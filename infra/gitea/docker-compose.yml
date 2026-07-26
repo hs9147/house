@@ -1,0 +1,39 @@
+# 사내 Git 서버(Gitea) — 1차(중소규모) 배포. MIT 라이선스, 상용·사내 사용 무제한.
+# 배경: docs/cloud-platform-paas-design-review.md 10.2절 (GitHub 대체 권고)
+#
+# 실행: docker compose -f platform/infra/gitea/docker-compose.yml up -d
+# 최초 접속 후 관리자 계정 생성 → Site Administration → Actions/webhook 등은 그대로 사용 가능
+#
+# 플랫폼과의 연결:
+#   - 프로젝트 등록 시 git_url을 이 Gitea 인스턴스 주소로 지정
+#   - 웹훅: Gitea 리포 Settings → Webhooks → Payload URL = https://<paas>/paas/webhooks/git,
+#     Secret = PAAS_WEBHOOK_SECRET과 동일 값 (플랫폼이 X-Gitea-Signature를 자동 인식)
+
+services:
+  gitea:
+    image: gitea/gitea:1.22
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__server__DOMAIN=${GITEA_DOMAIN:-git.example.com}
+      - GITEA__server__ROOT_URL=https://${GITEA_DOMAIN:-git.example.com}/
+      - GITEA__server__SSH_PORT=2222
+      # 사내 전용 — 초대 없이 가입 금지 (관리자가 계정 생성)
+      - GITEA__service__DISABLE_REGISTRATION=true
+      # 소규모는 내장 SQLite로 충분. 규모가 커지면 Postgres로 교체:
+      #   GITEA__database__DB_TYPE=postgres
+      #   GITEA__database__HOST=postgres:5432
+      #   GITEA__database__NAME=gitea
+      #   GITEA__database__USER=... / PASSWD=...
+      - GITEA__database__DB_TYPE=sqlite3
+    volumes:
+      - gitea-data:/data
+    ports:
+      # 컨테이너 자체에는 공인 포트를 열지 않고 Caddy가 리버스 프록시
+      # (Caddyfile.example 참고). SSH clone/push는 2222를 직접 열어도 되고 막아도 됨.
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:2222:22"
+
+volumes:
+  gitea-data:

@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea
+  namespace: gitea
+spec:
+  selector:
+    app: gitea
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+    - name: ssh
+      port: 22
+      targetPort: 22
+---
+# SSH clone/push용 — 클러스터 유형에 맞게 LoadBalancer 또는 NodePort로 조정.
+# HTTP(S)는 아래 ingress.yaml이 처리하므로 이 Service는 SSH 전용으로만 쓴다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea-ssh
+  namespace: gitea
+spec:
+  type: LoadBalancer
+  selector:
+    app: gitea
+  ports:
+    - name: ssh
+      port: 2222
+      targetPort: 22

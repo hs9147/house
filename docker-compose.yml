@@ -1,0 +1,22 @@
+# Docker Compose로 플랫폼(백엔드+콘솔)을 기동한다. 상세 설정 가이드는
+# ../docs/deployment-guide.md §3.2b 참고.
+#
+# 요구사항(Linux 호스트 전용):
+#   - network_mode: host — 이 플랫폼이 배포한 프로젝트 컨테이너는 host_port를
+#     127.0.0.1에 publish하는 전제로 동작한다(services/runtime/docker_runtime.py).
+#     플랫폼 자체를 별도 브리지 네트워크에 넣으면 127.0.0.1이 서로 달라 헬스체크가 실패한다.
+#     host 네트워크 모드는 Docker Desktop(macOS/Windows 네이티브)에서 지원하지 않으므로
+#     그 환경은 docs/deployment-guide.md §3.6의 venv 방식을 대신 사용할 것.
+#   - /var/run/docker.sock 마운트 — 컨테이너 안에서 호스트 Docker 데몬으로 프로젝트를
+#     빌드·기동한다("docker outside of docker").
+#   - .env에 PAAS_DATABASE_URL=sqlite:///./data/paas.db를 설정해 DB 파일이 아래 ./data
+#     볼륨 안에 생기도록 할 것(기본값 ./paas.db는 컨테이너 재생성 시 유실됨).
+services:
+  platform:
+    build: .
+    network_mode: host
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+    restart: unless-stopped

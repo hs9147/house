@@ -1,0 +1,25 @@
+# 플랫폼(6.2절)이 이미 구성한 것과 동일한 ingress 클래스·cert-manager ClusterIssuer를
+# 기본값으로 사용한다(PAAS_K8S_INGRESS_CLASS=traefik, PAAS_K8S_CLUSTER_ISSUER=letsencrypt와 동일).
+# 다르게 설정했다면 아래 값도 맞춰서 교체.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gitea
+  namespace: gitea
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [git.example.com]
+      secretName: gitea-tls
+  rules:
+    - host: git.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gitea
+                port: { number: 3000 }

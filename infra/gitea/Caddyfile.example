@@ -1,0 +1,9 @@
+# 1차(중소규모) Gitea용 Caddy 사이트 예시.
+# 플랫폼 자체의 caddy_sites_dir(*.caddy, app.services.proxy가 자동 생성)과는 별개 —
+# Gitea는 프로젝트가 아니라 지원 인프라이므로 이 파일을 메인 Caddyfile에 직접 import한다.
+#
+#   메인 Caddyfile에 추가: import /opt/paas/platform/infra/gitea/Caddyfile.example
+
+git.example.com {
+    reverse_proxy 127.0.0.1:3000
+}

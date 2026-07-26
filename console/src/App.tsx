@@ -1,0 +1,89 @@
+import type { ReactNode } from 'react';
+import { Navigate, Route, Routes } from 'react-router-dom';
+import Layout from './components/Layout';
+import { isAdmin, isLoggedIn } from './lib/auth';
+import Audit from './pages/Audit';
+import Chat from './pages/Chat';
+import Dashboard from './pages/Dashboard';
+import Git from './pages/Git';
+import Login from './pages/Login';
+import Modules from './pages/Modules';
+import Organizations from './pages/Organizations';
+import ProjectDetail from './pages/ProjectDetail';
+import Projects from './pages/Projects';
+import Providers from './pages/Providers';
+import ServerConfig from './pages/ServerConfig';
+import CodeTab from './pages/project/CodeTab';
+import DeploymentsTab from './pages/project/DeploymentsTab';
+import EnvTab from './pages/project/EnvTab';
+import LogsTab from './pages/project/LogsTab';
+import ModulesTab from './pages/project/ModulesTab';
+import OverviewTab from './pages/project/OverviewTab';
+import PreviewsTab from './pages/project/PreviewsTab';
+
+function RequireAuth({ children }: { children: ReactNode }) {
+  if (!isLoggedIn()) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+function AdminOnly({ children }: { children: ReactNode }) {
+  if (!isAdmin()) return <Navigate to="/projects" replace />;
+  return <>{children}</>;
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route
+        element={
+          <RequireAuth>
+            <Layout />
+          </RequireAuth>
+        }
+      >
+        <Route
+          path="/"
+          element={
+            <AdminOnly>
+              <Dashboard />
+            </AdminOnly>
+          }
+        />
+        <Route path="/projects" element={<Projects />} />
+        <Route path="/git" element={<Git />} />
+        <Route path="/projects/:id" element={<ProjectDetail />}>
+          <Route index element={<Navigate to="overview" replace />} />
+          <Route path="overview" element={<OverviewTab />} />
+          <Route path="code" element={<CodeTab />} />
+          <Route path="deployments" element={<DeploymentsTab />} />
+          <Route path="logs" element={<LogsTab />} />
+          <Route path="env" element={<EnvTab />} />
+          <Route path="modules" element={<ModulesTab />} />
+          <Route path="previews" element={<PreviewsTab />} />
+        </Route>
+        <Route path="/modules" element={<Modules />} />
+        <Route path="/server-config" element={<ServerConfig />} />
+        <Route
+          path="/orgs"
+          element={
+            <AdminOnly>
+              <Organizations />
+            </AdminOnly>
+          }
+        />
+        <Route path="/providers" element={<Providers />} />
+        <Route path="/chat" element={<Chat />} />
+        <Route
+          path="/audit"
+          element={
+            <AdminOnly>
+              <Audit />
+            </AdminOnly>
+          }
+        />
+      </Route>
+      <Route path="*" element={<Navigate to="/projects" replace />} />
+    </Routes>
+  );
+}

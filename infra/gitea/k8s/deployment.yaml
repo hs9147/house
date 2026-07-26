@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+  namespace: gitea
+  labels:
+    app: gitea
+spec:
+  replicas: 1 # Gitea는 SQLite/파일 기반 상태를 가진 단일 인스턴스 — 다중 replica 미지원
+  strategy:
+    type: Recreate # 볼륨 단독 마운트라 RollingUpdate 불가
+  selector:
+    matchLabels:
+      app: gitea
+  template:
+    metadata:
+      labels:
+        app: gitea
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: gitea
+          image: gitea/gitea:1.22
+          ports:
+            - containerPort: 3000
+              name: http
+            - containerPort: 22
+              name: ssh
+          env:
+            - name: USER_UID
+              value: "1000"
+            - name: USER_GID
+              value: "1000"
+            - name: GITEA__server__DOMAIN
+              value: "git.example.com" # 실제 도메인으로 교체
+            - name: GITEA__server__ROOT_URL
+              value: "https://git.example.com/"
+            - name: GITEA__server__SSH_PORT
+              value: "2222" # 외부 노출 포트(Service). 컨테이너 내부는 22.
+            - name: GITEA__service__DISABLE_REGISTRATION
+              value: "true"
+            # 소규모는 SQLite로 충분. 팀 규모가 커지면 아래로 교체(+ Secret 참조):
+            #   GITEA__database__DB_TYPE=postgres
+            #   GITEA__database__HOST=<postgres-service>:5432
+            #   GITEA__database__NAME=gitea
+            #   GITEA__database__USER / PASSWD → envFrom secretRef 로 주입 (플랫폼 시크릿 관행과 동일)
+            - name: GITEA__database__DB_TYPE
+              value: "sqlite3"
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          readinessProbe:
+            httpGet: { path: /api/healthz, port: 3000 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/healthz, port: 3000 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: gitea-data
