@@ -19,7 +19,9 @@ web.config는 플랫폼이 전부 새로 쓰는 게 아니라, 기존 파일에 
 파일·같은 배포 상태를 다시 넣으면 항상 같은 바이트를 낸다(결정적, 멱등).
 """
 import re
+import shutil
 import subprocess
+from pathlib import Path
 
 from ...config import get_settings
 from ...models import BuildProfile
