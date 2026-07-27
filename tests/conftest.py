@@ -44,6 +44,4 @@ def _clean_db():
             db_path.unlink(missing_ok=True)
             break
         except PermissionError:
-            if attempt == 19:
-                raise
             time.sleep(0.1)

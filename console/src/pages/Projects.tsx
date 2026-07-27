@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
 import Modal from '../components/Modal';
@@ -11,9 +11,19 @@ import type { BuildProfile, ProjectCreate, ProjectType } from '../lib/types';
 export default function Projects() {
   const state = useApi(() => api.listProjects());
   const orgs = useApi(() => api.listOrgs());
-  const [selectedOrgId, setSelectedOrgId] = useState<string>('');
+  const [selectedOrgId, setSelectedOrgId] = useState<string>(
+    sessionStorage.getItem('paas_selected_org_id') ?? ''
+  );
   const [showCreate, setShowCreate] = useState(false);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    const handleOrgChange = () => {
+      setSelectedOrgId(sessionStorage.getItem('paas_selected_org_id') ?? '');
+    };
+    window.addEventListener('paas_org_changed', handleOrgChange);
+    return () => window.removeEventListener('paas_org_changed', handleOrgChange);
+  }, []);
 
   return (
     <div className="panel">
@@ -24,7 +34,16 @@ export default function Projects() {
             <span>조직 선택:</span>
             <select
               value={selectedOrgId}
-              onChange={(e) => setSelectedOrgId(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setSelectedOrgId(val);
+                if (val) {
+                  sessionStorage.setItem('paas_selected_org_id', val);
+                } else {
+                  sessionStorage.removeItem('paas_selected_org_id');
+                }
+                window.dispatchEvent(new Event('paas_org_changed'));
+              }}
               style={{ padding: '4px 8px' }}
             >
               <option value="">전체 조직</option>

@@ -7,7 +7,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..models import ApiKey, AuditEvent, EnvVar, LlmProvider, Module
 from ..schemas import ApiKeyCreate, ApiKeyIssued
-from ..security import hash_key, issue_key, require_admin, rotate_token
+from ..security import hash_key, issue_key, require_admin, require_api_key, rotate_token
 from ..services import monitor
 
 # 헬스체크·상태 프로브는 버전 prefix 밖에 둔다(로드밸런서/k8s liveness probe, 콘솔 로그인
@@ -25,6 +25,7 @@ def health():
     return {
         "ok": True,
         "platform_name": settings.platform_name,
+        "allowed_email_domain": settings.allowed_email_domain,
         "tier": settings.tier,
         "host_os": get_host_caps().os,
         "features": sorted(enabled_features()),
