@@ -37,6 +37,16 @@ def system_status(_: ApiKey = Depends(require_admin)):
     return monitor.snapshot()
 
 
+@router.get("/auth/me")
+def get_current_user_profile(key: ApiKey = Depends(require_api_key)):
+    settings = get_settings()
+    return {
+        "name": key.name,
+        "is_admin": key.is_admin,
+        "allowed_email_domain": settings.allowed_email_domain,
+    }
+
+
 @router.post("/keys", response_model=ApiKeyIssued, status_code=201)
 def create_key(
     body: ApiKeyCreate,

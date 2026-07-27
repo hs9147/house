@@ -101,6 +101,17 @@ def _get_jwk_client():
     return _jwk_client
 
 
+def validate_email_domain(email: str) -> bool:
+    """PAAS_ALLOWED_EMAIL_DOMAIN 환경변수(기본값: cho-fam.com) 기준 이메일 도메인 검증."""
+    allowed = get_settings().allowed_email_domain.strip().lower().lstrip("@")
+    if not allowed:
+        return True
+    if "@" not in email:
+        return False
+    domain = email.strip().lower().split("@")[-1]
+    return domain == allowed or domain.endswith("." + allowed)
+
+
 def authenticate_bearer(token: str) -> ApiKey:
     """OIDC Access Token 검증 → ApiKey 형태로 매핑 (name=preferred_username, admin=롤 매핑)."""
     import jwt  # noqa: PLC0415
@@ -121,6 +132,13 @@ def authenticate_bearer(token: str) -> ApiKey:
         )
     except jwt.PyJWTError as e:
         raise HTTPException(status_code=401, detail=f"invalid bearer token: {e}")
+
+    email = payload.get("email", "")
+    if settings.allowed_email_domain and email and not validate_email_domain(email):
+        raise HTTPException(
+            status_code=403,
+            detail=f"only @{settings.allowed_email_domain} email domain accounts are allowed",
+        )
 
     roles = set(payload.get("realm_access", {}).get("roles", []))
     name = payload.get("preferred_username") or payload.get("sub", "oidc-user")

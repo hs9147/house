@@ -10,43 +10,67 @@ import type { BuildProfile, ProjectCreate, ProjectType } from '../lib/types';
 
 export default function Projects() {
   const state = useApi(() => api.listProjects());
+  const orgs = useApi(() => api.listOrgs());
+  const [selectedOrgId, setSelectedOrgId] = useState<string>('');
   const [showCreate, setShowCreate] = useState(false);
   const navigate = useNavigate();
 
   return (
     <div className="panel">
-      <div className="row" style={{ marginBottom: 12 }}>
+      <div className="row" style={{ marginBottom: 12, alignItems: 'center', gap: 12 }}>
         <h2 style={{ margin: 0 }}>프로젝트</h2>
+        {orgs.data && orgs.data.length > 0 && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, margin: 0, fontSize: 14 }}>
+            <span>조직 선택:</span>
+            <select
+              value={selectedOrgId}
+              onChange={(e) => setSelectedOrgId(e.target.value)}
+              style={{ padding: '4px 8px' }}
+            >
+              <option value="">전체 조직</option>
+              {orgs.data.map((o) => (
+                <option key={o.id} value={String(o.id)}>
+                  {o.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <div className="spacer" />
         <button onClick={() => setShowCreate(true)}>+ 새 프로젝트</button>
       </div>
       <Async state={state} empty="프로젝트가 없습니다.">
-        {(projects) => (
-          <table>
-            <thead>
-              <tr>
-                <th>이름</th>
-                <th>타입</th>
-                <th>Git</th>
-                <th>브랜치</th>
-                <th>기본 프로필</th>
-                <th>생성일</th>
-              </tr>
-            </thead>
-            <tbody>
-              {projects.map((p) => (
-                <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
-                  <td>{p.name}</td>
-                  <td><StatusPill value={p.type} /></td>
-                  <td className="mono">{p.git_url}</td>
-                  <td className="mono">{p.branch}</td>
-                  <td><StatusPill value={p.default_profile} /></td>
-                  <td className="mono">{fmtDate(p.created_at)}</td>
+        {(projects) => {
+          const filtered = selectedOrgId
+            ? projects.filter((p) => String(p.organization_id) === selectedOrgId)
+            : projects;
+          return (
+            <table>
+              <thead>
+                <tr>
+                  <th>이름</th>
+                  <th>타입</th>
+                  <th>Git</th>
+                  <th>브랜치</th>
+                  <th>기본 프로필</th>
+                  <th>생성일</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              </thead>
+              <tbody>
+                {filtered.map((p) => (
+                  <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
+                    <td>{p.name}</td>
+                    <td><StatusPill value={p.type} /></td>
+                    <td className="mono">{p.git_url}</td>
+                    <td className="mono">{p.branch}</td>
+                    <td><StatusPill value={p.default_profile} /></td>
+                    <td className="mono">{fmtDate(p.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          );
+        }}
       </Async>
       {showCreate && (
         <CreateModal

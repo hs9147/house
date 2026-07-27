@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # PaaS 명칭 (환경변수: PAAS_PLATFORM_NAME)
     platform_name: str = "chofam cloud platform"
 
+    # 허용할 계정 이메일 도메인 (환경변수: PAAS_ALLOWED_EMAIL_DOMAIN, 기본값: cho-fam.com)
+    allowed_email_domain: str = "cho-fam.com"
+
     # 1차(small): Docker 단일/소수 서버, 2차(enterprise): Kubernetes 클러스터
     tier: Tier = "small"
 
