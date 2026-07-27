@@ -13,7 +13,6 @@ export default function Login() {
   const [useApiKeyOnly, setUseApiKeyOnly] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
-  const [isAdLinked, setIsAdLinked] = useState(false);
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
 
@@ -89,61 +88,11 @@ export default function Login() {
     }
   };
 
-  /* 
-  // [보류] 사용자 로컬 AD 계정 자동 연동 기능
-  const handleLocalADLogin = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      const domain = allowedDomain ? allowedDomain.replace(/^@/, '') : 'cho-fam.com';
-      const adUserEmail = `ad-user@${domain}`;
-      setEmail(adUserEmail);
-      setIsAdLinked(true);
-      setSuccessMsg('🏢 로컬 AD 계정이 연동되었습니다.');
-
-      const regRes = await api.registerUser({
-        email: adUserEmail,
-        name: '로컬 AD 사용자',
-        password: 'ad-sso-integrated-token',
-      }).catch(() => null);
-
-      const targetEmail = regRes?.email || adUserEmail;
-      const keyToUse = regRes?.key || 'ad-sso-integrated-token';
-
-      const { admin } = await loginWithAccount(targetEmail, keyToUse);
-      navigate(admin ? '/' : '/projects');
-    } catch (err) {
-      setError('로컬 AD 계정 연동 실패: ' + (err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  */
-
   const domainHint = allowedDomain ? `@${allowedDomain.replace(/^@/, '')}` : '사내';
 
   return (
     <div className="login-wrap">
       <form className="panel login-box" onSubmit={submit} style={{ width: 380 }}>
-        {/* [보류] 🏢 로컬 AD 계정 연동 전용 버튼
-        <div style={{ marginBottom: 16 }}>
-          <button
-            type="button"
-            className="secondary primary"
-            onClick={handleLocalADLogin}
-            disabled={busy}
-            style={{ width: '100%', padding: '10px 0', fontSize: 14, fontWeight: 'bold', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, background: '#1e3a8a', color: '#fff', border: '1px solid #3b82f6', borderRadius: 4, cursor: 'pointer' }}
-          >
-            <span>🏢</span> 사용자 로컬 AD 계정으로 자동 연동
-          </button>
-          <div style={{ display: 'flex', alignItems: 'center', margin: '14px 0 10px 0' }}>
-            <div style={{ flex: 1, borderBottom: '1px solid #444' }} />
-            <span style={{ fontSize: 12, color: '#888', padding: '0 8px' }}>또는 이메일 직접 계정 {mode === 'register' ? '등록' : '로그인'}</span>
-            <div style={{ flex: 1, borderBottom: '1px solid #444' }} />
-          </div>
-        </div>
-        */}
-
         {/* 탭 전환 */}
         <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.1)', marginBottom: 16 }}>
           <button
@@ -197,20 +146,13 @@ export default function Login() {
               />
             </label>
             <label className="field" style={{ marginBottom: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>계정 이메일 (ID)</span>
-                {isAdLinked && (
-                  <span style={{ fontSize: 11, color: '#3b82f6' }}>🔒 AD 연동됨</span>
-                )}
-              </div>
+              계정 이메일
               <input
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder={allowedDomain ? `user@${allowedDomain.replace(/^@/, '')}` : 'user@company.com'}
-                disabled={isAdLinked}
                 required
-                style={isAdLinked ? { background: '#1e293b', opacity: 0.8, cursor: 'not-allowed' } : undefined}
               />
             </label>
             <label className="field" style={{ marginBottom: 12 }}>
@@ -228,32 +170,14 @@ export default function Login() {
           <>
             {!useApiKeyOnly && (
               <label className="field" style={{ marginBottom: 12 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span>계정 이메일 (ID)</span>
-                  {isAdLinked && (
-                    <button
-                      type="button"
-                      className="secondary text small"
-                      onClick={() => {
-                        setIsAdLinked(false);
-                        setEmail('');
-                        setSuccessMsg('');
-                      }}
-                      style={{ fontSize: 11, padding: 0, color: '#f87171' }}
-                    >
-                      AD 연동 해제
-                    </button>
-                  )}
-                </div>
+                계정 이메일
                 <input
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder={allowedDomain ? `user@${allowedDomain.replace(/^@/, '')}` : 'user@company.com'}
-                  disabled={isAdLinked}
                   required={!useApiKeyOnly}
                   autoFocus
-                  style={isAdLinked ? { background: '#1e293b', opacity: 0.8, cursor: 'not-allowed' } : undefined}
                 />
               </label>
             )}
