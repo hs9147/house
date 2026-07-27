@@ -105,11 +105,15 @@ def login_user_account(
         allowed = settings.allowed_email_domain.replace("@", "")
         raise HTTPException(status_code=403, detail=f"@{allowed} 계정 이메일만 로그인 가능합니다.")
 
-    # 3. 이메일 기반 계정 검색 및 비밀번호 검증 (단일 암호화 표준 적용)
+    # 3. 이메일 기반 계정 검색 및 비밀번호 검증 (IIS 팝업 방지를 위해 400 상태코드 사용)
     user_row = db.execute(select(ApiKey).where(ApiKey.name == email)).scalar_one_or_none()
     if user_row is not None:
-        if user_row.key_hash and user_row.key_hash != hash_key(password):
-            raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다.")
+        if user_row.key_hash and user_row.key_hash != hash_key(password) and user_row.key_hash != password:
+            raise HTTPException(status_code=400, detail="비밀번호가 올바르지 않습니다.")
+        # 비밀번호 일치 시 최신 암호화 해시로 자동 갱신
+        if user_row.key_hash != hash_key(password):
+            user_row.key_hash = hash_key(password)
+            db.commit()
         return UserLoginOut(name=user_row.name, email=email, key=password, is_admin=user_row.is_admin)
 
     # 4. 해시 기반 키 검색 (기존 API 키 호환)
