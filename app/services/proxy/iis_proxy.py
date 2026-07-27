@@ -34,7 +34,20 @@ BASE_SITE_NAME = "_base"
 
 MANAGED_BEGIN = "<!-- paas:managed:begin -->"
 MANAGED_END = "<!-- paas:managed:end -->"
-_SKELETON = '<?xml version="1.0" encoding="UTF-8"?>\n<configuration>\n</configuration>\n'
+_SKELETON = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<configuration>\n'
+    '  <system.webServer>\n'
+    '    <security>\n'
+    '      <authentication>\n'
+    '        <anonymousAuthentication enabled="true" />\n'
+    '        <windowsAuthentication enabled="false" />\n'
+    '        <basicAuthentication enabled="false" />\n'
+    '      </authentication>\n'
+    '    </security>\n'
+    '  </system.webServer>\n'
+    '</configuration>\n'
+)
 
 # 마커가 아직 없을 때(최초 생성 또는 플랫폼 도입 전부터 있던 파일) 규칙을 끼워 넣을
 # 자리를 안쪽 컨테이너부터 바깥쪽 순서로 찾는다 — 있는 태그를 최대한 재사용하고,
