@@ -129,7 +129,7 @@ def test_iis_configure_shared_writes_fragment_and_regenerates_base(monkeypatch, 
 
     IISProxy().configure("shop", BuildProfile.release, "apps.test", "/acme/shop/", ENDPOINT, REDIRECTS)
 
-    fragment = (tmp_path / "sites" / "_base" / "routes" / "shop.xml").read_text(encoding="utf-8")
+    fragment = (tmp_path / "sites" / "apps" / "shop" / "route.xml").read_text(encoding="utf-8")
     assert 'match url="^acme/shop/(.*)"' in fragment
     assert "http://127.0.0.1:8123/{R:1}" in fragment
     assert 'match url="^acme/shop/old$"' in fragment  # redirect가 조직/프로젝트 접두사를 명시적으로 반영
@@ -432,7 +432,7 @@ def test_iis_remove_deletes_fragment_and_dedicated_site(monkeypatch, tmp_path, f
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _Ok())
 
     IISProxy().configure("shop", BuildProfile.release, "apps.test", "/acme/shop/", ENDPOINT, [])
-    fragment = tmp_path / "sites" / "_base" / "routes" / "shop.xml"
+    fragment = tmp_path / "sites" / "apps" / "shop" / "route.xml"
     assert fragment.exists()
 
     IISProxy().remove("shop", BuildProfile.release)
@@ -524,7 +524,7 @@ def test_iis_configure_paths_routes_prefix_before_catchall_shared(monkeypatch, t
     IISProxy().configure_paths(
         "shop", BuildProfile.release, "apps.test", _composite_routes("/acme/shop/"), [],
     )
-    fragment = (tmp_path / "sites" / "_base" / "routes" / "shop.xml").read_text(encoding="utf-8")
+    fragment = (tmp_path / "sites" / "apps" / "shop" / "route.xml").read_text(encoding="utf-8")
     assert 'match url="^acme/shop/api/(.*)"' in fragment
     assert "http://127.0.0.1:8001/{R:1}" in fragment  # backend (prefix rule)
     assert "http://127.0.0.1:8002/{R:1}" in fragment  # frontend (catch-all)

@@ -152,15 +152,36 @@ def _is_shared(domain: str) -> bool:
     return domain == get_settings().base_domain
 
 
-def _routes_dir():
+def _apps_dir() -> Path:
     settings = get_settings()
-    d = settings.iis_sites_root / BASE_SITE_NAME / "routes"
+    d = settings.iis_sites_root / "apps"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def _route_fragment_file(project_name: str, profile: BuildProfile):
-    return _routes_dir() / f"{site_name(project_name, profile)}.xml"
+def _route_fragment_file(project_name: str, profile: BuildProfile) -> Path:
+    name = site_name(project_name, profile)
+    proj_dir = _apps_dir() / name
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    return proj_dir / "route.xml"
+
+
+def _migrate_legacy_routes_if_needed() -> None:
+    """기존 _base/routes/*.xml 파일이 존재하는 경우 데이터 손실 방지를 위해
+    apps/{name}/route.xml 새 구조로 안전하게 이관한다."""
+    settings = get_settings()
+    legacy_dir = settings.iis_sites_root / BASE_SITE_NAME / "routes"
+    if legacy_dir.is_dir():
+        for f in legacy_dir.glob("*.xml"):
+            target_dir = _apps_dir() / f.stem
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_file = target_dir / "route.xml"
+            if not target_file.exists():
+                shutil.copy2(f, target_file)
+            try:
+                f.unlink()
+            except OSError:
+                pass
 
 
 def _build_shared_fragment(
@@ -187,9 +208,14 @@ def _build_shared_fragment(
 
 
 def _regenerate_base_web_config() -> None:
+    _migrate_legacy_routes_if_needed()
     settings = get_settings()
-    routes_dir = _routes_dir()
-    fragments = sorted(routes_dir.glob("*.xml"))
+    apps_dir = _apps_dir()
+    
+    fragments = []
+    for p in sorted(apps_dir.glob("*/route.xml")):
+        fragments.append(p)
+        
     rule_blocks = "".join(f.read_text(encoding="utf-8") for f in fragments)
     
     # 1. _base/web.config (기본 베이스 사이트) 갱신
@@ -199,7 +225,7 @@ def _regenerate_base_web_config() -> None:
     existing = _read_existing_or_skeleton(config_path)
     config_path.write_text(_splice_managed_rules(existing, rule_blocks), encoding="utf-8")
 
-    # 2. 루트 web.config (예: C:\GPAX\web.config) 갱신
+    # 2. 루트 web.config (예: C:\GPAX\web.config) 갱신 - 기존 내용 100% 보존
     root_config_path = settings.iis_sites_root / "web.config"
     if root_config_path.exists() or not config_path.exists():
         existing_root = _read_existing_or_skeleton(root_config_path)
@@ -372,10 +398,15 @@ class IISProxy(ReverseProxy):
         연결 여부와 미등록 항목(이름·rewrite 주소)을 표시하는 근거가 된다."""
         root = get_settings().iis_sites_root
         result_map: dict[str, list[str]] = {}
+        apps_dir = root / "apps"
+        if apps_dir.is_dir():
+            for f in sorted(apps_dir.glob("*/route.xml")):
+                result_map[f.parent.name] = _rewrite_targets(f.read_text(encoding="utf-8"))
         routes_dir = root / BASE_SITE_NAME / "routes"
         if routes_dir.is_dir():
             for f in sorted(routes_dir.glob("*.xml")):
-                result_map[f.stem] = _rewrite_targets(f.read_text(encoding="utf-8"))
+                if f.stem not in result_map:
+                    result_map[f.stem] = _rewrite_targets(f.read_text(encoding="utf-8"))
         
         # C:\GPAX\web.config 또는 C:\GPAX\_base\web.config 메인 통합 파일 파싱
         for main_cfg in (root / "web.config", root / BASE_SITE_NAME / "web.config"):
