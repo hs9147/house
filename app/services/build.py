@@ -30,6 +30,8 @@ _START_SCRIPT = """@echo off
 REM 플랫폼 자동 생성(windows_service) — PORT/HOST는 런타임이 주입한다.
 if not defined PORT set PORT=8000
 if not defined HOST set HOST=127.0.0.1
+set PORT=%PORT%
+set HOST=%HOST%
 if exist package.json (
   call npm ci
   call npm run build --if-present
