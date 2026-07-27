@@ -28,15 +28,25 @@ export function logout(): void {
   sessionStorage.removeItem('paas_selected_org_id');
 }
 
+export async function hashPassword(plainText: string): Promise<string> {
+  if (!plainText) return '';
+  const encoder = new TextEncoder();
+  const data = encoder.encode(plainText);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 export async function loginWithAccount(email: string, key: string): Promise<{ admin: boolean; email: string }> {
   const cleanEmail = email.trim();
   const cleanKey = key.trim();
+  const encryptedPassword = await hashPassword(cleanKey);
 
   try {
     const res = await fetch('/paas/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: cleanEmail, password: cleanKey }),
+      body: JSON.stringify({ email: cleanEmail, password: encryptedPassword }),
     });
 
     if (res.ok) {

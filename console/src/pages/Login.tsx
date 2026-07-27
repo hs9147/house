@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
-import { loginWithAccount } from '../lib/auth';
+import { loginWithAccount, hashPassword } from '../lib/auth';
 
 export default function Login() {
   const [mode, setMode] = useState<'login' | 'register'>('login');
@@ -56,13 +56,14 @@ export default function Login() {
         return;
       }
       try {
+        const encryptedPassword = await hashPassword(password.trim());
         const regRes = await api.registerUser({
           email: cleanEmail,
           name: name.trim(),
-          password: password.trim(),
+          password: encryptedPassword,
         });
         // 회원가입 성공 시 자동 로그인
-        const { admin } = await loginWithAccount(regRes.email, regRes.key);
+        const { admin } = await loginWithAccount(regRes.email, password.trim());
         navigate(admin ? '/' : '/projects');
       } catch (err) {
         setError((err as Error).message);
