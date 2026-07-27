@@ -339,14 +339,14 @@ class IISProxy(ReverseProxy):
 
     def configure_paths(self, project_name, profile: BuildProfile, domain,
                          routes: list[PathRoute], redirects: list[RedirectSpec]) -> None:
-        if _is_shared(domain):
-            frag_key = site_name(project_name, profile)
-            _route_fragment_file(project_name, profile).write_text(
-                _build_shared_fragment(frag_key, routes, redirects), encoding="utf-8",
-            )
-            _regenerate_base_web_config()
-            _ensure_base_site()
-            return
+        # 배포 도메인/경로는 서브패스(Sub Path) 기반으로 통일 관리한다.
+        frag_key = site_name(project_name, profile)
+        _route_fragment_file(project_name, profile).write_text(
+            _build_shared_fragment(frag_key, routes, redirects), encoding="utf-8",
+        )
+        _regenerate_base_web_config()
+        _ensure_base_site()
+        return
 
         settings = get_settings()
         name = site_name(project_name, profile)

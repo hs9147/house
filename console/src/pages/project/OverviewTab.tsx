@@ -73,8 +73,8 @@ export default function OverviewTab() {
                     <td><StatusPill value={status[profile] ?? 'unknown'} /></td>
                     <td className="mono">
                       {profile === 'release'
-                        ? project.domain || `${project.name}.{기본도메인}`
-                        : `${project.name}-dev.{기본도메인}`}
+                        ? `/apps/_/${project.name}/`
+                        : `/apps/_/${project.name}/dev/`}
                     </td>
                     <td>
                       <div className="row">

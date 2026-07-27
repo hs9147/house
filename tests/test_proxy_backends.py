@@ -42,10 +42,9 @@ def test_get_proxy_selects_backend(monkeypatch, fresh_settings):
 
 
 def test_domain_for_is_shared_base_domain_by_default(fresh_settings):
-    """서브패스 라우팅 — 커스텀 도메인이 없으면(또는 development면) 항상
-    base_domain 하나를 공유한다. release+커스텀 도메인만 예외."""
+    """모든 배포 URL은 base_domain 서브패스(Sub Path)로 통일한다."""
     assert proxy.domain_for("shop", None, BuildProfile.release) == "apps.test"
-    assert proxy.domain_for("shop", "custom.example.com", BuildProfile.release) == "custom.example.com"
+    assert proxy.domain_for("shop", "custom.example.com", BuildProfile.release) == "apps.test"
     assert proxy.domain_for("shop", "custom.example.com", BuildProfile.development) == "apps.test"
 
 
@@ -53,8 +52,7 @@ def test_path_prefix_for_org_and_legacy_and_dev(fresh_settings):
     assert proxy.path_prefix_for("acme", "shop", None, BuildProfile.release) == "/apps/acme/shop/"
     assert proxy.path_prefix_for("acme", "shop", None, BuildProfile.development) == "/apps/acme/shop/dev/"
     assert proxy.path_prefix_for(None, "shop", None, BuildProfile.release) == "/apps/_/shop/"
-    # 커스텀 도메인 + release만 "/"(도메인 전체가 이 프로젝트 것)
-    assert proxy.path_prefix_for("acme", "shop", "custom.example.com", BuildProfile.release) == "/"
+    assert proxy.path_prefix_for("acme", "shop", "custom.example.com", BuildProfile.release) == "/apps/acme/shop/"
     assert proxy.path_prefix_for("acme", "shop", "custom.example.com", BuildProfile.development) == "/apps/acme/shop/dev/"
 
 
@@ -150,19 +148,11 @@ def test_iis_configure_dedicated_domain_writes_own_site(monkeypatch, tmp_path, f
         lambda args, **kw: (calls.append(args), _Ok())[1],
     )
 
-    IISProxy().configure("shop", BuildProfile.release, "shop.example.com", "/", ENDPOINT, REDIRECTS)
+    IISProxy().configure("shop", BuildProfile.release, "shop.example.com", "/acme/shop/", ENDPOINT, REDIRECTS)
 
-    web_config = (tmp_path / "sites" / "shop" / "web.config").read_text(encoding="utf-8")
-    assert 'redirectType="Permanent"' in web_config
-    assert 'action type="Rewrite" url="/v2/internal"' in web_config
-    assert "http://127.0.0.1:8123/{R:1}" in web_config
-
-    # ARR(Application Request Routing) 프록시 기능이 사이트 생성 전에 켜져야 한다 —
-    # URL Rewrite만으로는 절대 URL(http://127.0.0.1:{port}/...) target을 실제로 전달 못 함.
-    assert calls[0][1:3] == ["set", "config"]
-    assert calls[1][1:3] == ["delete", "site"]
-    assert calls[2][1:3] == ["add", "site"]
-    assert any("/bindings:http/*:80:shop.example.com" in a for a in calls[2])
+    fragment = (tmp_path / "sites" / "apps" / "shop" / "route.xml").read_text(encoding="utf-8")
+    assert 'match url="^acme/shop/(.*)"' in fragment
+    assert "http://127.0.0.1:8123/{R:1}" in fragment
 
 
 def test_iis_configure_raises_clear_error_when_arr_not_installed(monkeypatch, tmp_path, fresh_settings):
@@ -195,7 +185,7 @@ def test_iis_configure_dedicated_preserves_foreign_web_config_content(monkeypatc
     get_settings.cache_clear()
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _Ok())
 
-    site_dir = tmp_path / "sites" / "shop"
+    site_dir = tmp_path / "sites" / "_base"
     site_dir.mkdir(parents=True)
     (site_dir / "web.config").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -217,7 +207,7 @@ def test_iis_configure_dedicated_preserves_foreign_web_config_content(monkeypatc
         encoding="utf-8",
     )
 
-    IISProxy().configure("shop", BuildProfile.release, "shop.example.com", "/", ENDPOINT, [])
+    IISProxy().configure("shop", BuildProfile.release, "shop.example.com", "/acme/shop/", ENDPOINT, [])
 
     web_config = (site_dir / "web.config").read_text(encoding="utf-8")
     assert '<mimeMap fileExtension=".foo" mimeType="text/plain" />' in web_config
@@ -237,11 +227,11 @@ def test_iis_configure_dedicated_same_input_gives_same_output(monkeypatch, tmp_p
     get_settings.cache_clear()
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _Ok())
 
-    IISProxy().configure("shop", BuildProfile.release, "shop.example.com", "/", ENDPOINT, REDIRECTS)
-    first = (tmp_path / "sites" / "shop" / "web.config").read_text(encoding="utf-8")
+    IISProxy().configure("shop", BuildProfile.release, "shop.example.com", "/acme/shop/", ENDPOINT, REDIRECTS)
+    first = (tmp_path / "sites" / "apps" / "shop" / "route.xml").read_text(encoding="utf-8")
 
-    IISProxy().configure("shop", BuildProfile.release, "shop.example.com", "/", ENDPOINT, REDIRECTS)
-    second = (tmp_path / "sites" / "shop" / "web.config").read_text(encoding="utf-8")
+    IISProxy().configure("shop", BuildProfile.release, "shop.example.com", "/acme/shop/", ENDPOINT, REDIRECTS)
+    second = (tmp_path / "sites" / "apps" / "shop" / "route.xml").read_text(encoding="utf-8")
 
     assert first == second
 
