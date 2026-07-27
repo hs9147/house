@@ -1,3 +1,4 @@
+import hmac
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -81,7 +82,7 @@ def register_user_account(
     return UserRegisterOut(
         name=body.name,
         email=email,
-        key=raw_key,
+        key=password,
         is_admin=False,
     )
 
