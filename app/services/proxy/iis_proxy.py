@@ -272,6 +272,11 @@ def _ensure_arr_proxy_enabled() -> None:
             [appcmd, "set", "config", "-section:system.webServer/proxy", "/enabled:True", "/commit:apphost"],
             capture_output=True, text=True,
         )
+        # IIS ARR 프록시가 인증 헤더(Authorization/x-api-key 등)를 백엔드에 401 차단 없이 그대로 전달하도록 설정
+        subprocess.run(
+            [appcmd, "set", "config", "-section:system.webServer/proxy", "/passThroughAuthorizationHeader:True", "/commit:apphost"],
+            capture_output=True, text=True,
+        )
     except FileNotFoundError as e:
         raise IISError(
             f"[WinError 2] appcmd 실행 파일을 찾을 수 없습니다 (설정: PAAS_IIS_APPCMD_PATH={appcmd}): {e}"
