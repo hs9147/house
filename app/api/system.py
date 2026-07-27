@@ -24,6 +24,7 @@ def health():
     settings = get_settings()
     return {
         "ok": True,
+        "platform_name": settings.platform_name,
         "tier": settings.tier,
         "host_os": get_host_caps().os,
         "features": sorted(enabled_features()),

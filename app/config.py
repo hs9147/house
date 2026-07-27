@@ -15,6 +15,9 @@ Tier = Literal["small", "enterprise"]
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PAAS_", env_file=".env", extra="ignore")
 
+    # PaaS 명칭 (환경변수: PAAS_PLATFORM_NAME)
+    platform_name: str = "chofam cloud platform"
+
     # 1차(small): Docker 단일/소수 서버, 2차(enterprise): Kubernetes 클러스터
     tier: Tier = "small"
 
