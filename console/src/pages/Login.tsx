@@ -13,6 +13,7 @@ export default function Login() {
   const [useApiKeyOnly, setUseApiKeyOnly] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [isAdLinked, setIsAdLinked] = useState(false);
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
 
