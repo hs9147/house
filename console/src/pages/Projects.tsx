@@ -29,32 +29,16 @@ export default function Projects() {
     <div className="panel">
       <div className="row" style={{ marginBottom: 12, alignItems: 'center', gap: 12 }}>
         <h2 style={{ margin: 0 }}>프로젝트</h2>
-        {orgs.data && orgs.data.length > 0 && (
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, margin: 0, fontSize: 14 }}>
-            <span>조직 선택:</span>
-            <select
-              value={selectedOrgId}
-              onChange={(e) => {
-                const val = e.target.value;
-                setSelectedOrgId(val);
-                if (val) {
-                  sessionStorage.setItem('paas_selected_org_id', val);
-                } else {
-                  sessionStorage.removeItem('paas_selected_org_id');
-                }
-                window.dispatchEvent(new Event('paas_org_changed'));
-              }}
-              style={{ padding: '4px 8px' }}
-            >
-              <option value="">전체 조직</option>
-              {orgs.data.map((o) => (
-                <option key={o.id} value={String(o.id)}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
+        {(() => {
+          const currentOrg = orgs.data?.find((o) => String(o.id) === selectedOrgId);
+          const orgName = currentOrg ? currentOrg.name : (orgs.data && orgs.data.length > 0 ? orgs.data[0].name : '기본 조직');
+          return (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, backgroundColor: 'rgba(59, 130, 246, 0.12)', color: '#60a5fa', border: '1px solid rgba(59, 130, 246, 0.3)', padding: '4px 12px', borderRadius: 16, fontWeight: 600 }}>
+              <span style={{ color: '#9ca3af', fontWeight: 400 }}>소속 조직:</span>
+              <span>{orgName}</span>
+            </div>
+          );
+        })()}
         <div className="spacer" />
         <button onClick={() => setShowCreate(true)}>+ 새 프로젝트</button>
       </div>
