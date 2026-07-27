@@ -536,6 +536,33 @@ def test_apache_configure_paths_proxies_prefix_before_root_shared(monkeypatch, t
     assert fragment.index("ProxyPass /acme/shop/api/") < fragment.index("ProxyPass /acme/shop/ http")
 
 
+def test_iis_splice_managed_rules_places_before_default_rule():
+    from app.services.proxy.iis_proxy import _splice_managed_rules
+    sample_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<configuration>\n'
+        '  <system.webServer>\n'
+        '    <rewrite>\n'
+        '      <rules>\n'
+        '        <rule name="git" stopProcessing="true">\n'
+        '          <match url="^git/?(.*)$" />\n'
+        '          <action type="Rewrite" url="http://localhost:3000/{R:1}" />\n'
+        '        </rule>\n'
+        '        <rule name="default" stopProcessing="true">\n'
+        '          <match url="(.*)" />\n'
+        '          <action type="Rewrite" url="http://localhost:3000/{R:0}" />\n'
+        '        </rule>\n'
+        '      </rules>\n'
+        '    </rewrite>\n'
+        '  </system.webServer>\n'
+        '</configuration>\n'
+    )
+    rule_blocks = '<rule name="paas-chatbot"><match url="^apps/chatbot/(.*)" /><action type="Rewrite" url="http://127.0.0.1:8100/{R:1}" /></rule>\n'
+    result = _splice_managed_rules(sample_xml, rule_blocks)
+    assert '<!-- paas:managed:begin -->' in result
+    assert result.index('<!-- paas:managed:begin -->') < result.index('name="default"')
+
+
 class _Ok:
     returncode = 0
     stdout = ""

@@ -50,21 +50,33 @@ _FALLBACK_ANCHORS = (
 def _splice_managed_rules(existing_text: str, rule_blocks: str) -> str:
     """플랫폼이 관리하는 규칙만 paas:managed 마커 사이에 넣고 갈아끼운다 — 마커 밖의
     내용(플랫폼이 정의하지 않은 기존 web.config 구조)은 위치·내용 그대로 보존한다.
-    마커가 없으면(최초 생성 또는 플랫폼 도입 전 파일) 가장 안쪽에 있는 기존 컨테이너
-    닫는 태그(rules→rewrite→system.webServer→configuration 순) 바로 앞에 새로
-    만든다. 같은 existing_text·rule_blocks 입력에는 항상 같은 결과를 낸다(재실행해도
-    마커를 다시 찾아 같은 자리를 갈아끼우므로 멱등)."""
+    만약 기존 web.config에 default catch-all 규칙(<rule name="default"> 등)이 존재하면
+    플랫폼 규칙이 먼저 매칭되도록 default 규칙 바로 앞에 우선 주입한다."""
     managed_block = f"{MANAGED_BEGIN}\n{rule_blocks}{MANAGED_END}\n"
 
+    # 기존 마커 블록 제거 후 깨끗한 원본 텍스트 확보
     begin_idx = existing_text.find(MANAGED_BEGIN)
     end_idx = existing_text.find(MANAGED_END)
     if begin_idx != -1 and end_idx != -1:
-        return existing_text[:begin_idx] + managed_block + existing_text[end_idx + len(MANAGED_END):].lstrip("\n")
+        existing_clean = existing_text[:begin_idx] + existing_text[end_idx + len(MANAGED_END):].lstrip("\n")
+    else:
+        existing_clean = existing_text
+
+    # default catch-all 규칙 위치 검색 (예: <rule name="default" 또는 url="(.*)")
+    default_rule_re = re.compile(
+        r'<rule\s+[^>]*name=["\']default["\'][^>]*>|<rule\s+[^>]*>[\s\S]*?<match\s+url="\(\.\*\)"',
+        re.IGNORECASE,
+    )
+    m = default_rule_re.search(existing_clean)
+    if m:
+        # default 규칙 바로 앞에 플랫폼 마커 구역 삽입
+        insert_pos = m.start()
+        return existing_clean[:insert_pos] + managed_block + "\n        " + existing_clean[insert_pos:]
 
     for close_tag, wrap in _FALLBACK_ANCHORS:
-        close_idx = existing_text.find(close_tag)
+        close_idx = existing_clean.find(close_tag)
         if close_idx != -1:
-            return existing_text[:close_idx] + wrap(managed_block) + existing_text[close_idx:]
+            return existing_clean[:close_idx] + wrap(managed_block) + existing_clean[close_idx:]
 
     raise IISError(
         "web.config에 <configuration> 요소가 없어 규칙을 넣을 위치를 찾지 못했습니다 "
