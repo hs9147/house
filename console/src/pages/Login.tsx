@@ -95,6 +95,12 @@ export default function Login() {
       // 로컬 브라우저 AD 인증 세션 연동 (Integrated Windows Auth / OIDC SSO)
       const domain = allowedDomain ? allowedDomain.replace(/^@/, '') : 'cho-fam.com';
       const adUserEmail = `ad-user@${domain}`;
+      
+      // 🔒 계정 ID 자동 입력 및 입력창 비활성화
+      setEmail(adUserEmail);
+      setIsAdLinked(true);
+      setSuccessMsg('🏢 로컬 AD 계정이 연동되었습니다. 계정 ID가 자동 설정 및 비활성화되었습니다.');
+
       const regRes = await api.registerUser({
         email: adUserEmail,
         name: '로컬 AD 사용자',
@@ -189,13 +195,20 @@ export default function Login() {
               />
             </label>
             <label className="field" style={{ marginBottom: 12 }}>
-              계정 이메일
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>계정 이메일 (ID)</span>
+                {isAdLinked && (
+                  <span style={{ fontSize: 11, color: '#3b82f6' }}>🔒 AD 연동됨</span>
+                )}
+              </div>
               <input
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder={allowedDomain ? `user@${allowedDomain.replace(/^@/, '')}` : 'user@company.com'}
+                disabled={isAdLinked}
                 required
+                style={isAdLinked ? { background: '#1e293b', opacity: 0.8, cursor: 'not-allowed' } : undefined}
               />
             </label>
             <label className="field" style={{ marginBottom: 12 }}>
@@ -213,14 +226,32 @@ export default function Login() {
           <>
             {!useApiKeyOnly && (
               <label className="field" style={{ marginBottom: 12 }}>
-                계정 이메일
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>계정 이메일 (ID)</span>
+                  {isAdLinked && (
+                    <button
+                      type="button"
+                      className="secondary text small"
+                      onClick={() => {
+                        setIsAdLinked(false);
+                        setEmail('');
+                        setSuccessMsg('');
+                      }}
+                      style={{ fontSize: 11, padding: 0, color: '#f87171' }}
+                    >
+                      AD 연동 해제
+                    </button>
+                  )}
+                </div>
                 <input
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder={allowedDomain ? `user@${allowedDomain.replace(/^@/, '')}` : 'user@company.com'}
+                  disabled={isAdLinked}
                   required={!useApiKeyOnly}
                   autoFocus
+                  style={isAdLinked ? { background: '#1e293b', opacity: 0.8, cursor: 'not-allowed' } : undefined}
                 />
               </label>
             )}
