@@ -10,6 +10,7 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [key, setKey] = useState('');
   const [allowedDomain, setAllowedDomain] = useState<string>('');
+  const [platformName, setPlatformName] = useState<string>('PaaS');
   const [useApiKeyOnly, setUseApiKeyOnly] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
@@ -22,6 +23,9 @@ export default function Login() {
       .then((data) => {
         if (data.allowed_email_domain) {
           setAllowedDomain(data.allowed_email_domain);
+        }
+        if (data.platform_name) {
+          setPlatformName(data.platform_name);
         }
       })
       .catch(() => {});
@@ -122,7 +126,7 @@ export default function Login() {
         </div>
 
         <h2 style={{ marginBottom: 4, fontSize: 20 }}>
-          {mode === 'register' ? 'PaaS 신규 계정 등록' : 'PaaS 계정 로그인'}
+          {mode === 'register' ? `${platformName} 신규 계정 등록` : `${platformName} 계정 로그인`}
         </h2>
         <p className="dim" style={{ fontSize: 13, marginBottom: 16 }}>
           {mode === 'register'
