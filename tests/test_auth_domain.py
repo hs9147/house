@@ -99,3 +99,31 @@ def test_user_account_login_and_api_permissions(monkeypatch):
     res_projects = client.get("/paas/api/v1/projects", headers={"x-api-key": user_key})
     assert res_projects.status_code == 200
     assert isinstance(res_projects.json(), list)
+
+
+def test_legacy_user_account_password_compatibility(monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+    from app.security import hash_key
+
+    monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "cho-fam.com")
+    get_settings.cache_clear()
+    client = TestClient(create_app())
+
+    # 1. 회원 가입 (1차 해시 클라이언트 암호화 비밀번호)
+    raw_pass = "existing_secret_123"
+    client_hash_pass = hash_key(raw_pass)
+    
+    res_reg = client.post(
+        "/paas/api/v1/auth/register",
+        json={"email": "legacyuser@cho-fam.com", "name": "기존유저", "password": client_hash_pass},
+    )
+    assert res_reg.status_code == 201
+
+    # 2. 기존 비밀번호(클라이언트 단 암호화 패스워드)로 로그인 시도 ➔ 100% 성공 보장
+    res_login = client.post(
+        "/paas/api/v1/auth/login",
+        json={"email": "legacyuser@cho-fam.com", "password": client_hash_pass},
+    )
+    assert res_login.status_code == 200
+    assert res_login.json()["email"] == "legacyuser@cho-fam.com"

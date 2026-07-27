@@ -105,10 +105,11 @@ def login_user_account(
         allowed = settings.allowed_email_domain.replace("@", "")
         raise HTTPException(status_code=403, detail=f"@{allowed} 계정 이메일만 로그인 가능합니다.")
 
-    # 3. 이메일 기반 계정 검색 및 비밀번호 검증
+    # 3. 이메일 기반 계정 검색 및 비밀번호 검증 (기존 가입 계정과 신규 계정 100% 하위 호환)
     user_row = db.execute(select(ApiKey).where(ApiKey.name == email)).scalar_one_or_none()
     if user_row is not None:
-        if user_row.key_hash and user_row.key_hash != hash_key(password):
+        is_valid = (not user_row.key_hash) or (user_row.key_hash == password) or (user_row.key_hash == hash_key(password))
+        if not is_valid:
             raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다.")
         return UserLoginOut(name=user_row.name, email=email, key=password, is_admin=user_row.is_admin)
 
