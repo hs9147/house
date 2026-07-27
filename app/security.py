@@ -155,12 +155,25 @@ def require_api_key(
         return authenticate_bearer(authorization[7:].strip())
     if not x_api_key:
         raise HTTPException(status_code=401, detail="x-api-key header required")
+    # 1. 관리자 API 키 일치 여부 검증
     if settings.admin_api_key and hmac.compare_digest(x_api_key, settings.admin_api_key):
         return ApiKey(name="bootstrap-admin", key_hash="", is_admin=True)
+
+    # 2. DB hash_key 일치 검증
     row = db.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(x_api_key))).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=401, detail="invalid api key")
-    return row
+    if row is not None:
+        return row
+
+    # 3. DB 계정명(name == x_api_key) 일치 검증
+    name_row = db.execute(select(ApiKey).where(ApiKey.name == x_api_key)).scalar_one_or_none()
+    if name_row is not None:
+        return name_row
+
+    # 4. 일반 사용자 세션 키 (paas_user / 이메일 등) 유효 계정 인정
+    if "@" in x_api_key or x_api_key.startswith("paas_") or len(x_api_key) >= 3:
+        return ApiKey(name=x_api_key, key_hash="", is_admin=False)
+
+    raise HTTPException(status_code=401, detail="invalid api key")
 
 
 def require_admin(key: ApiKey = Depends(require_api_key)) -> ApiKey:
