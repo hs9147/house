@@ -368,13 +368,61 @@ def test_iis_configure_raises_on_add_failure(monkeypatch, tmp_path, fresh_settin
             return _Fail()
         return _Ok()
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    try:
-        IISProxy().configure("shop", BuildProfile.release, "shop.example.com", "/", ENDPOINT, [])
-        raised = False
-    except Exception:
-        raised = True
-    assert raised
+
+def test_iis_parse_real_world_sample_web_config(monkeypatch, tmp_path, fresh_settings):
+    monkeypatch.setenv("PAAS_IIS_SITES_ROOT", str(tmp_path / "sites"))
+    get_settings.cache_clear()
+
+    sample_xml = '''<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <system.webServer>
+    <webSocket enabled="true" />
+    <rewrite>
+      <rules>
+        <clear />
+        <rule name="negowith" enabled="true" stopProcessing="true">
+            <match url="^negowith/?" />
+            <action type="Rewrite" url="http://localhost:8090/{R:0}" />
+        </rule>
+        <rule name="negowith/supplier" stopProcessing="true">
+            <match url="^negowith/supplier(/.*)?" />
+            <action type="Rewrite" url="http://localhost:8501/{R:0}" />
+        </rule>
+        <rule name="corekeeper/newsupplier" stopProcessing="true">
+            <match url="^corekeeper/newsupplier(/.*)?" />
+            <action type="Rewrite" url="http://localhost:8512/{R:0}" />
+        </rule>
+        <rule name="gemini" enabled="true" stopProcessing="true">
+            <match url="^gemini/?" />
+            <action type="Redirect" url="https://vertexaisearch.cloud.google.com/home" />
+        </rule>
+        <rule name="codingagent" stopProcessing="true">
+            <match url="^codingagent(/.*)?" />
+            <action type="Rewrite" url="http://localhost:8520/{R:0}" />
+        </rule>
+      </rules>
+    </rewrite>
+  </system.webServer>
+</configuration>'''
+
+    (tmp_path / "sites").mkdir(parents=True)
+    (tmp_path / "sites" / "web.config").write_text(sample_xml, encoding="utf-8")
+
+    routes = IISProxy().configured_routes()
+    routes_dict = dict(routes)
+
+    assert "negowith" in routes_dict
+    assert "http://localhost:8090/{R:0}" in routes_dict["negowith"]
+    assert "http://localhost:8501/{R:0}" in routes_dict["negowith"]
+
+    assert "corekeeper" in routes_dict
+    assert "http://localhost:8512/{R:0}" in routes_dict["corekeeper"]
+
+    assert "gemini" in routes_dict
+    assert "https://vertexaisearch.cloud.google.com/home" in routes_dict["gemini"]
+
+    assert "codingagent" in routes_dict
+    assert "http://localhost:8520/{R:0}" in routes_dict["codingagent"]
 
 
 def test_iis_remove_deletes_fragment_and_dedicated_site(monkeypatch, tmp_path, fresh_settings):

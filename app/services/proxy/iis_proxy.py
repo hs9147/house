@@ -263,6 +263,36 @@ def _run_appcmd(*args: str) -> None:
         )
 
 
+def _parse_main_web_config_routes(xml: str) -> list[tuple[str, list[str]]]:
+    """단일 web.config 파일 전체에서 rule name, match url, action url 목록을 추출해
+    (site_name, rewrite/redirect 타겟 URL 목록) 형태로 파싱한다."""
+    from collections import defaultdict
+    # <rule name="..."> ... <action type="..." url="..." /> 구조 파싱
+    rule_block_re = re.compile(
+        r'<rule\s+name="([^"]+)"[^>]*>.*?'
+        r'<action\s+type="(?:Rewrite|Redirect)"\s+url="([^"]+)"',
+        re.DOTALL | re.IGNORECASE,
+    )
+    groups: dict[str, list[str]] = defaultdict(list)
+    for rule_name, target in rule_block_re.findall(xml):
+        # 1. 플랫폼 규칙 마커(site_name-path-0 / site_name-redirect-0) 처리
+        site = rule_name
+        for sfx in ("-path-", "-redirect-"):
+            if sfx in rule_name:
+                site = rule_name.split(sfx)[0]
+                break
+        else:
+            # 2. 실사용 예시(negowith/supplier, corekeeper/mmmng 등) 처리
+            # 슬래시(/)가 있는 경우 대표 서비스/조직/프로젝트명(첫 번째 서브패스)으로 그룹핑
+            if "/" in site:
+                site = site.split("/")[0]
+
+        if target not in groups[site]:
+            groups[site].append(target)
+            
+    return [(site, targets) for site, targets in groups.items()]
+
+
 class IISProxy(ReverseProxy):
     def configure(self, project_name, profile: BuildProfile, domain, path_prefix,
                   endpoint: Endpoint, redirects: list[RedirectSpec]) -> None:
@@ -325,24 +355,38 @@ class IISProxy(ReverseProxy):
             pass
 
     def configured_routes(self) -> list[tuple[str, list[str]]]:
-        """web.config에 구성된 (site_name, rewrite 타겟 URL 목록) 목록.
+        r"""web.config에 구성된 (site_name, rewrite 타겟 URL 목록) 목록.
 
-        공유 모드는 routes/ 아래 조각 파일(파일 stem = site_name), 커스텀 도메인
-        전용 사이트는 web.config를 가진 iis_sites_root 하위 디렉터리(디렉터리 이름
-        = site_name)로 판별한다. rewrite 타겟은 플랫폼이 쓴 <action type="Rewrite"
-        url="..."/>에서 뽑는다 — 서버구성이 연결 여부와 미등록 항목(이름·rewrite 주소)을
-        표시하는 근거가 된다."""
+        공유 모드는 routes/ 아래 조각 파일(파일 stem = site_name) 및 c:\GPAX\web.config
+        (또는 _base/web.config) 내의 단일 통합 메인 규칙, 커스텀 도메인 전용 사이트는
+        web.config를 가진 iis_sites_root 하위 디렉터리(디렉터리 이름 = site_name)로 판별한다.
+        rewrite 타겟은 플랫폼이 쓴 <action type="Rewrite" url="..."/>에서 뽑는다 — 서버구성이
+        연결 여부와 미등록 항목(이름·rewrite 주소)을 표시하는 근거가 된다."""
         root = get_settings().iis_sites_root
-        result: list[tuple[str, list[str]]] = []
+        result_map: dict[str, list[str]] = {}
         routes_dir = root / BASE_SITE_NAME / "routes"
         if routes_dir.is_dir():
             for f in sorted(routes_dir.glob("*.xml")):
-                result.append((f.stem, _rewrite_targets(f.read_text(encoding="utf-8"))))
+                result_map[f.stem] = _rewrite_targets(f.read_text(encoding="utf-8"))
+        
+        # C:\GPAX\web.config 또는 C:\GPAX\_base\web.config 메인 통합 파일 파싱
+        for main_cfg in (root / "web.config", root / BASE_SITE_NAME / "web.config"):
+            if main_cfg.exists():
+                for site, targets in _parse_main_web_config_routes(main_cfg.read_text(encoding="utf-8")):
+                    if site not in result_map:
+                        result_map[site] = targets
+                    else:
+                        for t in targets:
+                            if t not in result_map[site]:
+                                result_map[site].append(t)
+
         if root.is_dir():
             for d in sorted(root.iterdir()):
                 if d.name == BASE_SITE_NAME or not d.is_dir():
                     continue
                 cfg = d / "web.config"
                 if cfg.exists():
-                    result.append((d.name, _rewrite_targets(cfg.read_text(encoding="utf-8"))))
-        return result
+                    result_map[d.name] = _rewrite_targets(cfg.read_text(encoding="utf-8"))
+
+        return [(site, targets) for site, targets in result_map.items()]
+
