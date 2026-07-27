@@ -69,9 +69,10 @@ def register_user_account(
     if existing:
         raise HTTPException(status_code=400, detail="이미 등록된 계정 이메일입니다.")
 
-    # 3. 신규 사용자 키 및 계정 생성 (기본 권한: 일반 사용자 is_admin=False)
+    # 3. 비밀번호 및 키 생성 후 계정 저장
+    password = body.password.strip()
     raw_key = issue_key()
-    user_key = ApiKey(name=email, key_hash=hash_key(raw_key), is_admin=False)
+    user_key = ApiKey(name=email, key_hash=hash_key(password), is_admin=False)
     db.add(user_key)
     db.commit()
 
@@ -92,29 +93,34 @@ def login_user_account(
 ):
     settings = get_settings()
     email = body.email.strip()
-    raw_key = body.password.strip()
+    password = body.password.strip()
 
-    # 1. 관리자 키로 로그인 시도 시
-    if settings.admin_api_key and hmac.compare_digest(raw_key, settings.admin_api_key):
-        return UserLoginOut(name="bootstrap-admin", email=email or "admin@system", key=raw_key, is_admin=True)
+    # 1. 관리자 API 키로 직접 로그인 시도 시
+    if settings.admin_api_key and hmac.compare_digest(password, settings.admin_api_key):
+        return UserLoginOut(name="bootstrap-admin", email=email or "admin@system", key=password, is_admin=True)
 
     # 2. 계정 이메일 도메인 검증
     if settings.allowed_email_domain and email and not validate_email_domain(email):
         allowed = settings.allowed_email_domain.replace("@", "")
         raise HTTPException(status_code=403, detail=f"@{allowed} 계정 이메일만 로그인 가능합니다.")
 
-    # 3. DB 키 검증
-    key_row = db.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))).scalar_one_or_none()
-    if key_row is not None:
-        return UserLoginOut(name=key_row.name, email=email or key_row.name, key=raw_key, is_admin=key_row.is_admin)
-
-    # 4. 이메일 기반 키 검색
+    # 3. 이메일 기반 계정 검색 및 비밀번호 검증
     user_row = db.execute(select(ApiKey).where(ApiKey.name == email)).scalar_one_or_none()
     if user_row is not None:
-        return UserLoginOut(name=user_row.name, email=email, key=raw_key, is_admin=user_row.is_admin)
+        if user_row.key_hash and user_row.key_hash != hash_key(password):
+            raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다.")
+        return UserLoginOut(name=user_row.name, email=email, key=password, is_admin=user_row.is_admin)
 
-    # 기본 로그인 통과 처리 (비밀번호 미설정 일반 접속 허용)
-    return UserLoginOut(name=email.split("@")[0] if "@" in email else email, email=email, key=raw_key, is_admin=False)
+    # 4. 해시 기반 키 검색 (기존 API 키 호환)
+    key_row = db.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(password))).scalar_one_or_none()
+    if key_row is not None:
+        return UserLoginOut(name=key_row.name, email=email or key_row.name, key=password, is_admin=key_row.is_admin)
+
+    # 신규 등록되지 않은 정상 도메인 계정 최초 로그인 시 자동 계정 등록 처리
+    new_user = ApiKey(name=email, key_hash=hash_key(password), is_admin=False)
+    db.add(new_user)
+    db.commit()
+    return UserLoginOut(name=email.split("@")[0] if "@" in email else email, email=email, key=password, is_admin=False)
 
 
 @router.post("/keys", response_model=ApiKeyIssued, status_code=201)

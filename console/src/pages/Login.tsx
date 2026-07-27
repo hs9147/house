@@ -186,12 +186,12 @@ export default function Login() {
               </label>
             )}
             <label className="field">
-              {useApiKeyOnly ? 'API 키' : '인증 키 / 비밀번호'}
+              {useApiKeyOnly ? 'API 키' : '비밀번호'}
               <input
                 type="password"
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
-                placeholder={useApiKeyOnly ? 'paas_...' : '인증 키 또는 비밀번호 입력'}
+                placeholder={useApiKeyOnly ? 'paas_...' : '비밀번호 입력'}
                 required
                 autoFocus={useApiKeyOnly}
               />
