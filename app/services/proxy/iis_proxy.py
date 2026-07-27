@@ -191,11 +191,19 @@ def _regenerate_base_web_config() -> None:
     routes_dir = _routes_dir()
     fragments = sorted(routes_dir.glob("*.xml"))
     rule_blocks = "".join(f.read_text(encoding="utf-8") for f in fragments)
+    
+    # 1. _base/web.config (기본 베이스 사이트) 갱신
     site_dir = settings.iis_sites_root / BASE_SITE_NAME
     site_dir.mkdir(parents=True, exist_ok=True)
     config_path = site_dir / "web.config"
     existing = _read_existing_or_skeleton(config_path)
     config_path.write_text(_splice_managed_rules(existing, rule_blocks), encoding="utf-8")
+
+    # 2. 루트 web.config (예: C:\GPAX\web.config) 갱신
+    root_config_path = settings.iis_sites_root / "web.config"
+    if root_config_path.exists() or not config_path.exists():
+        existing_root = _read_existing_or_skeleton(root_config_path)
+        root_config_path.write_text(_splice_managed_rules(existing_root, rule_blocks), encoding="utf-8")
 
 
 def _ensure_arr_proxy_enabled() -> None:
