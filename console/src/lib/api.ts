@@ -290,4 +290,8 @@ export const api = {
   listPreviews: (projectId: number) =>
     request<PreviewOut[]>('GET', `/projects/${projectId}/previews`),
   deletePreview: (id: number) => request<void>('DELETE', `/previews/${id}`),
+
+  // 계정 회원가입
+  registerUser: (body: { email: string; name: string; password: string }) =>
+    request<{ name: string; email: string; key: string; is_admin: boolean }>('POST', '/auth/register', body),
 };

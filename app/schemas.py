@@ -289,3 +289,16 @@ class ApiKeyIssued(BaseModel):
     name: str
     key: str  # 발급 시 1회만 노출
     is_admin: bool
+
+
+class UserRegisterRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=128)
+    name: str = Field(min_length=2, max_length=64)
+    password: str = Field(min_length=4, max_length=128)
+
+
+class UserRegisterOut(BaseModel):
+    name: str
+    email: str
+    key: str
+    is_admin: bool = False

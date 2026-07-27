@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -6,8 +6,8 @@ from .. import audit
 from ..config import get_settings
 from ..db import get_db
 from ..models import ApiKey, AuditEvent, EnvVar, LlmProvider, Module
-from ..schemas import ApiKeyCreate, ApiKeyIssued
-from ..security import hash_key, issue_key, require_admin, require_api_key, rotate_token
+from ..schemas import ApiKeyCreate, ApiKeyIssued, UserRegisterRequest, UserRegisterOut
+from ..security import hash_key, issue_key, require_admin, require_api_key, rotate_token, validate_email_domain
 from ..services import monitor
 
 # 헬스체크·상태 프로브는 버전 prefix 밖에 둔다(로드밸런서/k8s liveness probe, 콘솔 로그인
@@ -46,6 +46,43 @@ def get_current_user_profile(key: ApiKey = Depends(require_api_key)):
         "is_admin": key.is_admin,
         "allowed_email_domain": settings.allowed_email_domain,
     }
+
+
+@router.post("/auth/register", response_model=UserRegisterOut, status_code=201)
+def register_user_account(
+    body: UserRegisterRequest,
+    db: Session = Depends(get_db),
+):
+    settings = get_settings()
+    email = body.email.strip()
+    
+    # 1. 계정 이메일 도메인 검증 (PAAS_ALLOWED_EMAIL_DOMAIN)
+    if settings.allowed_email_domain and not validate_email_domain(email):
+        allowed = settings.allowed_email_domain.replace("@", "")
+        raise HTTPException(
+            status_code=403,
+            detail=f"@{allowed} 계정 이메일만 가입 가능합니다.",
+        )
+
+    # 2. 이미 존재하는 계정인지 중복 확인
+    existing = db.execute(select(ApiKey).where(ApiKey.name == email)).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=400, detail="이미 등록된 계정 이메일입니다.")
+
+    # 3. 신규 사용자 키 및 계정 생성 (기본 권한: 일반 사용자 is_admin=False)
+    raw_key = issue_key()
+    user_key = ApiKey(name=email, key_hash=hash_key(raw_key), is_admin=False)
+    db.add(user_key)
+    db.commit()
+
+    audit.record(db, email, "user.register", email, {"name": body.name})
+
+    return UserRegisterOut(
+        name=body.name,
+        email=email,
+        key=raw_key,
+        is_admin=False,
+    )
 
 
 @router.post("/keys", response_model=ApiKeyIssued, status_code=201)
