@@ -303,3 +303,16 @@ class UserRegisterOut(BaseModel):
     email: str
     key: str
     is_admin: bool = False
+
+
+class UserLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserLoginOut(BaseModel):
+    ok: bool = True
+    name: str
+    email: str
+    key: str
+    is_admin: bool = False

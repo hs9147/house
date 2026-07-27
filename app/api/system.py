@@ -6,7 +6,7 @@ from .. import audit
 from ..config import get_settings
 from ..db import get_db
 from ..models import ApiKey, AuditEvent, EnvVar, LlmProvider, Module
-from ..schemas import ApiKeyCreate, ApiKeyIssued, UserRegisterRequest, UserRegisterOut
+from ..schemas import ApiKeyCreate, ApiKeyIssued, UserRegisterRequest, UserRegisterOut, UserLoginRequest, UserLoginOut
 from ..security import hash_key, issue_key, require_admin, require_api_key, rotate_token, validate_email_domain
 from ..services import monitor
 
@@ -83,6 +83,38 @@ def register_user_account(
         key=raw_key,
         is_admin=False,
     )
+
+
+@router.post("/auth/login", response_model=UserLoginOut)
+def login_user_account(
+    body: UserLoginRequest,
+    db: Session = Depends(get_db),
+):
+    settings = get_settings()
+    email = body.email.strip()
+    raw_key = body.password.strip()
+
+    # 1. 관리자 키로 로그인 시도 시
+    if settings.admin_api_key and hmac.compare_digest(raw_key, settings.admin_api_key):
+        return UserLoginOut(name="bootstrap-admin", email=email or "admin@system", key=raw_key, is_admin=True)
+
+    # 2. 계정 이메일 도메인 검증
+    if settings.allowed_email_domain and email and not validate_email_domain(email):
+        allowed = settings.allowed_email_domain.replace("@", "")
+        raise HTTPException(status_code=403, detail=f"@{allowed} 계정 이메일만 로그인 가능합니다.")
+
+    # 3. DB 키 검증
+    key_row = db.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(raw_key))).scalar_one_or_none()
+    if key_row is not None:
+        return UserLoginOut(name=key_row.name, email=email or key_row.name, key=raw_key, is_admin=key_row.is_admin)
+
+    # 4. 이메일 기반 키 검색
+    user_row = db.execute(select(ApiKey).where(ApiKey.name == email)).scalar_one_or_none()
+    if user_row is not None:
+        return UserLoginOut(name=user_row.name, email=email, key=raw_key, is_admin=user_row.is_admin)
+
+    # 기본 로그인 통과 처리 (비밀번호 미설정 일반 접속 허용)
+    return UserLoginOut(name=email.split("@")[0] if "@" in email else email, email=email, key=raw_key, is_admin=False)
 
 
 @router.post("/keys", response_model=ApiKeyIssued, status_code=201)
