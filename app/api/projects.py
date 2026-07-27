@@ -33,6 +33,8 @@ GIT_URL_MASK = "(내부 관리 — 관리자만 조회 가능)"
 def _serialize_project(project: Project, key: ApiKey) -> ProjectOut:
     """비관리자에게는 git_url(리포 위치) 등 메타 정보를 노출하지 않는다."""
     out = ProjectOut.model_validate(project)
+    if project.organization:
+        out.org_name = project.organization.name
     if not key.is_admin:
         out.git_url = GIT_URL_MASK
     return out

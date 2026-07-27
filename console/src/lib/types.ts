@@ -9,6 +9,7 @@ export interface ProjectOut {
   name: string;
   type: ProjectType;
   organization_id: number | null;
+  org_name?: string | null;
   // organization_id로 생성된 프로젝트는 비관리자에게 마스킹된 값이 온다
   git_url: string;
   branch: string;

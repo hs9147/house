@@ -67,42 +67,44 @@ export default function OverviewTab() {
                 </tr>
               </thead>
               <tbody>
-                {(['release', 'development'] as BuildProfile[]).map((profile) => (
-                  <tr key={profile}>
-                    <td><StatusPill value={profile} /></td>
-                    <td><StatusPill value={status[profile] ?? 'unknown'} /></td>
-                    <td className="mono">
-                      {profile === 'release'
-                        ? `/apps/_/${project.name}/`
-                        : `/apps/_/${project.name}/dev/`}
-                    </td>
-                    <td>
-                      <div className="row">
-                        <button
-                          className="small"
-                          disabled={busy}
-                          onClick={() => setAction({ kind: 'deploy', profile })}
-                        >
-                          배포
-                        </button>
-                        <button
-                          className="small secondary"
-                          disabled={busy}
-                          onClick={() => setAction({ kind: 'rollback', profile })}
-                        >
-                          롤백
-                        </button>
-                        <button
-                          className="small danger"
-                          disabled={busy}
-                          onClick={() => setAction({ kind: 'stop', profile })}
-                        >
-                          중지
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {(['release', 'development'] as BuildProfile[]).map((profile) => {
+                  const orgSegment = project.org_name || '_';
+                  const pathUrl = profile === 'release'
+                    ? `/apps/${orgSegment}/${project.name}/`
+                    : `/apps/${orgSegment}/${project.name}/dev/`;
+                  return (
+                    <tr key={profile}>
+                      <td><StatusPill value={profile} /></td>
+                      <td><StatusPill value={status[profile] ?? 'unknown'} /></td>
+                      <td className="mono">{pathUrl}</td>
+                      <td>
+                        <div className="row">
+                          <button
+                            className="small"
+                            disabled={busy}
+                            onClick={() => setAction({ kind: 'deploy', profile })}
+                          >
+                            배포
+                          </button>
+                          <button
+                            className="small secondary"
+                            disabled={busy}
+                            onClick={() => setAction({ kind: 'rollback', profile })}
+                          >
+                            롤백
+                          </button>
+                          <button
+                            className="small danger"
+                            disabled={busy}
+                            onClick={() => setAction({ kind: 'stop', profile })}
+                          >
+                            중지
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
