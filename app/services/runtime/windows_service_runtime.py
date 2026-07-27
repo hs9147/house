@@ -99,7 +99,7 @@ class WindowsServiceRuntime(Runtime):
         slot = "b" if old_slot == "a" else "a"
         name = f"{spec.unit_name}-{slot}"
         log_path = settings.build_log_dir / f"{name}.log"
-        env_pairs = " ".join(
+        env_pairs = "\n".join(
             f"{k}={v}" for k, v in {**spec.env, "PORT": str(host_port), "HOST": "127.0.0.1"}.items()
         )
 
