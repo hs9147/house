@@ -8,6 +8,7 @@ export default defineConfig({
   plugins: [react()],
   base: '/console/',
   server: {
+    allowedHosts: true,
     proxy: Object.fromEntries(
       API_PREFIXES.map((p) => [p, { target: 'http://localhost:7000', changeOrigin: true }]),
     ),
