@@ -89,18 +89,17 @@ export default function Login() {
     }
   };
 
+  /* 
+  // [보류] 사용자 로컬 AD 계정 자동 연동 기능
   const handleLocalADLogin = async () => {
     setBusy(true);
     setError('');
     try {
-      // 로컬 브라우저 AD 인증 세션 연동 (Integrated Windows Auth / OIDC SSO)
       const domain = allowedDomain ? allowedDomain.replace(/^@/, '') : 'cho-fam.com';
       const adUserEmail = `ad-user@${domain}`;
-      
-      // 🔒 계정 ID 자동 입력 및 입력창 비활성화
       setEmail(adUserEmail);
       setIsAdLinked(true);
-      setSuccessMsg('🏢 로컬 AD 계정이 연동되었습니다. 계정 ID가 자동 설정 및 비활성화되었습니다.');
+      setSuccessMsg('🏢 로컬 AD 계정이 연동되었습니다.');
 
       const regRes = await api.registerUser({
         email: adUserEmail,
@@ -119,13 +118,14 @@ export default function Login() {
       setBusy(false);
     }
   };
+  */
 
   const domainHint = allowedDomain ? `@${allowedDomain.replace(/^@/, '')}` : '사내';
 
   return (
     <div className="login-wrap">
       <form className="panel login-box" onSubmit={submit} style={{ width: 380 }}>
-        {/* 🏢 로컬 AD 계정 연동 전용 버튼 */}
+        {/* [보류] 🏢 로컬 AD 계정 연동 전용 버튼
         <div style={{ marginBottom: 16 }}>
           <button
             type="button"
@@ -142,6 +142,7 @@ export default function Login() {
             <div style={{ flex: 1, borderBottom: '1px solid #444' }} />
           </div>
         </div>
+        */}
 
         {/* 탭 전환 */}
         <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.1)', marginBottom: 16 }}>
