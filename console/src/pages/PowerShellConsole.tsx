@@ -3,15 +3,29 @@ import Async from '../components/Async';
 import { api } from '../lib/api';
 import { useApi } from '../lib/hooks';
 
+const PS_HISTORY_STORAGE_KEY = 'paas_powershell_cmd_history';
+
 export default function PowerShellConsole() {
   const [activeTab, setActiveTab] = useState<'console' | 'build_logs'>('console');
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [inputCmd, setInputCmd] = useState('');
   const [running, setRunning] = useState(false);
-  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
+
+  // 세션 종료/새로고침 시에도 기억되는 최대 100개 명령어 이력 State
+  const [cmdHistory, setCmdHistory] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(PS_HISTORY_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return Array.isArray(parsed) ? parsed.slice(-100) : [];
+      }
+    } catch {
+      // ignore JSON parse error
+    }
+    return [];
+  });
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
-  const logEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -47,23 +61,8 @@ export default function PowerShellConsole() {
   const [logContent, setLogContent] = useState<string>('');
   const [tailLines, setTailLines] = useState<number>(1000);
   const [loadingLog, setLoadingLog] = useState<boolean>(false);
-  const fileLogEndRef = useRef<HTMLDivElement>(null);
 
-  const scrollToBottom = () => {
-    setTimeout(() => {
-      logEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    }, 50);
-  };
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [logs, activeTab, connected]);
-
-  useEffect(() => {
-    if (logContent) {
-      fileLogEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [logContent]);
 
   useEffect(() => {
     if (buildLogsState.data && buildLogsState.data.files.length > 0 && !selectedFile) {
@@ -91,8 +90,10 @@ export default function PowerShellConsole() {
     setLogs([
       'Windows PowerShell Admin Interactive Console [Version 10.0.19045]',
       'Copyright (C) Microsoft Corporation. All rights reserved.',
-      'Administrator privileges verified via PaaS Control Plane.\n',
+      'Administrator privileges verified via PaaS Control Plane.',
+      'Console session active (Standalone Mode Enabled).\n',
     ]);
+    setTimeout(() => inputRef.current?.focus(), 50);
   };
 
   const handleDisconnect = () => {
@@ -105,10 +106,19 @@ export default function PowerShellConsole() {
     if (!cmd || !connected || running) return;
 
     setCmdHistory((prev) => {
-      if (prev.length > 0 && prev[prev.length - 1] === cmd) {
-        return prev;
+      let nextHistory = prev;
+      if (prev.length === 0 || prev[prev.length - 1] !== cmd) {
+        nextHistory = [...prev, cmd];
       }
-      return [...prev, cmd];
+      if (nextHistory.length > 100) {
+        nextHistory = nextHistory.slice(-100);
+      }
+      try {
+        localStorage.setItem(PS_HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
+      } catch {
+        // ignore
+      }
+      return nextHistory;
     });
     setHistoryIndex(-1);
 
@@ -120,17 +130,30 @@ export default function PowerShellConsole() {
       if (cmd.toLowerCase() === 'clear' || cmd.toLowerCase() === 'cls') {
         setLogs([]);
         setRunning(false);
+        setTimeout(() => inputRef.current?.focus(), 50);
         return;
       }
 
       const res = await api.execPowerShell(cmd);
       setLogs((prev) => [...prev, res.output]);
     } catch (err) {
-      setLogs((prev) => [...prev, `[Error] ${(err as Error).message}`]);
+      setLogs((prev) => [
+        ...prev,
+        `[Backend Unavailable] 백엔드 서비스(8000) 정지 중: ${(err as Error).message}`,
+        `[Hint] 백엔드 재기동 후 명령어를 재입력하세요. (콘솔 세션 유지 중)\n`,
+      ]);
     } finally {
       setRunning(false);
+      setTimeout(() => inputRef.current?.focus(), 50);
     }
   };
+
+  // 명령어 실행 완료 후 인풋 커서 포커스 자동 유지
+  useEffect(() => {
+    if (!running && connected && activeTab === 'console') {
+      inputRef.current?.focus();
+    }
+  }, [running, connected, activeTab]);
 
   return (
     <div className="panel" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -277,7 +300,6 @@ export default function PowerShellConsole() {
                     autoFocus
                   />
                 </form>
-                <div ref={logEndRef} />
               </div>
             )}
           </div>
@@ -357,10 +379,7 @@ export default function PowerShellConsole() {
                       선택된 빌드 로그 파일 내용이 비어있습니다.
                     </div>
                   ) : (
-                    <>
-                      {logContent}
-                      <div ref={fileLogEndRef} />
-                    </>
+                    logContent
                   )}
                 </div>
               </>
