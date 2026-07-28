@@ -10,6 +10,8 @@
   mcp          : PAY_URL, PAY_API_KEY (배포된 앱 코드가 직접 쓸 수도 있고, 플랫폼
                  채팅이 services/mcp_client.py로 같은 서버의 도구를 호출하기도 함)
 """
+from pathlib import Path
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
