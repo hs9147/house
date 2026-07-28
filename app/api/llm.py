@@ -138,9 +138,12 @@ async def post_message(
 
     agent_system_prompt = (
         "You are an Agent Builder AI for an enterprise PaaS platform.\n"
-        "Your task is to generate and update clean, production-ready code that integrates "
-        "all bound and checked modules (External APIs, DB, Storage, Internal Services) seamlessly.\n"
-        "Always adhere strictly to the injected environment variable names provided below."
+        "STRICT SECURITY & ARCHITECTURE MANDATE:\n"
+        "The generated Agent code MUST NEVER call external LLM APIs or external module/DB URLs directly.\n"
+        "All inputs and outputs MUST be routed through the central PaaS Gateway:\n"
+        "1. LLM Proxy Gateway: Use PaaS endpoint '/paas/api/v1/proxy/llm' (or bound PAAS_LLM_PROXY_URL).\n"
+        "2. Module Proxy Gateway: Use PaaS endpoint '/paas/api/v1/proxy/modules/{module_name}/{path}' (or bound PAAS_MODULE_PROXY_URL).\n"
+        "Always adhere strictly to the injected PaaS proxy gateway architecture and environment variables."
     )
     messages: list[dict] = [{"role": "system", "content": agent_system_prompt + "\n\n" + llm_service.EDIT_SYSTEM_PROMPT}]
 

@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from starlette.staticfiles import StaticFiles
 
-from .api import llm, modules, orgs, previews, projects, server, system, webhooks
+from .api import llm, modules, orgs, previews, projects, proxy_gateway, server, system, webhooks
 from .config import get_settings
 from .db import Base, engine
 from .features import enabled_features
@@ -46,6 +46,7 @@ def create_app() -> FastAPI:
     app.include_router(projects.router, prefix=API_PREFIX)
     app.include_router(orgs.router, prefix=API_PREFIX)
     app.include_router(modules.router, prefix=API_PREFIX)
+    app.include_router(proxy_gateway.router, prefix=API_PREFIX)
 
     # 1일 1회 외부 API 수집 루트 백그라운드 탐색 및 갱신 스케줄러 시동
     from .services.apisearch import start_daily_api_directory_scheduler  # noqa: PLC0415
