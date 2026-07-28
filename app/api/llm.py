@@ -52,8 +52,11 @@ def _require_admin_for_external(provider: LlmProvider, key: ApiKey) -> None:
 
 
 def _provider_out(p: LlmProvider) -> LlmProviderOut:
+    kind_val = p.kind.value if hasattr(p.kind, 'value') else str(p.kind)
+    if kind_val == "external":
+        kind_val = "openai"
     return LlmProviderOut(
-        id=p.id, name=p.name, kind=p.kind.value, base_url=p.base_url,
+        id=p.id, name=p.name, kind=kind_val, base_url=p.base_url,
         model=p.model, has_api_key=bool(p.api_key_encrypted),
     )
 
