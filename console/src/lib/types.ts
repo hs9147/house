@@ -274,3 +274,12 @@ export interface ApiKeyIssued {
   key: string;
   is_admin: boolean;
 }
+
+export interface McpDirectoryItem {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  url: string;
+  vendor: string;
+}

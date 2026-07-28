@@ -12,6 +12,7 @@ import type {
   DeploymentOut,
   EnvVarRow,
   LlmProviderOut,
+  McpDirectoryItem,
   ModuleOut,
   ModuleSummary,
   OrgOut,
@@ -232,6 +233,12 @@ export const api = {
     request<{ results: ApiSearchResult[] }>('GET', '/modules/search', undefined, { keyword }),
   importApiModule: (name: string, url: string, category?: string) =>
     request<ModuleOut>('POST', '/modules/import', { name, url, category: category || null }),
+
+  // 외부 MCP 디렉터리 검색 + mcp 모듈 자동 추가 (admin)
+  searchMcpDirectory: (q?: string) =>
+    request<McpDirectoryItem[]>('GET', `/mcp/search?q=${encodeURIComponent(q || '')}`),
+  importMcpModule: (name: string, url: string, category?: string) =>
+    request<ModuleOut>('POST', '/modules/import-mcp', { name, url, category: category || null }),
   createModule: (
     name: string,
     type: string,

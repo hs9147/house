@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Async from '../components/Async';
 import Modal from '../components/Modal';
 import StatusPill from '../components/StatusPill';
@@ -19,6 +19,7 @@ export default function Modules() {
   const state = useApi(() => api.listModules());
   const [showCreate, setShowCreate] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [showMcpSearch, setShowMcpSearch] = useState(false);
 
   return (
     <div className="panel">
@@ -26,9 +27,14 @@ export default function Modules() {
         <h2 style={{ margin: 0 }}>모듈 레지스트리</h2>
         <div className="spacer" />
         {isAdmin() && (
-          <button className="secondary" onClick={() => setShowSearch(true)}>
-            외부 API 검색
-          </button>
+          <>
+            <button className="secondary" onClick={() => setShowSearch(true)}>
+              외부 API 검색
+            </button>
+            <button className="secondary" onClick={() => setShowMcpSearch(true)}>
+              🔌 외부 MCP 검색
+            </button>
+          </>
         )}
         <button onClick={() => setShowCreate(true)}>+ 새 모듈</button>
       </div>
@@ -100,7 +106,122 @@ export default function Modules() {
           onAdded={() => state.reload()}
         />
       )}
+      {showMcpSearch && (
+        <SearchMcpModal
+          onClose={() => setShowMcpSearch(false)}
+          onAdded={() => state.reload()}
+        />
+      )}
     </div>
+  );
+}
+
+function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<import('../lib/types').McpDirectoryItem[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [added, setAdded] = useState<Record<string, string>>({});
+
+  const doSearch = async (q: string) => {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await api.searchMcpDirectory(q);
+      setResults(res);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    doSearch('');
+  }, []);
+
+  const searchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    doSearch(query);
+  };
+
+  const importMcp = async (item: import('../lib/types').McpDirectoryItem) => {
+    setError('');
+    try {
+      const created = await api.importMcpModule(item.id, item.url, item.category);
+      setAdded((a) => ({ ...a, [item.id]: created.name }));
+      onAdded();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  return (
+    <Modal title="🔌 외부 MCP 서버 디렉터리 검색 및 원클릭 등록" onClose={onClose}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <form className="row" onSubmit={searchSubmit}>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="키워드 검색 (예: github, postgres, slack, brave, puppeteer)..."
+            style={{ flex: 1 }}
+            autoFocus
+          />
+          <button type="submit" disabled={busy}>
+            {busy ? '검색 중...' : '검색'}
+          </button>
+        </form>
+
+        {error && <div className="error">{error}</div>}
+
+        <div style={{ maxHeight: 400, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {results && results.length === 0 && (
+            <div className="mutedtext" style={{ padding: 20, textAlign: 'center' }}>
+              검색 조건에 맞는 MCP 서버가 없습니다.
+            </div>
+          )}
+          {results &&
+            results.map((r) => (
+              <div
+                key={r.id}
+                className="panel"
+                style={{
+                  padding: 10,
+                  margin: 0,
+                  backgroundColor: 'rgba(255,255,255,0.02)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                }}
+              >
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <span style={{ fontWeight: 600, color: '#38bdf8' }}>{r.name}</span>
+                    <StatusPill value={r.category} />
+                    <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }}>
+                      by {r.vendor}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#d1d5db', marginBottom: 4 }}>{r.description}</div>
+                  <div style={{ fontSize: 11, color: '#6b7280', fontFamily: 'monospace' }}>{r.url}</div>
+                </div>
+                <div>
+                  {added[r.id] ? (
+                    <span style={{ color: '#10b981', fontSize: 12, fontWeight: 600 }}>
+                      ✓ 추가됨 ({added[r.id]})
+                    </span>
+                  ) : (
+                    <button className="small" onClick={() => importMcp(r)}>
+                      + 모듈로 등록
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+        </div>
+      </div>
+    </Modal>
   );
 }
 

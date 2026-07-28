@@ -13,6 +13,7 @@ from ..models import ApiKey, Module, ModuleBinding, ModuleType, Organization, Pr
 from ..schemas import ApiModuleImport, ModuleBind, ModuleCreate
 from ..security import require_admin, require_api_key
 from ..services import apisearch
+from ..services import mcp_search
 from ..services import modules as svc
 
 router = APIRouter(tags=["modules"])
@@ -225,3 +226,34 @@ def project_resources(
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
     return svc.available_resources(db, project)
+
+
+@router.get("/mcp/search")
+def search_mcp_directory(q: str = "", _: ApiKey = Depends(require_api_key)):
+    """외부 MCP 서버 디렉터리 키워드 검색."""
+    return mcp_search.search_mcp_servers(q)
+
+
+@router.post("/modules/import-mcp", status_code=201)
+def import_mcp_module(
+    body: ApiModuleImport,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """검색된 MCP 서버를 mcp 타입 모듈로 자동 추가한다."""
+    mod_name = apisearch.normalize_module_name(body.name)
+    if db.execute(select(Module).where(Module.name == mod_name)).scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"module '{mod_name}' already exists")
+
+    config = {"url": body.url, "api_key": ""}
+    row = Module(
+        name=mod_name,
+        type=ModuleType.mcp,
+        category=body.category or "mcp",
+        config=svc.encrypt_config(config),
+    )
+    db.add(row)
+    db.commit()
+    audit.record(db, admin.name, "module.import_mcp", mod_name, {"url": body.url})
+    return {"id": row.id, "name": row.name, "type": row.type.value, "category": row.category,
+            "config": svc.masked_config(row.config)}
