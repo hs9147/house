@@ -18,13 +18,12 @@ from ..models import BuildProfile, Module, ModuleBinding, ModuleType, Project
 from ..security import decrypt_value, encrypt_value
 
 # config 안에서 저장 시 암호화되는 필드
-SENSITIVE_KEYS = {"api_key", "dsn", "password", "secret", "token"}
-
+SENSITIVE_KEYS = {"api_key", "key", "dsn", "password", "secret", "client_secret", "token"}
 
 def encrypt_config(config: dict) -> dict:
     out = {}
     for k, v in config.items():
-        if k in SENSITIVE_KEYS and isinstance(v, str) and v:
+        if k.lower() in SENSITIVE_KEYS and isinstance(v, str) and v:
             out[k] = {"__enc__": encrypt_value(v)}
         else:
             out[k] = v
@@ -54,9 +53,12 @@ def binding_env(
     t = module.type
 
     if t == ModuleType.external_api:
-        env = {f"{p}_URL": cfg.get("url", "")}
-        if cfg.get("api_key"):
-            env[f"{p}_API_KEY"] = cfg["api_key"]
+        # 외부 API의 key, url, id, client_id, client_secret 등 모든 설정 항목 일괄 환경변수 주입
+        env = {}
+        for k, v in cfg.items():
+            if v is not None and str(v) != "":
+                env_key = f"{p}_{k.upper()}"
+                env[env_key] = str(v)
         return env
 
     if t == ModuleType.internal_api:

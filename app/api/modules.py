@@ -44,6 +44,29 @@ def list_modules(db: Session = Depends(get_db), _: ApiKey = Depends(require_api_
     ]
 
 
+@router.put("/modules/{module_id}")
+def update_module(
+    module_id: int,
+    body: ModuleCreate,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    row = db.get(Module, module_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="module not found")
+    row.name = body.name
+    row.category = body.category
+    row.organization_id = body.organization_id
+    if body.config:
+        existing_cfg = svc.decrypt_config(row.config or {})
+        existing_cfg.update(body.config)
+        row.config = svc.encrypt_config(existing_cfg)
+    db.commit()
+    audit.record(db, key.name, "module.update", row.name, {"type": row.type.value})
+    return {"id": row.id, "name": row.name, "type": row.type.value, "category": row.category,
+            "organization_id": row.organization_id, "config": svc.masked_config(row.config)}
+
+
 @router.post("/projects/{project_id}/modules/{module_id}/bind", status_code=201)
 def bind_module(
     project_id: int,
