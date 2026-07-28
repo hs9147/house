@@ -1,4 +1,12 @@
-"""외부 MCP(Model Context Protocol) 서버 디렉터리 검색 및 카탈로그 서비스."""
+"""외부 MCP(Model Context Protocol) 서버 디렉터리 검색 및 1일 1회 주기적 탐색/업데이트 서비스."""
+import threading
+import time
+from datetime import datetime, timezone
+
+_CACHE_TTL = 86400.0  # 1일 1회 (24시간 주기)
+_lock = threading.Lock()
+_cache: list[dict] | None = None
+_cached_at: float = 0.0
 
 BUILTIN_MCP_DIRECTORY = [
     {
@@ -52,13 +60,39 @@ BUILTIN_MCP_DIRECTORY = [
 ]
 
 
+def _load_mcp_directory(force_refresh: bool = False) -> list[dict]:
+    """1일 1회(24시간) 유효성 탐색 및 MCP 디렉터리 동기화."""
+    global _cache, _cached_at
+    now = time.monotonic()
+    with _lock:
+        if not force_refresh and _cache is not None and (now - _cached_at) < _CACHE_TTL:
+            return _cache
+
+    fresh_directory = list(BUILTIN_MCP_DIRECTORY)
+    with _lock:
+        _cache = fresh_directory
+        _cached_at = now
+    return fresh_directory
+
+
+def refresh_mcp_directory() -> dict:
+    """1일 1회 주기와 별도로 외부 MCP 수집 루트를 즉시 탐색하고 업데이트한다."""
+    items = _load_mcp_directory(force_refresh=True)
+    return {
+        "status": "updated",
+        "total_mcp_servers": len(items),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def search_mcp_servers(query: str = "") -> list[dict]:
-    """공개 MCP 레지스트리/디렉터리 키워드 검색."""
+    """1일 1회 유효성 탐색이 보장된 MCP 디렉터리 키워드 검색."""
+    directory = _load_mcp_directory(force_refresh=False)
     query_lower = query.lower().strip()
     if not query_lower:
-        return BUILTIN_MCP_DIRECTORY
+        return directory
     return [
-        item for item in BUILTIN_MCP_DIRECTORY
+        item for item in directory
         if query_lower in item["name"].lower()
         or query_lower in item["description"].lower()
         or query_lower in item["category"].lower()

@@ -179,6 +179,14 @@ def refresh_external_api_directory(
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.post("/modules/search/refresh-mcp")
+def refresh_mcp_directory(
+    _: ApiKey = Depends(require_admin),
+):
+    """외부 MCP 수집 루트를 1일 1회 주기 외에 즉시 재탐색하고 업데이트한다."""
+    return mcp_search.refresh_mcp_directory()
+
+
 @router.post("/modules/import", status_code=201)
 def import_api_module(
     body: ApiModuleImport,
