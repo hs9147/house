@@ -154,7 +154,8 @@ def available_resources(db: Session, project: Project) -> list[dict]:
 
 
 def context_for_llm(db: Session, project: Project) -> list[dict]:
-    """채팅 컨텍스트용 — LLM이 규약에 맞는 연동 코드를 생성하도록 모듈 목록을 요약(비밀값 제외)."""
+    """에이전트 빌더용 — 구현 세부명세(URL, API Key, Header 등)는 PaaS가 100% 프록시 처리하고,
+    프롬프트에는 모듈 설명(description)과 PaaS 프록시 대상 식별자만 주입한다."""
     rows = db.execute(
         select(ModuleBinding, Module)
         .join(Module, ModuleBinding.module_id == Module.id)
@@ -162,9 +163,14 @@ def context_for_llm(db: Session, project: Project) -> list[dict]:
     ).all()
     summary = []
     for binding, module in rows:
+        cfg = decrypt_config(module.config or {})
+        desc = cfg.get("description") or f"{module.type.value} module for {module.name}"
         summary.append({
             "name": module.name,
             "type": module.type.value,
-            "env": sorted(binding_env(module, binding.env_prefix, db=db).keys()),
+            "category": module.category or "general",
+            "description": desc,
+            "paas_proxy_endpoint": f"/paas/api/v1/proxy/modules/{module.name}",
+            "env_prefix": binding.env_prefix,
         })
     return summary
