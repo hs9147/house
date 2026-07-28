@@ -131,16 +131,25 @@ async def post_message(
     module_ctx = modules_service.context_for_llm(db, project)
     all_resources = modules_service.available_resources(db, project)
     workdir = workspace.workdir_for(project)
-    context_parts = [f"Project: {project.name} (type={project.type.value})"]
     
+    # 1. 프로젝트 언어/프레임워크 스택 및 의존성 패키지 감지 및 주입
+    stack_info = workspace.detect_project_stack_and_deps(workdir)
+    context_parts = [
+        f"Project: {project.name} (type={project.type.value})",
+        "=== PROJECT STACK & DEPENDENCIES ===\n" + json.dumps(stack_info, indent=2, ensure_ascii=False)
+    ]
+    
+    # 2. 바인딩/체크된 모듈 규약 및 주입 환경변수 명세
     if module_ctx:
         context_parts.append(
             "=== BOUND & CHECKED MODULES (INJECTED ENV VAR SPECIFICATION) ===\n" +
             json.dumps(module_ctx, indent=2, ensure_ascii=False)
         )
+    
+    # 3. 사용 가능한 전체 자원 및 헬스체크 메타데이터
     if all_resources:
         context_parts.append(
-            "=== ALL AVAILABLE RESOURCES & MODULES FOR THIS PROJECT ===\n" +
+            "=== ALL AVAILABLE RESOURCES & MODULE HEALTH STATUS ===\n" +
             json.dumps(all_resources, indent=2, ensure_ascii=False)
         )
 

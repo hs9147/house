@@ -3,6 +3,7 @@
 LLM은 리포에 직접 쓰지 않는다: diff는 ProposedChange로 저장되고,
 apply 승인 시에만 여기서 작업 브랜치에 git apply + commit 된다.
 """
+import json
 import subprocess
 from pathlib import Path
 
@@ -99,3 +100,67 @@ def _git(workdir: Path, *args: str) -> None:
     proc = subprocess.run(["git", *args], cwd=workdir, capture_output=True, text=True)
     if proc.returncode != 0:
         raise BuildError(f"git {args[0]} failed: {(proc.stderr or proc.stdout).strip()[:500]}")
+
+
+def detect_project_stack_and_deps(workdir: Path) -> dict:
+    """프로젝트 워크스페이스의 package.json, requirements.txt, pyproject.toml, go.mod 등을 감지하여
+    언어 스택, 프레임워크 및 주요 라이브러리 의존성 명세를 반환한다."""
+    stack = {"language": "unknown", "framework": "unknown", "dependencies": []}
+    if not workdir.exists():
+        return stack
+
+    # 1. Node.js / TypeScript / JavaScript
+    pkg_json = workdir / "package.json"
+    if pkg_json.is_file():
+        stack["language"] = "TypeScript/JavaScript"
+        try:
+            content = json.loads(pkg_json.read_text(encoding="utf-8", errors="ignore"))
+            deps = {**content.get("dependencies", {}), **content.get("devDependencies", {})}
+            stack["dependencies"] = list(deps.keys())[:30]
+            if "next" in deps:
+                stack["framework"] = "Next.js"
+            elif "express" in deps:
+                stack["framework"] = "Express"
+            elif "vite" in deps:
+                stack["framework"] = "Vite / React"
+            elif "react" in deps:
+                stack["framework"] = "React"
+            elif "vue" in deps:
+                stack["framework"] = "Vue"
+            elif "nest" in deps or "@nestjs/core" in deps:
+                stack["framework"] = "NestJS"
+        except Exception:
+            pass
+        return stack
+
+    # 2. Python
+    req_txt = workdir / "requirements.txt"
+    pyproject = workdir / "pyproject.toml"
+    if req_txt.is_file() or pyproject.is_file() or any(workdir.glob("*.py")):
+        stack["language"] = "Python"
+        deps = []
+        if req_txt.is_file():
+            for line in req_txt.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    pkg = line.split("==")[0].split(">=")[0].split("<=")[0].strip()
+                    if pkg:
+                        deps.append(pkg)
+        stack["dependencies"] = deps[:30]
+        dep_str = " ".join(deps).lower()
+        if "fastapi" in dep_str:
+            stack["framework"] = "FastAPI"
+        elif "django" in dep_str:
+            stack["framework"] = "Django"
+        elif "flask" in dep_str:
+            stack["framework"] = "Flask"
+        return stack
+
+    # 3. Go
+    go_mod = workdir / "go.mod"
+    if go_mod.is_file():
+        stack["language"] = "Go"
+        stack["framework"] = "Go Standard / Gin"
+        return stack
+
+    return stack
