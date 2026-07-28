@@ -4,6 +4,7 @@ LLM은 리포에 직접 쓰지 않는다: diff는 ProposedChange로 저장되고
 apply 승인 시에만 여기서 작업 브랜치에 git apply + commit 된다.
 """
 import json
+import re
 import subprocess
 from pathlib import Path
 
