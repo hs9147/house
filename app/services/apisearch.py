@@ -14,20 +14,21 @@ import time
 from ..config import get_settings
 from .httpx_retry import get_with_retry
 
-_CACHE_TTL = 3600.0  # 목록은 자주 바뀌지 않으므로 1시간 캐시
+_CACHE_TTL = 86400.0  # 1일 1회(24시간) 주기적 동기화
 _lock = threading.Lock()
 _cache: dict | None = None
 _cached_at = 0.0
+_scheduler_thread: threading.Thread | None = None
 
 
 class ApiSearchError(RuntimeError):
     """디렉터리 조회 실패 — 502로 매핑."""
 
 
-def _load_directory() -> dict:
+def _load_directory(force_refresh: bool = False) -> dict:
     global _cache, _cached_at
     with _lock:
-        if _cache is not None and time.monotonic() - _cached_at < _CACHE_TTL:
+        if not force_refresh and _cache is not None and time.monotonic() - _cached_at < _CACHE_TTL:
             return _cache
     url = get_settings().api_directory_url
     try:
@@ -45,11 +46,38 @@ def _load_directory() -> dict:
     return data
 
 
+def refresh_api_directory() -> dict:
+    """외부 API 수집 루트를 즉시 강제 탐색 및 업데이트한다."""
+    return _load_directory(force_refresh=True)
+
+
 def clear_cache() -> None:
     """테스트·수동 갱신용."""
     global _cache
     with _lock:
         _cache = None
+
+
+def start_daily_api_directory_scheduler() -> None:
+    """1일 1회(24시간 주기) 백그라운드에서 외부 API 수집 루트를 탐색하고 갱신한다."""
+    global _scheduler_thread
+    with _lock:
+        if _scheduler_thread is not None and _scheduler_thread.is_alive():
+            return
+
+        def _loop():
+            # 최초 실행 10초 후 1차 워밍업 수행
+            time.sleep(10)
+            while True:
+                try:
+                    refresh_api_directory()
+                except Exception:
+                    pass
+                # 24시간 (86,400초) 주기 대기
+                time.sleep(_CACHE_TTL)
+
+        _scheduler_thread = threading.Thread(target=_loop, daemon=True, name="daily-api-scheduler")
+        _scheduler_thread.start()
 
 
 def _entry_to_result(api_id: str, entry: dict) -> dict | None:

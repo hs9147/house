@@ -47,6 +47,10 @@ def create_app() -> FastAPI:
     app.include_router(orgs.router, prefix=API_PREFIX)
     app.include_router(modules.router, prefix=API_PREFIX)
 
+    # 1일 1회 외부 API 수집 루트 백그라운드 탐색 및 갱신 스케줄러 시동
+    from .services.apisearch import start_daily_api_directory_scheduler  # noqa: PLC0415
+    start_daily_api_directory_scheduler()
+
     # 선택 모듈 (설치 빌드옵션)
     if "deploy" in features:
         app.include_router(webhooks.router, prefix=PAAS_PREFIX)  # /paas/webhooks/git — 버전 없음

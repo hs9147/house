@@ -109,6 +109,18 @@ def search_external_apis(
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.post("/modules/search/refresh")
+def refresh_external_api_directory(
+    _: ApiKey = Depends(require_admin),
+):
+    """외부 API 수집 루트(디렉터리)를 1일 1회 주기 외에 즉시 재탐색하고 업데이트한다."""
+    try:
+        data = apisearch.refresh_api_directory()
+        return {"status": "success", "total_apis": len(data)}
+    except apisearch.ApiSearchError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @router.post("/modules/import", status_code=201)
 def import_api_module(
     body: ApiModuleImport,
