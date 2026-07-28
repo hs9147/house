@@ -268,3 +268,65 @@ async def powershell_websocket_terminal(websocket: WebSocket):
             await websocket.send_text(f"{out}\n\nPS > ")
     except Exception:
         pass
+
+
+@router.get("/system/build-logs")
+def list_build_log_files(
+    _: ApiKey = Depends(require_admin),
+):
+    """PAAS_BUILD_LOG_DIR 하위의 .txt 빌드 로그 파일 목록을 최신순으로 반환한다."""
+    import os  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    settings = get_settings()
+    log_dir = Path(settings.build_log_dir).resolve()
+    if not log_dir.exists():
+        return {"files": [], "log_dir": str(log_dir)}
+
+    txt_files = []
+    for entry in log_dir.glob("**/*.txt"):
+        if entry.is_file():
+            stat = entry.stat()
+            rel_path = entry.relative_to(log_dir).as_posix()
+            txt_files.append({
+                "filename": entry.name,
+                "relative_path": rel_path,
+                "size_bytes": stat.st_size,
+                "mtime": stat.st_mtime,
+            })
+
+    txt_files.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"files": txt_files, "log_dir": str(log_dir)}
+
+
+@router.get("/system/build-logs/content")
+def get_build_log_content(
+    filename: str,
+    tail_lines: int = 1000,
+    _: ApiKey = Depends(require_admin),
+):
+    """PAAS_BUILD_LOG_DIR 하위의 .txt 로그 파일 내용을 파일 끝(Tail)을 기본으로 반환한다."""
+    from pathlib import Path  # noqa: PLC0415
+
+    settings = get_settings()
+    log_dir = Path(settings.build_log_dir).resolve()
+    target_path = (log_dir / filename).resolve()
+
+    if not str(target_path).startswith(str(log_dir)):
+        raise HTTPException(status_code=403, detail="Access denied: outside log directory")
+
+    if not target_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Log file '{filename}' not found")
+
+    try:
+        content_full = target_path.read_text(encoding="utf-8", errors="replace")
+        lines = content_full.splitlines()
+        tail_content = "\n".join(lines[-tail_lines:]) if len(lines) > tail_lines else content_full
+        return {
+            "filename": filename,
+            "total_lines": len(lines),
+            "tail_lines": tail_lines,
+            "content": tail_content,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read log file: {e}")

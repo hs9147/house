@@ -5,12 +5,20 @@ import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
 
 export default function PowerShellConsole() {
-  const [activeTab, setActiveTab] = useState<'console' | 'logs'>('console');
+  const [activeTab, setActiveTab] = useState<'console' | 'build_logs' | 'audit_logs'>('build_logs');
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [inputCmd, setInputCmd] = useState('');
   const [running, setRunning] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
+
+  // 빌드 로그 (.txt) 탭용 API State
+  const buildLogsState = useApi(() => api.listBuildLogs(), []);
+  const [selectedFile, setSelectedFile] = useState<string>('');
+  const [logContent, setLogContent] = useState<string>('');
+  const [tailLines, setTailLines] = useState<number>(1000);
+  const [loadingLog, setLoadingLog] = useState<boolean>(false);
+  const fileLogEndRef = useRef<HTMLDivElement>(null);
 
   // 작업 로그 탭용 API hook
   const [auditLimit, setAuditLimit] = useState(100);
@@ -18,12 +26,43 @@ export default function PowerShellConsole() {
   const [searchFilter, setSearchFilter] = useState('');
 
   const scrollToBottom = () => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    setTimeout(() => {
+      logEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }, 50);
   };
 
   useEffect(() => {
     scrollToBottom();
-  }, [logs]);
+  }, [logs, activeTab, connected]);
+
+  // 빌드 로그 로드 후 자동 스크롤 (파일 끝 기본값 보기)
+  useEffect(() => {
+    if (logContent) {
+      fileLogEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logContent]);
+
+  // 빌드 로그 파일 목록 변경 시 첫 번째 파일 자동 선택
+  useEffect(() => {
+    if (buildLogsState.data && buildLogsState.data.files.length > 0 && !selectedFile) {
+      const firstFile = buildLogsState.data.files[0].relative_path;
+      setSelectedFile(firstFile);
+      loadLogFile(firstFile, tailLines);
+    }
+  }, [buildLogsState.data]);
+
+  const loadLogFile = async (filename: string, lines = 1000) => {
+    if (!filename) return;
+    setLoadingLog(true);
+    try {
+      const res = await api.getBuildLogContent(filename, lines);
+      setLogContent(res.content);
+    } catch (err) {
+      setLogContent(`[Error] 로그 파일을 읽을 수 없습니다: ${(err as Error).message}`);
+    } finally {
+      setLoadingLog(false);
+    }
+  };
 
   const handleConnect = () => {
     setConnected(true);
@@ -71,10 +110,10 @@ export default function PowerShellConsole() {
       <div className="row" style={{ alignItems: 'center' }}>
         <div>
           <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-            ⚡ PowerShell 콘솔 (관리자)
+            ⚡ PowerShell & 빌드 로그 (관리자)
           </h2>
           <p className="mutedtext" style={{ margin: '4px 0 0 0', fontSize: 12 }}>
-            PaaS 서버 호스트 노드의 관리자 권한 PowerShell 명령어를 실행하고 작업 로그를 확인합니다.
+            PAAS_BUILD_LOG_DIR (.txt) 빌드 로그 및 관리자 권한 PowerShell을 조회/실행합니다.
           </p>
         </div>
         <div className="spacer" />
@@ -109,15 +148,24 @@ export default function PowerShellConsole() {
       {/* Tab Nav Selector */}
       <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', paddingBottom: 8 }}>
         <button
+          className={activeTab === 'build_logs' ? 'primary small' : 'secondary small'}
+          onClick={() => {
+            setActiveTab('build_logs');
+            buildLogsState.reload();
+          }}
+        >
+          📄 빌드 로그 파일 (PAAS_BUILD_LOG_DIR)
+        </button>
+        <button
           className={activeTab === 'console' ? 'primary small' : 'secondary small'}
           onClick={() => setActiveTab('console')}
         >
           ⚡ 대화형 콘솔
         </button>
         <button
-          className={activeTab === 'logs' ? 'primary small' : 'secondary small'}
+          className={activeTab === 'audit_logs' ? 'primary small' : 'secondary small'}
           onClick={() => {
-            setActiveTab('logs');
+            setActiveTab('audit_logs');
             auditState.reload();
           }}
         >
@@ -125,7 +173,92 @@ export default function PowerShellConsole() {
         </button>
       </div>
 
-      {/* TAB 1: Console View */}
+      {/* TAB 1: PAAS_BUILD_LOG_DIR (.txt) Files View */}
+      {activeTab === 'build_logs' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <Async state={buildLogsState} empty="PAAS_BUILD_LOG_DIR 하위에 빌드 로그 (.txt) 파일이 존재하지 않습니다.">
+            {(data) => (
+              <>
+                <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+                  <label style={{ fontSize: 13, fontWeight: 600 }}>로그 파일 선택:</label>
+                  <select
+                    style={{ flex: 1, maxWidth: 450, fontFamily: 'monospace' }}
+                    value={selectedFile}
+                    onChange={(e) => {
+                      setSelectedFile(e.target.value);
+                      loadLogFile(e.target.value, tailLines);
+                    }}
+                  >
+                    {data.files.map((f) => (
+                      <option key={f.relative_path} value={f.relative_path}>
+                        {f.relative_path} ({(f.size_bytes / 1024).toFixed(1)} KB)
+                      </option>
+                    ))}
+                  </select>
+
+                  <label style={{ fontSize: 12, marginLeft: 8 }} className="mutedtext">라인 출력 (끝부분):</label>
+                  <select
+                    value={tailLines}
+                    onChange={(e) => {
+                      const num = Number(e.target.value);
+                      setTailLines(num);
+                      if (selectedFile) loadLogFile(selectedFile, num);
+                    }}
+                  >
+                    <option value={200}>마지막 200줄</option>
+                    <option value={500}>마지막 500줄</option>
+                    <option value={1000}>마지막 1000줄 (기본값)</option>
+                    <option value={5000}>마지막 5000줄</option>
+                  </select>
+
+                  <button
+                    className="secondary small"
+                    disabled={loadingLog || !selectedFile}
+                    onClick={() => loadLogFile(selectedFile, tailLines)}
+                  >
+                    {loadingLog ? '로딩 중...' : '🔄 새로고침'}
+                  </button>
+                </div>
+
+                <div
+                  style={{
+                    background: '#090d16',
+                    color: '#e2e8f0',
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                    padding: 16,
+                    borderRadius: 8,
+                    minHeight: 420,
+                    maxHeight: 580,
+                    overflowY: 'auto',
+                    border: '1px solid rgba(255, 255, 255, 0.12)',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-all',
+                  }}
+                >
+                  {loadingLog ? (
+                    <div style={{ color: '#94a3b8', textAlign: 'center', padding: '60px 0' }}>
+                      빌드 로그 파일 읽는 중...
+                    </div>
+                  ) : !logContent ? (
+                    <div style={{ color: '#94a3b8', textAlign: 'center', padding: '60px 0' }}>
+                      선택된 빌드 로그 파일 내용이 비어있습니다.
+                    </div>
+                  ) : (
+                    <>
+                      {logContent}
+                      <div ref={fileLogEndRef} />
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+          </Async>
+        </div>
+      )}
+
+      {/* TAB 2: Console View */}
       {activeTab === 'console' && (
         <>
           {/* Quick Command Shortcuts */}
@@ -202,8 +335,8 @@ export default function PowerShellConsole() {
         </>
       )}
 
-      {/* TAB 2: Audit Logs View */}
-      {activeTab === 'logs' && (
+      {/* TAB 3: Audit Logs View */}
+      {activeTab === 'audit_logs' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div className="row" style={{ alignItems: 'center', gap: 8 }}>
             <input
