@@ -9,8 +9,37 @@ export default function PowerShellConsole() {
   const [logs, setLogs] = useState<string[]>([]);
   const [inputCmd, setInputCmd] = useState('');
   const [running, setRunning] = useState(false);
+  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const logEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (cmdHistory.length === 0) return;
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const nextIdx = historyIndex < cmdHistory.length - 1 ? historyIndex + 1 : historyIndex;
+      setHistoryIndex(nextIdx);
+      const targetCmd = cmdHistory[cmdHistory.length - 1 - nextIdx];
+      if (targetCmd !== undefined) {
+        setInputCmd(targetCmd);
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (historyIndex > 0) {
+        const nextIdx = historyIndex - 1;
+        setHistoryIndex(nextIdx);
+        const targetCmd = cmdHistory[cmdHistory.length - 1 - nextIdx];
+        if (targetCmd !== undefined) {
+          setInputCmd(targetCmd);
+        }
+      } else if (historyIndex === 0) {
+        setHistoryIndex(-1);
+        setInputCmd('');
+      }
+    }
+  };
 
   // 빌드 로그 (.txt) 탭용 API State
   const buildLogsState = useApi(() => api.listBuildLogs(), []);
@@ -74,6 +103,14 @@ export default function PowerShellConsole() {
   const executeCommand = async (cmdToRun?: string) => {
     const cmd = (cmdToRun !== undefined ? cmdToRun : inputCmd).trim();
     if (!cmd || !connected || running) return;
+
+    setCmdHistory((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1] === cmd) {
+        return prev;
+      }
+      return [...prev, cmd];
+    });
+    setHistoryIndex(-1);
 
     setLogs((prev) => [...prev, `PS > ${cmd}`]);
     if (cmdToRun === undefined) setInputCmd('');
@@ -232,9 +269,10 @@ export default function PowerShellConsole() {
                       fontSize: 13,
                       padding: 0,
                     }}
-                    placeholder={running ? '명령어 실행 중...' : 'PowerShell 명령어 입력...'}
+                    placeholder={running ? '명령어 실행 중...' : 'PowerShell 명령어 입력 (상하 방향키로 이력 탐색)...'}
                     value={inputCmd}
                     onChange={(e) => setInputCmd(e.target.value)}
+                    onKeyDown={handleKeyDown}
                     disabled={running}
                     autoFocus
                   />
