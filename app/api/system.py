@@ -1,5 +1,5 @@
 import hmac
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -188,3 +188,181 @@ def audit_log(
          "detail": r.detail, "at": r.created_at.isoformat()}
         for r in rows
     ]
+
+
+@router.post("/system/powershell/exec")
+def exec_powershell_cmd(
+    body: dict,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """admin 전용 PowerShell 명령어 실행 API."""
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    cmd = body.get("command", "").strip()
+    if not cmd:
+        raise HTTPException(status_code=400, detail="command field is required")
+
+    settings = get_settings()
+    cwd_dir = os.path.abspath(settings.powershell_start_dir) if settings.powershell_start_dir else None
+
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            cwd=cwd_dir,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            encoding="utf-8",
+            errors="replace",
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+        audit.record(db, admin.name, "powershell.exec", cmd[:100], {"returncode": proc.returncode})
+        return {
+            "command": cmd,
+            "returncode": proc.returncode,
+            "output": output or "(no output)",
+            "cwd": cwd_dir or os.getcwd(),
+        }
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="PowerShell command execution timed out (30s)")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PowerShell execution failed: {e}")
+
+
+@router.websocket("/system/powershell/ws")
+async def powershell_websocket_terminal(websocket: WebSocket):
+    """admin 전용 실시간 PowerShell WebSocket 터미널."""
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    await websocket.accept()
+    settings = get_settings()
+    cwd_dir = os.path.abspath(settings.powershell_start_dir) if settings.powershell_start_dir else None
+    start_info = f"WorkDir: {cwd_dir or os.getcwd()}"
+
+    try:
+        await websocket.send_text(f"Windows PowerShell Interactive Console Connected ({start_info}).\nType commands or click Disconnect to end session.\n\nPS > ")
+        while True:
+            cmd = await websocket.receive_text()
+            cmd_str = cmd.strip()
+            if not cmd_str:
+                await websocket.send_text("PS > ")
+                continue
+            if cmd_str.lower() in ["exit", "quit"]:
+                await websocket.send_text("PowerShell Session Closed.\n")
+                await websocket.close()
+                break
+
+            proc = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd_str],
+                cwd=cwd_dir,
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+                encoding="utf-8",
+                errors="replace",
+            )
+            out = (proc.stdout or "") + (proc.stderr or "")
+            if not out.strip():
+                out = "(completed)"
+            await websocket.send_text(f"{out}\n\nPS > ")
+    except Exception:
+        pass
+
+
+@router.get("/system/build-logs")
+def list_build_log_files(
+    _: ApiKey = Depends(require_admin),
+):
+    """PAAS_BUILD_LOG_DIR 하위의 .txt 빌드 로그 파일 목록을 최신순으로 반환한다."""
+    from pathlib import Path  # noqa: PLC0415
+
+    try:
+        settings = get_settings()
+        log_dir = Path(settings.build_log_dir).resolve()
+        if not log_dir.exists():
+            log_dir.mkdir(parents=True, exist_ok=True)
+            return {"files": [], "log_dir": str(log_dir)}
+
+        txt_files = []
+        for entry in log_dir.glob("**/*.txt"):
+            try:
+                if entry.is_file():
+                    stat = entry.stat()
+                    rel_path = entry.relative_to(log_dir).as_posix()
+                    txt_files.append({
+                        "filename": entry.name,
+                        "relative_path": rel_path,
+                        "size_bytes": stat.st_size,
+                        "mtime": stat.st_mtime,
+                    })
+            except Exception:
+                continue
+
+        txt_files.sort(key=lambda x: x["mtime"], reverse=True)
+        return {"files": txt_files, "log_dir": str(log_dir)}
+    except Exception as e:
+        return {"files": [], "log_dir": "", "error": str(e)}
+
+
+@router.post("/system/restart")
+def restart_backend_service(
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """Self-Kill 대응: 백엔드가 자기 자신을 재시작할 때 부모 프로세스 종속성 없이 DETACHED 독립 프로세스로 2초 후 안전 재기동한다."""
+    import sys  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    py_exe = sys.executable
+    restart_script = (
+        f"Start-Sleep -Seconds 2; & '{py_exe}' -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    )
+
+    try:
+        flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", restart_script],
+            creationflags=flags,
+            close_fds=True,
+        )
+        audit.record(db, admin.name, "system.restart", "backend_service", {"py_exe": py_exe})
+        return {
+            "status": "restarting",
+            "message": "PaaS 백엔드 서비스가 2초 후 디태치 독립 프로세스로 안전하게 재기동됩니다.",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to schedule service restart: {e}")
+
+
+@router.get("/system/build-logs/content")
+def get_build_log_content(
+    filename: str,
+    tail_lines: int = 1000,
+    _: ApiKey = Depends(require_admin),
+):
+    """PAAS_BUILD_LOG_DIR 하위의 .txt 로그 파일 내용을 파일 끝(Tail)을 기본으로 반환한다."""
+    from pathlib import Path  # noqa: PLC0415
+
+    settings = get_settings()
+    log_dir = Path(settings.build_log_dir).resolve()
+    target_path = (log_dir / filename).resolve()
+
+    if not str(target_path).startswith(str(log_dir)):
+        raise HTTPException(status_code=403, detail="Access denied: outside log directory")
+
+    if not target_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Log file '{filename}' not found")
+
+    try:
+        content_full = target_path.read_text(encoding="utf-8", errors="replace")
+        lines = content_full.splitlines()
+        tail_content = "\n".join(lines[-tail_lines:]) if len(lines) > tail_lines else content_full
+        return {
+            "filename": filename,
+            "total_lines": len(lines),
+            "tail_lines": tail_lines,
+            "content": tail_content,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read log file: {e}")

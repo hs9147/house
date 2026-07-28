@@ -5,8 +5,25 @@ import DiffView from '../components/DiffView';
 import StatusPill from '../components/StatusPill';
 import { api } from '../lib/api';
 import { extractDiffFromReply } from '../lib/diff';
+import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
 import type { ChatSessionOut, ResourceItem, ReviewResult } from '../lib/types';
+
+const getSessionStorageKey = () => {
+  const currentKey = localStorage.getItem('paas_api_key') || 'default_user';
+  return `paas_saved_builder_sessions_${currentKey}`;
+};
+
+export interface SavedBuilderSession {
+  id: number;
+  projectId: number;
+  projectName: string;
+  providerId: number;
+  providerName: string;
+  branch: string;
+  createdAt: number;
+  messages: Msg[];
+}
 
 interface Msg {
   role: 'user' | 'assistant';
@@ -65,6 +82,52 @@ export default function Chat() {
   const [review, setReview] = useState<ReviewResult | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
 
+  // 사용자별 기억되는 저장된 빌더 세션 목록 State
+  const [savedSessions, setSavedSessions] = useState<SavedBuilderSession[]>(() => {
+    try {
+      const storageKey = getSessionStorageKey();
+      const saved = localStorage.getItem(storageKey);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [selectedSessionId, setSelectedSessionId] = useState<string>('');
+
+  // 메시지 업데이트 시 사용자별 localStorage 세션 동기화
+  const syncSessionMessages = (sessionId: number, updatedMessages: Msg[]) => {
+    setSavedSessions((prev) => {
+      const updated = prev.map((item) =>
+        item.id === sessionId ? { ...item, messages: updatedMessages } : item,
+      );
+      try {
+        const storageKey = getSessionStorageKey();
+        localStorage.setItem(storageKey, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  };
+
+  // 세션 삭제 핸들러
+  const deleteSavedSession = (sessionIdToDelete: number) => {
+    setSavedSessions((prev) => {
+      const updated = prev.filter((item) => item.id !== sessionIdToDelete);
+      try {
+        const storageKey = getSessionStorageKey();
+        localStorage.setItem(storageKey, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    if (session && session.id === sessionIdToDelete) {
+      setSession(null);
+      setMessages([]);
+      setSelectedSessionId('');
+    } else if (selectedSessionId === String(sessionIdToDelete)) {
+      setSelectedSessionId('');
+    }
+  };
+
   const startSession = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -75,8 +138,52 @@ export default function Chat() {
       setSession(s);
       setMessages([]);
       setReview(null);
+
+      const targetProject = (projects.data ?? []).find((p) => p.id === Number(projectId));
+      const targetProvider = (providers.data ?? []).find((p) => p.id === Number(providerId));
+
+      const newSavedItem: SavedBuilderSession = {
+        id: s.id,
+        projectId: Number(projectId),
+        projectName: targetProject?.name || `Project #${projectId}`,
+        providerId: Number(providerId),
+        providerName: targetProvider?.name || `Provider #${providerId}`,
+        branch: s.branch,
+        createdAt: Date.now(),
+        messages: [],
+      };
+
+      setSavedSessions((prev) => {
+        const filtered = prev.filter((item) => item.id !== s.id);
+        const updated = [newSavedItem, ...filtered].slice(0, 50); // 사용자별 최대 50개 기억
+        try {
+          const storageKey = getSessionStorageKey();
+          localStorage.setItem(storageKey, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      setSelectedSessionId(String(s.id));
     } catch (err) {
       setError((err as Error).message);
+    }
+  };
+
+  const handleSelectSavedSession = (sidStr: string) => {
+    setSelectedSessionId(sidStr);
+    if (!sidStr) return;
+
+    const target = savedSessions.find((s) => s.id === Number(sidStr));
+    if (target) {
+      setProjectId(String(target.projectId));
+      setProviderId(String(target.providerId));
+      setBranch(target.branch);
+      setSession({
+        id: target.id,
+        provider: target.providerName,
+        branch: target.branch,
+      });
+      setMessages(target.messages || []);
+      setReview(null);
     }
   };
 
@@ -84,15 +191,20 @@ export default function Chat() {
     e.preventDefault();
     if (!session || !input.trim()) return;
     const content = input.trim();
-    setMessages((m) => [...m, { role: 'user', content }]);
+    const newMsgList: Msg[] = [...messages, { role: 'user', content }];
+    setMessages(newMsgList);
+    if (session.id) {
+      syncSessionMessages(session.id, newMsgList);
+    }
+
     setInput('');
     setBusy(true);
     setError('');
     try {
       const fileList = files.split(',').map((f) => f.trim()).filter(Boolean);
       const res = await api.sendChatMessage(session.id, content, fileList);
-      setMessages((m) => [
-        ...m,
+      const finalMsgList: Msg[] = [
+        ...newMsgList,
         {
           role: 'assistant',
           content: res.reply,
@@ -100,7 +212,11 @@ export default function Chat() {
           changeStatus: res.proposed_change_id ? 'proposed' : undefined,
           usedModules: res.used_modules,
         },
-      ]);
+      ];
+      setMessages(finalMsgList);
+      if (session.id) {
+        syncSessionMessages(session.id, finalMsgList);
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -121,13 +237,20 @@ export default function Chat() {
       } else {
         await api.rejectChange(msg.changeId);
       }
-      setMessages((m) =>
-        m.map((x, i) =>
-          i === idx
-            ? { ...x, changeStatus: action === 'apply' ? 'applied' : 'rejected', appliedSha }
-            : x,
-        ),
+
+      const nextMessages = messages.map((m, i) =>
+        i === idx
+          ? {
+              ...m,
+              changeStatus: action === 'apply' ? ('applied' as const) : ('rejected' as const),
+              appliedSha,
+            }
+          : m,
       );
+      setMessages(nextMessages);
+      if (session?.id) {
+        syncSessionMessages(session.id, nextMessages);
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -136,7 +259,7 @@ export default function Chat() {
   };
 
   const runReview = async () => {
-    if (!session) return;
+    if (!projectId || !providerId || !session) return;
     setReviewBusy(true);
     setError('');
     try {
@@ -163,6 +286,41 @@ export default function Chat() {
         <p className="mutedtext" style={{ fontSize: 12, marginTop: 6, marginBottom: 12 }}>
           프로젝트에 연동/체크된 모듈 및 환경변수 명세가 LLM 시스템 프롬프트에 자동 반영되어 최적화된 에이전트 연동 코드가 작성됩니다.
         </p>
+
+        {/* 사용자별 저장된 이전 빌더 세션 선택 드롭다운 & 삭제 버튼 */}
+        {savedSessions.length > 0 && (
+          <div style={{ marginBottom: 12, padding: '8px 12px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: 6, border: '1px solid rgba(255, 255, 255, 0.08)' }}>
+            <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+              <label style={{ fontSize: 12, fontWeight: 600, color: '#38bdf8' }}>
+                📂 기억된 빌더 세션 목록 ({savedSessions.length}개):
+              </label>
+              <select
+                style={{ flex: 1, maxWidth: 500, fontSize: 12 }}
+                value={selectedSessionId}
+                onChange={(e) => handleSelectSavedSession(e.target.value)}
+              >
+                <option value="">이전 세션 선택 복원...</option>
+                {savedSessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    세션 #{s.id} · {s.projectName} ({s.branch}) - {fmtDate(new Date(s.createdAt).toISOString())} ({s.messages.length}개 대화)
+                  </option>
+                ))}
+              </select>
+
+              {selectedSessionId && (
+                <button
+                  type="button"
+                  className="danger small"
+                  style={{ fontSize: 11, padding: '4px 8px' }}
+                  onClick={() => deleteSavedSession(Number(selectedSessionId))}
+                >
+                  🗑️ 세션 삭제
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         <form className="row" onSubmit={startSession}>
           <select value={projectId} onChange={(e) => setProjectId(e.target.value)} required>
             <option value="">프로젝트 선택...</option>
@@ -185,10 +343,10 @@ export default function Chat() {
             onChange={(e) => setBranch(e.target.value)}
             style={{ width: 200 }}
           />
-          <button type="submit">빌더 세션 시작</button>
+          <button type="submit">신규 빌더 세션 시작</button>
           {session && (
             <span className="mutedtext" style={{ fontSize: 12 }}>
-              세션 #{session.id} · 브랜치 <span className="mono">{session.branch}</span> ·{' '}
+              현재 세션 #{session.id} · 브랜치 <span className="mono">{session.branch}</span> ·{' '}
               {session.provider}
             </span>
           )}
@@ -208,59 +366,104 @@ export default function Chat() {
                       <div className="mutedtext" style={{ fontSize: 11, marginBottom: 6 }}>
                         API (카테고리별)
                       </div>
-                      {Object.entries(apiByCategory).map(([cat, list]) => (
-                        <div key={cat} className="row" style={{ marginBottom: 4, flexWrap: 'wrap' }}>
-                          <span className="mutedtext mono" style={{ fontSize: 11, minWidth: 70 }}>
-                            {cat}
-                          </span>
-                          {list.map((r) => (
-                            <span key={r.id} className="status info" title={r.type}>
-                              {r.name}
-                              {r.scope === 'org' && ' (조직)'}
-                            </span>
-                          ))}
-                        </div>
-                      ))}
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {Object.entries(apiByCategory).map(([cat, list]) => (
+                          <div
+                            key={cat}
+                            style={{
+                              border: '1px solid var(--border)',
+                              borderRadius: 6,
+                              padding: '8px 12px',
+                              background: 'var(--panel-bg)',
+                            }}
+                          >
+                            <strong style={{ fontSize: 12 }}>{cat}</strong>
+                            <ul style={{ margin: '4px 0 0', paddingLeft: 16, fontSize: 12 }}>
+                              {list.map((r) => (
+                                <li key={r.name}>
+                                  {r.name}{' '}
+                                  <span className="mutedtext">
+                                    ({r.env_prefix}_URL, {r.env_prefix}_API_KEY)
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
+
                   {files.length > 0 && (
                     <div>
                       <div className="mutedtext" style={{ fontSize: 11, marginBottom: 6 }}>
-                        서버내 공유 파일
+                        공유 파일 저장소
                       </div>
-                      <div className="row" style={{ flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         {files.map((r) => (
-                          <span key={r.id} className="status dim">{r.name}</span>
+                          <div
+                            key={r.name}
+                            style={{
+                              border: '1px solid var(--border)',
+                              borderRadius: 6,
+                              padding: '8px 12px',
+                              background: 'var(--panel-bg)',
+                              fontSize: 12,
+                            }}
+                          >
+                            📁 <strong>{r.name}</strong>{' '}
+                            <span className="mutedtext">({r.env_prefix}_ENDPOINT)</span>
+                          </div>
                         ))}
                       </div>
                     </div>
                   )}
+
                   {databases.length > 0 && (
                     <div>
                       <div className="mutedtext" style={{ fontSize: 11, marginBottom: 6 }}>
-                        DB (조직별)
+                        데이터베이스
                       </div>
-                      <div className="row" style={{ flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         {databases.map((r) => (
-                          <span key={r.id} className="status warn">
-                            {r.name}
-                            {r.scope === 'org' && ' (조직)'}
-                          </span>
+                          <div
+                            key={r.name}
+                            style={{
+                              border: '1px solid var(--border)',
+                              borderRadius: 6,
+                              padding: '8px 12px',
+                              background: 'var(--panel-bg)',
+                              fontSize: 12,
+                            }}
+                          >
+                            🗄️ <strong>{r.name}</strong>{' '}
+                            <span className="mutedtext">({r.env_prefix}_DSN)</span>
+                          </div>
                         ))}
                       </div>
                     </div>
                   )}
+
                   {mcpServers.length > 0 && (
                     <div>
                       <div className="mutedtext" style={{ fontSize: 11, marginBottom: 6 }}>
-                        MCP 서버 (바인딩하면 채팅에서 모델이 도구를 직접 호출)
+                        MCP 서버 (도구)
                       </div>
-                      <div className="row" style={{ flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         {mcpServers.map((r) => (
-                          <span key={r.id} className="status ok">
-                            {r.name}
-                            {r.scope === 'org' && ' (조직)'}
-                          </span>
+                          <div
+                            key={r.name}
+                            style={{
+                              border: '1px solid var(--border)',
+                              borderRadius: 6,
+                              padding: '8px 12px',
+                              background: 'var(--panel-bg)',
+                              fontSize: 12,
+                            }}
+                          >
+                            🔌 <strong>{r.name}</strong>{' '}
+                            <span className="mutedtext">({r.env_prefix}_URL)</span>
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -272,140 +475,198 @@ export default function Chat() {
         </div>
       )}
 
-      {projectId && (
-        <div className="panel">
-          <div className="row" style={{ marginBottom: 10 }}>
-            <h2 style={{ margin: 0 }}>코드 구조</h2>
-            <div className="spacer" />
-            <button className="small secondary" onClick={() => setShowStructure((v) => !v)}>
-              {showStructure ? '접기' : '구조 보기'}
+      {session && (
+        <>
+          <div className="panel" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              onClick={() => setShowStructure((v) => !v)}
+              className="secondary small"
+            >
+              {showStructure ? '📁 파일 구조 숨기기' : '📁 파일 구조 보기'}
+            </button>
+            <button onClick={runReview} disabled={reviewBusy} className="secondary small">
+              {reviewBusy ? '리뷰 수행 중...' : '🔍 코드 리뷰 수행'}
             </button>
           </div>
-          {!showStructure ? (
-            <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
-              파일→클래스/함수 계층을 정적 파싱으로 보여줍니다(확대/축소). 같은 개요가
-              채팅 LLM 컨텍스트에도 주입되어, 전체 구조를 참조해 요청에 대응합니다.
-            </p>
-          ) : (
-            <Async state={codemapState} empty="파싱 가능한 코드 파일이 없습니다.">
-              {(files) => <CodeStructure files={files} />}
-            </Async>
-          )}
-        </div>
-      )}
 
-      {session && (
-        <div className="panel">
-          <div className="chat-thread">
-            {messages.map((m, i) => {
-              const diff = m.role === 'assistant' ? extractDiffFromReply(m.content) : null;
-              const textOnly = diff
-                ? m.content.replace(/```(?:diff|patch)\n[\s\S]*?```/, '').trim()
-                : m.content;
-              return (
-                <div key={i} className={`chat-msg ${m.role}`} style={{ maxWidth: diff ? '100%' : undefined }}>
-                  {m.usedModules && m.usedModules.length > 0 && (
-                    <div className="row" style={{ gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: 11, fontWeight: 600, color: '#10b981', background: 'rgba(16, 185, 129, 0.15)', padding: '2px 6px', borderRadius: 4, border: '1px solid rgba(16, 185, 129, 0.3)' }}>
-                        ☑ 사용된 자원/모듈 ({m.usedModules.length}):
-                      </span>
-                      {m.usedModules.map((modName) => (
-                        <span key={modName} style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', padding: '2px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
-                          {modName}
+          {showStructure && (
+            <div className="panel">
+              <h3>프로젝트 파일 레프트 트리</h3>
+              <Async state={codemapState} empty="파일 구조가 비어있습니다.">
+                {(fileList) => <CodeStructure files={fileList} />}
+              </Async>
+            </div>
+          )}
+
+          {review && (
+            <div className="panel">
+              <h3>🔍 코드 리뷰 결과</h3>
+              <p>
+                <strong>최대 심각도:</strong> <StatusPill value={review.max_severity} />
+              </p>
+
+              {review.findings && review.findings.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
+                  {review.findings.map((iss, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        padding: 10,
+                        borderRadius: 6,
+                        background: 'var(--panel-bg)',
+                        borderLeft: `4px solid ${
+                          iss.severity === 'high'
+                            ? '#ef4444'
+                            : iss.severity === 'medium'
+                            ? '#f59e0b'
+                            : '#3b82f6'
+                        }`,
+                      }}
+                    >
+                      <div className="row" style={{ justifyContent: 'space-between' }}>
+                        <span className="mono" style={{ fontSize: 12, fontWeight: 600 }}>
+                          {iss.file}
                         </span>
-                      ))}
+                        <StatusPill value={iss.severity} />
+                      </div>
+                      <p style={{ margin: '4px 0 0', fontSize: 13 }}>{iss.comment}</p>
                     </div>
-                  )}
-                  {textOnly}
-                  {diff && (
-                    <div style={{ marginTop: 10 }}>
-                      <DiffView diff={diff} />
-                      <div className="row" style={{ marginTop: 8 }}>
-                        {m.changeStatus === 'proposed' && m.changeId && (
+                  ))}
+                </div>
+              ) : (
+                <p className="mutedtext">감지된 특이 이슈가 없습니다. 아주 좋습니다!</p>
+              )}
+            </div>
+          )}
+
+          <div className="panel">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {messages.map((m, i) => {
+                const diff = m.content ? extractDiffFromReply(m.content) : null;
+                return (
+                  <div
+                    key={i}
+                    style={{
+                      alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                      maxWidth: '90%',
+                      background: m.role === 'user' ? 'rgba(59, 130, 246, 0.15)' : 'var(--panel-bg)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 8,
+                      padding: 12,
+                    }}
+                  >
+                    <div className="mutedtext" style={{ fontSize: 11, marginBottom: 4 }}>
+                      {m.role === 'user' ? '👤 나 (User)' : '🤖 LLM 에이전트'}
+                    </div>
+
+                    {m.usedModules && m.usedModules.length > 0 && (
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                        <span className="mutedtext" style={{ fontSize: 11 }}>
+                          참조된 모듈:
+                        </span>
+                        {m.usedModules.map((mod) => (
+                          <span
+                            key={mod}
+                            style={{
+                              fontSize: 10,
+                              padding: '1px 6px',
+                              borderRadius: 4,
+                              background: 'rgba(56, 189, 248, 0.2)',
+                              color: '#38bdf8',
+                            }}
+                          >
+                            {mod}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    <div style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{m.content}</div>
+
+                    {diff && (
+                      <div style={{ marginTop: 12 }}>
+                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                          📝 제안된 코드 변경사항 (Diff):
+                        </div>
+                        <DiffView diff={diff} />
+                      </div>
+                    )}
+
+                    {m.changeId && (
+                      <div
+                        style={{
+                          marginTop: 10,
+                          paddingTop: 8,
+                          borderTop: '1px dashed var(--border)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                        }}
+                      >
+                        <span className="mutedtext" style={{ fontSize: 12 }}>
+                          변경 # {m.changeId}
+                        </span>
+                        {m.changeStatus === 'proposed' && (
                           <>
-                            <button className="small" disabled={busy} onClick={() => decide(i, 'apply')}>
-                              승인 (브랜치에 커밋)
+                            <button
+                              className="primary small"
+                              disabled={busy}
+                              onClick={() => decide(i, 'apply')}
+                            >
+                              ✅ 승인 (Git Apply)
                             </button>
-                            <button className="small danger" disabled={busy} onClick={() => decide(i, 'reject')}>
-                              거절
+                            <button
+                              className="danger small"
+                              disabled={busy}
+                              onClick={() => decide(i, 'reject')}
+                            >
+                              ❌ 거절
                             </button>
                           </>
                         )}
                         {m.changeStatus === 'applied' && (
-                          <span>
-                            <StatusPill value="applied" />{' '}
-                            <span className="mono mutedtext">{m.appliedSha?.slice(0, 8)}</span>
+                          <span style={{ color: '#10b981', fontSize: 12 }}>
+                            ✓ 적용됨 ({m.appliedSha?.substring(0, 7)})
                           </span>
                         )}
-                        {m.changeStatus === 'rejected' && <StatusPill value="rejected" />}
+                        {m.changeStatus === 'rejected' && (
+                          <span style={{ color: '#ef4444', fontSize: 12 }}>
+                            ✗ 거절됨
+                          </span>
+                        )}
                       </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {busy && <div className="chat-msg assistant mutedtext">응답 생성 중...</div>}
-          </div>
-          <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <textarea
-              rows={3}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="예: 등록된 mail 모듈로 가입 환영 메일 발송 코드를 추가해줘"
-            />
-            <div className="row">
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <form onSubmit={send} style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
               <input
                 className="mono"
-                placeholder="컨텍스트 파일 (콤마 구분, 예: app/main.py, app/models.py)"
+                placeholder="참조할 특정 파일 경로들 (쉼표 구분 예: app/main.py, config.py)..."
                 value={files}
                 onChange={(e) => setFiles(e.target.value)}
-                style={{ flex: 1 }}
               />
-              <button type="submit" disabled={busy || !input.trim()}>
-                전송
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                disabled={reviewBusy}
-                onClick={runReview}
-              >
-                {reviewBusy ? '리뷰 중...' : '브랜치 diff 리뷰'}
-              </button>
-            </div>
-          </form>
-          {error && <p className="error">{error}</p>}
-        </div>
+              <div className="row">
+                <textarea
+                  style={{ flex: 1, minHeight: 80, fontFamily: 'inherit' }}
+                  placeholder="LLM에 명령/기능 구현 요청 입력..."
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                />
+                <button type="submit" className="primary" disabled={busy || !input.trim()}>
+                  {busy ? '요청 처리 중...' : '전송'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </>
       )}
 
-      {review && (
-        <div className="panel">
-          <div className="row" style={{ marginBottom: 10 }}>
-            <h2 style={{ margin: 0 }}>코드 리뷰 결과</h2>
-            <StatusPill value={review.max_severity} />
-          </div>
-          {review.findings.length === 0 ? (
-            <p className="mutedtext">지적 사항이 없습니다.</p>
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>심각도</th>
-                  <th>파일</th>
-                  <th>코멘트</th>
-                </tr>
-              </thead>
-              <tbody>
-                {review.findings.map((f, i) => (
-                  <tr key={i}>
-                    <td><StatusPill value={f.severity} /></td>
-                    <td className="mono">{f.file}</td>
-                    <td>{f.comment}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+      {error && (
+        <div style={{ padding: 12, borderRadius: 6, background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', marginTop: 16 }}>
+          ⚠️ {error}
         </div>
       )}
     </>

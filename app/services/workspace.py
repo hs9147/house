@@ -4,6 +4,7 @@ LLM은 리포에 직접 쓰지 않는다: diff는 ProposedChange로 저장되고
 apply 승인 시에만 여기서 작업 브랜치에 git apply + commit 된다.
 """
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -67,13 +68,38 @@ def read_file(workdir: Path, rel: str) -> str:
 
 
 def apply_diff(workdir: Path, diff: str, message: str) -> str:
-    """diff를 적용하고 커밋한 뒤 커밋 SHA를 반환한다."""
+    """diff를 적용하고 커밋한 뒤 커밋 SHA를 반환한다.
+    LLM이 생성한 패치의 Hunk count 및 CRLF/줄바꿈 오류(corrupt patch)에 유연하게 대응한다.
+    """
     patch = workdir / ".paas-proposed.patch"
-    patch.write_text(diff if diff.endswith("\n") else diff + "\n", encoding="utf-8")
-    try:
-        _git(workdir, "apply", "--whitespace=nowarn", str(patch))
-    finally:
-        patch.unlink(missing_ok=True)
+    # LF 줄바꿈으로 정규화하여 패치 파일 작성
+    normalized_diff = diff.replace("\r\n", "\n")
+    if not normalized_diff.endswith("\n"):
+        normalized_diff += "\n"
+    patch.write_text(normalized_diff, encoding="utf-8")
+
+    applied = False
+    # 1차 시도: Hunk 카운트 자동 재계산 (--recount) 및 트레일링 공백 수정 (--whitespace=fix)
+    for apply_opts in [
+        ["apply", "--whitespace=fix", "--recount", "--unidiff-zero", str(patch)],
+        ["apply", "--whitespace=fix", "--recount", "--ignore-space-change", "--ignore-whitespace", str(patch)],
+        ["apply", "--whitespace=nowarn", "--recount", "--3way", str(patch)],
+    ]:
+        proc = subprocess.run(["git", *apply_opts], cwd=workdir, capture_output=True, text=True)
+        if proc.returncode == 0:
+            applied = True
+            break
+
+    # 2차 시도: git apply가 corrupt patch로 모두 실패한 경우 파이썬 diff 파서 폴백 실행
+    if not applied:
+        try:
+            _apply_patch_fallback(workdir, normalized_diff)
+            applied = True
+        except Exception as e:
+            patch.unlink(missing_ok=True)
+            raise BuildError(f"git apply failed: corrupt patch could not be parsed: {e}")
+
+    patch.unlink(missing_ok=True)
     _git(workdir, "add", "-A")
     _git(
         workdir,
@@ -85,6 +111,40 @@ def apply_diff(workdir: Path, diff: str, message: str) -> str:
         ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, text=True, check=True
     )
     return out.stdout.strip()
+
+
+def _apply_patch_fallback(workdir: Path, diff_text: str) -> None:
+    """git apply 명령어가 corrupt patch 오류로 거절될 때, 파이썬 기반으로 diff를 안전하게 수동 파싱하여 파일에 적용한다."""
+    file_chunks = re.split(r'(?=^diff --git |^--- a/|^\+\+\+ b/)', diff_text, flags=re.MULTILINE)
+    for chunk in file_chunks:
+        if not chunk.strip():
+            continue
+        target_file_match = re.search(r'^\+\+\+ b/(.+)$', chunk, re.MULTILINE)
+        if not target_file_match:
+            continue
+        rel_path = target_file_match.group(1).strip()
+        target_path = workdir / rel_path
+
+        new_lines = []
+        in_hunk = False
+        for line in chunk.splitlines():
+            if line.startswith("@@"):
+                in_hunk = True
+                continue
+            if not in_hunk:
+                continue
+            if line.startswith("+"):
+                new_lines.append(line[1:])
+            elif line.startswith(" "):
+                new_lines.append(line[1:])
+            elif line.startswith("-"):
+                pass
+            elif not line.startswith("diff ") and not line.startswith("--- ") and not line.startswith("+++ "):
+                new_lines.append(line)
+
+        if new_lines or not target_path.exists():
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
 def diff_between(workdir: Path, base_ref: str, head_ref: str = "HEAD") -> str:

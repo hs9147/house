@@ -142,6 +142,7 @@ class LlmProviderKind(str, enum.Enum):
     azure = "azure"          # Azure OpenAI Service
     gcp = "gcp"              # GCP Vertex AI / Gemini API
     internal = "internal"    # 사내 배포 LLM (vLLM, Ollama)
+    external = "external"    # 기존 DB 레코드 하위 호환용 (OpenAI로 간주)
 
 
 class LlmProvider(Base):

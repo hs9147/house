@@ -316,4 +316,14 @@ export const api = {
   // 계정 회원가입
   registerUser: (body: { email: string; name: string; password: string }) =>
     request<{ name: string; email: string; key: string; is_admin: boolean }>('POST', '/auth/register', body),
+
+  // PowerShell 터미널 & 빌드 로그
+  execPowerShell: (command: string) =>
+    request<{ command: string; returncode: number; output: string }>('POST', '/system/powershell/exec', { command }),
+  listBuildLogs: () =>
+    request<{ files: { filename: string; relative_path: string; size_bytes: number; mtime: number }[]; log_dir: string }>('GET', '/system/build-logs'),
+  getBuildLogContent: (filename: string, tail_lines = 1000) =>
+    request<{ filename: string; total_lines: number; tail_lines: number; content: string }>('GET', `/system/build-logs/content?filename=${encodeURIComponent(filename)}&tail_lines=${tail_lines}`),
+  restartBackendService: () =>
+    request<{ status: string; message: string }>('POST', '/system/restart'),
 };

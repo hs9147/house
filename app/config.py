@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     work_dir: Path = Path("./data/workspaces")
     build_log_dir: Path = Path("./data/build-logs")
     storage_root: str = "./data/storage"
+    powershell_start_dir: str = ""
 
     # --- 1차(small) 전용 ---
     # 실행 런타임: docker(기본, 컨테이너 이미지) | windows_service(Docker 없이 nssm으로

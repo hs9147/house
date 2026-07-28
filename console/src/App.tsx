@@ -11,6 +11,7 @@ import Modules from './pages/Modules';
 import Organizations from './pages/Organizations';
 import ProjectDetail from './pages/ProjectDetail';
 import Projects from './pages/Projects';
+import PowerShellConsole from './pages/PowerShellConsole';
 import Providers from './pages/Providers';
 import ServerConfig from './pages/ServerConfig';
 import CodeTab from './pages/project/CodeTab';
@@ -100,6 +101,14 @@ export default function App() {
           element={
             <AdminOnly>
               <Audit />
+            </AdminOnly>
+          }
+        />
+        <Route
+          path="/powershell"
+          element={
+            <AdminOnly>
+              <PowerShellConsole />
             </AdminOnly>
           }
         />
