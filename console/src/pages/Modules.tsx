@@ -56,7 +56,29 @@ export default function Modules() {
                   <td>
                     <StatusPill value={m.organization_id ? 'org' : 'global'} />
                   </td>
-                  <td className="mono">{JSON.stringify(m.config)}</td>
+                  <td>
+                    {m.type === 'external_api' && typeof m.config === 'object' && m.config !== null ? (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {Boolean((m.config as Record<string, unknown>).url) ? (
+                          <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, background: 'rgba(96, 165, 250, 0.15)', color: '#60a5fa', border: '1px solid rgba(96, 165, 250, 0.3)' }}>
+                            🌐 URL: {String((m.config as Record<string, unknown>).url)}
+                          </span>
+                        ) : null}
+                        {Boolean((m.config as Record<string, unknown>).api_key || (m.config as Record<string, unknown>).client_id) ? (
+                          <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, background: 'rgba(245, 158, 11, 0.15)', color: '#f59e0b', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+                            🔑 Auth Key Configured
+                          </span>
+                        ) : null}
+                        {Object.keys(m.config).filter(k => !['url', 'api_key', 'client_id', 'client_secret'].includes(k)).length > 0 && (
+                          <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                            ⚙️ +{Object.keys(m.config).filter(k => !['url', 'api_key', 'client_id', 'client_secret'].includes(k)).length} Custom Envs
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="mono">{JSON.stringify(m.config)}</span>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -175,6 +197,180 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   );
 }
 
+function GroupedApiConfigForm({
+  config,
+  onChange,
+}: {
+  config: Record<string, unknown>;
+  onChange: (newConfig: Record<string, unknown>) => void;
+}) {
+  const [url, setUrl] = useState<string>(String(config.url ?? ''));
+  const [apiKey, setApiKey] = useState<string>(String(config.api_key ?? ''));
+  const [clientId, setClientId] = useState<string>(String(config.client_id ?? ''));
+  const [clientSecret, setClientSecret] = useState<string>(String(config.client_secret ?? ''));
+  const [customPairs, setCustomPairs] = useState<Array<{ key: string; value: string }>>(() => {
+    const known = new Set(['url', 'api_key', 'client_id', 'client_secret']);
+    return Object.entries(config)
+      .filter(([k]) => !known.has(k))
+      .map(([key, value]) => ({ key, value: String(value ?? '') }));
+  });
+
+  const update = (
+    newUrl: string,
+    newApiKey: string,
+    newClientId: string,
+    newClientSecret: string,
+    pairs: Array<{ key: string; value: string }>,
+  ) => {
+    const res: Record<string, unknown> = {};
+    if (newUrl.trim()) res.url = newUrl.trim();
+    if (newApiKey.trim()) res.api_key = newApiKey.trim();
+    if (newClientId.trim()) res.client_id = newClientId.trim();
+    if (newClientSecret.trim()) res.client_secret = newClientSecret.trim();
+    for (const p of pairs) {
+      if (p.key.trim()) {
+        res[p.key.trim()] = p.value.trim();
+      }
+    }
+    onChange(res);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 4 }}>
+      {/* 🌐 그룹 1: 기본 접속 정보 */}
+      <div className="panel" style={{ padding: 12, margin: 0, backgroundColor: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: '#60a5fa', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+          🌐 기본 연결 정보 (Connection & Endpoint)
+        </div>
+        <label className="field">
+          API Endpoint URL <span style={{ color: '#ef4444' }}>*</span>
+          <input
+            value={url}
+            onChange={(e) => {
+              setUrl(e.target.value);
+              update(e.target.value, apiKey, clientId, clientSecret, customPairs);
+            }}
+            placeholder="https://api.service.com/v1"
+            required
+          />
+        </label>
+      </div>
+
+      {/* 🔑 그룹 2: 인증 & 보안 키 */}
+      <div className="panel" style={{ padding: 12, margin: 0, backgroundColor: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: '#f59e0b', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+          🔑 인증 & 보안 키 (Authentication & Secret Keys)
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <label className="field">
+            API Key / Secret Token (자동 암호화 보관)
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => {
+                setApiKey(e.target.value);
+                update(url, e.target.value, clientId, clientSecret, customPairs);
+              }}
+              placeholder="paas_sec_... 또는 Bearer 토큰"
+            />
+          </label>
+          <div className="row" style={{ gap: 10 }}>
+            <label className="field" style={{ flex: 1 }}>
+              Client ID / App Key
+              <input
+                value={clientId}
+                onChange={(e) => {
+                  setClientId(e.target.value);
+                  update(url, apiKey, e.target.value, clientSecret, customPairs);
+                }}
+                placeholder="client_id_123"
+              />
+            </label>
+            <label className="field" style={{ flex: 1 }}>
+              Client Secret (자동 암호화 보관)
+              <input
+                type="password"
+                value={clientSecret}
+                onChange={(e) => {
+                  setClientSecret(e.target.value);
+                  update(url, apiKey, clientId, e.target.value, customPairs);
+                }}
+                placeholder="client_secret_456"
+              />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      {/* ⚙️ 그룹 3: 추가 커스텀 환경변수 */}
+      <div className="panel" style={{ padding: 12, margin: 0, backgroundColor: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: '#10b981', display: 'flex', alignItems: 'center', gap: 6 }}>
+            ⚙️ 추가 환경변수 & 헤더 (Custom Variables)
+          </div>
+          <button
+            type="button"
+            className="secondary small"
+            onClick={() => {
+              const next = [...customPairs, { key: '', value: '' }];
+              setCustomPairs(next);
+              update(url, apiKey, clientId, clientSecret, next);
+            }}
+          >
+            + 환경변수 추가
+          </button>
+        </div>
+        {customPairs.length === 0 ? (
+          <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+            추가로 주입할 환경변수(예: TIMEOUT, VERSION 등)가 있으면 항목을 추가하세요.
+          </p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {customPairs.map((pair, idx) => (
+              <div key={idx} className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  style={{ flex: 1 }}
+                  placeholder="변수명 (예: TIMEOUT)"
+                  value={pair.key}
+                  onChange={(e) => {
+                    const next = [...customPairs];
+                    next[idx].key = e.target.value;
+                    setCustomPairs(next);
+                    update(url, apiKey, clientId, clientSecret, next);
+                  }}
+                />
+                <input
+                  style={{ flex: 1 }}
+                  placeholder="값 (예: 30)"
+                  value={pair.value}
+                  onChange={(e) => {
+                    const next = [...customPairs];
+                    next[idx].value = e.target.value;
+                    setCustomPairs(next);
+                    update(url, apiKey, clientId, clientSecret, next);
+                  }}
+                />
+                <button
+                  type="button"
+                  className="secondary small"
+                  style={{ color: '#ef4444', padding: '4px 8px' }}
+                  onClick={() => {
+                    const next = customPairs.filter((_, i) => i !== idx);
+                    setCustomPairs(next);
+                    update(url, apiKey, clientId, clientSecret, next);
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CreateModuleModal({
   onClose,
   onCreated,
@@ -187,7 +383,8 @@ function CreateModuleModal({
   const [type, setType] = useState('external_api');
   const [category, setCategory] = useState('');
   const [organizationId, setOrganizationId] = useState('');
-  const [config, setConfig] = useState(TYPE_HINTS.external_api);
+  const [configObj, setConfigObj] = useState<Record<string, unknown>>({ url: '' });
+  const [configJson, setConfigJson] = useState(TYPE_HINTS.external_api);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -195,17 +392,28 @@ function CreateModuleModal({
     e.preventDefault();
     setBusy(true);
     setError('');
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(config);
-    } catch {
-      setError('설정이 올바른 JSON이 아닙니다.');
-      setBusy(false);
-      return;
+    let finalConfig: Record<string, unknown> = {};
+
+    if (type === 'external_api') {
+      finalConfig = configObj;
+      if (!finalConfig.url) {
+        setError('API Endpoint URL은 필수 입력 항목입니다.');
+        setBusy(false);
+        return;
+      }
+    } else {
+      try {
+        finalConfig = JSON.parse(configJson);
+      } catch {
+        setError('설정이 올바른 JSON이 아닙니다.');
+        setBusy(false);
+        return;
+      }
     }
+
     try {
       await api.createModule(
-        name.trim(), type, parsed,
+        name.trim(), type, finalConfig,
         category.trim() || undefined,
         organizationId ? Number(organizationId) : undefined,
       );
@@ -217,17 +425,18 @@ function CreateModuleModal({
   };
 
   return (
-    <Modal title="새 모듈" onClose={onClose}>
+    <Modal title="새 모듈 등록" onClose={onClose}>
       <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <label className="field">
-          이름 — 빈칸 없이 소문자·숫자·하이픈만 사용하세요 (예: news-api)
+          모듈 이름 — 빈칸 없이 소문자·숫자·하이픈만 사용 (예: payment-api)
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
             pattern="[a-z0-9][a-z0-9-]{1,40}"
-            title="빈칸 없이 소문자·숫자·하이픈만 사용하세요 (예: news-api)"
-            placeholder="news-api"
+            title="빈칸 없이 소문자·숫자·하이픈만 사용하세요 (예: payment-api)"
+            placeholder="payment-api"
             required
+            autoFocus
           />
         </label>
         <label className="field">
@@ -236,29 +445,25 @@ function CreateModuleModal({
             value={type}
             onChange={(e) => {
               setType(e.target.value);
-              setConfig(TYPE_HINTS[e.target.value]);
+              setConfigJson(TYPE_HINTS[e.target.value] || '{}');
             }}
           >
-            <option value="external_api">external_api — 외부 API</option>
+            <option value="external_api">external_api — 외부 API (환경변수 그룹 관리)</option>
             <option value="internal_api">internal_api — 플랫폼 내 프로젝트</option>
             <option value="database">database — DB 연결</option>
             <option value="file_storage">file_storage — 파일 저장소</option>
             <option value="mcp">mcp — 외부 MCP 서버</option>
           </select>
         </label>
-        {type === 'mcp' && (
-          <p className="mutedtext" style={{ fontSize: 12 }}>
-            프로젝트에 바인딩하면 배포 앱에 URL/API 키가 env로 주입되는 것에 더해,
-            채팅에서도 이 서버의 도구를 모델이 직접 호출할 수 있게 됩니다.
-          </p>
-        )}
+
         <label className="field">
-          카테고리 (선택 — 예: news, llm, payment. 자원 목록에서 API를 묶어 보여줍니다)
-          <input value={category} onChange={(e) => setCategory(e.target.value)} />
+          카테고리 (선택 — 예: payment, news, auth)
+          <input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="payment" />
         </label>
+
         {orgs.data && orgs.data.length > 0 && (
           <label className="field">
-            조직 범위 (선택 — 지정 시 해당 조직 프로젝트에만 노출, 예: 조직별 DB)
+            조직 범위 (선택)
             <select value={organizationId} onChange={(e) => setOrganizationId(e.target.value)}>
               <option value="">전역 (모든 프로젝트)</option>
               {orgs.data.map((o) => (
@@ -269,17 +474,24 @@ function CreateModuleModal({
             </select>
           </label>
         )}
-        <label className="field">
-          설정 (JSON)
-          <textarea
-            className="mono"
-            rows={4}
-            value={config}
-            onChange={(e) => setConfig(e.target.value)}
-          />
-        </label>
+
+        {/* 외부 API 일 때 그룹핑 폼 / 기타 모듈은 JSON textarea */}
+        {type === 'external_api' ? (
+          <GroupedApiConfigForm config={configObj} onChange={setConfigObj} />
+        ) : (
+          <label className="field">
+            설정 (JSON)
+            <textarea
+              className="mono"
+              rows={4}
+              value={configJson}
+              onChange={(e) => setConfigJson(e.target.value)}
+            />
+          </label>
+        )}
+
         {error && <p className="error">{error}</p>}
-        <div className="row" style={{ justifyContent: 'flex-end' }}>
+        <div className="row" style={{ justifyContent: 'flex-end', marginTop: 10 }}>
           <button type="button" className="secondary" onClick={onClose}>
             취소
           </button>
