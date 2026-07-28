@@ -32,7 +32,7 @@ export default function Modules() {
               외부 API 검색
             </button>
             <button className="secondary" onClick={() => setShowMcpSearch(true)}>
-              🔌 외부 MCP 검색
+              외부 MCP 검색
             </button>
           </>
         )}
@@ -177,7 +177,7 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   };
 
   return (
-    <Modal title="🔌 외부 MCP 서버 디렉터리 검색 및 원클릭 등록" onClose={onClose}>
+    <Modal title="외부 MCP 서버 디렉터리 검색 및 원클릭 등록" onClose={onClose}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <form className="row" onSubmit={searchSubmit}>
           <input
