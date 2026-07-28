@@ -116,6 +116,7 @@ export interface ChatSessionOut {
 export interface ChatReply {
   reply: string;
   proposed_change_id: number | null;
+  used_modules?: string[];
 }
 
 export interface ReviewFinding {

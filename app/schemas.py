@@ -165,6 +165,7 @@ class ChatMessageIn(BaseModel):
 class ChatReply(BaseModel):
     reply: str
     proposed_change_id: int | None = None
+    used_modules: list[str] = []
 
 
 class ReviewRequest(BaseModel):

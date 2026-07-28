@@ -60,7 +60,7 @@ export default function Layout() {
           {admin && <NavLink to="/modules">모듈</NavLink>}
           {admin && has('deploy') && <NavLink to="/server-config">서버구성</NavLink>}
           {admin && has('workspace') && <NavLink to="/providers">LLM</NavLink>}
-          {has('workspace') && <NavLink to="/chat">채팅</NavLink>}
+          {has('workspace') && <NavLink to="/chat">에이전트 빌더</NavLink>}
           {admin && <NavLink to="/audit">감사 로그</NavLink>}
         </nav>
         <div className="sidebar-footer">

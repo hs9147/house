@@ -119,23 +119,37 @@ async def post_message(
     project = db.get(Project, session.project_id)
     provider = db.get(LlmProvider, session.provider_id)
 
-    messages: list[dict] = [{"role": "system", "content": llm_service.EDIT_SYSTEM_PROMPT}]
+    agent_system_prompt = (
+        "You are an Agent Builder AI for an enterprise PaaS platform.\n"
+        "Your task is to generate and update clean, production-ready code that integrates "
+        "all bound and checked modules (External APIs, DB, Storage, Internal Services) seamlessly.\n"
+        "Always adhere strictly to the injected environment variable names provided below."
+    )
+    messages: list[dict] = [{"role": "system", "content": agent_system_prompt + "\n\n" + llm_service.EDIT_SYSTEM_PROMPT}]
 
-    # 프로젝트 컨텍스트: 바인딩된 모듈 규약 + 코드 구조 개요 + 요청 파일 내용
+    # 프로젝트 컨텍스트: 바인딩/체크된 모듈 규약 + 사용 가능 전체 자원 목록 + 코드 구조 개요
     module_ctx = modules_service.context_for_llm(db, project)
+    all_resources = modules_service.available_resources(db, project)
     workdir = workspace.workdir_for(project)
     context_parts = [f"Project: {project.name} (type={project.type.value})"]
+    
     if module_ctx:
-        context_parts.append("Bound modules (use these env vars):\n" + json.dumps(module_ctx))
+        context_parts.append(
+            "=== BOUND & CHECKED MODULES (INJECTED ENV VAR SPECIFICATION) ===\n" +
+            json.dumps(module_ctx, indent=2, ensure_ascii=False)
+        )
+    if all_resources:
+        context_parts.append(
+            "=== ALL AVAILABLE RESOURCES & MODULES FOR THIS PROJECT ===\n" +
+            json.dumps(all_resources, indent=2, ensure_ascii=False)
+        )
+
     if workdir.exists():
-        # 전체 파일 목록 대신 구조 개요(클래스/함수 시그니처+요약)를 준다 — 사용자의
-        # 요청을 전체 구조와 항목별 기능을 참조해 대응하도록(요청 2). 개요 추출이
-        # 실패해도(파싱 불가 등) 채팅 자체는 막지 않는다.
         try:
             outline = codemap_service.render_outline(codemap_service.build_code_map(workdir))
         except Exception:  # noqa: BLE001
             outline = "\n".join(workspace.file_tree(workdir))
-        context_parts.append("Code structure (outline):\n" + outline)
+        context_parts.append("=== CODE STRUCTURE (OUTLINE) ===\n" + outline)
         for path, content in workspace.read_context_files(workdir, body.files).items():
             context_parts.append(f"--- {path} ---\n{content}")
     messages.append({"role": "system", "content": "\n\n".join(context_parts)})
@@ -146,9 +160,6 @@ async def post_message(
     messages.extend({"role": m.role, "content": m.content} for m in history)
     messages.append({"role": "user", "content": body.content})
 
-    # 프로젝트에 mcp 타입 모듈이 바인딩돼 있으면 그 서버들의 도구를 tools=로
-    # 넘겨 모델이 직접 호출할 수 있게 한다(services/mcp_client.py) — tools/list
-    # 호출도 블로킹 HTTP라 chat_completion과 함께 스레드에서 돈다.
     mcp_servers = modules_service.mcp_servers_for_project(db, project)
     tools, registry = mcp_client.build_openai_tools(mcp_servers) if mcp_servers else ([], {})
     tool_executor = mcp_client.make_tool_executor(registry) if tools else None
@@ -159,6 +170,15 @@ async def post_message(
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"llm call failed: {e}")
+
+    # 생성된 답변 및 코드에서 사용된 자원/모듈 감지
+    used_modules: list[str] = []
+    if all_resources:
+        reply_upper = reply.upper()
+        for res_item in all_resources:
+            r_name = str(res_item.get("name", ""))
+            if r_name and (r_name in reply or r_name.upper().replace("-", "_") in reply_upper):
+                used_modules.append(r_name)
 
     db.add(ChatMessage(session_id=session_id, role="user", content=body.content))
     db.add(ChatMessage(session_id=session_id, role="assistant", content=reply))
@@ -173,7 +193,7 @@ async def post_message(
         db.add(change)
         db.commit()
         change_id = change.id
-    return ChatReply(reply=reply, proposed_change_id=change_id)
+    return ChatReply(reply=reply, proposed_change_id=change_id, used_modules=used_modules)
 
 
 @router.post("/changes/{change_id}/apply")

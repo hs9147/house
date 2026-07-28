@@ -14,6 +14,7 @@ interface Msg {
   changeId?: number | null;
   changeStatus?: 'proposed' | 'applied' | 'rejected';
   appliedSha?: string;
+  usedModules?: string[];
 }
 
 function groupResources(items: ResourceItem[]) {
@@ -97,6 +98,7 @@ export default function Chat() {
           content: res.reply,
           changeId: res.proposed_change_id,
           changeStatus: res.proposed_change_id ? 'proposed' : undefined,
+          usedModules: res.used_modules,
         },
       ]);
     } catch (err) {
@@ -152,19 +154,27 @@ export default function Chat() {
   return (
     <>
       <div className="panel">
-        <h2>대화식 코드 작성 · 편집</h2>
+        <div className="row" style={{ alignItems: 'center', gap: 10 }}>
+          <h2 style={{ margin: 0 }}>🤖 에이전트 빌더 (Agent Builder)</h2>
+          <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+            체크된 모듈 프롬프트 자동 반영
+          </span>
+        </div>
+        <p className="mutedtext" style={{ fontSize: 12, marginTop: 6, marginBottom: 12 }}>
+          프로젝트에 연동/체크된 모듈 및 환경변수 명세가 LLM 시스템 프롬프트에 자동 반영되어 최적화된 에이전트 연동 코드가 작성됩니다.
+        </p>
         <form className="row" onSubmit={startSession}>
           <select value={projectId} onChange={(e) => setProjectId(e.target.value)} required>
-            <option value="">프로젝트...</option>
+            <option value="">프로젝트 선택...</option>
             {(projects.data ?? []).map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
           <select value={providerId} onChange={(e) => setProviderId(e.target.value)} required>
-            <option value="">LLM 프로바이더...</option>
+            <option value="">LLM 프로바이더 선택...</option>
             {(providers.data ?? []).map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name} ({p.kind === 'internal' ? '내부' : '외부'})
+                {p.name} ({p.kind})
               </option>
             ))}
           </select>
@@ -175,7 +185,7 @@ export default function Chat() {
             onChange={(e) => setBranch(e.target.value)}
             style={{ width: 200 }}
           />
-          <button type="submit">세션 시작</button>
+          <button type="submit">빌더 세션 시작</button>
           {session && (
             <span className="mutedtext" style={{ fontSize: 12 }}>
               세션 #{session.id} · 브랜치 <span className="mono">{session.branch}</span> ·{' '}
@@ -187,7 +197,7 @@ export default function Chat() {
 
       {projectId && (
         <div className="panel">
-          <h2 style={{ margin: '0 0 10px' }}>사용 가능한 자원</h2>
+          <h2 style={{ margin: '0 0 10px' }}>📦 프롬프트 반영 체크 모듈 & 자원 현황</h2>
           <Async state={resourcesState} empty="등록된 자원이 없습니다.">
             {(items) => {
               const { apiByCategory, files, databases, mcpServers } = groupResources(items);
@@ -294,6 +304,18 @@ export default function Chat() {
                 : m.content;
               return (
                 <div key={i} className={`chat-msg ${m.role}`} style={{ maxWidth: diff ? '100%' : undefined }}>
+                  {m.usedModules && m.usedModules.length > 0 && (
+                    <div className="row" style={{ gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: '#10b981', background: 'rgba(16, 185, 129, 0.15)', padding: '2px 6px', borderRadius: 4, border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                        ☑ 사용된 자원/모듈 ({m.usedModules.length}):
+                      </span>
+                      {m.usedModules.map((modName) => (
+                        <span key={modName} style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', padding: '2px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
+                          {modName}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {textOnly}
                   {diff && (
                     <div style={{ marginTop: 10 }}>
