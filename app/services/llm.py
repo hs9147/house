@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import BuildProfile, LlmProvider, Project
+from ..models import BuildProfile, LlmProvider, LlmProviderKind, Project
 from ..security import decrypt_value
 
 EDIT_SYSTEM_PROMPT = """You are a coding assistant working inside an internal PaaS.
@@ -64,12 +64,58 @@ def chat_completion(
 ) -> str:
     """tools/tool_executor를 주면(예: 프로젝트에 바인딩된 MCP 서버) OpenAI 호환
     tool-call 프로토콜로 모델↔도구를 오간다 — 모델이 더 이상 tool_calls를 요청하지
-    않을 때까지(최대 MAX_TOOL_ROUNDS회) 반복하고 최종 텍스트만 반환한다. tools가
-    없으면 기존과 동일하게 단발 completion."""
+    않을 때까지(최대 MAX_TOOL_ROUNDS회) 반복하고 최종 텍스트만 반환한다."""
     url = resolve_base_url(provider.base_url, db)
     headers = {"content-type": "application/json"}
-    if provider.api_key_encrypted:
-        headers["authorization"] = f"Bearer {decrypt_value(provider.api_key_encrypted)}"
+    
+    decrypted_key = decrypt_value(provider.api_key_encrypted) if provider.api_key_encrypted else ""
+
+    # 프로바이더(openai, anthropic, aws, azure, gcp, internal)별 인증 헤더 및 URL 구성
+    kind_str = str(provider.kind.value if hasattr(provider.kind, 'value') else provider.kind)
+
+    if kind_str == "azure":
+        # Azure OpenAI Service
+        if decrypted_key:
+            headers["api-key"] = decrypted_key
+            headers["authorization"] = f"Bearer {decrypted_key}"
+        if "openai/deployments" not in url and not url.endswith("/chat/completions"):
+            url = f"{url.rstrip('/')}/openai/deployments/{provider.model}/chat/completions?api-version=2024-02-15-preview"
+    elif kind_str == "aws":
+        # AWS Bedrock
+        if decrypted_key:
+            headers["authorization"] = f"Bearer {decrypted_key}"
+            headers["x-api-key"] = decrypted_key
+        if not url.endswith("/chat/completions") and "converse" not in url:
+            url = f"{url.rstrip('/')}/v1/chat/completions"
+    elif kind_str == "gcp":
+        # GCP Vertex AI / Gemini API
+        if decrypted_key:
+            headers["authorization"] = f"Bearer {decrypted_key}"
+            headers["x-goog-api-key"] = decrypted_key
+        if not url.endswith("/chat/completions") and "generativelanguage" in url:
+            url = f"{url.rstrip('/')}/v1beta/openai/chat/completions"
+    elif kind_str == "anthropic":
+        # Anthropic Official API
+        if decrypted_key:
+            headers["x-api-key"] = decrypted_key
+            headers["anthropic-version"] = "2023-06-01"
+            headers["authorization"] = f"Bearer {decrypted_key}"
+        if not url.endswith("/messages") and not url.endswith("/chat/completions"):
+            url = f"{url.rstrip('/')}/v1/chat/completions" if "openai" in url else f"{url.rstrip('/')}/v1/messages"
+    elif kind_str == "openai":
+        # OpenAI Official API
+        if decrypted_key:
+            headers["authorization"] = f"Bearer {decrypted_key}"
+        if not url.endswith("/chat/completions"):
+            url = f"{url.rstrip('/')}/v1/chat/completions" if "/v1" not in url else f"{url.rstrip('/')}/chat/completions"
+    else:
+        # internal (vLLM, Ollama) 사내 배포 LLM
+        if decrypted_key:
+            headers["authorization"] = f"Bearer {decrypted_key}"
+        if not url.endswith("/chat/completions") and not url.startswith("http://127.0.0.1"):
+            if not url.endswith("/v1/chat/completions"):
+                url = f"{url.rstrip('/')}/v1/chat/completions"
+
     payload = {"model": provider.model, "messages": messages}
     if tools:
         payload["tools"] = tools

@@ -136,8 +136,12 @@ class ApiKey(Base):
 
 
 class LlmProviderKind(str, enum.Enum):
-    external = "external"  # Claude API, OpenAI 등 — 코드가 외부로 나감
-    internal = "internal"  # 플랫폼에 배포된 vLLM/Ollama — 사내망 내에서 처리
+    openai = "openai"        # OpenAI Official API (GPT-4o, o1 등)
+    anthropic = "anthropic"  # Anthropic Official API (Claude 3.5 Sonnet 등)
+    aws = "aws"              # AWS Bedrock (Claude, Titan, Llama 3 등)
+    azure = "azure"          # Azure OpenAI Service
+    gcp = "gcp"              # GCP Vertex AI / Gemini API
+    internal = "internal"    # 사내 배포 LLM (vLLM, Ollama)
 
 
 class LlmProvider(Base):

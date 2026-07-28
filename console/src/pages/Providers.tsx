@@ -9,7 +9,7 @@ export default function Providers() {
   const state = useApi(() => api.listProviders());
   const admin = isAdmin();
   const [form, setForm] = useState({
-    name: '', kind: 'external', base_url: '', api_key: '', model: '',
+    name: '', kind: 'openai', base_url: '', api_key: '', model: '',
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -22,7 +22,7 @@ export default function Providers() {
     setError('');
     try {
       await api.createProvider({ ...form, api_key: form.api_key || undefined });
-      setForm({ name: '', kind: 'external', base_url: '', api_key: '', model: '' });
+      setForm({ name: '', kind: 'openai', base_url: '', api_key: '', model: '' });
       state.reload();
     } catch (err) {
       setError((err as Error).message);
@@ -57,7 +57,7 @@ export default function Providers() {
                     <td>{p.name}</td>
                     <td>
                       <StatusPill value={p.kind === 'internal' ? 'release' : 'proposed'} />{' '}
-                      {p.kind === 'internal' ? '내부' : '외부'}
+                      <span style={{ fontWeight: 600, textTransform: 'uppercase', fontSize: 12 }}>{p.kind}</span>
                     </td>
                     <td className="mono">{p.base_url}</td>
                     <td className="mono">{p.model}</td>
@@ -79,21 +79,35 @@ export default function Providers() {
                 <input value={form.name} onChange={(e) => set('name', e.target.value)} required />
               </label>
               <label className="field">
-                구분
+                프로바이더 종류
                 <select value={form.kind} onChange={(e) => set('kind', e.target.value)}>
-                  <option value="external">external — 외부 API</option>
-                  <option value="internal">internal — 사내 배포 LLM</option>
+                  <option value="openai">openai — OpenAI Official API</option>
+                  <option value="anthropic">anthropic — Anthropic Claude API</option>
+                  <option value="aws">aws — AWS Bedrock</option>
+                  <option value="azure">azure — Azure OpenAI Service</option>
+                  <option value="gcp">gcp — GCP Vertex AI / Gemini API</option>
+                  <option value="internal">internal — 사내 배포 LLM (vLLM / Ollama)</option>
                 </select>
               </label>
             </div>
             <label className="field">
-              Endpoint
+              Endpoint URL
               <input
                 className="mono"
                 value={form.base_url}
                 onChange={(e) => set('base_url', e.target.value)}
                 placeholder={
-                  form.kind === 'internal' ? 'project://llm-main' : 'https://api.anthropic.com'
+                  form.kind === 'internal'
+                    ? 'project://llm-main'
+                    : form.kind === 'aws'
+                    ? 'https://bedrock-runtime.us-east-1.amazonaws.com'
+                    : form.kind === 'azure'
+                    ? 'https://my-resource.openai.azure.com'
+                    : form.kind === 'gcp'
+                    ? 'https://generativelanguage.googleapis.com'
+                    : form.kind === 'anthropic'
+                    ? 'https://api.anthropic.com'
+                    : 'https://api.openai.com/v1'
                 }
                 required
               />

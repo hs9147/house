@@ -124,7 +124,7 @@ class EnvVarSet(BaseModel):
 
 class LlmProviderCreate(BaseModel):
     name: str
-    kind: str = Field(pattern=r"^(external|internal)$")
+    kind: str = Field(pattern=r"^(openai|anthropic|aws|azure|gcp|internal)$")
     base_url: str  # internal은 project://<프로젝트명> 형식만 허용 (아래 검증)
     api_key: str | None = None
     model: str
