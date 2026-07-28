@@ -88,53 +88,66 @@ export default function Projects() {
   );
 }
 
-function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const orgs = useApi(() => api.listOrgs());
   const [form, setForm] = useState({
     name: '',
     type: 'react' as ProjectType,
-    organization_id: '', // 빈 문자열 = 직접 Git URL 입력(레거시 경로)
+    organization_id: '',
     git_url: '',
     branch: 'main',
     domain: '',
     health_check_path: '/',
     default_profile: 'release' as BuildProfile,
   });
-  const [uploadMode, setUploadMode] = useState(false); // zip/폴더 업로드 (조직 소속 시에만)
-  const [uploadKind, setUploadKind] = useState<'zip' | 'folder'>('zip');
+  const [sourceMode, setSourceMode] = useState<'upload' | 'git'>('upload'); // 기본값: 직접 업로드
+  const [uploadKind, setUploadKind] = useState<'zip' | 'folder' | 'files'>('zip');
   const [zipFile, setZipFile] = useState<File | null>(null);
   const [folderFiles, setFolderFiles] = useState<FileList | null>(null);
-  const [deployAfterUpload, setDeployAfterUpload] = useState(false);
+  const [singleFiles, setSingleFiles] = useState<FileList | null>(null);
+  const [deployAfterUpload, setDeployAfterUpload] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
-  const usingOrg = form.organization_id !== '';
+  
+  // 조직 자동 선택 (미선택 시 첫 번째 조직 ID 자동 할당)
+  const targetOrgId = form.organization_id || (orgs.data && orgs.data.length > 0 ? String(orgs.data[0].id) : '1');
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
 
-    if (usingOrg && uploadMode) {
-      const source: { kind: 'zip'; file: File } | { kind: 'folder'; files: FileList } | null =
-        uploadKind === 'zip'
-          ? zipFile
-            ? { kind: 'zip', file: zipFile }
-            : null
-          : folderFiles && folderFiles.length > 0
-            ? { kind: 'folder', files: folderFiles }
-            : null;
-      if (!source) {
-        setError(uploadKind === 'zip' ? 'zip 파일을 선택하세요.' : '폴더를 선택하세요.');
-        return;
+    if (sourceMode === 'upload') {
+      let source: { kind: 'zip'; file: File } | { kind: 'folder'; files: FileList } | null = null;
+
+      if (uploadKind === 'zip') {
+        if (!zipFile) {
+          setError('ZIP 압축 파일을 선택해 주세요.');
+          return;
+        }
+        source = { kind: 'zip', file: zipFile };
+      } else if (uploadKind === 'folder') {
+        if (!folderFiles || folderFiles.length === 0) {
+          setError('업로드할 폴더를 선택해 주세요.');
+          return;
+        }
+        source = { kind: 'folder', files: folderFiles };
+      } else {
+        if (!singleFiles || singleFiles.length === 0) {
+          setError('업로드할 소스 파일을 선택해 주세요.');
+          return;
+        }
+        source = { kind: 'folder', files: singleFiles };
       }
+
       setBusy(true);
       try {
         await api.uploadProject(
           {
             name: form.name,
             type: form.type,
-            organization_id: Number(form.organization_id),
+            organization_id: Number(targetOrgId),
             branch: form.branch,
             domain: form.domain || undefined,
             health_check_path: form.health_check_path,
@@ -160,7 +173,7 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
       health_check_path: form.health_check_path,
       default_profile: form.default_profile,
     };
-    if (usingOrg) {
+    if (form.organization_id) {
       payload.organization_id = Number(form.organization_id);
     } else {
       payload.git_url = form.git_url;
@@ -175,123 +188,141 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
   };
 
   return (
-    <Modal title="새 프로젝트" onClose={onClose}>
-      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <Modal title="새 프로젝트 생성" onClose={onClose}>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <label className="field">
-          이름 — 빈칸 없이 소문자·숫자·하이픈만 사용하세요 (예: portal-web)
+          프로젝트 이름 — 빈칸 없이 소문자·숫자·하이픈만 사용 (예: my-web-app)
           <input
             value={form.name}
             onChange={(e) => set('name', e.target.value)}
             pattern="[a-z0-9][a-z0-9-]{1,40}"
-            title="빈칸 없이 소문자·숫자·하이픈만 사용하세요 (예: portal-web)"
-            placeholder="portal-web"
+            title="빈칸 없이 소문자·숫자·하이픈만 사용하세요 (예: my-web-app)"
+            placeholder="my-web-app"
             required
+            autoFocus
           />
         </label>
+        
         <label className="field">
-          타입
+          프로젝트 타입
           <select value={form.type} onChange={(e) => set('type', e.target.value)}>
             <option value="react">react</option>
             <option value="python">python (FastAPI)</option>
             <option value="streamlit">streamlit</option>
             <option value="node">node</option>
-            <option value="html">html (정적)</option>
+            <option value="html">html (정적 웹)</option>
             <option value="llm">llm</option>
             <option value="composite">복합 — 백엔드+프론트엔드</option>
           </select>
         </label>
-        {form.type === 'composite' && (
-          <p className="mutedtext">
-            리포 루트에 <code>backend/</code>, <code>frontend/</code> 서브폴더가 모두 있어야
-            합니다 — 배포 시 각 폴더의 타입(python/node/react/html)을 자동 감지해 따로
-            빌드하고, 같은 도메인에서 <code>/api/*</code>는 백엔드로, <code>/*</code>는
-            프론트엔드로 자동 라우팅합니다.
-          </p>
-        )}
 
-        {orgs.data && orgs.data.length > 0 && (
-          <label className="field">
-            조직 (선택 시 사내 Gitea 리포를 내부에서 자동 생성 — Git 주소는 노출되지 않음)
-            <select
-              value={form.organization_id}
-              onChange={(e) => set('organization_id', e.target.value)}
-            >
-              <option value="">직접 Git URL 입력</option>
-              {orgs.data.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        {!usingOrg && (
-          <label className="field">
-            Git URL
-            <input value={form.git_url} onChange={(e) => set('git_url', e.target.value)} required />
-          </label>
-        )}
-        {usingOrg && (
-          <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={uploadMode}
-              onChange={(e) => setUploadMode(e.target.checked)}
-            />
-            git 리포 대신 zip/폴더를 직접 업로드
-          </label>
-        )}
-        {usingOrg && uploadMode && (
-          <div className="panel" style={{ padding: 12, margin: 0 }}>
-            <div className="row" style={{ marginBottom: 8 }}>
-              <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <input
-                  type="radio"
-                  name="uploadKind"
-                  checked={uploadKind === 'zip'}
-                  onChange={() => setUploadKind('zip')}
-                />
-                zip 파일
-              </label>
-              <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <input
-                  type="radio"
-                  name="uploadKind"
-                  checked={uploadKind === 'folder'}
-                  onChange={() => setUploadKind('folder')}
-                />
-                폴더
-              </label>
-            </div>
-            {uploadKind === 'zip' ? (
+        {/* 소스 등록 방식 선택 탭 */}
+        <div className="panel" style={{ padding: 12, margin: 0, backgroundColor: 'rgba(255,255,255,0.03)' }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: '#9ca3af', marginBottom: 8, display: 'block' }}>
+            소스 등록 방식 선택
+          </span>
+          <div className="row" style={{ gap: 16, marginBottom: 10 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
               <input
-                type="file"
-                accept=".zip"
-                onChange={(e) => setZipFile(e.target.files?.[0] ?? null)}
+                type="radio"
+                name="sourceMode"
+                checked={sourceMode === 'upload'}
+                onChange={() => setSourceMode('upload')}
               />
-            ) : (
+              📁 소스 직접 업로드 (파일 / ZIP / 폴더)
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
               <input
-                type="file"
-                multiple
-                ref={(el) => {
-                  if (el) el.setAttribute('webkitdirectory', '');
-                }}
-                onChange={(e) => setFolderFiles(e.target.files)}
+                type="radio"
+                name="sourceMode"
+                checked={sourceMode === 'git'}
+                onChange={() => setSourceMode('git')}
               />
-            )}
-            <label
-              className="field"
-              style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 }}
-            >
-              <input
-                type="checkbox"
-                checked={deployAfterUpload}
-                onChange={(e) => setDeployAfterUpload(e.target.checked)}
-              />
-              업로드 완료 후 바로 배포 (원클릭)
+              🔗 외부 Git URL 연동
             </label>
           </div>
-        )}
+
+          {sourceMode === 'upload' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 6 }}>
+              <div className="row" style={{ gap: 12 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 13, cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="uploadKind"
+                    checked={uploadKind === 'zip'}
+                    onChange={() => setUploadKind('zip')}
+                  />
+                  ZIP 압축파일
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 13, cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="uploadKind"
+                    checked={uploadKind === 'folder'}
+                    onChange={() => setUploadKind('folder')}
+                  />
+                  전체 폴더
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 13, cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="uploadKind"
+                    checked={uploadKind === 'files'}
+                    onChange={() => setUploadKind('files')}
+                  />
+                  개별 파일
+                </label>
+              </div>
+
+              {uploadKind === 'zip' && (
+                <input
+                  type="file"
+                  accept=".zip,.tar.gz"
+                  onChange={(e) => setZipFile(e.target.files?.[0] ?? null)}
+                  required
+                />
+              )}
+              {uploadKind === 'folder' && (
+                <input
+                  type="file"
+                  multiple
+                  ref={(el) => {
+                    if (el) el.setAttribute('webkitdirectory', '');
+                  }}
+                  onChange={(e) => setFolderFiles(e.target.files)}
+                  required
+                />
+              )}
+              {uploadKind === 'files' && (
+                <input
+                  type="file"
+                  multiple
+                  onChange={(e) => setSingleFiles(e.target.files)}
+                  required
+                />
+              )}
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, marginTop: 4 }}>
+                <input
+                  type="checkbox"
+                  checked={deployAfterUpload}
+                  onChange={(e) => setDeployAfterUpload(e.target.checked)}
+                />
+                업로드 즉시 자동 빌드 및 배포
+              </label>
+            </div>
+          ) : (
+            <label className="field" style={{ marginTop: 6 }}>
+              Git 주소 (HTTPS/SSH)
+              <input
+                value={form.git_url}
+                onChange={(e) => set('git_url', e.target.value)}
+                placeholder="https://github.com/user/repo.git"
+                required={sourceMode === 'git'}
+              />
+            </label>
+          )}
+        </div>
 
         <div className="row">
           <label className="field" style={{ flex: 1 }}>
@@ -326,7 +357,7 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
             취소
           </button>
           <button type="submit" disabled={busy}>
-            {busy ? (usingOrg && uploadMode ? '업로드 중...' : '생성 중...') : '생성'}
+            {busy ? (sourceMode === 'upload' ? '업로드 중...' : '생성 중...') : '생성'}
           </button>
         </div>
       </form>
