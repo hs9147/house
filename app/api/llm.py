@@ -344,18 +344,28 @@ async def review_project(
 
     diff = body.diff
     if diff is None:
-        workdir = workspace.workdir_for(project)
+        try:
+            workdir, _sha = await asyncio.to_thread(checkout, project)
+        except Exception:
+            workdir = workspace.workdir_for(project)
+
         if not workdir.exists():
             raise HTTPException(status_code=409, detail="no workspace; pass diff explicitly")
         base = body.base_ref or f"origin/{project.branch}"
-        diff = await asyncio.to_thread(workspace.diff_between, workdir, base)
-    if not diff.strip():
+        try:
+            diff = await asyncio.to_thread(workspace.diff_between, workdir, base)
+        except Exception as e:
+            # git diff 실패 시 500 대신 422/502 응답
+            raise HTTPException(status_code=422, detail=f"git diff failed between '{base}': {e}")
+
+    if not diff or not diff.strip():
         return {"findings": [], "max_severity": "none"}
 
     try:
         findings = await asyncio.to_thread(llm_service.review_diff, provider, diff, db)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"llm call failed: {e}")
+        raise HTTPException(status_code=502, detail=f"llm review call failed: {e}")
+
     severity = llm_service.max_severity(findings)
     audit.record(db, key.name, "code.review", project.name,
                  {"findings": len(findings), "max_severity": severity})

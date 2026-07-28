@@ -9,7 +9,10 @@ import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
 import type { ChatSessionOut, ResourceItem, ReviewResult } from '../lib/types';
 
-const BUILDER_SESSIONS_STORAGE_KEY = 'paas_saved_builder_sessions';
+const getSessionStorageKey = () => {
+  const currentKey = localStorage.getItem('paas_api_key') || 'default_user';
+  return `paas_saved_builder_sessions_${currentKey}`;
+};
 
 export interface SavedBuilderSession {
   id: number;
@@ -79,10 +82,11 @@ export default function Chat() {
   const [review, setReview] = useState<ReviewResult | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
 
-  // 저장된 빌더 세션 목록 State (기억 & 목록 선택)
+  // 사용자별 기억되는 저장된 빌더 세션 목록 State
   const [savedSessions, setSavedSessions] = useState<SavedBuilderSession[]>(() => {
     try {
-      const saved = localStorage.getItem(BUILDER_SESSIONS_STORAGE_KEY);
+      const storageKey = getSessionStorageKey();
+      const saved = localStorage.getItem(storageKey);
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
@@ -90,17 +94,38 @@ export default function Chat() {
   });
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
 
-  // 메시지 업데이트 시 localStorage 세션 내용 동기화
+  // 메시지 업데이트 시 사용자별 localStorage 세션 동기화
   const syncSessionMessages = (sessionId: number, updatedMessages: Msg[]) => {
     setSavedSessions((prev) => {
       const updated = prev.map((item) =>
         item.id === sessionId ? { ...item, messages: updatedMessages } : item,
       );
       try {
-        localStorage.setItem(BUILDER_SESSIONS_STORAGE_KEY, JSON.stringify(updated));
+        const storageKey = getSessionStorageKey();
+        localStorage.setItem(storageKey, JSON.stringify(updated));
       } catch {}
       return updated;
     });
+  };
+
+  // 세션 삭제 핸들러
+  const deleteSavedSession = (sessionIdToDelete: number) => {
+    setSavedSessions((prev) => {
+      const updated = prev.filter((item) => item.id !== sessionIdToDelete);
+      try {
+        const storageKey = getSessionStorageKey();
+        localStorage.setItem(storageKey, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    if (session && session.id === sessionIdToDelete) {
+      setSession(null);
+      setMessages([]);
+      setSelectedSessionId('');
+    } else if (selectedSessionId === String(sessionIdToDelete)) {
+      setSelectedSessionId('');
+    }
   };
 
   const startSession = async (e: React.FormEvent) => {
@@ -130,9 +155,10 @@ export default function Chat() {
 
       setSavedSessions((prev) => {
         const filtered = prev.filter((item) => item.id !== s.id);
-        const updated = [newSavedItem, ...filtered].slice(0, 50); // 최근 50개 기억
+        const updated = [newSavedItem, ...filtered].slice(0, 50); // 사용자별 최대 50개 기억
         try {
-          localStorage.setItem(BUILDER_SESSIONS_STORAGE_KEY, JSON.stringify(updated));
+          const storageKey = getSessionStorageKey();
+          localStorage.setItem(storageKey, JSON.stringify(updated));
         } catch {}
         return updated;
       });
@@ -261,7 +287,7 @@ export default function Chat() {
           프로젝트에 연동/체크된 모듈 및 환경변수 명세가 LLM 시스템 프롬프트에 자동 반영되어 최적화된 에이전트 연동 코드가 작성됩니다.
         </p>
 
-        {/* 저장된 이전 빌더 세션 선택 드롭다운 */}
+        {/* 사용자별 저장된 이전 빌더 세션 선택 드롭다운 & 삭제 버튼 */}
         {savedSessions.length > 0 && (
           <div style={{ marginBottom: 12, padding: '8px 12px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: 6, border: '1px solid rgba(255, 255, 255, 0.08)' }}>
             <div className="row" style={{ alignItems: 'center', gap: 8 }}>
@@ -280,6 +306,17 @@ export default function Chat() {
                   </option>
                 ))}
               </select>
+
+              {selectedSessionId && (
+                <button
+                  type="button"
+                  className="danger small"
+                  style={{ fontSize: 11, padding: '4px 8px' }}
+                  onClick={() => deleteSavedSession(Number(selectedSessionId))}
+                >
+                  🗑️ 세션 삭제
+                </button>
+              )}
             </div>
           </div>
         )}
