@@ -197,14 +197,19 @@ def exec_powershell_cmd(
     admin: ApiKey = Depends(require_admin),
 ):
     """admin 전용 PowerShell 명령어 실행 API."""
+    import os  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
     cmd = body.get("command", "").strip()
     if not cmd:
         raise HTTPException(status_code=400, detail="command field is required")
 
+    settings = get_settings()
+    cwd_dir = os.path.abspath(settings.powershell_start_dir) if settings.powershell_start_dir else None
+
     try:
         proc = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            cwd=cwd_dir,
             capture_output=True,
             text=True,
             timeout=30.0,
@@ -217,6 +222,7 @@ def exec_powershell_cmd(
             "command": cmd,
             "returncode": proc.returncode,
             "output": output or "(no output)",
+            "cwd": cwd_dir or os.getcwd(),
         }
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="PowerShell command execution timed out (30s)")
@@ -227,10 +233,15 @@ def exec_powershell_cmd(
 @router.websocket("/system/powershell/ws")
 async def powershell_websocket_terminal(websocket: WebSocket):
     """admin 전용 실시간 PowerShell WebSocket 터미널."""
+    import os  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
     await websocket.accept()
+    settings = get_settings()
+    cwd_dir = os.path.abspath(settings.powershell_start_dir) if settings.powershell_start_dir else None
+    start_info = f"WorkDir: {cwd_dir or os.getcwd()}"
+
     try:
-        await websocket.send_text("Windows PowerShell Interactive Console Connected.\nType commands or click Disconnect to end session.\n\nPS > ")
+        await websocket.send_text(f"Windows PowerShell Interactive Console Connected ({start_info}).\nType commands or click Disconnect to end session.\n\nPS > ")
         while True:
             cmd = await websocket.receive_text()
             cmd_str = cmd.strip()
@@ -244,6 +255,7 @@ async def powershell_websocket_terminal(websocket: WebSocket):
 
             proc = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd_str],
+                cwd=cwd_dir,
                 capture_output=True,
                 text=True,
                 timeout=30.0,
