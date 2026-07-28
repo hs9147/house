@@ -62,8 +62,22 @@ export default function App() {
           <Route path="modules" element={<ModulesTab />} />
           <Route path="previews" element={<PreviewsTab />} />
         </Route>
-        <Route path="/modules" element={<Modules />} />
-        <Route path="/server-config" element={<ServerConfig />} />
+        <Route
+          path="/modules"
+          element={
+            <AdminOnly>
+              <Modules />
+            </AdminOnly>
+          }
+        />
+        <Route
+          path="/server-config"
+          element={
+            <AdminOnly>
+              <ServerConfig />
+            </AdminOnly>
+          }
+        />
         <Route
           path="/orgs"
           element={
@@ -72,7 +86,14 @@ export default function App() {
             </AdminOnly>
           }
         />
-        <Route path="/providers" element={<Providers />} />
+        <Route
+          path="/providers"
+          element={
+            <AdminOnly>
+              <Providers />
+            </AdminOnly>
+          }
+        />
         <Route path="/chat" element={<Chat />} />
         <Route
           path="/audit"

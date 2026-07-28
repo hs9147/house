@@ -57,10 +57,9 @@ export default function Layout() {
           {admin && <NavLink to="/">대시보드</NavLink>}
           {admin && <NavLink to="/orgs">조직</NavLink>}
           <NavLink to="/projects">프로젝트</NavLink>
-          {health.data?.gitea_url && <NavLink to="/git">Git</NavLink>}
-          <NavLink to="/modules">모듈</NavLink>
-          {has('deploy') && <NavLink to="/server-config">서버구성</NavLink>}
-          {has('workspace') && <NavLink to="/providers">LLM</NavLink>}
+          {admin && <NavLink to="/modules">모듈</NavLink>}
+          {admin && has('deploy') && <NavLink to="/server-config">서버구성</NavLink>}
+          {admin && has('workspace') && <NavLink to="/providers">LLM</NavLink>}
           {has('workspace') && <NavLink to="/chat">채팅</NavLink>}
           {admin && <NavLink to="/audit">감사 로그</NavLink>}
         </nav>
