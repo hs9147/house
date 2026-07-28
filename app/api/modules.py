@@ -30,12 +30,20 @@ def create_module(
     if body.organization_id is not None and db.get(Organization, body.organization_id) is None:
         raise HTTPException(status_code=404, detail="organization not found")
     
-    # file_storage 일 경우 root 경로 하위에 지정된 폴더가 없으면 자동 생성
-    if body.type == ModuleType.file_storage.value and body.config:
+    # file_storage 일 경우 PAAS_STORAGE_ROOT 환경변수를 적용하고 폴더를 자동 생성
+    if body.type == ModuleType.file_storage.value:
+        settings = get_settings()
+        env_storage_root = str(Path(settings.storage_root or "./data/storage").resolve())
+        if not body.config:
+            body.config = {}
+        # endpoint가 비어있거나 기본값일 경우 PAAS_STORAGE_ROOT 환경변수로 자동 보정
+        if not body.config.get("endpoint") or body.config.get("endpoint") in ["./data/storage", "data/storage"]:
+            body.config["endpoint"] = env_storage_root
+        body.config["storage_root"] = env_storage_root
+
         sub_folder = body.config.get("sub_folder") or body.config.get("bucket")
         if sub_folder:
-            settings = get_settings()
-            root_path = Path(body.config.get("endpoint") or settings.storage_root or "./data/storage").resolve()
+            root_path = Path(body.config.get("endpoint") or env_storage_root).resolve()
             target_dir = root_path / str(sub_folder).strip("/\\")
             target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -80,7 +88,12 @@ def upload_file_storage_module(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"ZIP 파일 압축 해제 실패: {e}")
 
-    config = {"endpoint": str(root_path), "sub_folder": folder_name, "bucket": folder_name}
+    config = {
+        "endpoint": str(root_path),
+        "storage_root": str(root_path),
+        "sub_folder": folder_name,
+        "bucket": folder_name,
+    }
     row = Module(
         name=name, type=ModuleType.file_storage, category=category,
         organization_id=organization_id, config=svc.encrypt_config(config),
