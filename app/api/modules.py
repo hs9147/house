@@ -1,8 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException
+import io
+from pathlib import Path
+import zipfile
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import audit
+from ..config import get_settings
 from ..db import get_db
 from ..models import ApiKey, Module, ModuleBinding, ModuleType, Organization, Project
 from ..schemas import ApiModuleImport, ModuleBind, ModuleCreate
@@ -23,6 +28,16 @@ def create_module(
         raise HTTPException(status_code=409, detail="module name already exists")
     if body.organization_id is not None and db.get(Organization, body.organization_id) is None:
         raise HTTPException(status_code=404, detail="organization not found")
+    
+    # file_storage 일 경우 root 경로 하위에 지정된 폴더가 없으면 자동 생성
+    if body.type == ModuleType.file_storage.value and body.config:
+        sub_folder = body.config.get("sub_folder") or body.config.get("bucket")
+        if sub_folder:
+            settings = get_settings()
+            root_path = Path(body.config.get("endpoint") or settings.storage_root or "./data/storage").resolve()
+            target_dir = root_path / str(sub_folder).strip("/\\")
+            target_dir.mkdir(parents=True, exist_ok=True)
+
     row = Module(
         name=body.name, type=ModuleType(body.type), category=body.category,
         organization_id=body.organization_id, config=svc.encrypt_config(body.config),
@@ -30,6 +45,48 @@ def create_module(
     db.add(row)
     db.commit()
     audit.record(db, key.name, "module.create", body.name, {"type": body.type})
+    return {"id": row.id, "name": row.name, "type": row.type.value, "category": row.category,
+            "organization_id": row.organization_id, "config": svc.masked_config(row.config)}
+
+
+@router.post("/modules/upload-storage", status_code=201)
+def upload_file_storage_module(
+    zip_file: UploadFile = File(...),
+    name: str = Form(...),
+    category: str = Form(None),
+    organization_id: int = Form(None),
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """ZIP 파일 업로드 시 root 경로에 파일명으로 폴더를 생성하고 압축 해제 후 모듈을 자동 등록한다."""
+    if db.execute(select(Module).where(Module.name == name)).scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="module name already exists")
+    if organization_id is not None and db.get(Organization, organization_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    
+    filename = zip_file.filename or "storage.zip"
+    folder_name = Path(filename).stem.strip() or "uploaded-storage"
+    
+    settings = get_settings()
+    root_path = Path(settings.storage_root or "./data/storage").resolve()
+    target_dir = root_path / folder_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        content = zip_file.file.read()
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            zf.extractall(target_dir)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"ZIP 파일 압축 해제 실패: {e}")
+
+    config = {"endpoint": str(root_path), "sub_folder": folder_name, "bucket": folder_name}
+    row = Module(
+        name=name, type=ModuleType.file_storage, category=category,
+        organization_id=organization_id, config=svc.encrypt_config(config),
+    )
+    db.add(row)
+    db.commit()
+    audit.record(db, key.name, "module.create_zip_storage", name, {"folder_name": folder_name})
     return {"id": row.id, "name": row.name, "type": row.type.value, "category": row.category,
             "organization_id": row.organization_id, "config": svc.masked_config(row.config)}
 

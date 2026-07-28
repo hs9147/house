@@ -244,6 +244,19 @@ export const api = {
       category: category || null,
       organization_id: organization_id ?? null,
     }),
+  uploadFileStorageModule: (
+    zipFile: File,
+    name: string,
+    category?: string,
+    organization_id?: number,
+  ) => {
+    const fd = new FormData();
+    fd.append('zip_file', zipFile);
+    fd.append('name', name);
+    if (category) fd.append('category', category);
+    if (organization_id) fd.append('organization_id', String(organization_id));
+    return request<ModuleOut>('POST', '/modules/upload-storage', fd);
+  },
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),
   bindModule: (projectId: number, moduleId: number, env_prefix: string) =>
