@@ -94,6 +94,8 @@ export interface ResourceItem {
   type: string;
   category: string | null;
   scope: 'global' | 'org';
+  env_prefix?: string;
+  bound?: boolean;
 }
 
 export interface LlmProviderOut {

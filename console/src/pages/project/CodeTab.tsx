@@ -4,13 +4,14 @@ import Async from '../../components/Async';
 import StatusPill from '../../components/StatusPill';
 import { api } from '../../lib/api';
 import { useApi } from '../../lib/hooks';
-import type { ModuleOut } from '../../lib/types';
+import type { ResourceItem } from '../../lib/types';
 import type { ProjectContext } from '../ProjectDetail';
 
 export default function CodeTab() {
   const { project } = useOutletContext<ProjectContext>();
   const filesState = useApi(() => api.projectFiles(project.id), [project.id]);
   const modulesState = useApi(() => api.listModules(), []);
+  const resourcesState = useApi(() => api.projectResources(project.id), [project.id]);
   
   const [selected, setSelected] = useState<string | null>(null);
   const [content, setContent] = useState('');
@@ -45,31 +46,67 @@ export default function CodeTab() {
     return Object.values(allContentMap).join('\n') + '\n' + content;
   }, [allContentMap, content]);
 
-  // 모듈 사용 여부 실시간 판단 로직
-  const checkModuleUsage = (m: ModuleOut) => {
+  // 프로젝트에서 사용 가능한 통합 자원 목록 (전체 모듈 + projectResources 흡수)
+  const mergedResources = useMemo(() => {
+    const list: Array<{ id: string; name: string; type: string; category?: string; env_prefix?: string; bound: boolean }> = [];
+    const seen = new Set<string>();
+
+    // 1. projectResources 흡수
+    if (resourcesState.data && Array.isArray(resourcesState.data)) {
+      for (const r of resourcesState.data as ResourceItem[]) {
+        seen.add(r.name);
+        list.push({
+          id: `res-${r.name}`,
+          name: r.name,
+          type: r.type,
+          category: r.category || undefined,
+          env_prefix: r.env_prefix || undefined,
+          bound: Boolean(r.bound),
+        });
+      }
+    }
+
+    // 2. listModules 중 누락된 모듈 흡수
+    if (modulesState.data && Array.isArray(modulesState.data)) {
+      for (const m of modulesState.data) {
+        if (!seen.has(m.name)) {
+          seen.add(m.name);
+          list.push({
+            id: `mod-${m.id}`,
+            name: m.name,
+            type: m.type,
+            category: m.category || undefined,
+            bound: false,
+          });
+        }
+      }
+    }
+
+    return list;
+  }, [resourcesState.data, modulesState.data]);
+
+  // 모듈/자원 사용 여부 실시간 판단 로직
+  const checkItemUsage = (item: { name: string; type: string; env_prefix?: string }) => {
     if (!fullCodeText) return { used: false, matches: [] as string[] };
     
     const matches: string[] = [];
     const textUpper = fullCodeText.toUpperCase();
-    const nameUpper = m.name.toUpperCase().replace(/-/g, '_');
+    const nameUpper = item.name.toUpperCase().replace(/-/g, '_');
 
-    // 1. 모듈 이름 또는 변환된 이름 언급 확인
-    if (textUpper.includes(nameUpper) || fullCodeText.includes(m.name)) {
-      matches.push(m.name);
-    }
-
-    // 2. config 내 url / dsn / target 등 확인
-    if (m.config && typeof m.config === 'object') {
-      const cfg = m.config as Record<string, unknown>;
-      if (cfg.url && typeof cfg.url === 'string' && fullCodeText.includes(cfg.url)) {
-        matches.push('URL');
-      }
-      if (cfg.target_project && typeof cfg.target_project === 'string' && fullCodeText.includes(cfg.target_project)) {
-        matches.push('Target');
+    // 1. env_prefix 가 정의되어 있을 경우 코드 내 언급 확인 (예: PAY_URL, DB_DSN)
+    if (item.env_prefix) {
+      const pUpper = item.env_prefix.toUpperCase();
+      if (textUpper.includes(pUpper)) {
+        matches.push(`${pUpper}_*`);
       }
     }
 
-    // 3. 일반적으로 모듈 이름 기반 환경변수 관례 확인 (예: PAY_*, DB_*)
+    // 2. 모듈/자원 이름 또는 변환된 이름 언급 확인
+    if (textUpper.includes(nameUpper) || fullCodeText.includes(item.name)) {
+      matches.push(item.name);
+    }
+
+    // 3. 자원 이름 기반 환경변수 관례 확인
     const prefixCandidate = nameUpper.split('_')[0];
     if (prefixCandidate.length >= 2) {
       const envPattern = new RegExp(`${prefixCandidate}_[A-Z0-9_]+`, 'g');
@@ -134,61 +171,61 @@ export default function CodeTab() {
               </div>
             </div>
 
-            {/* 우측: 모듈 사용 현황 사이드바 (사용 여부 실시간 체크) */}
+            {/* 우측: 모듈 & 사용 가능 자원 패널 (자원 정보 완벽 흡수 + 실시간 체크) */}
             <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 6, border: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#f59e0b', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span>📦 연동 모듈 사용 현황</span>
+                <span>📦 모듈 & 자원 사용 현황</span>
                 <span style={{ fontSize: 11, color: '#9ca3af' }}>실시간 탐색</span>
               </div>
               <p className="mutedtext" style={{ fontSize: 11, margin: 0 }}>
-                코드 내 모듈 참조 시 <span style={{ color: '#10b981', fontWeight: 600 }}>☑ 사용 중</span>으로 자동 체크됩니다.
+                프로젝트 이용 가능 자원(API/DB/저장소)이 모듈 목록 패널로 흡수 통합 표시되며, 참조 시 <span style={{ color: '#10b981', fontWeight: 600 }}>☑ 사용 중</span>으로 자동 체크됩니다.
               </p>
 
-              <Async state={modulesState} empty="등록된 모듈이 없습니다.">
-                {(modules) => (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto', maxHeight: 420 }}>
-                    {modules.map((m) => {
-                      const { used, matches } = checkModuleUsage(m);
-                      return (
-                        <div
-                          key={m.id}
-                          style={{
-                            padding: 10,
-                            borderRadius: 6,
-                            backgroundColor: used ? 'rgba(16, 185, 129, 0.08)' : 'rgba(255,255,255,0.02)',
-                            border: `1px solid ${used ? 'rgba(16, 185, 129, 0.3)' : 'rgba(255,255,255,0.08)'}`,
-                            transition: 'all 0.2s ease',
-                          }}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                            <span style={{ fontSize: 13, fontWeight: 600, color: used ? '#10b981' : '#e5e7eb' }}>
-                              {used ? '☑' : '☐'} {m.name}
+              {mergedResources.length === 0 ? (
+                <p className="mutedtext" style={{ fontSize: 12 }}>등록되거나 사용 가능한 자원이 없습니다.</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto', maxHeight: 420 }}>
+                  {mergedResources.map((item) => {
+                    const { used, matches } = checkItemUsage(item);
+                    return (
+                      <div
+                        key={item.id}
+                        style={{
+                          padding: 10,
+                          borderRadius: 6,
+                          backgroundColor: used ? 'rgba(16, 185, 129, 0.08)' : 'rgba(255,255,255,0.02)',
+                          border: `1px solid ${used ? 'rgba(16, 185, 129, 0.3)' : 'rgba(255,255,255,0.08)'}`,
+                          transition: 'all 0.2s ease',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: used ? '#10b981' : '#e5e7eb' }}>
+                            {used ? '☑' : '☐'} {item.name}
+                          </span>
+                          <StatusPill value={item.type} />
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11 }}>
+                          <span className="mutedtext">{item.category || (item.env_prefix ? `ENV: ${item.env_prefix}_*` : '일반 자원')}</span>
+                          {used ? (
+                            <span style={{ color: '#10b981', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 2 }}>
+                              ✓ 코드에서 사용 중
                             </span>
-                            <StatusPill value={m.type} />
-                          </div>
-
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11 }}>
-                            <span className="mutedtext">{m.category || '기본 카테고리'}</span>
-                            {used ? (
-                              <span style={{ color: '#10b981', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 2 }}>
-                                ✓ 코드에서 사용 중
-                              </span>
-                            ) : (
-                              <span style={{ color: '#6b7280' }}>☐ 미사용</span>
-                            )}
-                          </div>
-
-                          {used && matches.length > 0 && (
-                            <div style={{ marginTop: 6, paddingTop: 4, borderTop: '1px stroke rgba(255,255,255,0.05)', fontSize: 10, color: '#a7f3d0' }}>
-                              감지 키워드: {matches.slice(0, 3).join(', ')}
-                            </div>
+                          ) : (
+                            <span style={{ color: '#6b7280' }}>☐ 미사용</span>
                           )}
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </Async>
+
+                        {used && matches.length > 0 && (
+                          <div style={{ marginTop: 6, paddingTop: 4, borderTop: '1px stroke rgba(255,255,255,0.05)', fontSize: 10, color: '#a7f3d0' }}>
+                            감지 키워드: {matches.slice(0, 3).join(', ')}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         )}
