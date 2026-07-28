@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.services import llm, workspace
+from app.services.build import BuildError
 
 
 def test_extract_diff_from_fence():
@@ -108,6 +109,55 @@ def test_apply_bad_diff_raises(tmp_path):
     bad = DIFF.replace('-print("hello")', '-print("nope")')
     with pytest.raises(Exception):
         workspace.apply_diff(repo, bad, "x")
+    # 거부된 패치가 파일을 건드리면 안 된다
+    assert (repo / "hello.py").read_text() == 'print("hello")\n'
+
+
+def _long_file(repo: Path) -> str:
+    body = "\n".join(f"line{i}" for i in range(1, 21)) + "\n"
+    (repo / "app.py").write_text(body)
+    return body
+
+
+def test_fallback_keeps_lines_outside_the_hunk(tmp_path):
+    """폴백은 hunk 구간만 바꾼다 — 파일 나머지를 hunk 내용으로 덮어쓰면 안 된다."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _long_file(repo)
+
+    # @@ 줄번호가 완전히 틀린 패치(LLM이 흔히 내는 오류) — 내용으로 위치를 찾아 붙어야 한다
+    workspace._apply_patch_fallback(repo, (
+        "--- a/app.py\n+++ b/app.py\n@@ -999,3 +999,3 @@\n"
+        " line9\n-line10\n+line10_FIXED\n line11\n"
+    ))
+
+    after = (repo / "app.py").read_text().splitlines()
+    assert len(after) == 20
+    assert after[9] == "line10_FIXED"
+    assert after[0] == "line1" and after[-1] == "line20"
+
+
+def test_fallback_refuses_when_context_does_not_match(tmp_path):
+    """문맥이 원본과 다르면 추측하지 않는다 — 승인한 diff와 다른 내용이 커밋되면 안 된다."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    before = _long_file(repo)
+
+    with pytest.raises(BuildError):
+        workspace._apply_patch_fallback(repo, (
+            "--- a/app.py\n+++ b/app.py\n@@ -9,3 +9,3 @@\n"
+            " line9\n-lineTEN_WRONG\n line11\n"
+        ))
+    assert (repo / "app.py").read_text() == before
+
+
+def test_fallback_creates_new_file(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    workspace._apply_patch_fallback(repo, (
+        "--- /dev/null\n+++ b/pkg/new.py\n@@ -0,0 +1,2 @@\n+a = 1\n+b = 2\n"
+    ))
+    assert (repo / "pkg" / "new.py").read_text() == "a = 1\nb = 2\n"
 
 
 def test_context_files_guardrails(tmp_path):

@@ -113,38 +113,77 @@ def apply_diff(workdir: Path, diff: str, message: str) -> str:
     return out.stdout.strip()
 
 
+def _locate(haystack: list[str], needle: list[str]) -> int:
+    """needle이 haystack에 나타나는 유일한 위치를 찾는다. 없거나 여러 곳이면 -1.
+
+    @@ 줄번호를 신뢰하지 않고 내용으로 찾기 때문에 헤더가 틀린 패치도 붙는다.
+    1차는 그대로, 2차는 좌우 공백을 무시하고 맞춘다.
+    """
+    for key in (lambda s: s, lambda s: s.strip()):
+        keyed_hay = [key(line) for line in haystack]
+        keyed_needle = [key(line) for line in needle]
+        hits = [
+            i for i in range(len(keyed_hay) - len(keyed_needle) + 1)
+            if keyed_hay[i:i + len(keyed_needle)] == keyed_needle
+        ]
+        if len(hits) == 1:
+            return hits[0]
+    return -1
+
+
 def _apply_patch_fallback(workdir: Path, diff_text: str) -> None:
-    """git apply 명령어가 corrupt patch 오류로 거절될 때, 파이썬 기반으로 diff를 안전하게 수동 파싱하여 파일에 적용한다."""
+    """git apply가 corrupt patch로 거절할 때 쓰는 파이썬 폴백.
+
+    관대하게 봐주는 것은 **hunk 헤더(@@ 줄번호·개수)와 좌우 공백**까지다. 원본에서
+    hunk 위치를 내용으로 다시 찾아 그 구간만 바꾸고, 나머지 줄은 손대지 않는다.
+    찾지 못하거나 후보가 여러 개면 추측하지 않고 예외를 던진다 — 승인한 diff와 다른
+    내용이 커밋되면 안 된다.
+    """
     file_chunks = re.split(r'(?=^diff --git |^--- a/|^\+\+\+ b/)', diff_text, flags=re.MULTILINE)
     for chunk in file_chunks:
-        if not chunk.strip():
-            continue
         target_file_match = re.search(r'^\+\+\+ b/(.+)$', chunk, re.MULTILINE)
         if not target_file_match:
             continue
         rel_path = target_file_match.group(1).strip()
         target_path = workdir / rel_path
 
-        new_lines = []
-        in_hunk = False
-        for line in chunk.splitlines():
-            if line.startswith("@@"):
-                in_hunk = True
-                continue
-            if not in_hunk:
-                continue
-            if line.startswith("+"):
-                new_lines.append(line[1:])
-            elif line.startswith(" "):
-                new_lines.append(line[1:])
-            elif line.startswith("-"):
-                pass
-            elif not line.startswith("diff ") and not line.startswith("--- ") and not line.startswith("+++ "):
-                new_lines.append(line)
+        # hunk별로 (원본에 있어야 할 줄, 바뀐 뒤의 줄)을 모은다.
+        hunks: list[tuple[list[str], list[str]]] = []
+        for body in re.split(r'^@@.*$\n?', chunk, flags=re.MULTILINE)[1:]:
+            old, new = [], []
+            for line in body.splitlines():
+                if line.startswith("\\"):
+                    continue  # "\ No newline at end of file"
+                if line.startswith("+"):
+                    new.append(line[1:])
+                elif line.startswith("-"):
+                    old.append(line[1:])
+                else:
+                    # 문맥 줄. 앞의 공백이 떨어져 나간 빈 줄도 문맥으로 본다.
+                    text = line[1:] if line.startswith(" ") else line
+                    old.append(text)
+                    new.append(text)
+            if old or new:
+                hunks.append((old, new))
 
-        if new_lines or not target_path.exists():
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        if not hunks:
+            continue
+
+        exists = target_path.is_file()
+        lines = target_path.read_text(encoding="utf-8").splitlines() if exists else []
+        for old, new in hunks:
+            if not old:
+                if exists:
+                    raise BuildError(f"{rel_path}: 문맥 없는 hunk는 위치를 특정할 수 없다")
+                lines = new
+                continue
+            at = _locate(lines, old)
+            if at < 0:
+                raise BuildError(f"{rel_path}: hunk 문맥이 원본과 맞지 않아 적용할 수 없다")
+            lines[at:at + len(old)] = new
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def diff_between(workdir: Path, base_ref: str, head_ref: str = "HEAD") -> str:
