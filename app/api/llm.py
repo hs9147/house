@@ -27,6 +27,7 @@ from ..schemas import (
     ReviewRequest,
 )
 from ..security import encrypt_value, require_admin, require_api_key
+from ..services import a2a as a2a_service
 from ..services import codemap as codemap_service
 from ..services import llm as llm_service
 from ..services import mcp_client
@@ -44,7 +45,7 @@ def _require_admin_for_external(provider: LlmProvider, key: ApiKey) -> None:
     소스를 외부로 보낼 수 있는 경로를 막는다. internal 프로바이더(project://)는
     사내망을 벗어나지 않으므로 일반 키에도 열어둔다.
     """
-    if provider.kind == LlmProviderKind.external and not key.is_admin:
+    if provider.kind != LlmProviderKind.internal and not key.is_admin:
         raise HTTPException(
             status_code=403,
             detail="외부 LLM 프로바이더는 admin 키만 사용할 수 있습니다.",
@@ -128,7 +129,7 @@ async def post_message(
     session_id: int,
     body: ChatMessageIn,
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_api_key),
 ):
     session = db.get(ChatSession, session_id)
     if session is None:
@@ -148,7 +149,7 @@ async def post_message(
     messages: list[dict] = [{"role": "system", "content": agent_system_prompt + "\n\n" + llm_service.EDIT_SYSTEM_PROMPT}]
 
     # 프로젝트 컨텍스트: 바인딩/체크된 모듈 규약 + 사용 가능 전체 자원 목록 + 코드 구조 개요
-    module_ctx = modules_service.context_for_llm(db, project)
+    module_ctx = a2a_service.list_project_a2a_cards(db, project)
     all_resources = modules_service.available_resources(db, project)
     workdir = workspace.workdir_for(project)
     
@@ -189,13 +190,25 @@ async def post_message(
     messages.extend({"role": m.role, "content": m.content} for m in history)
     messages.append({"role": "user", "content": body.content})
 
+    # 도구는 두 갈래다 — MCP 서버가 직접 광고하는 도구, 그리고 바인딩된 모듈을 A2A
+    # 게이트웨이 경유로 부르는 에이전트 도구(카드의 skills가 그대로 capability enum이 된다).
     mcp_servers = modules_service.mcp_servers_for_project(db, project)
-    tools, registry = mcp_client.build_openai_tools(mcp_servers) if mcp_servers else ([], {})
-    tool_executor = mcp_client.make_tool_executor(registry) if tools else None
+    mcp_tools, mcp_registry = mcp_client.build_openai_tools(mcp_servers) if mcp_servers else ([], {})
+    a2a_tools, a2a_registry = a2a_service.build_openai_tools(module_ctx)
+    mcp_exec = mcp_client.make_tool_executor(mcp_registry) if mcp_tools else None
+    a2a_exec = a2a_service.make_tool_executor(db, a2a_registry, key.name) if a2a_tools else None
+
+    tools = mcp_tools + a2a_tools
+
+    def tool_executor(fn_name: str, arguments: dict) -> str:
+        if fn_name in a2a_registry:
+            return a2a_exec(fn_name, arguments)
+        return mcp_exec(fn_name, arguments) if mcp_exec else f"unknown tool: {fn_name}"
 
     try:
         reply = await asyncio.to_thread(
-            llm_service.chat_completion, provider, messages, db, tools or None, tool_executor,
+            llm_service.chat_completion, provider, messages, db, tools or None,
+            tool_executor if tools else None,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"llm call failed: {e}")

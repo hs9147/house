@@ -81,10 +81,14 @@ export interface ModuleOut {
   config: Record<string, unknown>;
 }
 
+// 바인딩된 모듈은 A2A Agent Card 모양으로 내려온다 (services/a2a.build_agent_card)
 export interface ModuleSummary {
-  name: string;
+  agent_name: string;
   type: string;
-  env: string[];
+  category: string;
+  description: string;
+  skills: string[];
+  env_prefix: string;
 }
 
 // 대화식 편집 화면 자원 리스팅 — 바인딩 여부와 무관하게 사용 가능한 모듈을 아이템화

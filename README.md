@@ -212,15 +212,30 @@ POST /paas/api/v1/modules                           # external_api | internal_ap
 GET  /paas/api/v1/modules/search?keyword=           # 외부 API 디렉터리 키워드 검색 (admin, 아웃바운드 조회)
 POST /paas/api/v1/modules/import                    # 검색 결과를 external_api 모듈로 자동 추가 (admin, 이름 정규화)
 POST /paas/api/v1/projects/{id}/modules/{mid}/bind  # {env_prefix: "PAY"} → 배포 시 PAY_URL 등 자동 주입
-GET  /paas/api/v1/projects/{id}/modules             # LLM 컨텍스트용 요약 (비밀값 제외, 바인딩된 모듈만)
+GET  /paas/api/v1/projects/{id}/modules             # LLM 컨텍스트용 A2A Agent Card 목록
+                                                #   (비밀값 제외, 바인딩된 모듈만)
 GET  /paas/api/v1/projects/{id}/resources           # 대화식 편집 화면 자원 리스팅 — 바인딩 여부와 무관하게
                                                 #   이 프로젝트에서 쓸 수 있는 모든 모듈을 카테고리별로 아이템화
+
+GET  /paas/api/v1/a2a/agents                        # 등재된 에이전트 카드 목록 (?type= ?category= ?project_id=)
+GET  /paas/api/v1/a2a/agents/{name}/card            # 단일 카드
+POST /paas/api/v1/a2a/agents/{name}/task            # {capability, input} → 대상 에이전트로 중계
 
 POST /paas/api/v1/projects/{id}/preview             # {branch?, ttl_minutes=60} → {name}-pv{n}.{base_domain}
 GET  /paas/api/v1/projects/{id}/previews            # 조회 시 만료 프리뷰 자동 회수
 DELETE /paas/api/v1/previews/{id}
 ```
 
+- **A2A 게이트웨이 — 사내 자원을 에이전트로 추상화**: 모듈 레지스트리에 등록한 DB·API·
+  파일저장소·MCP 서버는 타입에 따라 호출 가능한 능력(`skills`)을 갖는 Agent Card로
+  정규화되어(`services/a2a.py`) `/a2a/agents`에서 열거됩니다. 호출은 반드시 게이트웨이를
+  거치며 **호출자는 대상의 자격증명을 보지 못합니다** — 게이트웨이가 복호화해
+  `Authorization`에 싣고, 호출자 신원을 `x-paas-calling-agent`로 전달한 뒤 감사 로그에
+  남깁니다. 같은 카드가 채팅 컨텍스트에도 주입되고 카드 하나가 도구 하나(`a2a__{이름}`,
+  capability는 카드의 `skills` enum)로 모델에 전달되므로, 모델은 카드에서 본 이름으로
+  다른 에이전트를 직접 호출할 수 있습니다.
+  현재 카드는 자체 규약입니다 — 표준 A2A 클라이언트가 붙으려면 `/.well-known/agent-card.json`
+  공개와 JSON-RPC `message/send` 수용이 남아 있습니다(미구현).
 - 내부 LLM 프로바이더(`project://llm-main`)를 쓰면 소스가 사내망을 벗어나지 않습니다.
 - internal_api 모듈과 `project://` LLM 프로바이더의 URL은 티어에 따라 자동
   해석됩니다(small: target 프로젝트의 실제 배포 URL과 동일한 서브패스 —

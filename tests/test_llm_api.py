@@ -1,4 +1,6 @@
 """LLM/모듈 API 통합 — 프로바이더 키 마스킹, 채팅→diff 제안 생성, 리뷰 엔드포인트."""
+import json
+
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -13,7 +15,7 @@ def _client() -> TestClient:
 
 def _create_provider(c: TestClient, name="claude") -> int:
     r = c.post("/paas/api/v1/llm/providers", json={
-        "name": name, "kind": "external", "base_url": "https://api.example.com",
+        "name": name, "kind": "openai", "base_url": "https://api.example.com",
         "api_key": "sk-secret", "model": "test-model",
     }, headers=ADMIN)
     assert r.status_code == 201, r.text
@@ -177,7 +179,7 @@ def test_chat_context_includes_code_structure_outline(monkeypatch, tmp_path):
            json={"content": "charge 함수 설명해줘"}, headers=ADMIN)
 
     system_text = "\n".join(m["content"] for m in captured["messages"] if m["role"] == "system")
-    assert "Code structure (outline)" in system_text
+    assert "CODE STRUCTURE (OUTLINE)" in system_text
     assert "svc.py" in system_text
     assert "def charge(amount)" in system_text
     assert "결제 서비스." in system_text
@@ -282,6 +284,14 @@ def test_module_bind_and_llm_context():
     assert c.post(f"/paas/api/v1/projects/{pid}/modules/{mid}/bind",
                   json={"env_prefix": "MAIL"}, headers=ADMIN).status_code == 409
 
+    # 컨텍스트는 A2A Agent Card와 같은 모양이다 — 모델이 카드에서 본 이름으로 그대로 호출한다.
     ctx = c.get(f"/paas/api/v1/projects/{pid}/modules", headers=ADMIN).json()
-    assert ctx == [{"name": "mail", "type": "external_api",
-                    "env": ["MAIL_API_KEY", "MAIL_URL"]}]
+    assert len(ctx) == 1
+    card = ctx[0]
+    assert card["agent_name"] == "mail"
+    assert card["type"] == "external_api"
+    assert card["env_prefix"] == "MAIL"
+    assert card["skills"] == ["invoke_api", "fetch_data"]
+    assert card["paas_a2a_endpoint"] == "/paas/api/v1/a2a/agents/mail/task"
+    # 비밀값은 카드에 실리지 않는다
+    assert "mk-1" not in json.dumps(card)
