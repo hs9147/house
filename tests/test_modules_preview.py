@@ -69,11 +69,17 @@ def test_internal_api_env_uses_target_projects_organization(fresh_settings):
         db.commit()
 
 
-def test_file_storage_env():
+def test_file_storage_env_exposes_url_not_local_path():
+    """저장소가 어느 디렉터리에 얹혀 있는지는 앱에 노출되지 않는다 — 창구 URL만 준다."""
     m = _module(ModuleType.file_storage,
-                {"endpoint": "http://seaweed:8333", "bucket": "assets"})
+                {"endpoint": "/srv/paas/data", "bucket": "assets"})
+    m.name = "assets-store"
     env = svc.binding_env(m, "FS")
-    assert env == {"FS_ENDPOINT": "http://seaweed:8333", "FS_BUCKET": "assets"}
+    assert env == {
+        "FS_URL": "https://apps.test/paas/api/v1/storage/assets-store",
+        "FS_BUCKET": "assets",
+    }
+    assert "/srv/paas/data" not in str(env)
 
 
 def test_available_resources_global_and_org_scope():

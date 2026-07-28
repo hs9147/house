@@ -6,12 +6,10 @@
                  프로젝트의 실제 배포 URL과 동일한 규칙, path_prefix_for 참고.
                  2차: http://paas-{target}.{ns}.svc)
   database     : PAY_DSN
-  file_storage : PAY_ENDPOINT, PAY_BUCKET
+  file_storage : PAY_URL (플랫폼 /storage/{모듈} 창구 — 로컬 경로는 노출하지 않는다), PAY_BUCKET
   mcp          : PAY_URL, PAY_API_KEY (배포된 앱 코드가 직접 쓸 수도 있고, 플랫폼
                  채팅이 services/mcp_client.py로 같은 서버의 도구를 호출하기도 함)
 """
-from pathlib import Path
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -85,22 +83,15 @@ def binding_env(
         return {f"{p}_DSN": cfg.get("dsn", "")}
 
     if t == ModuleType.file_storage:
-        endpoint = cfg.get("endpoint")
-        if not endpoint or endpoint in ["./data/storage", "data/storage"]:
-            endpoint = settings.storage_root or "./data/storage"
-        root_path = Path(endpoint).resolve()
-        sub_folder = cfg.get("sub_folder") or cfg.get("bucket", "")
-        root_clean = str(root_path).rstrip("/\\")
-        sub_clean = str(sub_folder).strip("/\\")
-        full_path = f"{root_clean}/{sub_clean}" if sub_clean else root_clean
-        storage_root_clean = str(Path(settings.storage_root or root_clean).resolve())
-        return {
-            f"{p}_ENDPOINT": root_clean,
-            f"{p}_STORAGE_ROOT": storage_root_clean,
-            f"{p}_SUB_FOLDER": sub_clean,
-            f"{p}_BUCKET": sub_clean,
-            f"{p}_PATH": full_path,
-        }
+        # 저장소가 실제로 어느 디렉터리에 얹혀 있는지는 플랫폼 내부 사정이다 —
+        # 앱에는 /storage/{모듈} 창구 URL만 준다.
+        from . import storage  # noqa: PLC0415 — 순환 import 회피
+
+        env = {f"{p}_URL": storage.url_for(module.name)}
+        bucket = str(cfg.get("sub_folder") or cfg.get("bucket") or "").strip("/\\")
+        if bucket:
+            env[f"{p}_BUCKET"] = bucket
+        return env
 
     if t == ModuleType.mcp:
         env = {f"{p}_URL": cfg.get("url", "")}

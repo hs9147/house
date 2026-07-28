@@ -14,6 +14,7 @@ import Projects from './pages/Projects';
 import PowerShellConsole from './pages/PowerShellConsole';
 import Providers from './pages/Providers';
 import ServerConfig from './pages/ServerConfig';
+import Storage from './pages/Storage';
 import CodeTab from './pages/project/CodeTab';
 import DeploymentsTab from './pages/project/DeploymentsTab';
 import EnvTab from './pages/project/EnvTab';
@@ -68,6 +69,14 @@ export default function App() {
           element={
             <AdminOnly>
               <Modules />
+            </AdminOnly>
+          }
+        />
+        <Route
+          path="/storage"
+          element={
+            <AdminOnly>
+              <Storage />
             </AdminOnly>
           }
         />

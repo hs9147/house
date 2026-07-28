@@ -27,6 +27,7 @@ import type {
   ReviewResult,
   ServerConfigOut,
   StatusSnapshot,
+  StorageListing,
 } from './types';
 
 // 백엔드 라우터는 모두 /paas 아래 마운트된다. /health, /status는 버전 prefix 없이
@@ -141,6 +142,20 @@ async function requestMultipart<T>(path: string, formData: FormData): Promise<T>
     throw new ApiError(res.status, detail);
   }
   return data as T;
+}
+
+/** 파일 다운로드 — x-api-key가 필요해 <a href>로는 못 받는다. Blob으로 받아 저장한다. */
+async function requestBlob(path: string, query: Record<string, string>): Promise<Blob> {
+  const res = await fetch(`${apiUrl(path)}?${new URLSearchParams(query).toString()}`, {
+    headers: { 'x-api-key': getKey() },
+  });
+  if (res.status === 401) {
+    logout();
+    window.location.hash = '#/login';
+    throw new ApiError(401, '인증이 만료되었습니다. 다시 로그인하세요.');
+  }
+  if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
+  return res.blob();
 }
 
 export const api = {
@@ -265,6 +280,20 @@ export const api = {
     return request<ModuleOut>('POST', '/modules/upload-storage', fd);
   },
   deleteModule: (id: number) => request<void>('DELETE', `/modules/${id}`),
+
+  // 파일 저장소 — 로컬 경로는 노출되지 않고 /storage/{모듈} 창구로만 다룬다
+  listStorageFiles: (module: string) =>
+    request<StorageListing>('GET', `/storage/${module}/files`),
+  uploadStorageFile: (module: string, file: File, path?: string) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (path) fd.append('path', path);
+    return requestMultipart<{ path: string }>(`/storage/${module}/files`, fd);
+  },
+  deleteStorageFile: (module: string, path: string) =>
+    request<void>('DELETE', `/storage/${module}/files`, undefined, { path }),
+  downloadStorageFile: (module: string, path: string) =>
+    requestBlob(`/storage/${module}/files/content`, { path }),
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),
   bindModule: (projectId: number, moduleId: number, env_prefix: string) =>

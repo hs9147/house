@@ -221,6 +221,11 @@ GET  /paas/api/v1/a2a/agents                        # 등재된 에이전트 카
 GET  /paas/api/v1/a2a/agents/{name}/card            # 단일 카드
 POST /paas/api/v1/a2a/agents/{name}/task            # {capability, input} → 대상 에이전트로 중계
 
+GET  /paas/api/v1/storage/{module}/files            # file_storage 모듈의 파일 목록 + 창구 URL
+GET  /paas/api/v1/storage/{module}/files/content    # ?path= 다운로드
+POST /paas/api/v1/storage/{module}/files            # multipart {file, path?} 업로드
+DELETE /paas/api/v1/storage/{module}/files          # ?path= 삭제
+
 POST /paas/api/v1/projects/{id}/preview             # {branch?, ttl_minutes=60} → {name}-pv{n}.{base_domain}
 GET  /paas/api/v1/projects/{id}/previews            # 조회 시 만료 프리뷰 자동 회수
 DELETE /paas/api/v1/previews/{id}
@@ -236,6 +241,11 @@ DELETE /paas/api/v1/previews/{id}
   다른 에이전트를 직접 호출할 수 있습니다.
   현재 카드는 자체 규약입니다 — 표준 A2A 클라이언트가 붙으려면 `/.well-known/agent-card.json`
   공개와 JSON-RPC `message/send` 수용이 남아 있습니다(미구현).
+- **파일 저장소는 URL로만 다룹니다**: `file_storage` 모듈이 실제로 어느 디렉터리에
+  얹혀 있는지는 플랫폼 내부 사정입니다. 바인딩된 앱에는 로컬 경로 대신
+  `{PREFIX}_URL`(= `/paas/api/v1/storage/{모듈}`)만 주입되고, 콘솔의 **파일 관리** 화면도
+  같은 창구를 씁니다. 저장소 루트는 `PAAS_STORAGE_ROOT`이며 경로 탈출과 절대 경로는
+  거부됩니다(`services/storage.py`).
 - 내부 LLM 프로바이더(`project://llm-main`)를 쓰면 소스가 사내망을 벗어나지 않습니다.
 - internal_api 모듈과 `project://` LLM 프로바이더의 URL은 티어에 따라 자동
   해석됩니다(small: target 프로젝트의 실제 배포 URL과 동일한 서브패스 —
@@ -278,7 +288,8 @@ npm run build        # tsc 타입체크 + vite build → dist/
   입력/조직 소속 자동 생성/zip·폴더 업로드 3가지 방식 선택, dev/release 배포·롤백·중지·배포
   이력·로그 3초 폴링·환경변수·모듈 바인딩·프리뷰), 코드 확인(읽기 전용 파일 트리·내용 뷰어 —
   수정은 채팅 탭에서 diff로만), 모듈 레지스트리(카테고리·조직 범위 표시 + admin은 "외부 API
-  검색"으로 공개 디렉터리에서 external_api 자동 추가), LLM 프로바이더,
+  검색"으로 공개 디렉터리에서 external_api 자동 추가), 파일 관리(file_storage 모듈의
+  창구 URL 표시 + 목록·업로드·다운로드·삭제), LLM 프로바이더,
   대화식 코드 편집(diff 뷰 + 승인/거절 + 브랜치 리뷰 + 프로젝트 선택 시 카테고리별 사용 가능
   자원 패널 + 코드 구조 트리 확대/축소), 서버구성(런타임/
   프록시 백엔드 표시, 프로젝트×프로필별 도메인·상태·배포/중지, 리다이렉트/재작성 규칙

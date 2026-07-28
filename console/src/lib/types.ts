@@ -81,6 +81,18 @@ export interface ModuleOut {
   config: Record<string, unknown>;
 }
 
+// 파일 저장소 — 로컬 경로 대신 창구 URL로만 다룬다 (services/storage.py)
+export interface StorageFile {
+  path: string;
+  size: number;
+}
+
+export interface StorageListing {
+  module: string;
+  url: string;
+  files: StorageFile[];
+}
+
 // 바인딩된 모듈은 A2A Agent Card 모양으로 내려온다 (services/a2a.build_agent_card)
 export interface ModuleSummary {
   agent_name: string;
