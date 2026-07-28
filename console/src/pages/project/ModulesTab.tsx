@@ -46,15 +46,17 @@ export default function ModulesTab() {
               <tr>
                 <th>모듈</th>
                 <th>타입</th>
-                <th>주입 환경변수</th>
+                <th>env 접두사</th>
+                <th>능력</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((m) => (
-                <tr key={m.name}>
-                  <td>{m.name}</td>
+                <tr key={m.agent_name}>
+                  <td>{m.agent_name}</td>
                   <td><StatusPill value={m.type} /></td>
-                  <td className="mono">{m.env.join(', ')}</td>
+                  <td className="mono">{m.env_prefix}</td>
+                  <td className="mono">{m.skills.join(', ')}</td>
                 </tr>
               ))}
             </tbody>

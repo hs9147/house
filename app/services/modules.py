@@ -10,6 +10,8 @@
   mcp          : PAY_URL, PAY_API_KEY (배포된 앱 코드가 직접 쓸 수도 있고, 플랫폼
                  채팅이 services/mcp_client.py로 같은 서버의 도구를 호출하기도 함)
 """
+from pathlib import Path
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -158,24 +160,5 @@ def available_resources(db: Session, project: Project) -> list[dict]:
     return result
 
 
-def context_for_llm(db: Session, project: Project) -> list[dict]:
-    """에이전트 빌더용 — 구현 세부명세(URL, API Key, Header 등)는 PaaS가 100% 프록시 처리하고,
-    프롬프트에는 모듈 설명(description)과 PaaS 프록시 대상 식별자만 주입한다."""
-    rows = db.execute(
-        select(ModuleBinding, Module)
-        .join(Module, ModuleBinding.module_id == Module.id)
-        .where(ModuleBinding.project_id == project.id)
-    ).all()
-    summary = []
-    for binding, module in rows:
-        cfg = decrypt_config(module.config or {})
-        desc = cfg.get("description") or f"{module.type.value} module for {module.name}"
-        summary.append({
-            "name": module.name,
-            "type": module.type.value,
-            "category": module.category or "general",
-            "description": desc,
-            "paas_proxy_endpoint": f"/paas/api/v1/proxy/modules/{module.name}",
-            "env_prefix": binding.env_prefix,
-        })
-    return summary
+# 에이전트 빌더용 모듈 컨텍스트는 services/a2a.list_project_a2a_cards가 만든다 —
+# 카드와 프롬프트 컨텍스트가 같은 모양이어야 모델이 배운 이름으로 그대로 호출할 수 있다.

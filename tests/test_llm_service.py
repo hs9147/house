@@ -8,7 +8,7 @@ TOOLS = [{"type": "function", "function": {"name": "srv__search", "description":
 
 def _provider() -> LlmProvider:
     return LlmProvider(
-        name="p", kind=LlmProviderKind.external, base_url="https://api.example.com", model="m",
+        name="p", kind=LlmProviderKind.openai, base_url="https://api.example.com", model="m",
     )
 
 

@@ -1,17 +1,36 @@
 """PaaS Central A2A (Agent-to-Agent) Gateway — A2A 규약 기반 메시지 전달 및 프로토콜 변환 전담 라우터."""
-import httpx
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import audit
 from ..db import get_db
-from ..models import ApiKey, Module
+from ..models import ApiKey, Module, Project
 from ..security import require_api_key
 from ..services import a2a as a2a_service
-from ..services import modules as modules_service
 
 router = APIRouter(tags=["a2a_gateway"])
+
+
+@router.get("/a2a/agents")
+def list_a2a_agents(
+    type: str | None = None,
+    category: str | None = None,
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """등재된 A2A 에이전트(모듈) 카드 목록 — 이름을 미리 몰라도 찾을 수 있는 디스커버리 창구.
+
+    project_id를 주면 그 프로젝트 관점의 조직 전용 자원까지 보이고, 없으면 전역 자원만 나온다.
+    """
+    project = None
+    if project_id is not None:
+        project = db.get(Project, project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+    return a2a_service.list_agent_cards(db, project=project, type=type, category=category)
 
 
 @router.get("/a2a/agents/{agent_name}/card")
@@ -39,44 +58,22 @@ async def execute_a2a_task(
     if module is None:
         raise HTTPException(status_code=404, detail=f"Target A2A Agent '{agent_name}' not found")
 
-    cfg = modules_service.decrypt_config(module.config or {})
-    target_url = cfg.get("url") or cfg.get("endpoint")
-    if not target_url:
-        raise HTTPException(status_code=400, detail=f"Target A2A Agent '{agent_name}' has no endpoint URL configured")
-
     try:
         payload = await request.json()
     except Exception:
         payload = {}
 
-    task_id = payload.get("task_id") or "a2a-task-001"
-    capability = payload.get("capability") or "default"
-    params = payload.get("input") or payload.get("params") or {}
-
-    headers = {
-        "content-type": "application/json",
-        "x-paas-a2a-gateway": "true",
-        "x-paas-calling-agent": key.name,
-    }
-
-    api_key = cfg.get("api_key") or cfg.get("secret_key")
-    if api_key:
-        headers["authorization"] = f"Bearer {api_key}"
-
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            res = await client.post(target_url, json={"task_id": task_id, "capability": capability, "params": params}, headers=headers)
-
-        audit.record(db, key.name, "a2a.task.execute", agent_name, {"capability": capability, "status": res.status_code})
-        return {
-            "jsonrpc": "2.0",
-            "id": task_id,
-            "result": {
-                "agent_name": agent_name,
-                "status": "success" if res.status_code < 400 else "failed",
-                "http_code": res.status_code,
-                "output": res.json() if "application/json" in res.headers.get("content-type", "") else res.text,
-            }
-        }
+        return await asyncio.to_thread(
+            a2a_service.execute_task,
+            db,
+            module,
+            payload.get("capability") or "default",
+            payload.get("input") or payload.get("params") or {},
+            key.name,
+            payload.get("task_id") or "a2a-task-001",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"A2A Task execution via PaaS Gateway failed: {e}")

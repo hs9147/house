@@ -164,15 +164,9 @@ def require_api_key(
     if row is not None:
         return row
 
-    # 3. DB 계정명(name == x_api_key) 일치 검증
-    name_row = db.execute(select(ApiKey).where(ApiKey.name == x_api_key)).scalar_one_or_none()
-    if name_row is not None:
-        return name_row
-
-    # 4. 일반 사용자 세션 키 (paas_user / 이메일 등) 유효 계정 인정
-    if "@" in x_api_key or x_api_key.startswith("paas_") or len(x_api_key) >= 3:
-        return ApiKey(name=x_api_key, key_hash="", is_admin=False)
-
+    # 계정명·길이 기반 인정은 두지 않는다 — 계정명은 감사 로그와 콘솔에 그대로 노출되는
+    # 공개 식별자라 비밀값이 아니다. 인증은 관리자 키(1)나 발급된 키의 해시(2)로만 성립한다.
+    # 일반 사용자 계정도 /auth/register·/auth/login이 key_hash를 심어 두므로 2에서 통과한다.
     raise HTTPException(status_code=401, detail="invalid api key")
 
 

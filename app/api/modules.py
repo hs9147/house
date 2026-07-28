@@ -12,6 +12,7 @@ from ..db import get_db
 from ..models import ApiKey, Module, ModuleBinding, ModuleType, Organization, Project
 from ..schemas import ApiModuleImport, ModuleBind, ModuleCreate
 from ..security import require_admin, require_api_key
+from ..services import a2a as a2a_service
 from ..services import apisearch
 from ..services import mcp_search
 from ..services import modules as svc
@@ -254,7 +255,7 @@ def project_modules(
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
-    return svc.context_for_llm(db, project)
+    return a2a_service.list_project_a2a_cards(db, project)
 
 
 @router.get("/projects/{project_id}/resources")

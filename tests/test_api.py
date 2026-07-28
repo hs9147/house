@@ -20,6 +20,13 @@ def test_requires_api_key():
     assert c.get("/paas/api/v1/projects", headers={"x-api-key": "wrong"}).status_code == 401
 
 
+def test_key_name_is_not_a_credential():
+    """계정명은 감사 로그·콘솔에 노출되는 공개 식별자다 — 그것만으로 인증되면 안 된다."""
+    c = _client()
+    assert c.post("/paas/api/v1/keys", json={"name": "ci-bot"}, headers=ADMIN).status_code == 201
+    assert c.get("/paas/api/v1/projects", headers={"x-api-key": "ci-bot"}).status_code == 401
+
+
 def test_project_crud_and_env_masking():
     c = _client()
     body = {
