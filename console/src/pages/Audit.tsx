@@ -11,7 +11,7 @@ export default function Audit() {
   return (
     <div className="panel">
       <div className="row" style={{ marginBottom: 12 }}>
-        <h2 style={{ margin: 0 }}>감사 로그</h2>
+        <h2 style={{ margin: 0 }}>작업 로그</h2>
         <div className="spacer" />
         <select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
           <option value={100}>최근 100건</option>

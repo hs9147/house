@@ -61,7 +61,7 @@ export default function Layout() {
           {admin && has('deploy') && <NavLink to="/server-config">서버구성</NavLink>}
           {admin && has('workspace') && <NavLink to="/providers">LLM</NavLink>}
           {has('workspace') && <NavLink to="/chat">에이전트 빌더</NavLink>}
-          {admin && <NavLink to="/audit">감사 로그</NavLink>}
+          {admin && <NavLink to="/audit">작업 로그</NavLink>}
         </nav>
         <div className="sidebar-footer">
           {health.data && (
