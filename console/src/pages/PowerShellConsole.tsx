@@ -148,6 +148,26 @@ export default function PowerShellConsole() {
     }
   };
 
+  const [restarting, setRestarting] = useState(false);
+
+  const handleRestartBackend = async () => {
+    if (!window.confirm('Self-Kill 방지 모드로 PaaS 백엔드 서비스를 2초 후 디태치 재기동하시겠습니까?')) return;
+    setRestarting(true);
+    try {
+      const res = await api.restartBackendService();
+      setLogs((prev) => [
+        ...prev,
+        `\n[System Notification] ${res.message}`,
+        `[System] 3초 후 백엔드 서비스 연결 상태를 확인하세요.\n`,
+      ]);
+    } catch (err) {
+      setLogs((prev) => [...prev, `[System Error] 백엔드 재기동 요청 실패: ${(err as Error).message}`]);
+    } finally {
+      setRestarting(false);
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  };
+
   // 명령어 실행 완료 후 인풋 커서 포커스 자동 유지
   useEffect(() => {
     if (!running && connected && activeTab === 'console') {
@@ -183,6 +203,14 @@ export default function PowerShellConsole() {
             >
               {connected ? '● 연결됨 (Connected)' : '○ 연결 끊김 (Disconnected)'}
             </span>
+            <button
+              className="secondary small"
+              disabled={restarting}
+              onClick={handleRestartBackend}
+              title="Self-Kill 방지 독립 프로세스로 백엔드 안전 재기동"
+            >
+              {restarting ? '재기동 요청 중...' : '🔄 백엔드 안전 재기동'}
+            </button>
             {!connected ? (
               <button className="primary small" onClick={handleConnect}>
                 🔗 연결

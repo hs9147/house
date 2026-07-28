@@ -305,6 +305,36 @@ def list_build_log_files(
         return {"files": [], "log_dir": "", "error": str(e)}
 
 
+@router.post("/system/restart")
+def restart_backend_service(
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """Self-Kill 대응: 백엔드가 자기 자신을 재시작할 때 부모 프로세스 종속성 없이 DETACHED 독립 프로세스로 2초 후 안전 재기동한다."""
+    import sys  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    py_exe = sys.executable
+    restart_script = (
+        f"Start-Sleep -Seconds 2; & '{py_exe}' -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    )
+
+    try:
+        flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", restart_script],
+            creationflags=flags,
+            close_fds=True,
+        )
+        audit.record(db, admin.name, "system.restart", "backend_service", {"py_exe": py_exe})
+        return {
+            "status": "restarting",
+            "message": "PaaS 백엔드 서비스가 2초 후 디태치 독립 프로세스로 안전하게 재기동됩니다.",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to schedule service restart: {e}")
+
+
 @router.get("/system/build-logs/content")
 def get_build_log_content(
     filename: str,

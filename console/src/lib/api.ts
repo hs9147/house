@@ -324,4 +324,6 @@ export const api = {
     request<{ files: { filename: string; relative_path: string; size_bytes: number; mtime: number }[]; log_dir: string }>('GET', '/system/build-logs'),
   getBuildLogContent: (filename: string, tail_lines = 1000) =>
     request<{ filename: string; total_lines: number; tail_lines: number; content: string }>('GET', `/system/build-logs/content?filename=${encodeURIComponent(filename)}&tail_lines=${tail_lines}`),
+  restartBackendService: () =>
+    request<{ status: string; message: string }>('POST', '/system/restart'),
 };
