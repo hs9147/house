@@ -371,6 +371,72 @@ function GroupedApiConfigForm({
   );
 }
 
+function FileStorageConfigForm({
+  config,
+  onChange,
+}: {
+  config: Record<string, unknown>;
+  onChange: (newConfig: Record<string, unknown>) => void;
+}) {
+  const [rootPath, setRootPath] = useState<string>(String(config.endpoint ?? './data/storage'));
+  const [subFolder, setSubFolder] = useState<string>(String(config.sub_folder ?? config.bucket ?? 'uploads'));
+
+  const update = (root: string, sub: string) => {
+    onChange({
+      endpoint: root.trim(),
+      sub_folder: sub.trim(),
+      bucket: sub.trim(),
+    });
+  };
+
+  const rootClean = rootPath.trim().replace(/[/\\]+$/, '');
+  const subClean = subFolder.trim().replace(/^[/\\]+/, '');
+  const fullPath = subClean ? `${rootClean}/${subClean}` : rootClean;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 4 }}>
+      <div className="panel" style={{ padding: 12, margin: 0, backgroundColor: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: '#38bdf8', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+          💾 Root 경로 (환경변수 PAAS_STORAGE_ROOT 반영)
+        </div>
+        <label className="field">
+          저장소 Root 경로 (기본값: PAAS_STORAGE_ROOT 환경변수)
+          <input
+            value={rootPath}
+            onChange={(e) => {
+              setRootPath(e.target.value);
+              update(e.target.value, subFolder);
+            }}
+            placeholder="./data/storage 또는 /mnt/nas/storage"
+          />
+        </label>
+      </div>
+
+      <div className="panel" style={{ padding: 12, margin: 0, backgroundColor: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: '#f59e0b', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+          📂 하위 폴더 지정 (Sub-folder Path)
+        </div>
+        <label className="field">
+          Root 경로 하위 폴더 선택/입력 <span style={{ color: '#ef4444' }}>*</span>
+          <input
+            value={subFolder}
+            onChange={(e) => {
+              setSubFolder(e.target.value);
+              update(rootPath, e.target.value);
+            }}
+            placeholder="uploads 또는 shared-data"
+            required
+          />
+        </label>
+        <div style={{ marginTop: 8, padding: 8, borderRadius: 4, background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.05)', fontSize: 12 }}>
+          <span style={{ color: '#9ca3af' }}>최종 자동 결합 경로: </span>
+          <span style={{ color: '#38bdf8', fontWeight: 600, fontFamily: 'monospace' }}>{fullPath}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CreateModuleModal({
   onClose,
   onCreated,
@@ -394,10 +460,15 @@ function CreateModuleModal({
     setError('');
     let finalConfig: Record<string, unknown> = {};
 
-    if (type === 'external_api') {
+    if (type === 'external_api' || type === 'file_storage') {
       finalConfig = configObj;
-      if (!finalConfig.url) {
+      if (type === 'external_api' && !finalConfig.url) {
         setError('API Endpoint URL은 필수 입력 항목입니다.');
+        setBusy(false);
+        return;
+      }
+      if (type === 'file_storage' && !finalConfig.sub_folder) {
+        setError('하위 폴더 지정은 필수 항목입니다.');
         setBusy(false);
         return;
       }
@@ -428,13 +499,13 @@ function CreateModuleModal({
     <Modal title="새 모듈 등록" onClose={onClose}>
       <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <label className="field">
-          모듈 이름 — 빈칸 없이 소문자·숫자·하이픈만 사용 (예: payment-api)
+          모듈 이름 — 빈칸 없이 소문자·숫자·하이픈만 사용 (예: user-storage)
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
             pattern="[a-z0-9][a-z0-9-]{1,40}"
-            title="빈칸 없이 소문자·숫자·하이픈만 사용하세요 (예: payment-api)"
-            placeholder="payment-api"
+            title="빈칸 없이 소문자·숫자·하이픈만 사용하세요 (예: user-storage)"
+            placeholder="user-storage"
             required
             autoFocus
           />
@@ -444,21 +515,26 @@ function CreateModuleModal({
           <select
             value={type}
             onChange={(e) => {
-              setType(e.target.value);
-              setConfigJson(TYPE_HINTS[e.target.value] || '{}');
+              const newType = e.target.value;
+              setType(newType);
+              if (newType === 'file_storage') {
+                setConfigObj({ endpoint: './data/storage', sub_folder: 'uploads' });
+              } else {
+                setConfigJson(TYPE_HINTS[newType] || '{}');
+              }
             }}
           >
             <option value="external_api">external_api — 외부 API (환경변수 그룹 관리)</option>
+            <option value="file_storage">file_storage — 파일 저장소 (Root/하위 폴더 지정)</option>
             <option value="internal_api">internal_api — 플랫폼 내 프로젝트</option>
             <option value="database">database — DB 연결</option>
-            <option value="file_storage">file_storage — 파일 저장소</option>
             <option value="mcp">mcp — 외부 MCP 서버</option>
           </select>
         </label>
 
         <label className="field">
-          카테고리 (선택 — 예: payment, news, auth)
-          <input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="payment" />
+          카테고리 (선택 — 예: storage, media, docs)
+          <input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="storage" />
         </label>
 
         {orgs.data && orgs.data.length > 0 && (
@@ -475,9 +551,11 @@ function CreateModuleModal({
           </label>
         )}
 
-        {/* 외부 API 일 때 그룹핑 폼 / 기타 모듈은 JSON textarea */}
+        {/* 타입별 맞춤형 환경변수 및 폴더 지정 폼 */}
         {type === 'external_api' ? (
           <GroupedApiConfigForm config={configObj} onChange={setConfigObj} />
+        ) : type === 'file_storage' ? (
+          <FileStorageConfigForm config={configObj} onChange={setConfigObj} />
         ) : (
           <label className="field">
             설정 (JSON)

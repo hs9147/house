@@ -83,9 +83,16 @@ def binding_env(
         return {f"{p}_DSN": cfg.get("dsn", "")}
 
     if t == ModuleType.file_storage:
+        root_path = cfg.get("endpoint") or settings.storage_root or "./data/storage"
+        sub_folder = cfg.get("sub_folder") or cfg.get("bucket", "")
+        root_clean = str(root_path).rstrip("/\\")
+        sub_clean = str(sub_folder).strip("/\\")
+        full_path = f"{root_clean}/{sub_clean}" if sub_clean else root_clean
         return {
-            f"{p}_ENDPOINT": cfg.get("endpoint", ""),
-            f"{p}_BUCKET": cfg.get("bucket", ""),
+            f"{p}_ENDPOINT": root_clean,
+            f"{p}_SUB_FOLDER": sub_clean,
+            f"{p}_BUCKET": sub_clean,
+            f"{p}_PATH": full_path,
         }
 
     if t == ModuleType.mcp:

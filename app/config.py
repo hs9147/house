@@ -58,9 +58,10 @@ class Settings(BaseSettings):
     # POST /admin/rotate-secrets 로 전체 재암호화 → 구 키 제거.
     fernet_keys_old: str = ""
 
-    # Git 작업 디렉토리 / 빌드 로그 저장소
+    # Git 작업 디렉토리 / 빌드 로그 저장소 / 파일 저장소 Root (환경변수: PAAS_STORAGE_ROOT)
     work_dir: Path = Path("./data/workspaces")
     build_log_dir: Path = Path("./data/build-logs")
+    storage_root: str = "./data/storage"
 
     # --- 1차(small) 전용 ---
     # 실행 런타임: docker(기본, 컨테이너 이미지) | windows_service(Docker 없이 nssm으로
