@@ -64,7 +64,7 @@ def test_review_parsing(monkeypatch):
     )
     from app.models import LlmProvider, LlmProviderKind
 
-    provider = LlmProvider(name="t", kind=LlmProviderKind.external,
+    provider = LlmProvider(name="t", kind=LlmProviderKind.openai,
                            base_url="https://x", model="m")
     findings = llm.review_diff(provider, "--- a/a.py\n+++ b/a.py\n")
     assert findings[0]["severity"] == "high"

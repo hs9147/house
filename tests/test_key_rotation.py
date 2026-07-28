@@ -41,7 +41,7 @@ def test_rotate_secrets_endpoint_reencrypts_all(monkeypatch, fresh_settings):
     }, headers=ADMIN).json()["id"]
     c.put(f"/paas/api/v1/projects/{pid}/env", json={"key": "TOKEN", "value": "old-secret"}, headers=ADMIN)
     c.post("/paas/api/v1/llm/providers", json={
-        "name": "p1", "kind": "external", "base_url": "https://x", "api_key": "pk", "model": "m",
+        "name": "p1", "kind": "openai", "base_url": "https://x", "api_key": "pk", "model": "m",
     }, headers=ADMIN)
     c.post("/paas/api/v1/modules", json={
         "name": "m1", "type": "external_api", "config": {"url": "https://y", "api_key": "mk"},
