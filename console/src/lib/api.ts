@@ -264,6 +264,7 @@ export const api = {
     if (organization_id) fd.append('organization_id', String(organization_id));
     return request<ModuleOut>('POST', '/modules/upload-storage', fd);
   },
+  deleteModule: (id: number) => request<void>('DELETE', `/modules/${id}`),
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),
   bindModule: (projectId: number, moduleId: number, env_prefix: string) =>
@@ -273,6 +274,7 @@ export const api = {
 
   // LLM
   listProviders: () => request<LlmProviderOut[]>('GET', '/llm/providers'),
+  deleteProvider: (id: number) => request<void>('DELETE', `/llm/providers/${id}`),
   createProvider: (body: {
     name: string; kind: string; base_url: string; api_key?: string; model: string;
   }) => request<LlmProviderOut>('POST', '/llm/providers', body),

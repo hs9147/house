@@ -51,6 +51,7 @@ export default function Modules() {
                 <th>카테고리</th>
                 <th>범위</th>
                 <th>설정</th>
+                {isAdmin() && <th>작업</th>}
               </tr>
             </thead>
             <tbody>
@@ -85,6 +86,25 @@ export default function Modules() {
                       <span className="mono">{JSON.stringify(m.config)}</span>
                     )}
                   </td>
+                  {isAdmin() && (
+                    <td>
+                      <button
+                        className="small danger"
+                        onClick={async () => {
+                          if (confirm(`정말로 모듈 '${m.name}'을(를) 삭제하시겠습니까?`)) {
+                            try {
+                              await api.deleteModule(m.id);
+                              state.reload();
+                            } catch (err) {
+                              alert((err as Error).message);
+                            }
+                          }
+                        }}
+                      >
+                        삭제
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

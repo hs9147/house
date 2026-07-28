@@ -85,6 +85,23 @@ def list_providers(db: Session = Depends(get_db), _: ApiKey = Depends(require_ap
     return [_provider_out(p) for p in rows]
 
 
+@router.delete("/llm/providers/{provider_id}", status_code=204)
+def delete_provider(
+    provider_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """admin 권한으로 LLM 프로바이더를 삭제한다."""
+    row = db.get(LlmProvider, provider_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="provider not found")
+    provider_name = row.name
+    db.delete(row)
+    db.commit()
+    audit.record(db, admin.name, "llm.provider.delete", provider_name, {"provider_id": provider_id})
+    return None
+
+
 @router.post("/chat/sessions")
 def create_session(
     body: ChatSessionCreate,

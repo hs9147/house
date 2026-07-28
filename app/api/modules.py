@@ -125,6 +125,28 @@ def update_module(
             "organization_id": row.organization_id, "config": svc.masked_config(row.config)}
 
 
+@router.delete("/modules/{module_id}", status_code=204)
+def delete_module(
+    module_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """admin 권한으로 모듈을 삭제한다."""
+    row = db.get(Module, module_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="module not found")
+
+    bindings = db.execute(select(ModuleBinding).where(ModuleBinding.module_id == module_id)).scalars().all()
+    for b in bindings:
+        db.delete(b)
+
+    mod_name = row.name
+    db.delete(row)
+    db.commit()
+    audit.record(db, admin.name, "module.delete", mod_name, {"module_id": module_id})
+    return None
+
+
 @router.post("/projects/{project_id}/modules/{module_id}/bind", status_code=201)
 def bind_module(
     project_id: int,

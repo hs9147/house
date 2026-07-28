@@ -49,6 +49,7 @@ export default function Providers() {
                   <th>Endpoint</th>
                   <th>모델</th>
                   <th>API 키</th>
+                  {admin && <th>작업</th>}
                 </tr>
               </thead>
               <tbody>
@@ -62,6 +63,25 @@ export default function Providers() {
                     <td className="mono">{p.base_url}</td>
                     <td className="mono">{p.model}</td>
                     <td>{p.has_api_key ? '설정됨' : '-'}</td>
+                    {admin && (
+                      <td>
+                        <button
+                          className="small danger"
+                          onClick={async () => {
+                            if (confirm(`정말로 LLM 프로바이더 '${p.name}'을(를) 삭제하시겠습니까?`)) {
+                              try {
+                                await api.deleteProvider(p.id);
+                                state.reload();
+                              } catch (err) {
+                                alert((err as Error).message);
+                              }
+                            }
+                          }}
+                        >
+                          삭제
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
