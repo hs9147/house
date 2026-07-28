@@ -188,3 +188,71 @@ def audit_log(
          "detail": r.detail, "at": r.created_at.isoformat()}
         for r in rows
     ]
+
+
+@router.post("/system/powershell/exec")
+def exec_powershell_cmd(
+    body: dict,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """admin 전용 PowerShell 명령어 실행 API."""
+    import subprocess  # noqa: PLC0415
+    cmd = body.get("command", "").strip()
+    if not cmd:
+        raise HTTPException(status_code=400, detail="command field is required")
+
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            encoding="utf-8",
+            errors="replace",
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+        audit.record(db, admin.name, "powershell.exec", cmd[:100], {"returncode": proc.returncode})
+        return {
+            "command": cmd,
+            "returncode": proc.returncode,
+            "output": output or "(no output)",
+        }
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="PowerShell command execution timed out (30s)")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PowerShell execution failed: {e}")
+
+
+@router.websocket("/system/powershell/ws")
+async def powershell_websocket_terminal(websocket: WebSocket):
+    """admin 전용 실시간 PowerShell WebSocket 터미널."""
+    import subprocess  # noqa: PLC0415
+    await websocket.accept()
+    try:
+        await websocket.send_text("Windows PowerShell Interactive Console Connected.\nType commands or click Disconnect to end session.\n\nPS > ")
+        while True:
+            cmd = await websocket.receive_text()
+            cmd_str = cmd.strip()
+            if not cmd_str:
+                await websocket.send_text("PS > ")
+                continue
+            if cmd_str.lower() in ["exit", "quit"]:
+                await websocket.send_text("PowerShell Session Closed.\n")
+                await websocket.close()
+                break
+
+            proc = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd_str],
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+                encoding="utf-8",
+                errors="replace",
+            )
+            out = (proc.stdout or "") + (proc.stderr or "")
+            if not out.strip():
+                out = "(completed)"
+            await websocket.send_text(f"{out}\n\nPS > ")
+    except Exception:
+        pass

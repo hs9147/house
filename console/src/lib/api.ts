@@ -316,4 +316,8 @@ export const api = {
   // 계정 회원가입
   registerUser: (body: { email: string; name: string; password: string }) =>
     request<{ name: string; email: string; key: string; is_admin: boolean }>('POST', '/auth/register', body),
+
+  // PowerShell 터미널
+  execPowerShell: (command: string) =>
+    request<{ command: string; returncode: number; output: string }>('POST', '/system/powershell/exec', { command }),
 };
