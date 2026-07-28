@@ -245,7 +245,9 @@ DELETE /paas/api/v1/previews/{id}
   얹혀 있는지는 플랫폼 내부 사정입니다. 바인딩된 앱에는 로컬 경로 대신
   `{PREFIX}_URL`(= `/paas/api/v1/storage/{모듈}`)만 주입되고, 콘솔의 **파일 관리** 화면도
   같은 창구를 씁니다. 저장소 루트는 `PAAS_STORAGE_ROOT`이며 경로 탈출과 절대 경로는
-  거부됩니다(`services/storage.py`).
+  거부됩니다(`services/storage.py`). 사내망 전제라 앱마다 별도 자격증명을 발급하지 않는
+  대신, 업로드·다운로드·삭제는 모두 호출 주체(`x-api-key`의 키 이름 또는 OIDC
+  `preferred_username`)와 함께 감사 로그에 남습니다.
 - 내부 LLM 프로바이더(`project://llm-main`)를 쓰면 소스가 사내망을 벗어나지 않습니다.
 - internal_api 모듈과 `project://` LLM 프로바이더의 URL은 티어에 따라 자동
   해석됩니다(small: target 프로젝트의 실제 배포 URL과 동일한 서브패스 —

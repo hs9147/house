@@ -42,6 +42,12 @@ def test_upload_list_download_delete(monkeypatch, tmp_path, fresh_settings):
     assert dl.status_code == 200
     assert dl.content == b"binary-bytes"
 
+    # 사내망 전제로 별도 자격증명은 요구하지 않되, 꺼내 간 주체는 감사 로그에 남는다
+    audit = c.get("/paas/api/v1/audit", headers=ADMIN).json()
+    actions = {(row["action"], row["actor"]) for row in audit}
+    assert ("storage.upload", "bootstrap-admin") in actions
+    assert ("storage.download", "bootstrap-admin") in actions
+
     assert c.delete("/paas/api/v1/storage/assets/files?path=logo.png",
                     headers=ADMIN).status_code == 204
     assert c.get("/paas/api/v1/storage/assets/files", headers=ADMIN).json()["files"] == []

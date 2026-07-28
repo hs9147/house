@@ -41,7 +41,7 @@ def download_storage_file(
     module_name: str,
     path: str,
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_api_key),
 ):
     module = _module(db, module_name)
     try:
@@ -50,6 +50,9 @@ def download_storage_file(
         raise HTTPException(status_code=400, detail=str(e))
     if not target.is_file():
         raise HTTPException(status_code=404, detail="file not found")
+    # 사내망 전제라 별도 자격증명을 요구하지 않는 대신, 파일을 꺼내 간 주체는 남긴다.
+    # key.name은 발급 키 이름이거나 OIDC preferred_username이다.
+    audit.record(db, key.name, "storage.download", module.name, {"path": path})
     return FileResponse(target, filename=target.name)
 
 

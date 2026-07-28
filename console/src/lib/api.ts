@@ -277,7 +277,7 @@ export const api = {
     fd.append('name', name);
     if (category) fd.append('category', category);
     if (organization_id) fd.append('organization_id', String(organization_id));
-    return request<ModuleOut>('POST', '/modules/upload-storage', fd);
+    return requestMultipart<ModuleOut>('/modules/upload-storage', fd);
   },
   deleteModule: (id: number) => request<void>('DELETE', `/modules/${id}`),
 
