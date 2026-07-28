@@ -275,28 +275,34 @@ def list_build_log_files(
     _: ApiKey = Depends(require_admin),
 ):
     """PAAS_BUILD_LOG_DIR 하위의 .txt 빌드 로그 파일 목록을 최신순으로 반환한다."""
-    import os  # noqa: PLC0415
     from pathlib import Path  # noqa: PLC0415
 
-    settings = get_settings()
-    log_dir = Path(settings.build_log_dir).resolve()
-    if not log_dir.exists():
-        return {"files": [], "log_dir": str(log_dir)}
+    try:
+        settings = get_settings()
+        log_dir = Path(settings.build_log_dir).resolve()
+        if not log_dir.exists():
+            log_dir.mkdir(parents=True, exist_ok=True)
+            return {"files": [], "log_dir": str(log_dir)}
 
-    txt_files = []
-    for entry in log_dir.glob("**/*.txt"):
-        if entry.is_file():
-            stat = entry.stat()
-            rel_path = entry.relative_to(log_dir).as_posix()
-            txt_files.append({
-                "filename": entry.name,
-                "relative_path": rel_path,
-                "size_bytes": stat.st_size,
-                "mtime": stat.st_mtime,
-            })
+        txt_files = []
+        for entry in log_dir.glob("**/*.txt"):
+            try:
+                if entry.is_file():
+                    stat = entry.stat()
+                    rel_path = entry.relative_to(log_dir).as_posix()
+                    txt_files.append({
+                        "filename": entry.name,
+                        "relative_path": rel_path,
+                        "size_bytes": stat.st_size,
+                        "mtime": stat.st_mtime,
+                    })
+            except Exception:
+                continue
 
-    txt_files.sort(key=lambda x: x["mtime"], reverse=True)
-    return {"files": txt_files, "log_dir": str(log_dir)}
+        txt_files.sort(key=lambda x: x["mtime"], reverse=True)
+        return {"files": txt_files, "log_dir": str(log_dir)}
+    except Exception as e:
+        return {"files": [], "log_dir": "", "error": str(e)}
 
 
 @router.get("/system/build-logs/content")
