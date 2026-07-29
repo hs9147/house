@@ -151,6 +151,10 @@ export default function PowerShellConsole() {
   const [restarting, setRestarting] = useState(false);
 
   const handleRestartBackend = async () => {
+    if (!connected) {
+      alert('백엔드가 연결 끊김(Disconnected) 상태일 때는 안전 재기동 요청을 전송할 수 없습니다.');
+      return;
+    }
     if (!window.confirm('Self-Kill 방지 모드로 PaaS 백엔드 서비스를 2초 후 디태치 재기동하시겠습니까?')) return;
     setRestarting(true);
     try {
@@ -205,9 +209,9 @@ export default function PowerShellConsole() {
             </span>
             <button
               className="secondary small"
-              disabled={restarting}
+              disabled={!connected || restarting}
               onClick={handleRestartBackend}
-              title="Self-Kill 방지 독립 프로세스로 백엔드 안전 재기동"
+              title={connected ? 'Self-Kill 방지 독립 프로세스로 백엔드 안전 재기동' : '백엔드가 연결된 상태에서만 안전 재기동이 가능합니다'}
             >
               {restarting ? '재기동 요청 중...' : '🔄 백엔드 안전 재기동'}
             </button>
