@@ -378,6 +378,14 @@ npm run build        # tsc 타입체크 + vite build → dist/
   이어지지 않는다(`app/services/deployer.py`의 `deploy_composite_sync` 참고).
 - **OIDC/RBAC (Keycloak 호환)**: `PAAS_OIDC_ISSUER` 설정 시 `Authorization: Bearer <JWT>`
   인증 병행. `realm_access.roles`에 `PAAS_OIDC_ADMIN_ROLE`(기본 paas-admin)이 있으면 admin.
+- **계정 비밀번호와 세션**: 사람 계정(`user_accounts`)의 비밀번호는 **솔트 + scrypt**로만
+  저장한다(표준 라이브러리라 폐쇄망에 의존성을 늘리지 않는다). 기계용 API 키(`api_keys`)는
+  `issue_key()`가 만드는 256비트 난수라 sha256으로 충분해 그대로 둔다 — 추측 가능한
+  비밀번호와 난수 키는 같은 방식으로 지킬 수 없다.
+  로그인은 비밀번호에서 유도되지 않는 **난수 세션 토큰**(`user_sessions`, 기본 12시간)을
+  발급하고 해시만 저장한다. `POST /paas/api/v1/auth/logout`으로 서버에서 폐기되며,
+  만료된 토큰은 `require_api_key`가 지운다. 비밀번호 원문은 TLS 위로만 오가고 어디에도
+  저장되지 않는다.
 - **비동기 배포**: `POST /paas/api/v1/projects/{id}/deploy`에 `"wait": false` → 202 즉시 반환,
   `GET /paas/api/v1/projects/{id}/deployments`로 진행 폴링. 워커 수는 `PAAS_DEPLOY_WORKERS`(기본 2).
 - **OpenBao 시크릿**: `PAAS_OPENBAO_URL/TOKEN/KEY_PATH` 설정 시 Fernet 키를 KV v2에서 로드.

@@ -126,6 +126,12 @@ class EnvVar(Base):
 
 
 class ApiKey(Base):
+    """기계용 키 — issue_key()가 만드는 256비트 난수라 sha256으로 충분하다.
+
+    사람이 정한 비밀번호는 여기 저장하지 않는다(UserAccount 참고). 난수 키와 달리
+    비밀번호는 추측 가능한 공간에 있어서 빠른 해시로는 지킬 수 없다.
+    """
+
     __tablename__ = "api_keys"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -133,6 +139,32 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(String(64), index=True)  # sha256 hex
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserAccount(Base):
+    """사람 계정 — 비밀번호는 솔트 + scrypt로만 저장한다(security.hash_password)."""
+
+    __tablename__ = "user_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True)
+    name: Mapped[str] = mapped_column(String(128), default="")
+    password_hash: Mapped[str] = mapped_column(String(255))
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserSession(Base):
+    """로그인 세션 — 비밀번호에서 유도되지 않는 난수 토큰. 만료되고 폐기할 수 있다."""
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sha256 hex
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class LlmProviderKind(str, enum.Enum):
