@@ -100,3 +100,34 @@ def test_user_account_login_and_api_permissions(monkeypatch):
     assert res_projects.status_code == 200
     assert isinstance(res_projects.json(), list)
 
+
+
+def test_stored_hash_is_not_accepted_as_a_password(monkeypatch):
+    """pass-the-hash 차단 — DB에서 얻은 key_hash를 그대로 제출해 로그인할 수 없다."""
+    from fastapi.testclient import TestClient
+
+    from app.db import SessionLocal
+    from app.main import create_app
+    from app.models import ApiKey
+    from app.security import hash_key
+
+    monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "cho-fam.com")
+    get_settings.cache_clear()
+    client = TestClient(create_app())
+
+    client.post("/paas/api/v1/auth/register",
+                json={"email": "victim@cho-fam.com", "name": "victim", "password": "pw-correct"})
+
+    with SessionLocal() as db:
+        stolen = db.query(ApiKey).filter(ApiKey.name == "victim@cho-fam.com").one().key_hash
+    assert stolen == hash_key("pw-correct")
+
+    res = client.post("/paas/api/v1/auth/login",
+                      json={"email": "victim@cho-fam.com", "password": stolen})
+    assert res.status_code == 400
+
+    # 거절된 시도가 저장된 해시를 덮어쓰지 않는다 (원래 비밀번호가 계속 통해야 한다)
+    with SessionLocal() as db:
+        assert db.query(ApiKey).filter(ApiKey.name == "victim@cho-fam.com").one().key_hash == stolen
+    assert client.post("/paas/api/v1/auth/login",
+                       json={"email": "victim@cho-fam.com", "password": "pw-correct"}).status_code == 200

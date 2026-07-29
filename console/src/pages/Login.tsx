@@ -84,7 +84,8 @@ export default function Login() {
     }
 
     try {
-      const { admin } = await loginWithAccount(cleanEmail, cleanKey);
+      // API 키 로그인은 원문을 보낸다 — 서버가 원문을 해시해 대조하므로 여기서 해시하면 안 된다.
+      const { admin } = await loginWithAccount(cleanEmail, cleanKey, { rawKey: useApiKeyOnly });
       navigate(admin ? '/' : '/projects');
     } catch (err) {
       setError((err as Error).message);

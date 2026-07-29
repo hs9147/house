@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../lib/api';
+import { loginWithAccount } from '../lib/auth';
 
 // api.ts는 요청 시점에 sessionStorage에서 키를 읽는다 — node 환경이라 최소 스텁을 심는다.
 const store = new Map<string, string>();
@@ -57,5 +58,76 @@ describe('파일 업로드는 multipart로 나간다', () => {
     expect(calls[0].url).toBe('/paas/api/v1/storage/assets/files');
     expect(fd.get('path')).toBe('img/logo.png');
     expect(fd.get('file')).toBeInstanceOf(File);
+  });
+});
+
+describe('로그인은 서버 승인 없이 세션을 만들지 않는다', () => {
+  // 바깥 beforeEach가 심어 둔 세션을 지우고 시작해야 "세션이 안 생겼다"를 단언할 수 있다.
+  beforeEach(() => {
+    store.clear();
+  });
+
+  // 회귀: 예전에는 백엔드가 닿지 않거나 거절해도 catch에서 삼키고, 키가 'paas'로
+  // 시작하면 로컬에서 admin으로 승인해 버렸다. 서버는 여전히 막지만 콘솔이 admin
+  // 화면을 열어 주는 데다, 발급 키는 전부 'paas_'로 시작해 사실상 항상 admin이 됐다.
+  it('네트워크 오류 시 던지고 세션을 남기지 않는다', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    await expect(loginWithAccount('u@x.com', 'paas_anything')).rejects.toThrow('서버에 연결할 수 없습니다');
+    expect(store.get('paas_console_key')).toBeUndefined();
+    expect(store.get('paas_console_admin')).toBeUndefined();
+  });
+
+  it('서버가 거절하면 서버 메시지로 던지고 세션을 남기지 않는다', async () => {
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ detail: '비밀번호가 올바르지 않습니다.' }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    await expect(loginWithAccount('u@x.com', 'paas_wrong')).rejects.toThrow('비밀번호가 올바르지 않습니다.');
+    expect(store.get('paas_console_key')).toBeUndefined();
+  });
+
+  it('admin 여부는 서버 응답만 따른다', async () => {
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ key: 'paas_issued', is_admin: false, email: 'u@x.com' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    // 'paas_'로 시작하는 키지만 서버가 일반 사용자라고 했으므로 admin이 아니다
+    const out = await loginWithAccount('u@x.com', 'paas_issued', { rawKey: true });
+    expect(out.admin).toBe(false);
+    expect(store.get('paas_console_admin')).toBe('0');
+    expect(store.get('paas_console_key')).toBe('paas_issued');
+  });
+
+  it('API 키 로그인은 원문을 그대로 보낸다', async () => {
+    const sent: string[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+      sent.push(JSON.parse(init.body as string).password);
+      return new Response(JSON.stringify({ key: 'paas_raw', is_admin: true, email: '' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    await loginWithAccount('', 'paas_raw', { rawKey: true });
+    expect(sent[0]).toBe('paas_raw');
+  });
+
+  it('비밀번호 로그인은 해시해서 보낸다', async () => {
+    const sent: string[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+      sent.push(JSON.parse(init.body as string).password);
+      return new Response(JSON.stringify({ key: 'k', is_admin: false, email: 'u@x.com' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    await loginWithAccount('u@x.com', 'my-password');
+    expect(sent[0]).not.toBe('my-password');
+    expect(sent[0]).toMatch(/^[0-9a-f]{64}$/);
   });
 });

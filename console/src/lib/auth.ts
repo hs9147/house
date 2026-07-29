@@ -121,38 +121,54 @@ export async function hashPassword(plainText: string): Promise<string> {
   return sha256Pure(plainText);
 }
 
-export async function loginWithAccount(email: string, key: string): Promise<{ admin: boolean; email: string }> {
+/**
+ * 계정 로그인. 성공한 서버 응답만 세션을 만든다 — 서버가 거절하거나 닿지 않으면 던진다.
+ *
+ * rawKey는 발급된 API 키(또는 관리자 키)로 로그인할 때 쓴다. 비밀번호는 해시해서 보내지만
+ * API 키는 서버가 원문을 해시해 대조하므로(hash_key(원문) == key_hash), 여기서 한 번 더
+ * 해시하면 영영 매칭되지 않는다.
+ */
+export async function loginWithAccount(
+  email: string,
+  secret: string,
+  opts: { rawKey?: boolean } = {},
+): Promise<{ admin: boolean; email: string }> {
   const cleanEmail = email.trim();
-  const cleanKey = key.trim();
-  const encryptedPassword = await hashPassword(cleanKey);
+  const cleanSecret = secret.trim();
+  const password = opts.rawKey ? cleanSecret : await hashPassword(cleanSecret);
 
+  let res: Response;
   try {
-    const res = await fetch('/paas/api/v1/auth/login', {
+    res = await fetch('/paas/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: cleanEmail, password: encryptedPassword }),
+      body: JSON.stringify({ email: cleanEmail, password }),
     });
-
-    if (res.ok) {
-      const data = await res.json();
-      const admin = Boolean(data.is_admin);
-      const keyToUse = data.key || cleanKey || 'paas_user';
-      sessionStorage.setItem(KEY, keyToUse);
-      sessionStorage.setItem(ADMIN, admin ? '1' : '0');
-      sessionStorage.setItem(EMAIL, cleanEmail || data.email);
-      return { admin, email: cleanEmail || data.email };
-    }
-  } catch (e) {
-    // 백엔드 통신 오류 시 로컬 세션 보조 승인
+  } catch {
+    throw new Error('서버에 연결할 수 없습니다. 잠시 후 다시 시도하세요.');
   }
 
-  const defaultAdmin = cleanKey === 'paas' || cleanKey.startsWith('paas_');
-  sessionStorage.setItem(KEY, cleanKey || 'paas_user');
-  sessionStorage.setItem(ADMIN, defaultAdmin ? '1' : '0');
-  sessionStorage.setItem(EMAIL, cleanEmail);
-  return { admin: defaultAdmin, email: cleanEmail };
+  if (!res.ok) {
+    let detail = `로그인에 실패했습니다 (HTTP ${res.status})`;
+    try {
+      const body = await res.json();
+      if (typeof body?.detail === 'string') detail = body.detail;
+    } catch {
+      /* 본문 없는 응답 */
+    }
+    throw new Error(detail);
+  }
+
+  const data = await res.json();
+  if (!data.key) throw new Error('로그인 응답에 인증 키가 없습니다.');
+
+  const admin = Boolean(data.is_admin);
+  sessionStorage.setItem(KEY, data.key);
+  sessionStorage.setItem(ADMIN, admin ? '1' : '0');
+  sessionStorage.setItem(EMAIL, cleanEmail || data.email);
+  return { admin, email: cleanEmail || data.email };
 }
 
 export async function login(key: string): Promise<{ admin: boolean }> {
-  return loginWithAccount('', key);
+  return loginWithAccount('', key, { rawKey: true });
 }
