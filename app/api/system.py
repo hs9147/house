@@ -512,13 +512,19 @@ def restart_backend_service(
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
-    """Self-Kill 대응: 백엔드가 자기 자신을 재시작할 때 부모 프로세스 종속성 없이 DETACHED 독립 프로세스로 2초 후 안전 재기동한다."""
+    """Self-Kill 대응: 백엔드가 자기 자신을 재시작할 때 8000 포트 점유 프로세스를 해제하고 DETACHED 독립 프로세스로 안전 재기동한다."""
+    import os  # noqa: PLC0415
     import sys  # noqa: PLC0415
+    import threading  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
 
+    root_dir = Path(__file__).resolve().parent.parent.parent
     py_exe = sys.executable
     escaped_exe = py_exe.replace("'", "''")
+
     restart_script = (
+        "Start-Sleep -Seconds 2; "
         "if (!(Test-Path '.venv')) { "
         "  Write-Host '[PaaS Provisioning] .venv missing. Creating Python virtual environment...'; "
         f"  & '{escaped_exe}' -m venv .venv; "
@@ -527,7 +533,10 @@ def restart_backend_service(
         "    if (Test-Path 'requirements.txt') { & '.venv\\Scripts\\python.exe' -m pip install --disable-pip-version-check -r requirements.txt } "
         "  } "
         "}; "
-        "Start-Sleep -Seconds 2; "
+        "Write-Host '[PaaS Restart] Releasing port 8000...'; "
+        "$pids = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess; "
+        "foreach ($p in $pids) { if ($p -and $p -gt 0 -and $p -ne $PID) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } }; "
+        "Start-Sleep -Seconds 1; "
         "if (Test-Path '.venv\\Scripts\\python.exe') { "
         "  & '.venv\\Scripts\\python.exe' -m uvicorn app.main:app --host 0.0.0.0 --port 8000 "
         "} else { "
@@ -539,14 +548,22 @@ def restart_backend_service(
         flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0
         subprocess.Popen(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", restart_script],
+            cwd=str(root_dir),
             creationflags=flags,
             close_fds=True,
         )
         actor_name = getattr(admin, "name", "admin")
         audit.record(db, actor_name, "system.restart", "backend_service", {"py_exe": py_exe})
+
+        # 2.5초 후 기존 백엔드 프로세스를 종료하여 8000번 포트를 완전히 비워준다
+        def _terminate_self():
+            os._exit(0)
+
+        threading.Timer(2.5, _terminate_self).start()
+
         return {
             "status": "restarting",
-            "message": "PaaS 백엔드 서비스가 2초 후 디태치 독립 프로세스로 안전하게 재기동됩니다.",
+            "message": "PaaS 백엔드 서비스가 2초 후 기존 포트 해제 및 디태치 독립 프로세스로 안전하게 재기동됩니다.",
             "error": None,
             "executable": py_exe,
         }
