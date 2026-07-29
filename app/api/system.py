@@ -427,7 +427,8 @@ def restart_backend_service(
             creationflags=flags,
             close_fds=True,
         )
-        audit.record(db, admin.name, "system.restart", "backend_service", {"py_exe": py_exe})
+        actor_name = getattr(admin, "name", "admin")
+        audit.record(db, actor_name, "system.restart", "backend_service", {"py_exe": py_exe})
         return {
             "status": "restarting",
             "message": "PaaS 백엔드 서비스가 2초 후 디태치 독립 프로세스로 안전하게 재기동됩니다.",
