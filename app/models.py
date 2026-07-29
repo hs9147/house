@@ -169,7 +169,7 @@ class UserAccount(Base):
     organization: Mapped["Organization | None"] = relationship()
     organizations: Mapped[list["Organization"]] = relationship(
         secondary="user_organizations",
-        lazy="joined",
+        lazy="selectin",
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

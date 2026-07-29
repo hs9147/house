@@ -90,9 +90,13 @@ def get_current_user_profile(
     org_list: list[dict] = []
 
     if user:
-        if user.organizations:
-            org_list = [{"id": o.id, "name": o.name} for o in user.organizations]
-        elif org_id and org_name:
+        try:
+            if user.organizations:
+                org_list = [{"id": o.id, "name": o.name} for o in user.organizations]
+        except Exception:
+            pass
+
+        if not org_list and org_id and org_name:
             org_list = [{"id": org_id, "name": org_name}]
 
     return {
@@ -202,9 +206,13 @@ def logout_user_session(
 
 def _build_user_account_out(db: Session, u: UserAccount) -> UserAccountOut:
     org_out_list: list[UserOrgOut] = []
-    if u.organizations:
-        org_out_list = [UserOrgOut(id=o.id, name=o.name) for o in u.organizations]
-    elif u.organization_id and u.organization:
+    try:
+        if u.organizations:
+            org_out_list = [UserOrgOut(id=o.id, name=o.name) for o in u.organizations]
+    except Exception:
+        pass
+
+    if not org_out_list and u.organization_id and u.organization:
         org_out_list = [UserOrgOut(id=u.organization.id, name=u.organization.name)]
 
     primary_org_name = u.organization.name if u.organization else (org_out_list[0].name if org_out_list else None)
