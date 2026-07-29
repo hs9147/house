@@ -158,14 +158,22 @@ export default function PowerShellConsole() {
     if (!window.confirm('Self-Kill 방지 모드로 PaaS 백엔드 서비스를 2초 후 디태치 재기동하시겠습니까?')) return;
     setRestarting(true);
     try {
-      const res = await api.restartBackendService();
+      const res = (await api.restartBackendService()) as { status?: string; message?: string; error?: string | null };
+      const statusStr = res.status || 'restarting';
+      const msgStr = res.message || 'PaaS 백엔드 서비스가 안전하게 재기동됩니다.';
+      const errStr = res.error ? ` | Error: ${res.error}` : '';
+
       setLogs((prev) => [
         ...prev,
-        `\n[System Notification] ${res.message}`,
+        `\n[System Notification] Status: ${statusStr} | Message: ${msgStr}${errStr}`,
         `[System] 3초 후 백엔드 서비스 연결 상태를 확인하세요.\n`,
       ]);
     } catch (err) {
-      setLogs((prev) => [...prev, `[System Error] 백엔드 재기동 요청 실패: ${(err as Error).message}`]);
+      setLogs((prev) => [
+        ...prev,
+        `\n[System Error] Status: error | Error: ${(err as Error).message}`,
+        `[Hint] 백엔드 서비스 통신 장애 상태입니다.\n`,
+      ]);
     } finally {
       setRestarting(false);
       setTimeout(() => inputRef.current?.focus(), 50);

@@ -547,6 +547,8 @@ def restart_backend_service(
         return {
             "status": "restarting",
             "message": "PaaS 백엔드 서비스가 2초 후 디태치 독립 프로세스로 안전하게 재기동됩니다.",
+            "error": None,
+            "executable": py_exe,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to schedule service restart: {e}")
