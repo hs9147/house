@@ -28,6 +28,7 @@ import type {
   ServerConfigOut,
   StatusSnapshot,
   StorageListing,
+  UserAccountOut,
 } from './types';
 
 // 백엔드 라우터는 모두 /paas 아래 마운트된다. /health, /status는 버전 prefix 없이
@@ -280,6 +281,11 @@ export const api = {
     return requestMultipart<ModuleOut>('/modules/upload-storage', fd);
   },
   deleteModule: (id: number) => request<void>('DELETE', `/modules/${id}`),
+
+  // 계정 승인 (admin)
+  listAccounts: () => request<UserAccountOut[]>('GET', '/auth/accounts'),
+  approveAccount: (id: number) => request<UserAccountOut>('POST', `/auth/accounts/${id}/approve`),
+  rejectAccount: (id: number) => request<void>('DELETE', `/auth/accounts/${id}`),
 
   // 파일 저장소 — 로컬 경로는 노출되지 않고 /storage/{모듈} 창구로만 다룬다
   listStorageFiles: (module: string) =>

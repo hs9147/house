@@ -9,7 +9,15 @@ from .. import audit
 from ..config import get_settings
 from ..db import get_db
 from ..models import ApiKey, AuditEvent, EnvVar, LlmProvider, Module, UserAccount, UserSession, utcnow
-from ..schemas import ApiKeyCreate, ApiKeyIssued, UserRegisterRequest, UserRegisterOut, UserLoginRequest, UserLoginOut
+from ..schemas import (
+    ApiKeyCreate,
+    ApiKeyIssued,
+    UserAccountOut,
+    UserLoginOut,
+    UserLoginRequest,
+    UserRegisterOut,
+    UserRegisterRequest,
+)
 from ..security import (
     hash_key,
     hash_password,
@@ -103,19 +111,15 @@ def register_user_account(
     if not password:
         raise HTTPException(status_code=400, detail="비밀번호를 입력하세요.")
     db.add(UserAccount(
-        email=email, name=body.name.strip(), password_hash=hash_password(password), is_admin=False,
+        email=email, name=body.name.strip(), password_hash=hash_password(password),
+        is_approved=False, is_admin=False,
     ))
     db.commit()
 
     audit.record(db, email, "user.register", email, {"name": body.name})
 
-    # 가입 직후 바로 쓸 수 있도록 세션을 함께 발급한다(로그인과 동일한 경로).
-    return UserRegisterOut(
-        name=body.name,
-        email=email,
-        key=_start_session(db, email, is_admin=False),
-        is_admin=False,
-    )
+    # 세션을 발급하지 않는다 — 관리자가 승인해야 로그인할 수 있다.
+    return UserRegisterOut(name=body.name, email=email, is_approved=False, is_admin=False)
 
 
 @router.post("/auth/login", response_model=UserLoginOut)
@@ -146,6 +150,9 @@ def login_user_account(
     user = db.execute(select(UserAccount).where(UserAccount.email == email)).scalar_one_or_none()
     if user is None or not verify_password(password, user.password_hash):
         raise HTTPException(status_code=400, detail="이메일 또는 비밀번호가 올바르지 않습니다.")
+    # 승인 여부는 비밀번호가 맞은 뒤에 본다 — 미승인 안내로 계정 존재를 흘리지 않는다.
+    if not user.is_approved:
+        raise HTTPException(status_code=403, detail="관리자 승인 대기 중인 계정입니다.")
 
     return UserLoginOut(
         name=user.name or user.email,
@@ -168,6 +175,57 @@ def logout_user_session(
         if session is not None:
             db.delete(session)
             db.commit()
+    return None
+
+
+@router.get("/auth/accounts", response_model=list[UserAccountOut])
+def list_user_accounts(
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_admin),
+):
+    """계정 목록 — 승인 대기가 먼저 온다."""
+    rows = db.execute(
+        select(UserAccount).order_by(UserAccount.is_approved, UserAccount.created_at)
+    ).scalars()
+    return [
+        UserAccountOut(id=u.id, email=u.email, name=u.name,
+                       is_approved=u.is_approved, is_admin=u.is_admin)
+        for u in rows
+    ]
+
+
+@router.post("/auth/accounts/{account_id}/approve", response_model=UserAccountOut)
+def approve_user_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    user = db.get(UserAccount, account_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    user.is_approved = True
+    db.commit()
+    audit.record(db, admin.name, "user.approve", user.email, {})
+    return UserAccountOut(id=user.id, email=user.email, name=user.name,
+                          is_approved=user.is_approved, is_admin=user.is_admin)
+
+
+@router.delete("/auth/accounts/{account_id}", status_code=204)
+def reject_user_account(
+    account_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """가입 거절 또는 계정 삭제. 이미 발급된 세션도 함께 폐기한다."""
+    user = db.get(UserAccount, account_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    email = user.email
+    for session in db.execute(select(UserSession).where(UserSession.email == email)).scalars():
+        db.delete(session)
+    db.delete(user)
+    db.commit()
+    audit.record(db, admin.name, "user.reject", email, {})
     return None
 
 
