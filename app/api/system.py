@@ -517,8 +517,22 @@ def restart_backend_service(
     import subprocess  # noqa: PLC0415
 
     py_exe = sys.executable
+    escaped_exe = py_exe.replace("'", "''")
     restart_script = (
-        f"Start-Sleep -Seconds 2; & '{py_exe}' -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+        "if (!(Test-Path '.venv')) { "
+        "  Write-Host '[PaaS Provisioning] .venv missing. Creating Python virtual environment...'; "
+        f"  & '{escaped_exe}' -m venv .venv; "
+        "  if (Test-Path '.venv\\Scripts\\python.exe') { "
+        "    & '.venv\\Scripts\\python.exe' -m pip install --upgrade pip --disable-pip-version-check; "
+        "    if (Test-Path 'requirements.txt') { & '.venv\\Scripts\\python.exe' -m pip install --disable-pip-version-check -r requirements.txt } "
+        "  } "
+        "}; "
+        "Start-Sleep -Seconds 2; "
+        "if (Test-Path '.venv\\Scripts\\python.exe') { "
+        "  & '.venv\\Scripts\\python.exe' -m uvicorn app.main:app --host 0.0.0.0 --port 8000 "
+        "} else { "
+        f"  & '{escaped_exe}' -m uvicorn app.main:app --host 0.0.0.0 --port 8000 "
+        "}"
     )
 
     try:

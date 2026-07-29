@@ -28,19 +28,57 @@ START_SCRIPT_NAME = "start.cmd"
 # PORT/HOST는 windows_service 런타임이 주입한다(HOST=127.0.0.1로 로컬 바인드).
 _START_SCRIPT = """@echo off
 REM 플랫폼 자동 생성(windows_service) — PORT/HOST는 런타임이 주입한다.
+REM 배포 환경 미설정 시 Python/Node 가상환경 및 자동 패키지 설치, 환경 설정 수행
 if not defined PORT set PORT=8000
 if not defined HOST set HOST=127.0.0.1
 set PORT=%PORT%
 set HOST=%HOST%
+
 if exist package.json (
-  call npm ci
+  if not exist node_modules (
+    echo [PaaS Auto-Provisioning] Node environment missing. Installing dependencies...
+    call npm install
+  ) else (
+    call npm ci --if-present
+  )
   call npm run build --if-present
   npm start
 ) else if exist requirements.txt (
-  py -m pip install --disable-pip-version-check -r requirements.txt
-  py -m uvicorn app.main:app --host %HOST% --port %PORT%
+  if not exist .venv (
+    echo [PaaS Auto-Provisioning] Python venv missing. Creating .venv...
+    py -m venv .venv || python -m venv .venv || python3 -m venv .venv
+  )
+  if exist .venv\\Scripts\\activate.bat (
+    call .venv\\Scripts\\activate.bat
+  ) else if exist .venv/bin/activate (
+    call .venv/bin/activate
+  )
+  echo [PaaS Auto-Provisioning] Installing Python dependencies from requirements.txt...
+  python -m pip install --upgrade pip --disable-pip-version-check
+  python -m pip install --disable-pip-version-check -r requirements.txt
+  if exist app\\main.py (
+    python -m uvicorn app.main:app --host %HOST% --port %PORT%
+  ) else if exist main.py (
+    python -m uvicorn main:app --host %HOST% --port %PORT%
+  ) else if exist app.py (
+    python -m uvicorn app:app --host %HOST% --port %PORT%
+  ) else (
+    python -m uvicorn app.main:app --host %HOST% --port %PORT%
+  )
+) else if exist main.py (
+  if not exist .venv (
+    echo [PaaS Auto-Provisioning] Creating .venv for main.py...
+    py -m venv .venv || python -m venv .venv
+  )
+  if exist .venv\\Scripts\\activate.bat call .venv\\Scripts\\activate.bat
+  python -m uvicorn main:app --host %HOST% --port %PORT%
 ) else if exist app.py (
-  py -m uvicorn app.main:app --host %HOST% --port %PORT%
+  if not exist .venv (
+    echo [PaaS Auto-Provisioning] Creating .venv for app.py...
+    py -m venv .venv || python -m venv .venv
+  )
+  if exist .venv\\Scripts\\activate.bat call .venv\\Scripts\\activate.bat
+  python -m uvicorn app:app --host %HOST% --port %PORT%
 ) else (
   py -m http.server %PORT% --bind %HOST%
 )
