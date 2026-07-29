@@ -6,6 +6,7 @@ import { useApi } from '../lib/hooks';
 
 export default function Accounts() {
   const accounts = useApi(() => api.listAccounts());
+  const [activeTab, setActiveTab] = useState<'list' | 'pending'>('list');
   const [busy, setBusy] = useState(0);
   const [error, setError] = useState('');
 
@@ -22,65 +23,173 @@ export default function Accounts() {
     }
   };
 
-  const reject = (id: number, email: string) => {
-    if (!confirm(`${email} 계정을 삭제할까요? 발급된 세션도 함께 폐기됩니다.`)) return;
+  const deleteAccount = (id: number, email: string) => {
+    if (!confirm(`정말로 계정 '${email}'을(를) 삭제하시겠습니까?\n해당 계정에 발급된 세션 및 권한이 즉시 폐기됩니다.`)) return;
+    return act(id, () => api.rejectAccount(id));
+  };
+
+  const rejectAccountRequest = (id: number, email: string) => {
+    if (!confirm(`'${email}' 계정의 승인 요청을 거절하고 삭제하시겠습니까?`)) return;
     return act(id, () => api.rejectAccount(id));
   };
 
   return (
-    <div className="panel">
-      <h2>계정 승인</h2>
-      <p className="mutedtext" style={{ fontSize: 12 }}>
-        가입은 신청일 뿐입니다. 관리자가 승인해야 로그인할 수 있고, 삭제하면 이미 발급된
-        세션도 함께 폐기됩니다.
-      </p>
+    <div className="panel" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div>
+        <h2 style={{ margin: 0 }}>👤 계정 관리 (Account Management)</h2>
+        <p className="mutedtext" style={{ fontSize: 12, marginTop: 4 }}>
+          전체 계정 목록을 조회하고 승인 요청을 처리하거나 불필요한 계정을 삭제 관리합니다.
+        </p>
+      </div>
 
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <div style={{ padding: 10, borderRadius: 6, background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', fontSize: 13 }}>
+          ⚠️ {error}
+        </div>
+      )}
 
       <Async state={accounts} empty="등록된 계정이 없습니다.">
-        {(rows) => (
-          <table>
-            <thead>
-              <tr>
-                <th>이메일</th>
-                <th>이름</th>
-                <th>상태</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((a) => (
-                <tr key={a.id}>
-                  <td className="mono">{a.email}</td>
-                  <td>{a.name}</td>
-                  <td>
-                    <StatusPill value={a.is_approved ? (a.is_admin ? 'admin' : '승인됨') : '승인 대기'} />
-                  </td>
-                  <td>
-                    {!a.is_approved && (
-                      <>
-                        <button
-                          className="small"
-                          disabled={busy === a.id}
-                          onClick={() => act(a.id, () => api.approveAccount(a.id))}
-                        >
-                          승인
-                        </button>{' '}
-                      </>
-                    )}
-                    <button
-                      className="secondary small"
-                      disabled={busy === a.id}
-                      onClick={() => reject(a.id, a.email)}
-                    >
-                      {a.is_approved ? '삭제' : '거절'}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+        {(rows) => {
+          const pendingRows = rows.filter((a) => !a.is_approved);
+
+          return (
+            <>
+              {/* Tab navigation */}
+              <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', paddingBottom: 8 }}>
+                <button
+                  className={activeTab === 'list' ? 'primary small' : 'secondary small'}
+                  onClick={() => setActiveTab('list')}
+                >
+                  👥 계정 목록 조회 ({rows.length})
+                </button>
+                <button
+                  className={activeTab === 'pending' ? 'primary small' : 'secondary small'}
+                  onClick={() => setActiveTab('pending')}
+                  style={{ position: 'relative' }}
+                >
+                  ✅ 계정 승인 요청 {pendingRows.length > 0 && (
+                    <span style={{
+                      marginLeft: 6,
+                      padding: '1px 6px',
+                      borderRadius: 10,
+                      fontSize: 11,
+                      background: '#ef4444',
+                      color: '#fff',
+                    }}>
+                      {pendingRows.length}
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              {/* Tab 1: 계정 목록 조회 */}
+              {activeTab === 'list' && (
+                <div>
+                  <table style={{ width: '100%', marginTop: 8 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: 'left' }}>이메일</th>
+                        <th style={{ textAlign: 'left' }}>이름</th>
+                        <th style={{ textAlign: 'left' }}>역할 / 상태</th>
+                        <th style={{ textAlign: 'right' }}>관리 Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.length === 0 ? (
+                        <tr>
+                          <td colSpan={4} className="mutedtext" style={{ textAlign: 'center', padding: 24 }}>
+                            등록된 계정이 존재하지 않습니다.
+                          </td>
+                        </tr>
+                      ) : (
+                        rows.map((a) => (
+                          <tr key={a.id}>
+                            <td className="mono">{a.email}</td>
+                            <td>{a.name}</td>
+                            <td>
+                              <StatusPill value={a.is_approved ? (a.is_admin ? 'admin' : '승인됨') : '승인 대기'} />
+                            </td>
+                            <td style={{ textAlign: 'right' }}>
+                              {!a.is_approved && (
+                                <button
+                                  className="small"
+                                  disabled={busy === a.id}
+                                  onClick={() => act(a.id, () => api.approveAccount(a.id))}
+                                  style={{ marginRight: 6 }}
+                                >
+                                  ✅ 승인
+                                </button>
+                              )}
+                              <button
+                                className="danger small"
+                                disabled={busy === a.id}
+                                onClick={() => deleteAccount(a.id, a.email)}
+                              >
+                                🗑️ 계정 삭제
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Tab 2: 계정 승인 요청 */}
+              {activeTab === 'pending' && (
+                <div>
+                  <table style={{ width: '100%', marginTop: 8 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: 'left' }}>이메일</th>
+                        <th style={{ textAlign: 'left' }}>이름</th>
+                        <th style={{ textAlign: 'left' }}>상태</th>
+                        <th style={{ textAlign: 'right' }}>승인 처리</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pendingRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={4} className="mutedtext" style={{ textAlign: 'center', padding: 24 }}>
+                            🎉 승인 대기 중인 계정 요청이 없습니다.
+                          </td>
+                        </tr>
+                      ) : (
+                        pendingRows.map((a) => (
+                          <tr key={a.id}>
+                            <td className="mono">{a.email}</td>
+                            <td>{a.name}</td>
+                            <td>
+                              <StatusPill value="승인 대기" />
+                            </td>
+                            <td style={{ textAlign: 'right' }}>
+                              <button
+                                className="primary small"
+                                disabled={busy === a.id}
+                                onClick={() => act(a.id, () => api.approveAccount(a.id))}
+                                style={{ marginRight: 6 }}
+                              >
+                                ✅ 승인
+                              </button>
+                              <button
+                                className="danger small"
+                                disabled={busy === a.id}
+                                onClick={() => rejectAccountRequest(a.id, a.email)}
+                              >
+                                ❌ 거절 (삭제)
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          );
+        }}
       </Async>
     </div>
   );
