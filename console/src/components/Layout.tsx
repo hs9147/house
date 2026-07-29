@@ -22,11 +22,32 @@ export default function Layout() {
       <aside className="sidebar">
         <h1 style={{ marginBottom: 8 }}>{systemName} 콘솔</h1>
 
-        {/* 🏢 소속 조직 표시 */}
+        {/* 🏢 소속 조직 다수 뱃지 표시 */}
         <div style={{ padding: '0 0 12px 0', borderBottom: '1px solid rgba(255,255,255,0.1)', marginBottom: 12 }}>
-          <div style={{ fontSize: 11, color: '#888', marginBottom: 2 }}>소속 조직</div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: '#38bdf8' }}>
-            🏢 {me.data?.organization_name || '기본 조직 (소속 미지정)'}
+          <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>소속 조직</div>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {me.data?.organizations && me.data.organizations.length > 0 ? (
+              me.data.organizations.map((o) => (
+                <span
+                  key={o.id}
+                  style={{
+                    fontSize: 11,
+                    padding: '2px 8px',
+                    borderRadius: 12,
+                    background: 'rgba(56, 189, 248, 0.15)',
+                    color: '#38bdf8',
+                    border: '1px solid rgba(56, 189, 248, 0.3)',
+                    fontWeight: 600,
+                  }}
+                >
+                  🏢 {o.name}
+                </span>
+              ))
+            ) : (
+              <span style={{ fontSize: 12, fontWeight: 600, color: '#38bdf8' }}>
+                🏢 {me.data?.organization_name || '기본 조직'}
+              </span>
+            )}
           </div>
         </div>
 

@@ -29,6 +29,7 @@ import type {
   StatusSnapshot,
   StorageListing,
   UserAccountOut,
+  UserOrgOut,
 } from './types';
 
 // 백엔드 라우터는 모두 /paas 아래 마운트된다. /health, /status는 버전 prefix 없이
@@ -283,11 +284,13 @@ export const api = {
   deleteModule: (id: number) => request<void>('DELETE', `/modules/${id}`),
 
   me: () =>
-    request<{ name: string; is_admin: boolean; allowed_email_domain: string | null; organization_id: number | null; organization_name: string | null }>('GET', '/auth/me'),
+    request<{ name: string; is_admin: boolean; allowed_email_domain: string | null; organization_id: number | null; organization_name: string | null; organizations?: UserOrgOut[] }>('GET', '/auth/me'),
   listAccounts: () => request<UserAccountOut[]>('GET', '/auth/accounts'),
   approveAccount: (id: number) => request<UserAccountOut>('POST', `/auth/accounts/${id}/approve`),
   updateAccountOrganization: (id: number, organization_id: number | null) =>
     request<UserAccountOut>('POST', `/auth/accounts/${id}/organization`, { organization_id }),
+  modifyAccountOrganization: (id: number, organization_id: number, action: 'add' | 'remove') =>
+    request<UserAccountOut>('POST', `/auth/accounts/${id}/organizations/modify`, { organization_id, action }),
   rejectAccount: (id: number) => request<void>('DELETE', `/auth/accounts/${id}`),
 
   // 파일 저장소 — 로컬 경로는 노출되지 않고 /storage/{모듈} 창구로만 다룬다

@@ -8,14 +8,16 @@ from sqlalchemy.orm import Session
 from .. import audit
 from ..config import get_settings
 from ..db import get_db
-from ..models import ApiKey, AuditEvent, EnvVar, LlmProvider, Module, UserAccount, UserSession, utcnow
+from ..models import ApiKey, AuditEvent, EnvVar, LlmProvider, Module, Organization, UserAccount, UserOrganization, UserSession, utcnow
 from ..schemas import (
     ApiKeyCreate,
     ApiKeyIssued,
     UserAccountOut,
     UserAccountOrganizationUpdate,
+    UserAccountOrgModifyRequest,
     UserLoginOut,
     UserLoginRequest,
+    UserOrgOut,
     UserRegisterOut,
     UserRegisterRequest,
 )
@@ -85,6 +87,13 @@ def get_current_user_profile(
     user = db.execute(select(UserAccount).where(UserAccount.email == key.name)).scalar_one_or_none()
     org_id = user.organization_id if user else None
     org_name = user.organization.name if (user and user.organization) else None
+    org_list: list[dict] = []
+
+    if user:
+        if user.organizations:
+            org_list = [{"id": o.id, "name": o.name} for o in user.organizations]
+        elif org_id and org_name:
+            org_list = [{"id": org_id, "name": org_name}]
 
     return {
         "name": key.name,
@@ -92,6 +101,7 @@ def get_current_user_profile(
         "allowed_email_domain": settings.allowed_email_domain,
         "organization_id": org_id,
         "organization_name": org_name,
+        "organizations": org_list,
     }
 
 
@@ -190,6 +200,27 @@ def logout_user_session(
     return None
 
 
+def _build_user_account_out(db: Session, u: UserAccount) -> UserAccountOut:
+    org_out_list: list[UserOrgOut] = []
+    if u.organizations:
+        org_out_list = [UserOrgOut(id=o.id, name=o.name) for o in u.organizations]
+    elif u.organization_id and u.organization:
+        org_out_list = [UserOrgOut(id=u.organization.id, name=u.organization.name)]
+
+    primary_org_name = u.organization.name if u.organization else (org_out_list[0].name if org_out_list else None)
+
+    return UserAccountOut(
+        id=u.id,
+        email=u.email,
+        name=u.name,
+        is_approved=u.is_approved,
+        is_admin=u.is_admin,
+        organization_id=u.organization_id or (org_out_list[0].id if org_out_list else None),
+        organization_name=primary_org_name,
+        organizations=org_out_list,
+    )
+
+
 @router.get("/auth/accounts", response_model=list[UserAccountOut])
 def list_user_accounts(
     db: Session = Depends(get_db),
@@ -199,18 +230,7 @@ def list_user_accounts(
     rows = db.execute(
         select(UserAccount).order_by(UserAccount.is_approved, UserAccount.created_at)
     ).scalars()
-    return [
-        UserAccountOut(
-            id=u.id,
-            email=u.email,
-            name=u.name,
-            is_approved=u.is_approved,
-            is_admin=u.is_admin,
-            organization_id=u.organization_id,
-            organization_name=u.organization.name if u.organization else None,
-        )
-        for u in rows
-    ]
+    return [_build_user_account_out(db, u) for u in rows]
 
 
 @router.post("/auth/accounts/{account_id}/approve", response_model=UserAccountOut)
@@ -225,15 +245,7 @@ def approve_user_account(
     user.is_approved = True
     db.commit()
     audit.record(db, admin.name, "user.approve", user.email, {})
-    return UserAccountOut(
-        id=user.id,
-        email=user.email,
-        name=user.name,
-        is_approved=user.is_approved,
-        is_admin=user.is_admin,
-        organization_id=user.organization_id,
-        organization_name=user.organization.name if user.organization else None,
-    )
+    return _build_user_account_out(db, user)
 
 
 @router.post("/auth/accounts/{account_id}/organization", response_model=UserAccountOut)
@@ -246,19 +258,49 @@ def update_user_account_organization(
     user = db.get(UserAccount, account_id)
     if user is None:
         raise HTTPException(status_code=404, detail="account not found")
+    
+    if body.organization_id is not None:
+        org = db.get(Organization, body.organization_id)
+        if org and org not in user.organizations:
+            user.organizations.append(org)
     user.organization_id = body.organization_id
     db.commit()
     db.refresh(user)
     audit.record(db, admin.name, "user.set_organization", user.email, {"organization_id": body.organization_id})
-    return UserAccountOut(
-        id=user.id,
-        email=user.email,
-        name=user.name,
-        is_approved=user.is_approved,
-        is_admin=user.is_admin,
-        organization_id=user.organization_id,
-        organization_name=user.organization.name if user.organization else None,
-    )
+    return _build_user_account_out(db, user)
+
+
+@router.post("/auth/accounts/{account_id}/organizations/modify", response_model=UserAccountOut)
+def modify_user_account_organization(
+    account_id: int,
+    body: UserAccountOrgModifyRequest,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """사용자의 소속 조직 뱃지를 추가(add) 또는 삭제(remove)한다."""
+    user = db.get(UserAccount, account_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="account not found")
+
+    org = db.get(Organization, body.organization_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+
+    if body.action == "add":
+        if org not in user.organizations:
+            user.organizations.append(org)
+        if user.organization_id is None:
+            user.organization_id = org.id
+    elif body.action == "remove":
+        if org in user.organizations:
+            user.organizations.remove(org)
+        if user.organization_id == org.id:
+            user.organization_id = user.organizations[0].id if user.organizations else None
+
+    db.commit()
+    db.refresh(user)
+    audit.record(db, admin.name, f"user.org.{body.action}", user.email, {"organization_id": body.organization_id})
+    return _build_user_account_out(db, user)
 
 
 @router.delete("/auth/accounts/{account_id}", status_code=204)

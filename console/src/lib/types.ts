@@ -82,6 +82,11 @@ export interface ModuleOut {
 }
 
 // 계정 승인 — 가입은 신청일 뿐이고 관리자가 승인해야 로그인할 수 있다
+export interface UserOrgOut {
+  id: number;
+  name: string;
+}
+
 export interface UserAccountOut {
   id: number;
   email: string;
@@ -90,6 +95,7 @@ export interface UserAccountOut {
   is_admin: boolean;
   organization_id?: number | null;
   organization_name?: string | null;
+  organizations?: UserOrgOut[];
 }
 
 // 파일 저장소 — 로컬 경로 대신 창구 URL로만 다룬다 (services/storage.py)

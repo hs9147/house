@@ -141,6 +141,16 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class UserOrganization(Base):
+    """사용자-조직 다대다 매핑 테이블."""
+
+    __tablename__ = "user_organizations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+
+
 class UserAccount(Base):
     """사람 계정 — 비밀번호는 솔트 + scrypt로만 저장한다(security.hash_password)."""
 
@@ -157,6 +167,10 @@ class UserAccount(Base):
         ForeignKey("organizations.id"), nullable=True
     )
     organization: Mapped["Organization | None"] = relationship()
+    organizations: Mapped[list["Organization"]] = relationship(
+        secondary="user_organizations",
+        lazy="joined",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

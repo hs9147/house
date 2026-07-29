@@ -307,6 +307,11 @@ class UserRegisterOut(BaseModel):
     is_admin: bool = False
 
 
+class UserOrgOut(BaseModel):
+    id: int
+    name: str
+
+
 class UserAccountOut(BaseModel):
     id: int
     email: str
@@ -315,10 +320,16 @@ class UserAccountOut(BaseModel):
     is_admin: bool
     organization_id: int | None = None
     organization_name: str | None = None
+    organizations: list[UserOrgOut] = []
 
 
 class UserAccountOrganizationUpdate(BaseModel):
     organization_id: int | None = None
+
+
+class UserAccountOrgModifyRequest(BaseModel):
+    organization_id: int
+    action: str = "add"  # "add" | "remove"
 
 
 class UserLoginRequest(BaseModel):
@@ -334,3 +345,4 @@ class UserLoginOut(BaseModel):
     is_admin: bool = False
     organization_id: int | None = None
     organization_name: str | None = None
+    organizations: list[UserOrgOut] = []
