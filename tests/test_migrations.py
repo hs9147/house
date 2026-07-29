@@ -12,7 +12,7 @@ EXPECTED_TABLES = {
     "projects", "deployments", "env_vars", "api_keys", "audit_events",
     "llm_providers", "chat_sessions", "chat_messages", "proposed_changes",
     "modules", "module_bindings", "preview_sessions", "payments",
-    "redirect_rules", "alembic_version",
+    "redirect_rules", "user_accounts", "user_sessions", "alembic_version",
 }
 
 

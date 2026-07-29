@@ -98,36 +98,25 @@ describe('로그인은 서버 승인 없이 세션을 만들지 않는다', () =
       }),
     );
     // 'paas_'로 시작하는 키지만 서버가 일반 사용자라고 했으므로 admin이 아니다
-    const out = await loginWithAccount('u@x.com', 'paas_issued', { rawKey: true });
+    const out = await loginWithAccount('u@x.com', 'paas_issued');
     expect(out.admin).toBe(false);
     expect(store.get('paas_console_admin')).toBe('0');
     expect(store.get('paas_console_key')).toBe('paas_issued');
   });
 
-  it('API 키 로그인은 원문을 그대로 보낸다', async () => {
+  it('비밀번호는 원문을 보내고, 저장하는 것은 서버가 준 세션 토큰이다', async () => {
+    // 예전에는 클라이언트가 SHA-256을 걸어 보내고 그 해시를 그대로 x-api-key로 저장했다.
+    // 비밀번호의 결정적 함수가 무기한 자격증명이 되므로, 서버가 발급한 난수 토큰만 저장한다.
     const sent: string[] = [];
     vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
       sent.push(JSON.parse(init.body as string).password);
-      return new Response(JSON.stringify({ key: 'paas_raw', is_admin: true, email: '' }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-    });
-    await loginWithAccount('', 'paas_raw', { rawKey: true });
-    expect(sent[0]).toBe('paas_raw');
-  });
-
-  it('비밀번호 로그인은 해시해서 보낸다', async () => {
-    const sent: string[] = [];
-    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
-      sent.push(JSON.parse(init.body as string).password);
-      return new Response(JSON.stringify({ key: 'k', is_admin: false, email: 'u@x.com' }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({ key: 'paass_random-token', is_admin: false, email: 'u@x.com' }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
     });
     await loginWithAccount('u@x.com', 'my-password');
-    expect(sent[0]).not.toBe('my-password');
-    expect(sent[0]).toMatch(/^[0-9a-f]{64}$/);
+    expect(sent[0]).toBe('my-password');
+    expect(store.get('paas_console_key')).toBe('paass_random-token');
   });
 });

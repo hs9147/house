@@ -1,20 +1,48 @@
 import hmac
-from fastapi import APIRouter, Depends, HTTPException, WebSocket
+from datetime import timedelta
+
+from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import audit
 from ..config import get_settings
 from ..db import get_db
-from ..models import ApiKey, AuditEvent, EnvVar, LlmProvider, Module
+from ..models import ApiKey, AuditEvent, EnvVar, LlmProvider, Module, UserAccount, UserSession, utcnow
 from ..schemas import ApiKeyCreate, ApiKeyIssued, UserRegisterRequest, UserRegisterOut, UserLoginRequest, UserLoginOut
-from ..security import hash_key, issue_key, require_admin, require_api_key, rotate_token, validate_email_domain
+from ..security import (
+    hash_key,
+    hash_password,
+    issue_key,
+    issue_session_token,
+    require_admin,
+    require_api_key,
+    rotate_token,
+    validate_email_domain,
+    verify_password,
+)
 from ..services import monitor
 
 # 헬스체크·상태 프로브는 버전 prefix 밖에 둔다(로드밸런서/k8s liveness probe, 콘솔 로그인
 # 프로브가 API 버전과 무관하게 고정된 경로를 기대함) — router.py 참고.
 health_router = APIRouter(tags=["system"])
 router = APIRouter(tags=["system"])
+
+# 로그인 세션 수명. 짧게 두고 재로그인시키는 편이, 새어 나간 토큰이 오래 사는 것보다 낫다.
+SESSION_TTL = timedelta(hours=12)
+
+
+def _start_session(db: Session, email: str, is_admin: bool) -> str:
+    """난수 세션 토큰을 발급하고 해시만 저장한다 — 원문은 이 반환값이 유일하다."""
+    token = issue_session_token()
+    db.add(UserSession(
+        token_hash=hash_key(token),
+        email=email,
+        is_admin=is_admin,
+        expires_at=utcnow() + SESSION_TTL,
+    ))
+    db.commit()
+    return token
 
 
 @health_router.get("/health")
@@ -66,23 +94,26 @@ def register_user_account(
         )
 
     # 2. 이미 존재하는 계정인지 중복 확인
-    existing = db.execute(select(ApiKey).where(ApiKey.name == email)).scalar_one_or_none()
+    existing = db.execute(select(UserAccount).where(UserAccount.email == email)).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=400, detail="이미 등록된 계정 이메일입니다.")
 
-    # 3. 비밀번호 및 키 생성 후 계정 저장
+    # 3. 비밀번호는 솔트 + scrypt로만 저장한다 — 원문도, 그 sha256도 남기지 않는다.
     password = body.password.strip()
-    raw_key = issue_key()
-    user_key = ApiKey(name=email, key_hash=hash_key(password), is_admin=False)
-    db.add(user_key)
+    if not password:
+        raise HTTPException(status_code=400, detail="비밀번호를 입력하세요.")
+    db.add(UserAccount(
+        email=email, name=body.name.strip(), password_hash=hash_password(password), is_admin=False,
+    ))
     db.commit()
 
     audit.record(db, email, "user.register", email, {"name": body.name})
 
+    # 가입 직후 바로 쓸 수 있도록 세션을 함께 발급한다(로그인과 동일한 경로).
     return UserRegisterOut(
         name=body.name,
         email=email,
-        key=password,
+        key=_start_session(db, email, is_admin=False),
         is_admin=False,
     )
 
@@ -96,37 +127,48 @@ def login_user_account(
     email = body.email.strip()
     password = body.password.strip()
 
-    # 1. 관리자 API 키로 직접 로그인 시도 시
+    # 1. 관리자 API 키 / 발급된 API 키로 로그인 — 난수 키라 그대로 쓴다(세션 불필요).
     if settings.admin_api_key and hmac.compare_digest(password, settings.admin_api_key):
         return UserLoginOut(name="bootstrap-admin", email=email or "admin@system", key=password, is_admin=True)
+    key_row = db.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(password))).scalar_one_or_none()
+    if key_row is not None:
+        return UserLoginOut(name=key_row.name, email=email or key_row.name, key=password, is_admin=key_row.is_admin)
 
     # 2. 계정 이메일 도메인 검증
     if settings.allowed_email_domain and email and not validate_email_domain(email):
         allowed = settings.allowed_email_domain.replace("@", "")
         raise HTTPException(status_code=403, detail=f"@{allowed} 계정 이메일만 로그인 가능합니다.")
 
-    # 3. 이메일 기반 계정 검색 및 비밀번호 검증 (IIS 팝업 방지를 위해 400 상태코드 사용)
+    # 3. 계정 비밀번호 검증 (IIS 팝업 방지를 위해 400 상태코드 사용).
     #
-    # 저장된 해시 자체를 비밀번호로 받아 주지 않는다. 예전에는 `key_hash != password`를
-    # 조건에 함께 두어, DB 덤프·백업에서 해시를 얻은 사람이 그 해시를 그대로 제출해
-    # 로그인할 수 있었다(pass-the-hash). 게다가 아래 자동 갱신이 이어 붙어 그 순간
-    # key_hash가 sha256(해시)로 덮여, 정작 원래 사용자가 잠기는 계정 탈취가 됐다.
-    user_row = db.execute(select(ApiKey).where(ApiKey.name == email)).scalar_one_or_none()
-    if user_row is not None:
-        if not user_row.key_hash or not hmac.compare_digest(user_row.key_hash, hash_key(password)):
-            raise HTTPException(status_code=400, detail="비밀번호가 올바르지 않습니다.")
-        return UserLoginOut(name=user_row.name, email=email, key=password, is_admin=user_row.is_admin)
+    # 계정이 없을 때도 같은 400을 돌려준다 — 어떤 이메일이 등록돼 있는지 알려주지 않는다.
+    # 반환하는 key는 비밀번호에서 유도되지 않은 난수 세션 토큰이라, 새어도 폐기·만료된다.
+    user = db.execute(select(UserAccount).where(UserAccount.email == email)).scalar_one_or_none()
+    if user is None or not verify_password(password, user.password_hash):
+        raise HTTPException(status_code=400, detail="이메일 또는 비밀번호가 올바르지 않습니다.")
 
-    # 4. 해시 기반 키 검색 (기존 API 키 호환)
-    key_row = db.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(password))).scalar_one_or_none()
-    if key_row is not None:
-        return UserLoginOut(name=key_row.name, email=email or key_row.name, key=password, is_admin=key_row.is_admin)
+    return UserLoginOut(
+        name=user.name or user.email,
+        email=user.email,
+        key=_start_session(db, user.email, user.is_admin),
+        is_admin=user.is_admin,
+    )
 
-    # 신규 등록되지 않은 정상 도메인 계정 최초 로그인 시 자동 계정 등록 처리
-    new_user = ApiKey(name=email, key_hash=hash_key(password), is_admin=False)
-    db.add(new_user)
-    db.commit()
-    return UserLoginOut(name=email.split("@")[0] if "@" in email else email, email=email, key=password, is_admin=False)
+
+@router.post("/auth/logout", status_code=204)
+def logout_user_session(
+    x_api_key: str = Header(default=""),
+    db: Session = Depends(get_db),
+):
+    """세션 토큰을 서버에서 폐기한다. 브라우저 저장소만 비우면 토큰은 계속 유효하다."""
+    if x_api_key:
+        session = db.execute(
+            select(UserSession).where(UserSession.token_hash == hash_key(x_api_key))
+        ).scalar_one_or_none()
+        if session is not None:
+            db.delete(session)
+            db.commit()
+    return None
 
 
 @router.post("/keys", response_model=ApiKeyIssued, status_code=201)

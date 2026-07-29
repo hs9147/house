@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
-import { loginWithAccount, hashPassword } from '../lib/auth';
+import { loginWithAccount } from '../lib/auth';
 
 export default function Login() {
   const [mode, setMode] = useState<'login' | 'register'>('login');
@@ -56,11 +56,10 @@ export default function Login() {
         return;
       }
       try {
-        const encryptedPassword = await hashPassword(password.trim());
         const regRes = await api.registerUser({
           email: cleanEmail,
           name: name.trim(),
-          password: encryptedPassword,
+          password: password.trim(),
         });
         // 회원가입 성공 시 자동 로그인
         const { admin } = await loginWithAccount(regRes.email, password.trim());
@@ -84,8 +83,7 @@ export default function Login() {
     }
 
     try {
-      // API 키 로그인은 원문을 보낸다 — 서버가 원문을 해시해 대조하므로 여기서 해시하면 안 된다.
-      const { admin } = await loginWithAccount(cleanEmail, cleanKey, { rawKey: useApiKeyOnly });
+      const { admin } = await loginWithAccount(cleanEmail, cleanKey);
       navigate(admin ? '/' : '/projects');
     } catch (err) {
       setError((err as Error).message);

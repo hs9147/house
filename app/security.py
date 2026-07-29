@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import secrets
+from datetime import timezone
 
 from cryptography.fernet import Fernet, MultiFernet
 from fastapi import Depends, Header, HTTPException
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .db import get_db
-from .models import ApiKey
+from .models import ApiKey, UserSession, utcnow
 
 _fernet: Fernet | None = None
 
@@ -72,6 +73,42 @@ def hash_key(raw: str) -> str:
 
 def issue_key() -> str:
     return "paas_" + secrets.token_urlsafe(32)
+
+
+# --- 비밀번호 (사람이 정한 값) ---
+#
+# API 키는 256비트 난수라 sha256으로 충분하지만, 비밀번호는 추측 가능한 공간에 있어서
+# 빠른 해시로는 못 지킨다. 솔트 + 메모리 하드 KDF가 필요하다. scrypt는 표준 라이브러리에
+# 있어 폐쇄망 설치에 의존성을 늘리지 않는다(argon2를 쓰려면 argon2-cffi 추가 필요).
+_SCRYPT_N = 2 ** 14  # 약 16MiB, 한 번 검증에 수십 ms
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+
+
+def hash_password(plain: str) -> str:
+    """scrypt$n$r$p$salt$hash — 파라미터를 함께 저장해 나중에 세기를 올릴 수 있다."""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.scrypt(plain.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
+    return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${dk.hex()}"
+
+
+def verify_password(plain: str, stored: str) -> bool:
+    try:
+        scheme, n, r, p, salt_hex, hash_hex = stored.split("$")
+        if scheme != "scrypt":
+            return False
+        dk = hashlib.scrypt(
+            plain.encode(), salt=bytes.fromhex(salt_hex),
+            n=int(n), r=int(r), p=int(p), dklen=len(hash_hex) // 2,
+        )
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(dk.hex(), hash_hex)
+
+
+def issue_session_token() -> str:
+    """로그인 세션 토큰 — 비밀번호에서 유도되지 않는 난수라 폐기·만료할 수 있다."""
+    return "paass_" + secrets.token_urlsafe(32)
 
 
 def verify_webhook_signature(secret: str, body: bytes, signature: str) -> bool:
@@ -164,9 +201,23 @@ def require_api_key(
     if row is not None:
         return row
 
+    # 3. 로그인 세션 토큰 (사람 계정) — 만료된 토큰은 통과시키지 않는다.
+    session = db.execute(
+        select(UserSession).where(UserSession.token_hash == hash_key(x_api_key))
+    ).scalar_one_or_none()
+    if session is not None:
+        expires = session.expires_at
+        if expires.tzinfo is None:  # SQLite는 tz를 보존하지 않음 (services/preview.py와 동일)
+            expires = expires.replace(tzinfo=timezone.utc)
+        if expires <= utcnow():
+            db.delete(session)
+            db.commit()
+            raise HTTPException(status_code=401, detail="session expired")
+        return ApiKey(name=session.email, key_hash="", is_admin=session.is_admin)
+
     # 계정명·길이 기반 인정은 두지 않는다 — 계정명은 감사 로그와 콘솔에 그대로 노출되는
-    # 공개 식별자라 비밀값이 아니다. 인증은 관리자 키(1)나 발급된 키의 해시(2)로만 성립한다.
-    # 일반 사용자 계정도 /auth/register·/auth/login이 key_hash를 심어 두므로 2에서 통과한다.
+    # 공개 식별자라 비밀값이 아니다. 인증은 관리자 키(1), 발급된 키의 해시(2),
+    # 로그인 세션 토큰(3)으로만 성립한다.
     raise HTTPException(status_code=401, detail="invalid api key")
 
 
