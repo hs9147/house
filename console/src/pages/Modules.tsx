@@ -3,6 +3,7 @@ import Async from '../components/Async';
 import Modal from '../components/Modal';
 import StatusPill from '../components/StatusPill';
 import { api } from '../lib/api';
+import { fmtDate } from '../lib/format';
 import { isAdmin } from '../lib/auth';
 import { useApi } from '../lib/hooks';
 import type { ApiSearchResult, OrgOut } from '../lib/types';
@@ -20,12 +21,16 @@ export default function Modules() {
   const [showCreate, setShowCreate] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [showMcpSearch, setShowMcpSearch] = useState(false);
+  const [showReport, setShowReport] = useState(false);
 
   return (
     <div className="panel">
       <div className="row" style={{ marginBottom: 12 }}>
         <h2 style={{ margin: 0 }}>모듈 레지스트리</h2>
         <div className="spacer" />
+        <button className="secondary" onClick={() => setShowReport(true)}>
+          📊 모듈 사용이력 리포트
+        </button>
         {isAdmin() && (
           <>
             <button className="secondary" onClick={() => setShowSearch(true)}>
@@ -132,6 +137,7 @@ export default function Modules() {
           onAdded={() => state.reload()}
         />
       )}
+      {showReport && <PlatformReportModal onClose={() => setShowReport(false)} />}
     </div>
   );
 }
@@ -810,6 +816,124 @@ function CreateModuleModal({
           </button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+function PlatformReportModal({ onClose }: { onClose: () => void }) {
+  const reportState = useApi(() => api.getPlatformModuleReport());
+
+  return (
+    <Modal title="📊 PaaS 플랫폼 전역 모듈 사용이력 통합 리포트" onClose={onClose}>
+      <div style={{ minWidth: 680, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+          PaaS 플랫폼에 등록된 모든 모듈과 이를 바인딩하여 사용 중인 프로젝트 목록, 그리고 최근 모듈 관련 변경 이력을 종합 리포팅합니다.
+        </p>
+
+        <Async state={reportState}>
+          {(report) => (
+            <>
+              {/* 요약 카드 */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
+                <div style={{ padding: 14, borderRadius: 8, background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
+                  <div style={{ fontSize: 12, color: '#888' }}>총 등록 모듈</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: '#38bdf8', marginTop: 4 }}>
+                    {report.total_modules}개
+                  </div>
+                </div>
+                <div style={{ padding: 14, borderRadius: 8, background: 'rgba(16, 185, 129, 0.08)', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                  <div style={{ fontSize: 12, color: '#888' }}>총 바인딩 연결 건수</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: '#10b981', marginTop: 4 }}>
+                    {report.total_bindings}건
+                  </div>
+                </div>
+              </div>
+
+              {/* 전역 모듈 현황 테이블 */}
+              <div style={{ marginTop: 8 }}>
+                <h4 style={{ margin: '0 0 8px 0', fontSize: 14 }}>🧩 등록 모듈 및 프로젝트 바인딩 현황</h4>
+                <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>모듈명</th>
+                        <th>타입</th>
+                        <th>소속 조직</th>
+                        <th>바인딩 프로젝트 ({report.total_bindings})</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {report.modules.map((m) => (
+                        <tr key={m.module_id}>
+                          <td style={{ fontWeight: 600 }}>{m.module_name}</td>
+                          <td><StatusPill value={m.type} /></td>
+                          <td>{m.organization_name || '전역(Global)'}</td>
+                          <td>
+                            {m.bound_projects.length === 0 ? (
+                              <span className="mutedtext" style={{ fontSize: 11 }}>미바인딩</span>
+                            ) : (
+                              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                                {m.bound_projects.map((p) => (
+                                  <span
+                                    key={p}
+                                    style={{
+                                      fontSize: 11,
+                                      padding: '1px 6px',
+                                      borderRadius: 4,
+                                      background: 'rgba(56, 189, 248, 0.15)',
+                                      color: '#38bdf8',
+                                      border: '1px solid rgba(56, 189, 248, 0.3)',
+                                    }}
+                                  >
+                                    🏢 {p}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* 최근 모듈 감사 로그 */}
+              <div style={{ marginTop: 8 }}>
+                <h4 style={{ margin: '0 0 8px 0', fontSize: 14 }}>📜 최근 모듈 변경 이력 ({report.recent_history.length})</h4>
+                <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>일시</th>
+                        <th>작업자</th>
+                        <th>Action</th>
+                        <th>대상</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {report.recent_history.map((h) => (
+                        <tr key={h.id}>
+                          <td className="mono" style={{ fontSize: 11 }}>{fmtDate(h.created_at)}</td>
+                          <td className="mono" style={{ fontSize: 11 }}>{h.actor}</td>
+                          <td><StatusPill value={h.action} /></td>
+                          <td className="mono" style={{ fontSize: 11 }}>{h.target}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+        </Async>
+
+        <div className="row" style={{ justifyContent: 'flex-end', marginTop: 12 }}>
+          <button type="button" onClick={onClose}>
+            닫기
+          </button>
+        </div>
+      </div>
     </Modal>
   );
 }

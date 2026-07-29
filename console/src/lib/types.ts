@@ -317,3 +317,49 @@ export interface McpDirectoryItem {
   url: string;
   vendor: string;
 }
+
+export interface ModuleUsageItem {
+  id: number;
+  name: string;
+  type: string;
+  category?: string | null;
+  env_prefix: string;
+  injected_env_keys: string[];
+}
+
+export interface ModuleHistoryItem {
+  id: number;
+  actor: string;
+  action: string;
+  target: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ProjectModuleReportOut {
+  project_id: number;
+  project_name: string;
+  org_name?: string | null;
+  total_active_modules: number;
+  total_injected_envs: number;
+  active_modules: ModuleUsageItem[];
+  history: ModuleHistoryItem[];
+}
+
+export interface GlobalModuleUsageSummary {
+  module_id: number;
+  module_name: string;
+  type: string;
+  category?: string | null;
+  organization_name?: string | null;
+  bound_project_count: number;
+  bound_projects: string[];
+  created_at: string;
+}
+
+export interface PlatformModuleReportOut {
+  total_modules: number;
+  total_bindings: number;
+  modules: GlobalModuleUsageSummary[];
+  recent_history: ModuleHistoryItem[];
+}

@@ -153,3 +153,16 @@ def available_resources(db: Session, project: Project) -> list[dict]:
 
 # 에이전트 빌더용 모듈 컨텍스트는 services/a2a.list_project_a2a_cards가 만든다 —
 # 카드와 프롬프트 컨텍스트가 같은 모양이어야 모델이 배운 이름으로 그대로 호출할 수 있다.
+
+
+def _injected_keys_for(module_type: str, env_prefix: str) -> list[str]:
+    p = env_prefix.upper()
+    if module_type in ("external_api", "mcp"):
+        return [f"{p}_URL", f"{p}_API_KEY"]
+    if module_type == "internal_api":
+        return [f"{p}_URL"]
+    if module_type == "database":
+        return [f"{p}_DSN"]
+    if module_type == "file_storage":
+        return [f"{p}_URL", f"{p}_BUCKET"]
+    return [f"{p}_URL"]

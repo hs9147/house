@@ -234,6 +234,52 @@ class RedirectRuleOut(BaseModel):
     created_at: datetime
 
 
+class ModuleUsageItem(BaseModel):
+    id: int
+    name: str
+    type: str
+    category: str | None = None
+    env_prefix: str
+    injected_env_keys: list[str] = []
+
+
+class ModuleHistoryItem(BaseModel):
+    id: int
+    actor: str
+    action: str
+    target: str
+    payload: dict = {}
+    created_at: datetime
+
+
+class ProjectModuleReportOut(BaseModel):
+    project_id: int
+    project_name: str
+    org_name: str | None = None
+    total_active_modules: int
+    total_injected_envs: int
+    active_modules: list[ModuleUsageItem] = []
+    history: list[ModuleHistoryItem] = []
+
+
+class GlobalModuleUsageSummary(BaseModel):
+    module_id: int
+    module_name: str
+    type: str
+    category: str | None = None
+    organization_name: str | None = None
+    bound_project_count: int
+    bound_projects: list[str] = []
+    created_at: datetime
+
+
+class PlatformModuleReportOut(BaseModel):
+    total_modules: int
+    total_bindings: int
+    modules: list[GlobalModuleUsageSummary] = []
+    recent_history: list[ModuleHistoryItem] = []
+
+
 class ComponentStatus(BaseModel):
     name: str  # "backend" | "frontend"
     status: str

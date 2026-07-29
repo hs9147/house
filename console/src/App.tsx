@@ -21,6 +21,7 @@ import DeploymentsTab from './pages/project/DeploymentsTab';
 import EnvTab from './pages/project/EnvTab';
 import LogsTab from './pages/project/LogsTab';
 import ModulesTab from './pages/project/ModulesTab';
+import ModuleReportTab from './pages/project/ModuleReportTab';
 import OverviewTab from './pages/project/OverviewTab';
 import PreviewsTab from './pages/project/PreviewsTab';
 
@@ -63,6 +64,7 @@ export default function App() {
           <Route path="logs" element={<LogsTab />} />
           <Route path="env" element={<EnvTab />} />
           <Route path="modules" element={<ModulesTab />} />
+          <Route path="module-report" element={<ModuleReportTab />} />
           <Route path="previews" element={<PreviewsTab />} />
         </Route>
         <Route

@@ -20,6 +20,8 @@ import type {
   ProjectCreate,
   ProjectFileContentOut,
   ProjectFilesOut,
+  ProjectModuleReportOut,
+  PlatformModuleReportOut,
   ProjectOut,
   ProjectType,
   RedirectRule,
@@ -204,6 +206,8 @@ export const api = {
     }
     return requestMultipart<ProjectOut>('/projects/upload', fd);
   },
+  getProjectModuleReport: (id: number) =>
+    request<ProjectModuleReportOut>('GET', `/projects/${id}/module-report`),
 
   // 조직 (사내 Gitea 작업공간)
   listOrgs: () => request<OrgOut[]>('GET', '/orgs'),
@@ -245,6 +249,8 @@ export const api = {
 
   // 모듈
   listModules: () => request<ModuleOut[]>('GET', '/modules'),
+  getPlatformModuleReport: () =>
+    request<PlatformModuleReportOut>('GET', '/modules/usage-report'),
   // 외부 API 디렉터리 검색 + external_api 모듈 자동 추가 (admin)
   searchApis: (keyword: string) =>
     request<{ results: ApiSearchResult[] }>('GET', '/modules/search', undefined, { keyword }),

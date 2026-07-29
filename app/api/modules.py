@@ -10,7 +10,14 @@ from .. import audit
 from ..config import get_settings
 from ..db import get_db
 from ..models import ApiKey, Module, ModuleBinding, ModuleType, Organization, Project
-from ..schemas import ApiModuleImport, ModuleBind, ModuleCreate
+from ..schemas import (
+    ApiModuleImport,
+    GlobalModuleUsageSummary,
+    ModuleBind,
+    ModuleCreate,
+    ModuleHistoryItem,
+    PlatformModuleReportOut,
+)
 from ..security import require_admin, require_api_key
 from ..services import a2a as a2a_service
 from ..services import apisearch
@@ -301,3 +308,72 @@ def import_mcp_module(
     audit.record(db, admin.name, "module.import_mcp", mod_name, {"url": body.url})
     return {"id": row.id, "name": row.name, "type": row.type.value, "category": row.category,
             "config": svc.masked_config(row.config)}
+
+
+@router.get("/modules/usage-report", response_model=PlatformModuleReportOut)
+def get_platform_module_report(
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """PaaS 플랫폼 전역 모듈 사용 이력 리포트 — 등록된 모든 모듈의 바인딩 프로젝트 현황 및 최근 모듈 관련 변경 로그를 종합 집계한다."""
+    from sqlalchemy.orm import joinedload  # noqa: PLC0415
+    from ..models import AuditEvent  # noqa: PLC0415
+
+    modules = db.execute(
+        select(Module).options(joinedload(Module.organization)).order_by(Module.id.desc())
+    ).scalars().unique().all()
+
+    bindings = db.execute(
+        select(ModuleBinding, Project)
+        .join(Project, ModuleBinding.project_id == Project.id)
+    ).all()
+
+    bindings_by_module: dict[int, list[str]] = {}
+    for binding, proj in bindings:
+        bindings_by_module.setdefault(binding.module_id, []).append(proj.name)
+
+    summaries: list[GlobalModuleUsageSummary] = []
+    total_bindings = len(bindings)
+
+    for m in modules:
+        proj_list = bindings_by_module.get(m.id, [])
+        org_name = m.organization.name if m.organization else None
+        summaries.append(
+            GlobalModuleUsageSummary(
+                module_id=m.id,
+                module_name=m.name,
+                type=m.type.value,
+                category=m.category,
+                organization_name=org_name,
+                bound_project_count=len(proj_list),
+                bound_projects=proj_list,
+                created_at=m.created_at,
+            )
+        )
+
+    # 최근 모듈 관련 감사 이벤트
+    audit_rows = db.execute(
+        select(AuditEvent)
+        .where(AuditEvent.action.like("module.%"))
+        .order_by(AuditEvent.created_at.desc())
+        .limit(100)
+    ).scalars()
+
+    recent_history: list[ModuleHistoryItem] = [
+        ModuleHistoryItem(
+            id=r.id,
+            actor=r.actor,
+            action=r.action,
+            target=r.target,
+            payload=r.payload or {},
+            created_at=r.created_at,
+        )
+        for r in audit_rows
+    ]
+
+    return PlatformModuleReportOut(
+        total_modules=len(modules),
+        total_bindings=total_bindings,
+        modules=summaries,
+        recent_history=recent_history,
+    )

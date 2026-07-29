@@ -16,6 +16,7 @@ const TABS = [
   ['logs', '로그'],
   ['env', '환경변수'],
   ['modules', '모듈'],
+  ['module-report', '📦 모듈 사용이력 리포트'],
   ['previews', '프리뷰'],
 ] as const;
 

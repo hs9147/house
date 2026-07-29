@@ -2,19 +2,22 @@ import shutil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from .. import audit
 from ..config import get_settings
 from ..db import get_db
 from ..features import is_enabled, require_feature
 from ..git_policy import enforce_internal_git_url
-from ..models import ApiKey, BuildProfile, Deployment, EnvVar, Organization, Project, ProjectType
+from ..models import ApiKey, AuditEvent, BuildProfile, Deployment, EnvVar, Module, ModuleBinding, Organization, Project, ProjectType
 from ..schemas import (
     DeploymentOut,
     DeployRequest,
     EnvVarSet,
+    ModuleHistoryItem,
+    ModuleUsageItem,
     ProjectCreate,
+    ProjectModuleReportOut,
     ProjectOut,
     ProjectUploadForm,
 )
@@ -385,3 +388,78 @@ def list_env_vars(
     # 시크릿 값은 마스킹해서만 노출
     return [{"key": r.key, "is_secret": r.is_secret, "value": "•••" if r.is_secret else "(set)"}
             for r in rows]
+
+
+@router.get("/{project_id}/module-report", response_model=ProjectModuleReportOut)
+def get_project_module_report(
+    project_id: int,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """프로젝트 모듈 사용 이력 리포트 — 현재 바인딩된 모듈, 주입된 환경변수, 관련 작업 로그를 집계한다."""
+    project = db.execute(
+        select(Project).options(joinedload(Project.organization)).where(Project.id == project_id)
+    ).scalar_one_or_none()
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    org_name = project.organization.name if project.organization else None
+
+    # 1. 바인딩된 모듈 조회
+    bindings = db.execute(
+        select(ModuleBinding, Module)
+        .join(Module, ModuleBinding.module_id == Module.id)
+        .where(ModuleBinding.project_id == project_id)
+    ).all()
+
+    active_modules: list[ModuleUsageItem] = []
+    total_injected_envs = 0
+
+    from ..services.modules import _injected_keys_for  # noqa: PLC0415
+
+    for binding, module in bindings:
+        keys = _injected_keys_for(module.type.value, binding.env_prefix)
+        total_injected_envs += len(keys)
+        active_modules.append(
+            ModuleUsageItem(
+                id=module.id,
+                name=module.name,
+                type=module.type.value,
+                category=module.category,
+                env_prefix=binding.env_prefix,
+                injected_env_keys=keys,
+            )
+        )
+
+    # 2. 모듈 관련 감사 이벤트 (Audit History) 조회
+    audit_rows = db.execute(
+        select(AuditEvent)
+        .where(
+            (AuditEvent.target == project.name) | (AuditEvent.target == str(project_id))
+        )
+        .order_by(AuditEvent.created_at.desc())
+        .limit(100)
+    ).scalars()
+
+    history: list[ModuleHistoryItem] = []
+    for r in audit_rows:
+        if r.action and (r.action.startswith("module.") or "module" in r.action):
+            history.append(
+                ModuleHistoryItem(
+                    id=r.id,
+                    actor=r.actor,
+                    action=r.action,
+                    target=r.target,
+                    payload=r.payload or {},
+                    created_at=r.created_at,
+                )
+            )
+
+    return ProjectModuleReportOut(
+        project_id=project.id,
+        project_name=project.name,
+        org_name=org_name,
+        total_active_modules=len(active_modules),
+        total_injected_envs=total_injected_envs,
+        active_modules=active_modules,
+        history=history,
+    )
