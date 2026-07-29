@@ -291,7 +291,7 @@ npm run build        # tsc 타입체크 + vite build → dist/
   이력·로그 3초 폴링·환경변수·모듈 바인딩·프리뷰), 코드 확인(읽기 전용 파일 트리·내용 뷰어 —
   수정은 채팅 탭에서 diff로만), 모듈 레지스트리(카테고리·조직 범위 표시 + admin은 "외부 API
   검색"으로 공개 디렉터리에서 external_api 자동 추가), 파일 관리(file_storage 모듈의
-  창구 URL 표시 + 목록·업로드·다운로드·삭제), LLM 프로바이더,
+  창구 URL 표시 + 목록·업로드·다운로드·삭제), 계정 승인(가입 신청 승인/거절), LLM 프로바이더,
   대화식 코드 편집(diff 뷰 + 승인/거절 + 브랜치 리뷰 + 프로젝트 선택 시 카테고리별 사용 가능
   자원 패널 + 코드 구조 트리 확대/축소), 서버구성(런타임/
   프록시 백엔드 표시, 프로젝트×프로필별 도메인·상태·배포/중지, 리다이렉트/재작성 규칙
@@ -386,6 +386,11 @@ npm run build        # tsc 타입체크 + vite build → dist/
   발급하고 해시만 저장한다. `POST /paas/api/v1/auth/logout`으로 서버에서 폐기되며,
   만료된 토큰은 `require_api_key`가 지운다. 비밀번호 원문은 TLS 위로만 오가고 어디에도
   저장되지 않는다.
+- **가입은 관리자 승인제**: `/auth/register`는 신청만 만든다(`is_approved=false`) — 세션을
+  주지 않으므로 승인 전에는 로그인할 수 없다(403). 도메인이 맞기만 하면 누구나 계정을
+  만들 수 있던 것을 막는다. admin이 콘솔 **계정 승인** 화면 또는
+  `GET /auth/accounts` · `POST /auth/accounts/{id}/approve` · `DELETE /auth/accounts/{id}`로
+  처리하며, 삭제하면 그 계정의 세션도 함께 폐기된다. 최초 관리자는 `PAAS_ADMIN_API_KEY`다.
 - **비동기 배포**: `POST /paas/api/v1/projects/{id}/deploy`에 `"wait": false` → 202 즉시 반환,
   `GET /paas/api/v1/projects/{id}/deployments`로 진행 폴링. 워커 수는 `PAAS_DEPLOY_WORKERS`(기본 2).
 - **OpenBao 시크릿**: `PAAS_OPENBAO_URL/TOKEN/KEY_PATH` 설정 시 Fernet 키를 KV v2에서 로드.

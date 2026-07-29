@@ -6,6 +6,18 @@ from app.config import get_settings
 from app.security import validate_email_domain
 
 
+ADMIN = {"x-api-key": "test-admin-key"}
+
+
+def _approve_and_login(client, email, password):
+    """가입 → 관리자 승인 → 로그인. 승인 도입 후 계정을 쓰려면 이 경로를 거쳐야 한다."""
+    accounts = client.get("/paas/api/v1/auth/accounts", headers=ADMIN).json()
+    account_id = next(a["id"] for a in accounts if a["email"] == email)
+    client.post(f"/paas/api/v1/auth/accounts/{account_id}/approve", headers=ADMIN)
+    return client.post("/paas/api/v1/auth/login",
+                       json={"email": email, "password": password}).json()["key"]
+
+
 def test_validate_email_domain_default(monkeypatch):
     monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "cho-fam.com")
     get_settings.cache_clear()
@@ -54,9 +66,9 @@ def test_register_user_account_endpoint(monkeypatch):
     assert res_ok.status_code == 201
     data = res_ok.json()
     assert data["email"] == "newuser@cho-fam.com"
-    # 응답의 key는 비밀번호가 아니라 난수 세션 토큰이다
-    assert data["key"] != "pass"
-    assert data["key"].startswith("paass_")
+    # 가입은 신청일 뿐 — 승인 전에는 세션(key)을 주지 않는다
+    assert data["is_approved"] is False
+    assert "key" not in data
 
     # 3. 중복 이메일 가입 시 400 차단
     res_dup = client.post(
@@ -80,7 +92,7 @@ def test_user_account_login_and_api_permissions(monkeypatch):
         json={"email": "testuser@cho-fam.com", "name": "테스트유저", "password": "mypassword123"},
     )
     assert res_reg.status_code == 201
-    user_key = res_reg.json()["key"]
+    user_key = _approve_and_login(client, "testuser@cho-fam.com", "mypassword123")
 
     # 2. 로그인 API (/paas/api/v1/auth/login) 검증
     res_login = client.post(
@@ -138,8 +150,7 @@ def test_stored_hash_is_not_accepted_as_a_password(monkeypatch):
     with SessionLocal() as db:
         assert db.query(UserAccount).filter(
             UserAccount.email == "victim@cho-fam.com").one().password_hash == stored
-    assert client.post("/paas/api/v1/auth/login",
-                       json={"email": "victim@cho-fam.com", "password": "pw-correct"}).status_code == 200
+    assert _approve_and_login(client, "victim@cho-fam.com", "pw-correct").startswith("paass_")
 
 
 def test_same_password_yields_different_hashes(monkeypatch):
@@ -163,8 +174,9 @@ def test_session_token_expires(monkeypatch):
     get_settings.cache_clear()
     client = TestClient(create_app())
 
-    token = client.post("/paas/api/v1/auth/register",
-                        json={"email": "u@cho-fam.com", "name": "user1", "password": "pw-1234"}).json()["key"]
+    client.post("/paas/api/v1/auth/register",
+                json={"email": "u@cho-fam.com", "name": "user1", "password": "pw-1234"})
+    token = _approve_and_login(client, "u@cho-fam.com", "pw-1234")
     assert client.get("/paas/api/v1/auth/me", headers={"x-api-key": token}).status_code == 200
 
     with SessionLocal() as db:
@@ -185,7 +197,107 @@ def test_logout_revokes_the_session(monkeypatch):
     get_settings.cache_clear()
     client = TestClient(create_app())
 
-    token = client.post("/paas/api/v1/auth/register",
-                        json={"email": "u2@cho-fam.com", "name": "user2", "password": "pw-1234"}).json()["key"]
+    client.post("/paas/api/v1/auth/register",
+                json={"email": "u2@cho-fam.com", "name": "user2", "password": "pw-1234"})
+    token = _approve_and_login(client, "u2@cho-fam.com", "pw-1234")
     assert client.post("/paas/api/v1/auth/logout", headers={"x-api-key": token}).status_code == 204
     assert client.get("/paas/api/v1/auth/me", headers={"x-api-key": token}).status_code == 401
+
+
+def _register(client, email="pending@cho-fam.com", password="pw-1234"):
+    return client.post("/paas/api/v1/auth/register",
+                       json={"email": email, "name": "가입자", "password": password})
+
+
+def test_unapproved_account_cannot_log_in(monkeypatch):
+    """도메인만 맞으면 누구나 들어오던 것을 막는다 — 승인 전에는 로그인 불가."""
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "cho-fam.com")
+    get_settings.cache_clear()
+    client = TestClient(create_app())
+
+    assert _register(client).status_code == 201
+    res = client.post("/paas/api/v1/auth/login",
+                      json={"email": "pending@cho-fam.com", "password": "pw-1234"})
+    assert res.status_code == 403
+    assert "승인" in res.text
+
+    # 비밀번호가 틀리면 승인 여부를 알려주지 않고 동일한 400을 준다
+    wrong = client.post("/paas/api/v1/auth/login",
+                        json={"email": "pending@cho-fam.com", "password": "nope-1234"})
+    assert wrong.status_code == 400
+
+
+def test_admin_approves_then_login_works(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "cho-fam.com")
+    get_settings.cache_clear()
+    client = TestClient(create_app())
+    admin = ADMIN
+
+    _register(client)
+    accounts = client.get("/paas/api/v1/auth/accounts", headers=admin).json()
+    assert [a["email"] for a in accounts] == ["pending@cho-fam.com"]
+    assert accounts[0]["is_approved"] is False
+
+    approved = client.post(f"/paas/api/v1/auth/accounts/{accounts[0]['id']}/approve", headers=admin)
+    assert approved.status_code == 200
+    assert approved.json()["is_approved"] is True
+
+    ok = client.post("/paas/api/v1/auth/login",
+                     json={"email": "pending@cho-fam.com", "password": "pw-1234"})
+    assert ok.status_code == 200
+    assert ok.json()["key"].startswith("paass_")
+
+
+def test_reject_removes_account_and_revokes_sessions(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "cho-fam.com")
+    get_settings.cache_clear()
+    client = TestClient(create_app())
+    admin = ADMIN
+
+    _register(client)
+    account_id = client.get("/paas/api/v1/auth/accounts", headers=admin).json()[0]["id"]
+    client.post(f"/paas/api/v1/auth/accounts/{account_id}/approve", headers=admin)
+    token = client.post("/paas/api/v1/auth/login",
+                        json={"email": "pending@cho-fam.com", "password": "pw-1234"}).json()["key"]
+    assert client.get("/paas/api/v1/auth/me", headers={"x-api-key": token}).status_code == 200
+
+    assert client.delete(f"/paas/api/v1/auth/accounts/{account_id}", headers=admin).status_code == 204
+    # 계정이 사라지면 이미 발급된 세션도 함께 죽는다
+    assert client.get("/paas/api/v1/auth/me", headers={"x-api-key": token}).status_code == 401
+    assert client.get("/paas/api/v1/auth/accounts", headers=admin).json() == []
+
+
+def test_approval_endpoints_are_admin_only(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "cho-fam.com")
+    get_settings.cache_clear()
+    client = TestClient(create_app())
+    admin = ADMIN
+
+    _register(client)
+    account_id = client.get("/paas/api/v1/auth/accounts", headers=admin).json()[0]["id"]
+    client.post(f"/paas/api/v1/auth/accounts/{account_id}/approve", headers=admin)
+    member = {"x-api-key": client.post(
+        "/paas/api/v1/auth/login",
+        json={"email": "pending@cho-fam.com", "password": "pw-1234"}).json()["key"]}
+
+    assert client.get("/paas/api/v1/auth/accounts", headers=member).status_code == 403
+    assert client.post(f"/paas/api/v1/auth/accounts/{account_id}/approve",
+                       headers=member).status_code == 403
+    assert client.delete(f"/paas/api/v1/auth/accounts/{account_id}",
+                         headers=member).status_code == 403

@@ -150,6 +150,8 @@ class UserAccount(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True)
     name: Mapped[str] = mapped_column(String(128), default="")
     password_hash: Mapped[str] = mapped_column(String(255))
+    # 관리자가 승인해야 로그인할 수 있다 — 도메인만 맞으면 누구나 들어오는 것을 막는다.
+    is_approved: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

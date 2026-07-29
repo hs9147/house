@@ -302,8 +302,17 @@ class UserRegisterRequest(BaseModel):
 class UserRegisterOut(BaseModel):
     name: str
     email: str
-    key: str
+    # 가입 직후에는 세션을 발급하지 않는다 — 관리자 승인 전까지 로그인할 수 없다.
+    is_approved: bool = False
     is_admin: bool = False
+
+
+class UserAccountOut(BaseModel):
+    id: int
+    email: str
+    name: str
+    is_approved: bool
+    is_admin: bool
 
 
 class UserLoginRequest(BaseModel):

@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import Layout from './components/Layout';
 import { isAdmin, isLoggedIn } from './lib/auth';
+import Accounts from './pages/Accounts';
 import Audit from './pages/Audit';
 import Chat from './pages/Chat';
 import Dashboard from './pages/Dashboard';
@@ -69,6 +70,14 @@ export default function App() {
           element={
             <AdminOnly>
               <Modules />
+            </AdminOnly>
+          }
+        />
+        <Route
+          path="/accounts"
+          element={
+            <AdminOnly>
+              <Accounts />
             </AdminOnly>
           }
         />

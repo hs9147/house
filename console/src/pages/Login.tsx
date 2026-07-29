@@ -56,14 +56,15 @@ export default function Login() {
         return;
       }
       try {
-        const regRes = await api.registerUser({
+        await api.registerUser({
           email: cleanEmail,
           name: name.trim(),
           password: password.trim(),
         });
-        // 회원가입 성공 시 자동 로그인
-        const { admin } = await loginWithAccount(regRes.email, password.trim());
-        navigate(admin ? '/' : '/projects');
+        // 승인 전에는 로그인할 수 없다 — 자동 로그인하지 않고 안내만 남긴다.
+        setMode('login');
+        setPassword('');
+        setSuccessMsg('가입 신청이 접수됐습니다. 관리자 승인 후 로그인할 수 있습니다.');
       } catch (err) {
         setError((err as Error).message);
       } finally {
