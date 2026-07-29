@@ -62,6 +62,7 @@ export default function Projects() {
 }
 
 export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const me = useApi(() => api.me());
   const orgs = useApi(() => api.listOrgs());
   const [form, setForm] = useState({
     name: '',
@@ -84,8 +85,10 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
 
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
   
-  // 조직 자동 선택 (미선택 시 첫 번째 조직 ID 자동 할당)
-  const targetOrgId = form.organization_id || (orgs.data && orgs.data.length > 0 ? String(orgs.data[0].id) : '1');
+  // 사용자의 소속 조직으로 프로젝트 생성 고정 (소속 미지정이면 기본 첫 조직 ID 사용)
+  const userOrgId = me.data?.organization_id;
+  const userOrgName = me.data?.organization_name;
+  const targetOrgId = userOrgId ? String(userOrgId) : (form.organization_id || (orgs.data && orgs.data.length > 0 ? String(orgs.data[0].id) : '1'));
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -163,6 +166,9 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
   return (
     <Modal title="새 프로젝트 생성" onClose={onClose}>
       <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 12, padding: '6px 10px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
+          🏢 소속 조직: <strong>{userOrgName || '기본 조직'}</strong> (사용자의 소속 조직으로 자동 등록됩니다)
+        </div>
         <label className="field">
           프로젝트 이름 — 빈칸 없이 소문자·숫자·하이픈만 사용 (예: my-web-app)
           <input

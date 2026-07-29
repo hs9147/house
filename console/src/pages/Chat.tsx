@@ -55,8 +55,18 @@ function groupResources(items: ResourceItem[]) {
 }
 
 export default function Chat() {
+  const me = useApi(() => api.me());
   const projects = useApi(() => api.listProjects());
   const providers = useApi(() => api.listProviders());
+
+  const userOrgId = me.data?.organization_id;
+  const userOrgName = me.data?.organization_name;
+
+  // 사용자의 소속 조직이 지정된 경우, 소속 조직에 해당하는 프로젝트만 노출
+  const availableProjects = (projects.data ?? []).filter((p) => {
+    if (!userOrgId) return true; // 소속 조직 미지정이면 전체 허용
+    return p.organization_id === userOrgId;
+  });
 
   const [projectId, setProjectId] = useState('');
   const resourcesState = useApi(
@@ -323,8 +333,10 @@ export default function Chat() {
 
         <form className="row" onSubmit={startSession}>
           <select value={projectId} onChange={(e) => setProjectId(e.target.value)} required>
-            <option value="">프로젝트 선택...</option>
-            {(projects.data ?? []).map((p) => (
+            <option value="">
+              {userOrgName ? `🏢 [${userOrgName}] 프로젝트 선택...` : '프로젝트 선택...'}
+            </option>
+            {availableProjects.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
