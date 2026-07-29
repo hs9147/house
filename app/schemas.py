@@ -313,6 +313,12 @@ class UserAccountOut(BaseModel):
     name: str
     is_approved: bool
     is_admin: bool
+    organization_id: int | None = None
+    organization_name: str | None = None
+
+
+class UserAccountOrganizationUpdate(BaseModel):
+    organization_id: int | None = None
 
 
 class UserLoginRequest(BaseModel):
@@ -326,3 +332,5 @@ class UserLoginOut(BaseModel):
     email: str
     key: str
     is_admin: bool = False
+    organization_id: int | None = None
+    organization_name: str | None = None

@@ -6,6 +6,7 @@ import { useApi } from '../lib/hooks';
 
 export default function Accounts() {
   const accounts = useApi(() => api.listAccounts());
+  const orgs = useApi(() => api.listOrgs());
   const [activeTab, setActiveTab] = useState<'list' | 'pending'>('list');
   const [busy, setBusy] = useState(0);
   const [error, setError] = useState('');
@@ -23,6 +24,11 @@ export default function Accounts() {
     }
   };
 
+  const updateOrg = (accountId: number, orgIdStr: string) => {
+    const orgId = orgIdStr ? Number(orgIdStr) : null;
+    return act(accountId, () => api.updateAccountOrganization(accountId, orgId));
+  };
+
   const deleteAccount = (id: number, email: string) => {
     if (!confirm(`정말로 계정 '${email}'을(를) 삭제하시겠습니까?\n해당 계정에 발급된 세션 및 권한이 즉시 폐기됩니다.`)) return;
     return act(id, () => api.rejectAccount(id));
@@ -33,12 +39,14 @@ export default function Accounts() {
     return act(id, () => api.rejectAccount(id));
   };
 
+  const orgList = orgs.data ?? [];
+
   return (
     <div className="panel" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div>
         <h2 style={{ margin: 0 }}>👤 계정 관리 (Account Management)</h2>
         <p className="mutedtext" style={{ fontSize: 12, marginTop: 4 }}>
-          전체 계정 목록을 조회하고 승인 요청을 처리하거나 불필요한 계정을 삭제 관리합니다.
+          계정 목록 및 승인 대기 요청을 관리하고 계정별 소속 조직을 지정합니다.
         </p>
       </div>
 
@@ -90,6 +98,7 @@ export default function Accounts() {
                       <tr>
                         <th style={{ textAlign: 'left' }}>이메일</th>
                         <th style={{ textAlign: 'left' }}>이름</th>
+                        <th style={{ textAlign: 'left' }}>소속 조직 설정</th>
                         <th style={{ textAlign: 'left' }}>역할 / 상태</th>
                         <th style={{ textAlign: 'right' }}>관리 Action</th>
                       </tr>
@@ -97,7 +106,7 @@ export default function Accounts() {
                     <tbody>
                       {rows.length === 0 ? (
                         <tr>
-                          <td colSpan={4} className="mutedtext" style={{ textAlign: 'center', padding: 24 }}>
+                          <td colSpan={5} className="mutedtext" style={{ textAlign: 'center', padding: 24 }}>
                             등록된 계정이 존재하지 않습니다.
                           </td>
                         </tr>
@@ -106,6 +115,21 @@ export default function Accounts() {
                           <tr key={a.id}>
                             <td className="mono">{a.email}</td>
                             <td>{a.name}</td>
+                            <td>
+                              <select
+                                style={{ fontSize: 12, padding: '4px 6px' }}
+                                value={a.organization_id ?? ''}
+                                disabled={busy === a.id}
+                                onChange={(e) => updateOrg(a.id, e.target.value)}
+                              >
+                                <option value="">🏢 미지정 (전역)</option>
+                                {orgList.map((o) => (
+                                  <option key={o.id} value={o.id}>
+                                    🏢 {o.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
                             <td>
                               <StatusPill value={a.is_approved ? (a.is_admin ? 'admin' : '승인됨') : '승인 대기'} />
                             </td>
@@ -144,6 +168,7 @@ export default function Accounts() {
                       <tr>
                         <th style={{ textAlign: 'left' }}>이메일</th>
                         <th style={{ textAlign: 'left' }}>이름</th>
+                        <th style={{ textAlign: 'left' }}>소속 조직 설정</th>
                         <th style={{ textAlign: 'left' }}>상태</th>
                         <th style={{ textAlign: 'right' }}>승인 처리</th>
                       </tr>
@@ -151,7 +176,7 @@ export default function Accounts() {
                     <tbody>
                       {pendingRows.length === 0 ? (
                         <tr>
-                          <td colSpan={4} className="mutedtext" style={{ textAlign: 'center', padding: 24 }}>
+                          <td colSpan={5} className="mutedtext" style={{ textAlign: 'center', padding: 24 }}>
                             🎉 승인 대기 중인 계정 요청이 없습니다.
                           </td>
                         </tr>
@@ -160,6 +185,21 @@ export default function Accounts() {
                           <tr key={a.id}>
                             <td className="mono">{a.email}</td>
                             <td>{a.name}</td>
+                            <td>
+                              <select
+                                style={{ fontSize: 12, padding: '4px 6px' }}
+                                value={a.organization_id ?? ''}
+                                disabled={busy === a.id}
+                                onChange={(e) => updateOrg(a.id, e.target.value)}
+                              >
+                                <option value="">🏢 미지정 (전역)</option>
+                                {orgList.map((o) => (
+                                  <option key={o.id} value={o.id}>
+                                    🏢 {o.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
                             <td>
                               <StatusPill value="승인 대기" />
                             </td>

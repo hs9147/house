@@ -13,6 +13,7 @@ from ..schemas import (
     ApiKeyCreate,
     ApiKeyIssued,
     UserAccountOut,
+    UserAccountOrganizationUpdate,
     UserLoginOut,
     UserLoginRequest,
     UserRegisterOut,
@@ -76,12 +77,21 @@ def system_status(_: ApiKey = Depends(require_admin)):
 
 
 @router.get("/auth/me")
-def get_current_user_profile(key: ApiKey = Depends(require_api_key)):
+def get_current_user_profile(
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
     settings = get_settings()
+    user = db.execute(select(UserAccount).where(UserAccount.email == key.name)).scalar_one_or_none()
+    org_id = user.organization_id if user else None
+    org_name = user.organization.name if (user and user.organization) else None
+
     return {
         "name": key.name,
         "is_admin": key.is_admin,
         "allowed_email_domain": settings.allowed_email_domain,
+        "organization_id": org_id,
+        "organization_name": org_name,
     }
 
 
@@ -159,6 +169,8 @@ def login_user_account(
         email=user.email,
         key=_start_session(db, user.email, user.is_admin),
         is_admin=user.is_admin,
+        organization_id=user.organization_id,
+        organization_name=user.organization.name if user.organization else None,
     )
 
 
@@ -188,8 +200,15 @@ def list_user_accounts(
         select(UserAccount).order_by(UserAccount.is_approved, UserAccount.created_at)
     ).scalars()
     return [
-        UserAccountOut(id=u.id, email=u.email, name=u.name,
-                       is_approved=u.is_approved, is_admin=u.is_admin)
+        UserAccountOut(
+            id=u.id,
+            email=u.email,
+            name=u.name,
+            is_approved=u.is_approved,
+            is_admin=u.is_admin,
+            organization_id=u.organization_id,
+            organization_name=u.organization.name if u.organization else None,
+        )
         for u in rows
     ]
 
@@ -206,8 +225,40 @@ def approve_user_account(
     user.is_approved = True
     db.commit()
     audit.record(db, admin.name, "user.approve", user.email, {})
-    return UserAccountOut(id=user.id, email=user.email, name=user.name,
-                          is_approved=user.is_approved, is_admin=user.is_admin)
+    return UserAccountOut(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        is_approved=user.is_approved,
+        is_admin=user.is_admin,
+        organization_id=user.organization_id,
+        organization_name=user.organization.name if user.organization else None,
+    )
+
+
+@router.post("/auth/accounts/{account_id}/organization", response_model=UserAccountOut)
+def update_user_account_organization(
+    account_id: int,
+    body: UserAccountOrganizationUpdate,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    user = db.get(UserAccount, account_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    user.organization_id = body.organization_id
+    db.commit()
+    db.refresh(user)
+    audit.record(db, admin.name, "user.set_organization", user.email, {"organization_id": body.organization_id})
+    return UserAccountOut(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        is_approved=user.is_approved,
+        is_admin=user.is_admin,
+        organization_id=user.organization_id,
+        organization_name=user.organization.name if user.organization else None,
+    )
 
 
 @router.delete("/auth/accounts/{account_id}", status_code=204)

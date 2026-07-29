@@ -26,13 +26,15 @@ export default function Layout() {
 
   // 설치 빌드옵션(기능 모듈·호스트 OS)에 맞춰 메뉴를 구성한다
   const health = useApi(() => api.health());
+  const me = useApi(() => api.me());
   const features = health.data?.features ?? [];
   const has = (f: string) => features.includes(f);
+  const systemName = health.data?.platform_name || (import.meta as any).env?.VITE_SYSTEM_NAME || 'PaaS';
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <h1 style={{ marginBottom: 8 }}>PaaS 콘솔</h1>
+        <h1 style={{ marginBottom: 8 }}>{systemName} 콘솔</h1>
 
         {/* 🏢 글로벌 조직 선택 필터 */}
         <div style={{ padding: '0 0 12px 0', borderBottom: '1px solid rgba(255,255,255,0.1)', marginBottom: 12 }}>
@@ -74,6 +76,7 @@ export default function Layout() {
           )}
           <span className="mutedtext" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={email || (admin ? 'admin' : 'member')}>
             {email || (admin ? 'admin' : 'member')}
+            {me.data?.organization_name ? ` (🏢 ${me.data.organization_name})` : ''}
           </span>
           <button
             className="secondary small"

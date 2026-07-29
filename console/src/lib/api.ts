@@ -282,9 +282,12 @@ export const api = {
   },
   deleteModule: (id: number) => request<void>('DELETE', `/modules/${id}`),
 
-  // 계정 승인 (admin)
+  me: () =>
+    request<{ name: string; is_admin: boolean; allowed_email_domain: string | null; organization_id: number | null; organization_name: string | null }>('GET', '/auth/me'),
   listAccounts: () => request<UserAccountOut[]>('GET', '/auth/accounts'),
   approveAccount: (id: number) => request<UserAccountOut>('POST', `/auth/accounts/${id}/approve`),
+  updateAccountOrganization: (id: number, organization_id: number | null) =>
+    request<UserAccountOut>('POST', `/auth/accounts/${id}/organization`, { organization_id }),
   rejectAccount: (id: number) => request<void>('DELETE', `/auth/accounts/${id}`),
 
   // 파일 저장소 — 로컬 경로는 노출되지 않고 /storage/{모듈} 창구로만 다룬다

@@ -88,6 +88,8 @@ export interface UserAccountOut {
   name: string;
   is_approved: boolean;
   is_admin: boolean;
+  organization_id?: number | null;
+  organization_name?: string | null;
 }
 
 // 파일 저장소 — 로컬 경로 대신 창구 URL로만 다룬다 (services/storage.py)
@@ -288,6 +290,7 @@ export interface StatusSnapshot {
 
 export interface HealthInfo {
   ok: boolean;
+  platform_name?: string;
   tier: string;
   host_os: string;
   features: string[];
