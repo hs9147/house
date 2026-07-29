@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
 import Modal from '../components/Modal';
@@ -10,70 +10,43 @@ import type { BuildProfile, ProjectCreate, ProjectType } from '../lib/types';
 
 export default function Projects() {
   const state = useApi(() => api.listProjects());
-  const orgs = useApi(() => api.listOrgs());
-  const [selectedOrgId, setSelectedOrgId] = useState<string>(
-    sessionStorage.getItem('paas_selected_org_id') ?? ''
-  );
   const [showCreate, setShowCreate] = useState(false);
   const navigate = useNavigate();
-
-  useEffect(() => {
-    const handleOrgChange = () => {
-      setSelectedOrgId(sessionStorage.getItem('paas_selected_org_id') ?? '');
-    };
-    window.addEventListener('paas_org_changed', handleOrgChange);
-    return () => window.removeEventListener('paas_org_changed', handleOrgChange);
-  }, []);
 
   return (
     <div className="panel">
       <div className="row" style={{ marginBottom: 12, alignItems: 'center', gap: 12 }}>
         <h2 style={{ margin: 0 }}>프로젝트</h2>
-        {(() => {
-          const currentOrg = orgs.data?.find((o) => String(o.id) === selectedOrgId);
-          const orgName = currentOrg ? currentOrg.name : (orgs.data && orgs.data.length > 0 ? orgs.data[0].name : '기본 조직');
-          return (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, backgroundColor: 'rgba(59, 130, 246, 0.12)', color: '#60a5fa', border: '1px solid rgba(59, 130, 246, 0.3)', padding: '4px 12px', borderRadius: 16, fontWeight: 600 }}>
-              <span style={{ color: '#9ca3af', fontWeight: 400 }}>소속 조직:</span>
-              <span>{orgName}</span>
-            </div>
-          );
-        })()}
         <div className="spacer" />
         <button onClick={() => setShowCreate(true)}>+ 새 프로젝트</button>
       </div>
       <Async state={state} empty="프로젝트가 없습니다.">
-        {(projects) => {
-          const filtered = selectedOrgId
-            ? projects.filter((p) => String(p.organization_id) === selectedOrgId)
-            : projects;
-          return (
-            <table>
-              <thead>
-                <tr>
-                  <th>이름</th>
-                  <th>타입</th>
-                  <th>Git</th>
-                  <th>브랜치</th>
-                  <th>기본 프로필</th>
-                  <th>생성일</th>
+        {(projects) => (
+          <table>
+            <thead>
+              <tr>
+                <th>이름</th>
+                <th>타입</th>
+                <th>Git</th>
+                <th>브랜치</th>
+                <th>기본 프로필</th>
+                <th>생성일</th>
+              </tr>
+            </thead>
+            <tbody>
+              {projects.map((p) => (
+                <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
+                  <td>{p.name}</td>
+                  <td><StatusPill value={p.type} /></td>
+                  <td className="mono">{p.git_url}</td>
+                  <td className="mono">{p.branch}</td>
+                  <td><StatusPill value={p.default_profile} /></td>
+                  <td className="mono">{fmtDate(p.created_at)}</td>
                 </tr>
-              </thead>
-              <tbody>
-                {filtered.map((p) => (
-                  <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
-                    <td>{p.name}</td>
-                    <td><StatusPill value={p.type} /></td>
-                    <td className="mono">{p.git_url}</td>
-                    <td className="mono">{p.branch}</td>
-                    <td><StatusPill value={p.default_profile} /></td>
-                    <td className="mono">{fmtDate(p.created_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          );
-        }}
+              ))}
+            </tbody>
+          </table>
+        )}
       </Async>
       {showCreate && (
         <CreateModal
