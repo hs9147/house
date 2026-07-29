@@ -72,7 +72,6 @@ export default function Layout() {
           )}
           <span className="mutedtext" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={email || (admin ? 'admin' : 'member')}>
             {email || (admin ? 'admin' : 'member')}
-            {me.data?.organization_name ? ` (🏢 ${me.data.organization_name})` : ''}
           </span>
           <button
             className="secondary small"

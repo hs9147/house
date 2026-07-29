@@ -9,9 +9,13 @@ import { useApi } from '../lib/hooks';
 import type { BuildProfile, ProjectCreate, ProjectType } from '../lib/types';
 
 export default function Projects() {
+  const me = useApi(() => api.me());
   const state = useApi(() => api.listProjects());
   const [showCreate, setShowCreate] = useState(false);
   const navigate = useNavigate();
+
+  const userOrgs = me.data?.organizations ?? [];
+  const userOrgIds = userOrgs.map((o) => o.id);
 
   return (
     <div className="panel">
@@ -21,32 +25,39 @@ export default function Projects() {
         <button onClick={() => setShowCreate(true)}>+ 새 프로젝트</button>
       </div>
       <Async state={state} empty="프로젝트가 없습니다.">
-        {(projects) => (
-          <table>
-            <thead>
-              <tr>
-                <th>이름</th>
-                <th>타입</th>
-                <th>Git</th>
-                <th>브랜치</th>
-                <th>기본 프로필</th>
-                <th>생성일</th>
-              </tr>
-            </thead>
-            <tbody>
-              {projects.map((p) => (
-                <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
-                  <td>{p.name}</td>
-                  <td><StatusPill value={p.type} /></td>
-                  <td className="mono">{p.git_url}</td>
-                  <td className="mono">{p.branch}</td>
-                  <td><StatusPill value={p.default_profile} /></td>
-                  <td className="mono">{fmtDate(p.created_at)}</td>
+        {(projects) => {
+          // 사용자가 소속 조직을 가지고 있는 경우, 속해 있는 모든 조직의 프로젝트들을 노출
+          const filtered = (userOrgIds.length > 0 && !me.data?.is_admin)
+            ? projects.filter((p) => p.organization_id !== null && p.organization_id !== undefined && userOrgIds.includes(p.organization_id))
+            : projects;
+
+          return (
+            <table>
+              <thead>
+                <tr>
+                  <th>이름</th>
+                  <th>타입</th>
+                  <th>Git</th>
+                  <th>브랜치</th>
+                  <th>기본 프로필</th>
+                  <th>생성일</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              </thead>
+              <tbody>
+                {filtered.map((p) => (
+                  <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
+                    <td>{p.name}</td>
+                    <td><StatusPill value={p.type} /></td>
+                    <td className="mono">{p.git_url}</td>
+                    <td className="mono">{p.branch}</td>
+                    <td><StatusPill value={p.default_profile} /></td>
+                    <td className="mono">{fmtDate(p.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          );
+        }}
       </Async>
       {showCreate && (
         <CreateModal
@@ -85,10 +96,16 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
 
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
   
-  // 사용자의 소속 조직으로 프로젝트 생성 고정 (소속 미지정이면 기본 첫 조직 ID 사용)
-  const userOrgId = me.data?.organization_id;
-  const userOrgName = me.data?.organization_name;
-  const targetOrgId = userOrgId ? String(userOrgId) : (form.organization_id || (orgs.data && orgs.data.length > 0 ? String(orgs.data[0].id) : '1'));
+  // 사용자의 소속 조직 목록 추출
+  const userOrgs = me.data?.organizations && me.data.organizations.length > 0
+    ? me.data.organizations
+    : (me.data?.organization_id && me.data?.organization_name ? [{ id: me.data.organization_id, name: me.data.organization_name }] : []);
+
+  const [selectedOrgId, setSelectedOrgId] = useState<string>(() => {
+    return userOrgs.length > 0 ? String(userOrgs[0].id) : (orgs.data && orgs.data.length > 0 ? String(orgs.data[0].id) : '1');
+  });
+
+  const targetOrgId = selectedOrgId || (userOrgs.length > 0 ? String(userOrgs[0].id) : '1');
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -148,12 +165,8 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
       domain: form.domain || null,
       health_check_path: form.health_check_path,
       default_profile: form.default_profile,
+      organization_id: Number(targetOrgId),
     };
-    if (form.organization_id) {
-      payload.organization_id = Number(form.organization_id);
-    } else {
-      payload.git_url = form.git_url;
-    }
     try {
       await api.createProject(payload);
       onCreated();
@@ -166,9 +179,26 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
   return (
     <Modal title="새 프로젝트 생성" onClose={onClose}>
       <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div style={{ fontSize: 12, padding: '6px 10px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
-          🏢 소속 조직: <strong>{userOrgName || '기본 조직'}</strong> (사용자의 소속 조직으로 자동 등록됩니다)
-        </div>
+        {userOrgs.length > 1 ? (
+          <label className="field">
+            소속 조직 선택 (다수 소속 조직 중 프로젝트를 생성할 조직을 선택하세요)
+            <select
+              value={targetOrgId}
+              onChange={(e) => setSelectedOrgId(e.target.value)}
+              style={{ fontSize: 13, padding: '6px 8px' }}
+            >
+              {userOrgs.map((o) => (
+                <option key={o.id} value={o.id}>
+                  🏢 {o.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <div style={{ fontSize: 12, padding: '6px 10px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
+            🏢 소속 조직: <strong>{userOrgs[0]?.name || me.data?.organization_name || '기본 조직'}</strong> (사용자의 소속 조직으로 등록됩니다)
+          </div>
+        )}
         <label className="field">
           프로젝트 이름 — 빈칸 없이 소문자·숫자·하이픈만 사용 (예: my-web-app)
           <input

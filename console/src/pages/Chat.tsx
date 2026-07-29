@@ -59,13 +59,15 @@ export default function Chat() {
   const projects = useApi(() => api.listProjects());
   const providers = useApi(() => api.listProviders());
 
-  const userOrgId = me.data?.organization_id;
-  const userOrgName = me.data?.organization_name;
+  const userOrgs = me.data?.organizations ?? [];
+  const userOrgIds = userOrgs.map((o) => o.id);
 
-  // 사용자의 소속 조직이 지정된 경우, 소속 조직에 해당하는 프로젝트만 노출
+  const orgNamesLabel = userOrgs.length > 0 ? userOrgs.map((o) => o.name).join(', ') : me.data?.organization_name;
+
+  // 사용자가 소속된 모든 소속 조직들의 프로젝트를 노출
   const availableProjects = (projects.data ?? []).filter((p) => {
-    if (!userOrgId) return true; // 소속 조직 미지정이면 전체 허용
-    return p.organization_id === userOrgId;
+    if (userOrgIds.length === 0 || me.data?.is_admin) return true; // 소속 미지정이거나 관리자면 전체 노출
+    return p.organization_id !== null && p.organization_id !== undefined && userOrgIds.includes(p.organization_id);
   });
 
   const [projectId, setProjectId] = useState('');
@@ -334,7 +336,7 @@ export default function Chat() {
         <form className="row" onSubmit={startSession}>
           <select value={projectId} onChange={(e) => setProjectId(e.target.value)} required>
             <option value="">
-              {userOrgName ? `🏢 [${userOrgName}] 프로젝트 선택...` : '프로젝트 선택...'}
+              {orgNamesLabel ? `🏢 [${orgNamesLabel}] 프로젝트 선택...` : '프로젝트 선택...'}
             </option>
             {availableProjects.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
