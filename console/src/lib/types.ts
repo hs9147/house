@@ -152,6 +152,42 @@ export interface ChatReply {
   used_modules?: string[];
 }
 
+// 에이전트 기획 (Agent Planning)
+export interface PlanArtifactOut {
+  stage: 'spec' | 'architecture' | 'solution' | 'principles';
+  title: string;
+  repo_path: string;
+  commit_sha: string | null;
+  confirmed: boolean;
+}
+
+export interface PlanSessionOut {
+  id: number;
+  branch: string;
+  provider: string;
+  project_id: number;
+  project_name: string;
+  artifacts: PlanArtifactOut[];
+}
+
+export interface PlanMessageReply {
+  reply: string;
+  used_modules?: string[];
+}
+
+export interface PlanBuildEvent {
+  actor: string;
+  action: string;
+  detail: Record<string, unknown> | null;
+  created_at: string | null;
+}
+
+export interface PlanBuildStatus {
+  project: string;
+  branch: string;
+  events: PlanBuildEvent[];
+}
+
 export interface ReviewFinding {
   severity: string;
   file: string;

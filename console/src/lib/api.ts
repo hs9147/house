@@ -16,6 +16,10 @@ import type {
   ModuleOut,
   ModuleSummary,
   OrgOut,
+  PlanArtifactOut,
+  PlanBuildStatus,
+  PlanMessageReply,
+  PlanSessionOut,
   PreviewOut,
   ProjectCreate,
   ProjectFileContentOut,
@@ -339,6 +343,24 @@ export const api = {
       provider_id, diff: diff || null, base_ref: base_ref || null,
     }),
 
+  // 에이전트 기획 (Agent Planning)
+  createPlanSession: (project_id: number, provider_id: number, branch?: string) =>
+    request<PlanSessionOut>('POST', '/plan/sessions', {
+      project_id, provider_id, branch: branch || null,
+    }),
+  getPlanSession: (sessionId: number) =>
+    request<PlanSessionOut>('GET', `/plan/sessions/${sessionId}`),
+  sendPlanMessage: (sessionId: number, stage: string, content: string, files: string[]) =>
+    request<PlanMessageReply>('POST', `/plan/sessions/${sessionId}/stages/${stage}/messages`,
+      { content, files }),
+  confirmPlanStage: (sessionId: number, stage: string, content: string) =>
+    request<PlanArtifactOut>('POST', `/plan/sessions/${sessionId}/stages/${stage}/confirm`,
+      { content }),
+  planBuildStatus: (sessionId: number) =>
+    request<PlanBuildStatus>('GET', `/plan/sessions/${sessionId}/build-status`),
+  planConstraints: (projectId: number) =>
+    request<{ document: string }>('GET', `/plan/projects/${projectId}/constraints`),
+
   // 서버구성 (런타임/프록시 백엔드 시각화 + redirect/rewrite 규칙)
   serverConfig: () => request<ServerConfigOut>('GET', '/server-config'),
   listRedirects: (projectId: number) =>
@@ -371,6 +393,7 @@ export const api = {
     request<{ files: { filename: string; relative_path: string; size_bytes: number; mtime: number }[]; log_dir: string }>('GET', '/system/build-logs'),
   getBuildLogContent: (filename: string, tail_lines = 1000) =>
     request<{ filename: string; total_lines: number; tail_lines: number; content: string }>('GET', `/system/build-logs/content?filename=${encodeURIComponent(filename)}&tail_lines=${tail_lines}`),
-  restartBackendService: () =>
-    request<{ status: string; message: string }>('POST', '/system/restart'),
+  swUpdate: () =>
+    request<{ status: string; message: string; services?: string[]; error?: string | null }>(
+      'POST', '/system/sw-update'),
 };

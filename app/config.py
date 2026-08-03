@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     storage_root: str = "./data/storage"
     powershell_start_dir: str = ""
 
+    # --- SW 업데이트(git pull + Windows 서비스 재시작) ---
+    # 비우면 플랫폼 리포 루트에서 git pull 한다.
+    sw_update_repo_dir: str = ""
+    # git pull 후 재시작할 Windows 서비스명(콤마 구분). 백엔드(paas)와 콘솔(console) 서비스명은
+    # 설치 환경마다 다르므로 여기서 지정한다 — 예: "paas,paas-console".
+    sw_update_services: str = "paas,paas-console"
+
     # --- 1차(small) 전용 ---
     # 실행 런타임: docker(기본, 컨테이너 이미지) | windows_service(Docker 없이 nssm으로
     # 네이티브 프로세스를 Windows Service로 등록 — IIS 뒤에 배치하는 구성 등)

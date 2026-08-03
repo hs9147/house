@@ -11,6 +11,7 @@ from pathlib import Path
 from ..config import get_settings
 from ..models import Project
 from .build import BuildError, checkout
+from .git_auth import auth_args
 
 MAX_CONTEXT_FILE_BYTES = 40_000
 CONTEXT_EXTENSIONS = {
@@ -184,6 +185,37 @@ def _apply_patch_fallback(workdir: Path, diff_text: str) -> None:
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_and_commit(project: Project, branch: str, rel_path: str, content: str, message: str) -> str:
+    """작업 브랜치에 파일 하나를 쓰고 커밋한 뒤 원격(Gitea)에 push, 커밋 SHA를 반환한다.
+
+    에이전트 기획의 단계 산출물 확정 경로 — diff가 아니라 완성된 문서를 리포에 남긴다.
+    경로 탈출을 막고, 인증(git_auth)은 push에서만 주입한다(git_url은 로그·원격 인자로만).
+    """
+    workdir = ensure_branch(project, branch)
+    root = workdir.resolve()
+    target = (root / rel_path).resolve()
+    if not target.is_relative_to(root):
+        raise BuildError(f"경로가 워크스페이스를 벗어납니다: {rel_path}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    normalized = content.replace("\r\n", "\n")
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    target.write_text(normalized, encoding="utf-8")
+
+    _git(workdir, "add", "--", rel_path)
+    _git(
+        workdir,
+        "-c", "user.name=paas-bot",
+        "-c", "user.email=paas-bot@localhost",
+        "commit", "-m", message,
+    )
+    _git(workdir, *auth_args(project.git_url), "push", "-u", "origin", branch)
+    out = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, text=True, check=True
+    )
+    return out.stdout.strip()
 
 
 def diff_between(workdir: Path, base_ref: str, head_ref: str = "HEAD") -> str:

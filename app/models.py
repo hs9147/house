@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -249,6 +249,30 @@ class ProposedChange(Base):
     summary: Mapped[str] = mapped_column(String(255), default="")
     status: Mapped[ChangeStatus] = mapped_column(Enum(ChangeStatus), default=ChangeStatus.proposed)
     applied_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PlanStage(str, enum.Enum):
+    """에이전트 기획의 순차 단계. 순서는 아래 정의 순서를 따른다."""
+
+    spec = "spec"  # 기획서 확정
+    architecture = "architecture"  # 아키텍처 설계
+    solution = "solution"  # 솔루션 구성(내부 솔루션 사용)
+    principles = "principles"  # 개발원칙
+
+
+class PlanArtifact(Base):
+    """단계 산출물 포인터. 본문은 프로젝트 Gitea 리포에 커밋되고 여기엔 위치·커밋·확정만 둔다."""
+
+    __tablename__ = "plan_artifacts"
+    __table_args__ = (UniqueConstraint("session_id", "stage", name="uq_plan_artifact_session_stage"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("chat_sessions.id"), index=True)
+    stage: Mapped[PlanStage] = mapped_column(Enum(PlanStage))
+    repo_path: Mapped[str] = mapped_column(String(255))  # 예: docs/agent-planning/01-기획서.md
+    commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

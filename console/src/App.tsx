@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import Layout from './components/Layout';
 import { isAdmin, isLoggedIn } from './lib/auth';
 import Accounts from './pages/Accounts';
+import AgentPlanning from './pages/AgentPlanning';
 import Audit from './pages/Audit';
 import Chat from './pages/Chat';
 import Dashboard from './pages/Dashboard';
@@ -115,6 +116,7 @@ export default function App() {
             </AdminOnly>
           }
         />
+        <Route path="/planning" element={<AgentPlanning />} />
         <Route path="/chat" element={<Chat />} />
         <Route
           path="/audit"

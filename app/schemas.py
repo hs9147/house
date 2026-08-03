@@ -174,6 +174,46 @@ class ReviewRequest(BaseModel):
     base_ref: str | None = None
 
 
+# --- 에이전트 기획 (Agent Planning) ---
+
+
+class PlanSessionCreate(BaseModel):
+    project_id: int
+    provider_id: int
+    branch: str | None = None  # 기본: paas/plan-{session_id}
+
+
+class PlanMessageIn(BaseModel):
+    content: str
+    files: list[str] = []  # 컨텍스트로 포함할 리포 내 파일 경로
+
+
+class PlanMessageReply(BaseModel):
+    reply: str  # 단계 산출물 문서 초안(마크다운)
+    used_modules: list[str] = []
+
+
+class PlanConfirmIn(BaseModel):
+    content: str  # 확정할 단계 산출물 본문(마크다운) — Gitea 리포에 커밋된다
+
+
+class PlanArtifactOut(BaseModel):
+    stage: str
+    title: str
+    repo_path: str
+    commit_sha: str | None = None
+    confirmed: bool = False
+
+
+class PlanSessionOut(BaseModel):
+    id: int
+    branch: str
+    provider: str
+    project_id: int
+    project_name: str
+    artifacts: list[PlanArtifactOut] = []
+
+
 class ModuleCreate(BaseModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,40}$")
     type: str = Field(pattern=r"^(external_api|internal_api|database|file_storage|mcp)$")

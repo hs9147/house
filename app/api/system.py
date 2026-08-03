@@ -398,9 +398,9 @@ def exec_powershell_cmd(
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
-    """admin 전용 PowerShell 명령어 실행 API."""
+    """admin 전용 PowerShell 명령어 실행 API. 상주 공유 데몬을 사용해 호출 간 세션이 유지된다."""
     import os  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
+    from ..services import powershell_daemon  # noqa: PLC0415
     cmd = body.get("command", "").strip()
     if not cmd:
         raise HTTPException(status_code=400, detail="command field is required")
@@ -409,24 +409,16 @@ def exec_powershell_cmd(
     cwd_dir = os.path.abspath(settings.powershell_start_dir) if settings.powershell_start_dir else None
 
     try:
-        proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd],
-            cwd=cwd_dir,
-            capture_output=True,
-            text=True,
-            timeout=30.0,
-            encoding="utf-8",
-            errors="replace",
-        )
-        output = (proc.stdout or "") + (proc.stderr or "")
-        audit.record(db, admin.name, "powershell.exec", cmd[:100], {"returncode": proc.returncode})
+        daemon = powershell_daemon.shared_daemon(cwd=cwd_dir)
+        result = daemon.run(cmd, timeout=30.0)
+        audit.record(db, admin.name, "powershell.exec", cmd[:100], {"returncode": result.returncode})
         return {
             "command": cmd,
-            "returncode": proc.returncode,
-            "output": output or "(no output)",
+            "returncode": result.returncode,
+            "output": result.output or "(no output)",
             "cwd": cwd_dir or os.getcwd(),
         }
-    except subprocess.TimeoutExpired:
+    except TimeoutError:
         raise HTTPException(status_code=504, detail="PowerShell command execution timed out (30s)")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PowerShell execution failed: {e}")
@@ -434,14 +426,20 @@ def exec_powershell_cmd(
 
 @router.websocket("/system/powershell/ws")
 async def powershell_websocket_terminal(websocket: WebSocket):
-    """admin 전용 실시간 PowerShell WebSocket 터미널."""
+    """admin 전용 실시간 PowerShell WebSocket 터미널.
+
+    연결마다 상주 데몬을 하나 띄워 그 연결 동안 세션 상태(cd·변수)를 유지하고, 명령 실행은
+    asyncio.to_thread로 돌려 이벤트 루프를 블로킹하지 않는다. 연결 종료 시 데몬을 정리한다.
+    """
+    import asyncio  # noqa: PLC0415
     import os  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
+    from ..services import powershell_daemon  # noqa: PLC0415
     await websocket.accept()
     settings = get_settings()
     cwd_dir = os.path.abspath(settings.powershell_start_dir) if settings.powershell_start_dir else None
     start_info = f"WorkDir: {cwd_dir or os.getcwd()}"
 
+    daemon = powershell_daemon.PowerShellDaemon(cwd=cwd_dir)
     try:
         await websocket.send_text(f"Windows PowerShell Interactive Console Connected ({start_info}).\nType commands or click Disconnect to end session.\n\nPS > ")
         while True:
@@ -455,21 +453,18 @@ async def powershell_websocket_terminal(websocket: WebSocket):
                 await websocket.close()
                 break
 
-            proc = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd_str],
-                cwd=cwd_dir,
-                capture_output=True,
-                text=True,
-                timeout=30.0,
-                encoding="utf-8",
-                errors="replace",
-            )
-            out = (proc.stdout or "") + (proc.stderr or "")
+            try:
+                result = await asyncio.to_thread(daemon.run, cmd_str, 30.0)
+                out = result.output
+            except TimeoutError:
+                out = "(timed out after 30s)"
             if not out.strip():
                 out = "(completed)"
             await websocket.send_text(f"{out}\n\nPS > ")
     except Exception:
         pass
+    finally:
+        await asyncio.to_thread(daemon.stop)
 
 
 @router.get("/system/build-logs")
@@ -569,6 +564,61 @@ def restart_backend_service(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to schedule service restart: {e}")
+
+
+@router.post("/system/sw-update")
+def sw_update(
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """SW 업데이트: 프로젝트 폴더에서 git pull 후 paas·console Windows 서비스를 재시작한다.
+
+    Restart-Service가 paas 서비스(현재 프로세스)를 stop→start 하므로, 스크립트를 DETACHED
+    독립 프로세스로 띄워 백엔드가 내려가도 업데이트가 끝까지 진행되게 한다.
+    """
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    settings = get_settings()
+    repo_dir = settings.sw_update_repo_dir or str(Path(__file__).resolve().parent.parent.parent)
+    services = [s.strip() for s in settings.sw_update_services.split(",") if s.strip()]
+    if not services:
+        raise HTTPException(status_code=400, detail="PAAS_SW_UPDATE_SERVICES가 비어 있습니다.")
+
+    escaped_repo = repo_dir.replace("'", "''")
+    restart_lines = "".join(
+        f"Restart-Service -Name '{s.replace(chr(39), chr(39) * 2)}' -Force -ErrorAction SilentlyContinue; "
+        for s in services
+    )
+    update_script = (
+        "$ErrorActionPreference = 'Continue'; "
+        f"Set-Location '{escaped_repo}'; "
+        "Write-Host '[SW Update] git pull...'; "
+        "git pull; "
+        "Start-Sleep -Seconds 1; "
+        "Write-Host '[SW Update] Restarting services...'; "
+        + restart_lines
+    )
+
+    try:
+        flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", update_script],
+            cwd=repo_dir,
+            creationflags=flags,
+            close_fds=True,
+        )
+        audit.record(db, getattr(admin, "name", "admin"), "system.sw_update", "backend_service",
+                     {"repo_dir": repo_dir, "services": services})
+        return {
+            "status": "updating",
+            "message": f"git pull 후 서비스 {', '.join(services)} 재시작을 시작했습니다. 잠시 후 연결을 확인하세요.",
+            "error": None,
+            "services": services,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to schedule SW update: {e}")
 
 
 @router.get("/system/build-logs/content")

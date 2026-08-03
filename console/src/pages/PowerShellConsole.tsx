@@ -150,23 +150,23 @@ export default function PowerShellConsole() {
 
   const [restarting, setRestarting] = useState(false);
 
-  const handleRestartBackend = async () => {
+  const handleSwUpdate = async () => {
     if (!connected) {
-      alert('백엔드가 연결 끊김(Disconnected) 상태일 때는 안전 재기동 요청을 전송할 수 없습니다.');
+      alert('백엔드가 연결 끊김(Disconnected) 상태일 때는 SW 업데이트 요청을 전송할 수 없습니다.');
       return;
     }
-    if (!window.confirm('Self-Kill 방지 모드로 PaaS 백엔드 서비스를 2초 후 디태치 재기동하시겠습니까?')) return;
+    if (!window.confirm('프로젝트 폴더에서 git pull 후 paas·console 서비스를 재시작합니다. 진행하시겠습니까?')) return;
     setRestarting(true);
     try {
-      const res = (await api.restartBackendService()) as { status?: string; message?: string; error?: string | null };
-      const statusStr = res.status || 'restarting';
-      const msgStr = res.message || 'PaaS 백엔드 서비스가 안전하게 재기동됩니다.';
+      const res = await api.swUpdate();
+      const statusStr = res.status || 'updating';
+      const msgStr = res.message || 'git pull 후 서비스가 재시작됩니다.';
       const errStr = res.error ? ` | Error: ${res.error}` : '';
 
       setLogs((prev) => [
         ...prev,
         `\n[System Notification] Status: ${statusStr} | Message: ${msgStr}${errStr}`,
-        `[System] 3초 후 백엔드 서비스 연결 상태를 확인하세요.\n`,
+        `[System] 잠시 후 백엔드 서비스 연결 상태를 확인하세요.\n`,
       ]);
     } catch (err) {
       setLogs((prev) => [
@@ -218,10 +218,10 @@ export default function PowerShellConsole() {
             <button
               className="secondary small"
               disabled={!connected || restarting}
-              onClick={handleRestartBackend}
-              title={connected ? 'Self-Kill 방지 독립 프로세스로 백엔드 안전 재기동' : '백엔드가 연결된 상태에서만 안전 재기동이 가능합니다'}
+              onClick={handleSwUpdate}
+              title={connected ? 'git pull 후 paas·console 서비스 재시작' : '백엔드가 연결된 상태에서만 SW 업데이트가 가능합니다'}
             >
-              {restarting ? '재기동 요청 중...' : '🔄 백엔드 안전 재기동'}
+              {restarting ? 'SW 업데이트 중...' : '⬆️ SW 업데이트'}
             </button>
             {!connected ? (
               <button className="primary small" onClick={handleConnect}>

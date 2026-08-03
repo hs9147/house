@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from starlette.staticfiles import StaticFiles
 
 from .api import (
-    a2a_gateway, llm, modules, orgs, previews, projects, proxy_gateway, server, storage, system, webhooks,
+    a2a_gateway, llm, modules, orgs, planning, previews, projects, proxy_gateway, server, storage, system, webhooks,
 )
 from .config import get_settings
 from .db import Base, engine
@@ -67,6 +67,7 @@ def create_app() -> FastAPI:
         bootstrap_console_deploy()
     if "workspace" in features:
         app.include_router(llm.router, prefix=API_PREFIX)
+        app.include_router(planning.router, prefix=API_PREFIX)
 
     # 콘솔 UI(React 빌드 산출물) — dist가 있을 때만 마운트, 없어도 API는 동일 기동
     console_dist = Path(
@@ -75,6 +76,14 @@ def create_app() -> FastAPI:
     )
     if console_dist.is_dir():
         app.mount("/console", StaticFiles(directory=console_dist, html=True), name="console")
+
+    # 상주 PowerShell 데몬을 프로세스 종료 시 정리한다.
+    import atexit  # noqa: PLC0415
+
+    from .services.powershell_daemon import shutdown_shared  # noqa: PLC0415
+
+    atexit.register(shutdown_shared)
+
     return app
 
 
