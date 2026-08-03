@@ -64,9 +64,11 @@ class Settings(BaseSettings):
     storage_root: str = "./data/storage"
     powershell_start_dir: str = ""
 
+    # 플랫폼(paas) 리포지토리 루트. 비우면 소스 트리에서 자동 계산한다.
+    # SW 업데이트의 git pull 위치로 쓰인다. (환경변수: PAAS_REPO_ROOT)
+    repo_root: str = ""
+
     # --- SW 업데이트(git pull + Windows 서비스 재시작) ---
-    # 비우면 플랫폼 리포 루트에서 git pull 한다.
-    sw_update_repo_dir: str = ""
     # git pull 후 재시작할 Windows 서비스명(콤마 구분). 백엔드(paas)와 콘솔(console) 서비스명은
     # 설치 환경마다 다르므로 여기서 지정한다 — 예: "paas,paas-console".
     sw_update_services: str = "paas,paas-console"
@@ -164,6 +166,16 @@ class Settings(BaseSettings):
     self_deploy_console: bool = False
     self_deploy_console_git_url: str = ""  # 이 플랫폼 자신의 git 리포 URL
     self_deploy_console_branch: str = "main"
+
+    @property
+    def resolved_repo_root(self) -> Path:
+        """플랫폼 리포 루트. PAAS_REPO_ROOT가 있으면 그 값을, 없으면 소스 트리 기준으로 계산한다.
+
+        이 파일은 app/config.py이므로 parent.parent가 리포 루트다.
+        """
+        if self.repo_root:
+            return Path(self.repo_root)
+        return Path(__file__).resolve().parent.parent
 
 
 @lru_cache

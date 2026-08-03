@@ -578,10 +578,9 @@ def sw_update(
     """
     import subprocess  # noqa: PLC0415
     import sys  # noqa: PLC0415
-    from pathlib import Path  # noqa: PLC0415
 
     settings = get_settings()
-    repo_dir = settings.sw_update_repo_dir or str(Path(__file__).resolve().parent.parent.parent)
+    repo_dir = str(settings.resolved_repo_root)
     services = [s.strip() for s in settings.sw_update_services.split(",") if s.strip()]
     if not services:
         raise HTTPException(status_code=400, detail="PAAS_SW_UPDATE_SERVICES가 비어 있습니다.")
