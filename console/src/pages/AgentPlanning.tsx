@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { api } from '../lib/api';
 import { useApi } from '../lib/hooks';
-import type { PlanArtifactOut, PlanBuildEvent, PlanSessionOut } from '../lib/types';
+import type { PlanArtifactOut, PlanBuildEvent, PlanSessionOut, ProjectCreate, ProjectType } from '../lib/types';
+
+const PROJECT_TYPES: ProjectType[] = ['python', 'react', 'node', 'html', 'streamlit', 'llm', 'composite'];
 
 interface Msg {
   role: 'user' | 'assistant';
@@ -44,6 +46,51 @@ export default function AgentPlanning() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [buildEvents, setBuildEvents] = useState<PlanBuildEvent[]>([]);
+
+  // 프로젝트 미선택 시 신규 생성 팝업
+  const createOrgs = userOrgs.length > 0
+    ? userOrgs
+    : (me.data?.organization_id && me.data?.organization_name
+        ? [{ id: me.data.organization_id, name: me.data.organization_name }]
+        : []);
+  const [showNewProject, setShowNewProject] = useState(false);
+  const [npName, setNpName] = useState('');
+  const [npType, setNpType] = useState<ProjectType>('python');
+  const [npOrgId, setNpOrgId] = useState('');
+  const [npBusy, setNpBusy] = useState(false);
+  const [npError, setNpError] = useState('');
+
+  const openNewProject = () => {
+    setNpName('');
+    setNpType('python');
+    setNpOrgId(createOrgs[0] ? String(createOrgs[0].id) : '');
+    setNpError('');
+    setShowNewProject(true);
+  };
+
+  const submitNewProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!npName.trim()) return;
+    setNpBusy(true);
+    setNpError('');
+    try {
+      const payload: ProjectCreate = {
+        name: npName.trim(),
+        type: npType,
+        branch: 'main',
+        default_profile: 'release',
+      };
+      if (npOrgId) payload.organization_id = Number(npOrgId);
+      const created = await api.createProject(payload);
+      projects.reload();
+      setProjectId(String(created.id)); // 생성 즉시 선택
+      setShowNewProject(false);
+    } catch (err) {
+      setNpError((err as Error).message);
+    } finally {
+      setNpBusy(false);
+    }
+  };
 
   const artifactOf = (stage: string) => session?.artifacts.find((a) => a.stage === stage);
   const isConfirmed = (stage: string) => !!artifactOf(stage)?.confirmed;
@@ -153,6 +200,11 @@ export default function AgentPlanning() {
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
+          {!projectId && (
+            <button type="button" className="secondary" onClick={openNewProject} title="프로젝트를 선택하지 않았을 때 새 프로젝트를 만듭니다">
+              ➕ 신규 프로젝트
+            </button>
+          )}
           <select value={providerId} onChange={(e) => setProviderId(e.target.value)} required>
             <option value="">LLM 프로바이더 선택...</option>
             {(providers.data ?? []).map((p) => (
@@ -308,6 +360,55 @@ export default function AgentPlanning() {
       {error && (
         <div style={{ padding: 12, borderRadius: 6, background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', marginTop: 16 }}>
           ⚠️ {error}
+        </div>
+      )}
+
+      {/* 신규 프로젝트 생성 팝업 (프로젝트 미선택 시) */}
+      {showNewProject && (
+        <div
+          onClick={() => setShowNewProject(false)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}
+        >
+          <form
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={submitNewProject}
+            className="panel"
+            style={{ width: 420, maxWidth: '90vw', display: 'flex', flexDirection: 'column', gap: 10 }}
+          >
+            <h3 style={{ margin: 0 }}>➕ 신규 프로젝트 생성</h3>
+            <label style={{ fontSize: 12, fontWeight: 600 }}>프로젝트명</label>
+            <input
+              autoFocus
+              placeholder="예: my-agent-app"
+              value={npName}
+              onChange={(e) => setNpName(e.target.value)}
+            />
+            <label style={{ fontSize: 12, fontWeight: 600 }}>타입</label>
+            <select value={npType} onChange={(e) => setNpType(e.target.value as ProjectType)}>
+              {PROJECT_TYPES.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+            {createOrgs.length > 0 && (
+              <>
+                <label style={{ fontSize: 12, fontWeight: 600 }}>소속 조직 (리포 자동 생성)</label>
+                <select value={npOrgId} onChange={(e) => setNpOrgId(e.target.value)}>
+                  {createOrgs.map((o) => (
+                    <option key={o.id} value={o.id}>🏢 {o.name}</option>
+                  ))}
+                </select>
+              </>
+            )}
+            {npError && (
+              <div style={{ fontSize: 12, color: '#ef4444' }}>⚠️ {npError}</div>
+            )}
+            <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+              <button type="button" className="secondary small" onClick={() => setShowNewProject(false)}>취소</button>
+              <button type="submit" className="primary small" disabled={npBusy || !npName.trim()}>
+                {npBusy ? '생성 중...' : '생성'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </>
