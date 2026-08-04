@@ -234,6 +234,32 @@ def test_chat_context_includes_code_structure_outline(monkeypatch, tmp_path):
     assert "결제 서비스." in system_text
 
 
+def test_chat_system_prompt_carries_agent_principles(monkeypatch):
+    """기획·구현 원칙 문서(docs/agent-planning/AGENT.md)가 빌더 시스템 프롬프트에 들어간다."""
+    captured: dict = {}
+
+    def fake_post(url, headers, payload):
+        captured["messages"] = payload["messages"]
+        return {"choices": [{"message": {"content": "확인했습니다."}}]}
+
+    monkeypatch.setattr(llm_service, "_post_chat", fake_post)
+
+    c = _client()
+    pid = _create_project(c)
+    prov = _create_provider(c)
+    sid = c.post("/paas/api/v1/chat/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    c.post(f"/paas/api/v1/chat/sessions/{sid}/messages",
+           json={"content": "함수 추가해줘"}, headers=ADMIN)
+
+    system = captured["messages"][0]["content"]
+    assert "기획·구현 원칙" in system
+    assert "Surgical Changes" in system  # 문서 본문이 그대로 실린다
+    # 역할 → 원칙 → 출력 형식(diff 규약) 순
+    assert system.index("Agent Builder AI") < system.index("기획·구현 원칙")
+    assert system.index("기획·구현 원칙") < system.index("ONE unified diff")
+
+
 def test_review_endpoint_with_explicit_diff(monkeypatch):
     monkeypatch.setattr(
         llm_service, "_post_chat",

@@ -33,6 +33,8 @@ RUN pip install --no-cache-dir -r requirements.txt docker
 
 COPY app/ ./app/
 COPY templates/ ./templates/
+# 기획·구현 원칙 — services/llm.py가 런타임에 읽어 시스템 프롬프트에 주입한다.
+COPY docs/agent-planning/AGENT.md ./docs/agent-planning/AGENT.md
 COPY migrations/ ./migrations/
 COPY alembic.ini ./
 COPY --from=console-build /console/dist/ ./console/dist/

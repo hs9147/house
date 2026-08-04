@@ -141,7 +141,12 @@ async def post_message(
         "2. Module Proxy Gateway: Use PaaS endpoint '/paas/api/v1/proxy/modules/{module_name}/{path}' (or bound PAAS_MODULE_PROXY_URL).\n"
         "Always adhere strictly to the injected PaaS proxy gateway architecture and environment variables."
     )
-    messages: list[dict] = [{"role": "system", "content": agent_system_prompt + "\n\n" + llm_service.EDIT_SYSTEM_PROMPT}]
+    # 역할 → 기획·구현 원칙(플랫폼 표준 문서) → 출력 형식 순으로 쌓는다.
+    messages: list[dict] = [{"role": "system", "content": "\n\n".join(filter(None, [
+        agent_system_prompt,
+        llm_service.agent_principles_prompt(),
+        llm_service.EDIT_SYSTEM_PROMPT,
+    ]))}]
 
     # 프로젝트 컨텍스트: 바인딩/체크된 모듈 규약 + 사용 가능 전체 자원 목록 + 코드 구조 개요
     module_ctx = a2a_service.list_project_a2a_cards(db, project)

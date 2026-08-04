@@ -1,4 +1,4 @@
-# CLAUDE.md
+# 에이전트 기획·구현 원칙
 
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
