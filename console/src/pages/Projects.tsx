@@ -16,6 +16,22 @@ export default function Projects() {
 
   const userOrgs = me.data?.organizations ?? [];
   const userOrgIds = userOrgs.map((o) => o.id);
+  const canDelete = !!me.data?.is_admin;
+
+  const remove = async (p: ProjectOut) => {
+    const ok = confirm(
+      `정말로 프로젝트 '${p.name}'을(를) 삭제하시겠습니까?\n` +
+      '배포본이 정지되고 배포 이력·환경변수·모듈 바인딩·기획 세션이 함께 삭제됩니다.\n' +
+      'Git 리포지토리와 소스는 삭제되지 않습니다.',
+    );
+    if (!ok) return;
+    try {
+      await api.deleteProject(p.id);
+      state.reload();
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  };
 
   return (
     <div className="panel">
@@ -41,6 +57,7 @@ export default function Projects() {
                   <th>브랜치</th>
                   <th>기본 프로필</th>
                   <th>생성일</th>
+                  {canDelete && <th />}
                 </tr>
               </thead>
               <tbody>
@@ -52,6 +69,17 @@ export default function Projects() {
                     <td className="mono">{p.branch}</td>
                     <td><StatusPill value={p.default_profile} /></td>
                     <td className="mono">{fmtDate(p.created_at)}</td>
+                    {canDelete && (
+                      <td>
+                        {/* 행 클릭은 상세로 이동하므로 삭제 버튼에서는 전파를 막는다 */}
+                        <button
+                          className="small danger"
+                          onClick={(e) => { e.stopPropagation(); void remove(p); }}
+                        >
+                          삭제
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

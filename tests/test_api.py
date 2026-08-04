@@ -47,6 +47,53 @@ def test_project_crud_and_env_masking():
     assert r.json() == [{"key": "API_TOKEN", "is_secret": True, "value": "•••"}]
 
 
+def test_delete_project_removes_related_rows_and_keeps_audit(monkeypatch, fresh_settings, tmp_path):
+    """프로젝트 삭제 — 딸린 행·워크스페이스 클론은 지우고, Gitea 리포·감사 로그는 남긴다."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("PAAS_WORK_DIR", str(tmp_path / "workspaces"))
+    get_settings.cache_clear()
+
+    c = _client()
+    pid = c.post("/paas/api/v1/projects", json={
+        "name": "doomed", "type": "react", "git_url": "https://git.example.com/o/doomed",
+    }, headers=ADMIN).json()["id"]
+    prov = c.post("/paas/api/v1/llm/providers", json={
+        "name": "p", "kind": "openai", "base_url": "https://api.example.com",
+        "api_key": "sk-secret", "model": "m",
+    }, headers=ADMIN).json()["id"]
+    c.put(f"/paas/api/v1/projects/{pid}/env",
+          json={"key": "API_TOKEN", "value": "s3cret"}, headers=ADMIN)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    workdir = tmp_path / "workspaces" / "doomed"
+    workdir.mkdir(parents=True)
+    (workdir / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    assert c.delete(f"/paas/api/v1/projects/{pid}", headers=ADMIN).status_code == 204
+
+    assert c.get(f"/paas/api/v1/projects/{pid}/env", headers=ADMIN).status_code == 404
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 404
+    assert not workdir.exists()  # 워크스페이스 클론 정리
+    assert not any(p["name"] == "doomed" for p in c.get("/paas/api/v1/projects", headers=ADMIN).json())
+    # 감사 로그는 삭제 이력을 남긴다
+    events = c.get("/paas/api/v1/audit", headers=ADMIN).json()
+    assert any(e["action"] == "project.delete" and e["target"] == "doomed" for e in events)
+
+
+def test_delete_project_requires_admin_and_404s_for_unknown():
+    c = _client()
+    pid = c.post("/paas/api/v1/projects", json={
+        "name": "keep-me", "type": "react", "git_url": "https://git.example.com/o/keep-me",
+    }, headers=ADMIN).json()["id"]
+    issued = c.post("/paas/api/v1/keys", json={"name": "ci-bot"}, headers=ADMIN).json()["key"]
+
+    assert c.delete(f"/paas/api/v1/projects/{pid}", headers={"x-api-key": issued}).status_code == 403
+    assert c.delete("/paas/api/v1/projects/9999", headers=ADMIN).status_code == 404
+    # 거절된 삭제로 프로젝트가 사라지지 않는다
+    assert c.get(f"/paas/api/v1/projects/{pid}/env", headers=ADMIN).status_code == 200
+
+
 def test_issue_key_and_use_it():
     c = _client()
     r = c.post("/paas/api/v1/keys", json={"name": "ci-bot"}, headers=ADMIN)
