@@ -162,7 +162,7 @@ export default function AgentPlanning() {
               {orgNamesLabel ? `🏢 [${orgNamesLabel}] 프로젝트 선택...` : '프로젝트 선택...'}
             </option>
             {availableProjects.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
+              <option key={p.id} value={p.id}>{p.org_name ? `[${p.org_name}] ${p.name}` : p.name}</option>
             ))}
           </select>
           <select value={providerId} onChange={(e) => setProviderId(e.target.value)} required>
