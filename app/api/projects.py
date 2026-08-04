@@ -1,6 +1,7 @@
 import shutil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
@@ -9,7 +10,24 @@ from ..config import get_settings
 from ..db import get_db
 from ..features import is_enabled, require_feature
 from ..git_policy import enforce_internal_git_url
-from ..models import ApiKey, AuditEvent, BuildProfile, Deployment, EnvVar, Module, ModuleBinding, Organization, Project, ProjectType
+from ..models import (
+    ApiKey,
+    AuditEvent,
+    BuildProfile,
+    ChatMessage,
+    ChatSession,
+    Deployment,
+    EnvVar,
+    Module,
+    ModuleBinding,
+    Organization,
+    PlanArtifact,
+    PreviewSession,
+    Project,
+    ProjectType,
+    ProposedChange,
+    RedirectRule,
+)
 from ..schemas import (
     DeploymentOut,
     DeployRequest,
@@ -21,7 +39,7 @@ from ..schemas import (
     ProjectOut,
     ProjectUploadForm,
 )
-from ..security import encrypt_value, require_api_key
+from ..security import encrypt_value, require_admin, require_api_key
 from ..services import deployer, gitea, upload
 from ..services.build import COMPOSITE_COMPONENTS
 from ..services.deployer import DeployInProgress, NoRollbackTarget
@@ -196,6 +214,48 @@ async def upload_project(
             deployer.deploy_queued(db, project, form.default_profile, git_sha)
 
     return _serialize_project(project, key)
+
+
+@router.delete("/{project_id}", status_code=204)
+def delete_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """admin 권한으로 프로젝트를 삭제한다 — 플랫폼 등록 정보 한정.
+
+    **Gitea 리포는 지우지 않는다.** 플랫폼에서 프로젝트를 내리는 것과 소스를 파기하는 것은
+    되돌릴 수 있는 정도가 달라 분리한다(리포 정리는 Gitea에서 직접).
+    삭제 대상은 프로젝트 레코드와 딸린 행(배포 이력·환경변수·모듈 바인딩·리다이렉트·프리뷰·
+    기획/채팅 세션), 그리고 워크스페이스 클론이다. 감사 로그는 남긴다.
+    """
+    project = _get_project(db, project_id)
+    name = project.name
+
+    # 배포본 정지 — 레코드가 사라지면 콘솔에서 내릴 방법이 없어진다(런타임 미가용은 무시).
+    if is_enabled("deploy"):
+        units = ([f"{name}-{c}" for c in COMPOSITE_COMPONENTS]
+                 if project.type == ProjectType.composite else [name])
+        for unit in units:
+            for profile in BuildProfile:
+                try:
+                    deployer.get_runtime().stop(unit, profile)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    session_ids = db.execute(
+        select(ChatSession.id).where(ChatSession.project_id == project_id)
+    ).scalars().all()
+    if session_ids:
+        for model in (ChatMessage, ProposedChange, PlanArtifact):
+            db.execute(sa_delete(model).where(model.session_id.in_(session_ids)))
+    for model in (ChatSession, Deployment, EnvVar, ModuleBinding, RedirectRule, PreviewSession):
+        db.execute(sa_delete(model).where(model.project_id == project_id))
+    db.delete(project)
+    db.commit()
+
+    shutil.rmtree(get_settings().work_dir / name, ignore_errors=True)
+    audit.record(db, admin.name, "project.delete", name, {"project_id": project_id})
 
 
 @router.post("/{project_id}/deploy", response_model=DeploymentOut | list[DeploymentOut],

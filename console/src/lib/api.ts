@@ -177,6 +177,8 @@ export const api = {
   // 프로젝트
   listProjects: () => request<ProjectOut[]>('GET', '/projects'),
   createProject: (body: ProjectCreate) => request<ProjectOut>('POST', '/projects', body),
+  // 프로젝트 삭제(admin) — Gitea 리포는 남고 플랫폼 등록 정보만 지워진다.
+  deleteProject: (id: number) => request<void>('DELETE', `/projects/${id}`),
 
   // zip/폴더 업로드로 프로젝트 등록 (조직 필수 — 사내 Gitea 리포로 최초 push)
   uploadProject: (
