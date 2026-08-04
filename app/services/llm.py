@@ -8,11 +8,12 @@ import re
 from typing import Callable
 
 import httpx
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import BuildProfile, LlmProvider, LlmProviderKind, Project
+from ..models import ApiKey, BuildProfile, LlmProvider, LlmProviderKind, Project
 from ..security import decrypt_value
 
 EDIT_SYSTEM_PROMPT = """You are a coding assistant working inside an internal PaaS.
@@ -25,6 +26,22 @@ REVIEW_SYSTEM_PROMPT = """You are a strict code reviewer. Review the given unifi
 Reply in Korean as a JSON array of findings:
 [{"severity": "high|medium|low", "file": "...", "comment": "..."}]
 Return [] if the diff looks fine. Reply with JSON only."""
+
+
+def require_provider_access(provider: LlmProvider, project: Project, key: ApiKey) -> None:
+    """프로바이더 사용 권한은 Module과 동일한 조직 범위 규칙을 따른다.
+
+    provider.organization_id가 없으면(NULL) 전역이라 누구나 쓸 수 있다. 지정돼 있으면
+    같은 조직 소속 프로젝트에서만 쓸 수 있다 — admin은 조직 경계와 무관하게 항상 허용
+    (services/modules.py available_resources의 조직 스코프 필터와 대응하는 사용 시점 검증).
+    """
+    if key.is_admin:
+        return
+    if provider.organization_id is not None and provider.organization_id != project.organization_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"'{provider.name}' 프로바이더는 해당 조직 소속 프로젝트에서만 사용할 수 있습니다.",
+        )
 
 
 def resolve_base_url(base_url: str, db: Session | None = None) -> str:

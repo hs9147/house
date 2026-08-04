@@ -128,6 +128,9 @@ class LlmProviderCreate(BaseModel):
     base_url: str  # internal은 project://<프로젝트명> 형식만 허용 (아래 검증)
     api_key: str | None = None
     model: str
+    # 미지정(None) = 전역(모든 프로젝트에서 사용 가능), 지정 시 해당 조직 소속
+    # 프로젝트에서만 사용 가능 — Module.organization_id와 동일한 규칙.
+    organization_id: int | None = None
 
     @model_validator(mode="after")
     def _internal_must_use_project_scheme(self) -> "LlmProviderCreate":
@@ -149,6 +152,8 @@ class LlmProviderOut(BaseModel):
     base_url: str
     model: str
     has_api_key: bool
+    organization_id: int | None = None
+    org_name: str | None = None
 
 
 class ChatSessionCreate(BaseModel):

@@ -61,14 +61,31 @@ def _member_key(c: TestClient, name="dev1") -> dict:
     return {"x-api-key": key}
 
 
-def test_non_admin_key_blocked_from_external_provider_session():
+def _mock_gitea(monkeypatch):
+    """조직/조직 소속 프로젝트 생성이 거치는 gitea.ensure_org/ensure_repo를 목킹한다."""
+    from app.config import get_settings
+    from app.services import gitea
+
+    monkeypatch.setenv("PAAS_GITEA_URL", "https://git.example.com")
+    monkeypatch.setenv("PAAS_GITEA_API_TOKEN", "tok-123")
+    get_settings.cache_clear()
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: type(
+        "R", (), {"status_code": 201, "text": "",
+                  "json": lambda self=None: {"clone_url": "https://git.example.com/o/r.git"}}
+    )())
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: type(
+        "R", (), {"status_code": 404, "text": ""}
+    )())
+
+
+def test_non_admin_key_allowed_for_global_external_provider_session():
+    """전역(organization_id 미지정) 외부 프로바이더는 모든 사용자가 쓸 수 있다."""
     c = _client()
     pid = _create_project(c)
-    prov = _create_provider(c)  # external
+    prov = _create_provider(c)  # external, organization_id 미지정 = 전역
     r = c.post("/paas/api/v1/chat/sessions", json={"project_id": pid, "provider_id": prov},
                headers=_member_key(c))
-    assert r.status_code == 403
-    assert "admin" in r.text
+    assert r.status_code == 200
 
 
 def test_non_admin_key_allowed_for_internal_provider_session():
@@ -83,20 +100,52 @@ def test_non_admin_key_allowed_for_internal_provider_session():
     assert r.status_code == 200
 
 
-def test_non_admin_key_blocked_from_external_review():
+def test_org_scoped_provider_blocked_for_other_org_project(monkeypatch, fresh_settings):
+    """조직 지정 프로바이더는 그 조직 소속 프로젝트에서만 쓸 수 있다(Module과 동일 규칙)."""
+    _mock_gitea(monkeypatch)
     c = _client()
-    pid = _create_project(c)
-    prov = _create_provider(c)  # external
-    r = c.post(f"/paas/api/v1/projects/{pid}/review",
-               json={"provider_id": prov, "diff": "--- a/x\n+++ b/x\n"},
-               headers=_member_key(c))
+    org_a = c.post("/paas/api/v1/orgs", json={"name": "org-a"}, headers=ADMIN).json()["id"]
+    org_b = c.post("/paas/api/v1/orgs", json={"name": "org-b"}, headers=ADMIN).json()["id"]
+    prov = c.post("/paas/api/v1/llm/providers", json={
+        "name": "org-a-only", "kind": "openai", "base_url": "https://api.example.com",
+        "model": "m", "organization_id": org_a,
+    }, headers=ADMIN).json()["id"]
+    other_org_project = c.post("/paas/api/v1/projects", json={
+        "name": "org-b-project", "type": "python", "organization_id": org_b,
+    }, headers=ADMIN).json()["id"]
+
+    r = c.post("/paas/api/v1/chat/sessions",
+               json={"project_id": other_org_project, "provider_id": prov}, headers=_member_key(c))
     assert r.status_code == 403
+    assert "org-a-only" in r.text
 
 
-def test_admin_key_still_allowed_for_external_session():
+def test_org_scoped_provider_allowed_for_same_org_project(monkeypatch, fresh_settings):
+    _mock_gitea(monkeypatch)
     c = _client()
-    pid = _create_project(c)
-    prov = _create_provider(c)
+    org_a = c.post("/paas/api/v1/orgs", json={"name": "org-c"}, headers=ADMIN).json()["id"]
+    prov = c.post("/paas/api/v1/llm/providers", json={
+        "name": "org-c-only", "kind": "openai", "base_url": "https://api.example.com",
+        "model": "m", "organization_id": org_a,
+    }, headers=ADMIN).json()["id"]
+    same_org_project = c.post("/paas/api/v1/projects", json={
+        "name": "org-c-project", "type": "python", "organization_id": org_a,
+    }, headers=ADMIN).json()["id"]
+
+    r = c.post("/paas/api/v1/chat/sessions",
+               json={"project_id": same_org_project, "provider_id": prov}, headers=_member_key(c))
+    assert r.status_code == 200
+
+
+def test_admin_key_bypasses_provider_org_scope(monkeypatch, fresh_settings):
+    _mock_gitea(monkeypatch)
+    c = _client()
+    org_a = c.post("/paas/api/v1/orgs", json={"name": "org-d"}, headers=ADMIN).json()["id"]
+    prov = c.post("/paas/api/v1/llm/providers", json={
+        "name": "org-d-only", "kind": "openai", "base_url": "https://api.example.com",
+        "model": "m", "organization_id": org_a,
+    }, headers=ADMIN).json()["id"]
+    pid = _create_project(c)  # organization_id 없음(전역) — org-d와 불일치
     r = c.post("/paas/api/v1/chat/sessions", json={"project_id": pid, "provider_id": prov}, headers=ADMIN)
     assert r.status_code == 200
 

@@ -138,6 +138,9 @@ export interface LlmProviderOut {
   base_url: string;
   model: string;
   has_api_key: boolean;
+  // 미지정(null) = 전역(모든 프로젝트에서 사용 가능), 지정 시 해당 조직 소속 프로젝트에서만 사용 가능
+  organization_id?: number | null;
+  org_name?: string | null;
 }
 
 export interface ChatSessionOut {

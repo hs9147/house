@@ -7,9 +7,10 @@ import { useApi } from '../lib/hooks';
 
 export default function Providers() {
   const state = useApi(() => api.listProviders());
+  const orgs = useApi(() => api.listOrgs());
   const admin = isAdmin();
   const [form, setForm] = useState({
-    name: '', kind: 'openai', base_url: '', api_key: '', model: '',
+    name: '', kind: 'openai', base_url: '', api_key: '', model: '', organization_id: '',
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -21,8 +22,12 @@ export default function Providers() {
     setBusy(true);
     setError('');
     try {
-      await api.createProvider({ ...form, api_key: form.api_key || undefined });
-      setForm({ name: '', kind: 'openai', base_url: '', api_key: '', model: '' });
+      await api.createProvider({
+        ...form,
+        api_key: form.api_key || undefined,
+        organization_id: form.organization_id ? Number(form.organization_id) : null,
+      });
+      setForm({ name: '', kind: 'openai', base_url: '', api_key: '', model: '', organization_id: '' });
       state.reload();
     } catch (err) {
       setError((err as Error).message);
@@ -49,6 +54,7 @@ export default function Providers() {
                   <th>Endpoint</th>
                   <th>모델</th>
                   <th>API 키</th>
+                  <th>사용 범위</th>
                   {admin && <th>작업</th>}
                 </tr>
               </thead>
@@ -63,6 +69,7 @@ export default function Providers() {
                     <td className="mono">{p.base_url}</td>
                     <td className="mono">{p.model}</td>
                     <td>{p.has_api_key ? '설정됨' : '-'}</td>
+                    <td>{p.org_name ? `🏢 ${p.org_name}` : '전역'}</td>
                     {admin && (
                       <td>
                         <button
@@ -151,6 +158,15 @@ export default function Providers() {
                 />
               </label>
             </div>
+            <label className="field">
+              사용 범위 (선택 — 비우면 전역, 모든 프로젝트에서 사용 가능)
+              <select value={form.organization_id} onChange={(e) => set('organization_id', e.target.value)}>
+                <option value="">전역 (모든 조직)</option>
+                {(orgs.data ?? []).map((o) => (
+                  <option key={o.id} value={o.id}>🏢 {o.name}</option>
+                ))}
+              </select>
+            </label>
             {error && <p className="error">{error}</p>}
             <div className="row">
               <button type="submit" disabled={busy}>

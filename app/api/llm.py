@@ -15,6 +15,7 @@ from ..models import (
     ChatSession,
     LlmProvider,
     LlmProviderKind,
+    Organization,
     Project,
     ProposedChange,
 )
@@ -38,20 +39,6 @@ from ..services.build import BuildError, checkout
 router = APIRouter(tags=["llm"])
 
 
-def _require_admin_for_external(provider: LlmProvider, key: ApiKey) -> None:
-    """외부 LLM 프로바이더 사용은 admin 키만 허용한다.
-
-    일반 키가 임의 project_id + 임의 provider_id를 조합해 아무 프로젝트의
-    소스를 외부로 보낼 수 있는 경로를 막는다. internal 프로바이더(project://)는
-    사내망을 벗어나지 않으므로 일반 키에도 열어둔다.
-    """
-    if provider.kind != LlmProviderKind.internal and not key.is_admin:
-        raise HTTPException(
-            status_code=403,
-            detail="외부 LLM 프로바이더는 admin 키만 사용할 수 있습니다.",
-        )
-
-
 def _provider_out(p: LlmProvider) -> LlmProviderOut:
     kind_val = p.kind.value if hasattr(p.kind, 'value') else str(p.kind)
     if kind_val == "external":
@@ -59,6 +46,8 @@ def _provider_out(p: LlmProvider) -> LlmProviderOut:
     return LlmProviderOut(
         id=p.id, name=p.name, kind=kind_val, base_url=p.base_url,
         model=p.model, has_api_key=bool(p.api_key_encrypted),
+        organization_id=p.organization_id,
+        org_name=p.organization.name if p.organization_id and p.organization else None,
     )
 
 
@@ -70,12 +59,15 @@ def create_provider(
 ):
     if db.execute(select(LlmProvider).where(LlmProvider.name == body.name)).scalar_one_or_none():
         raise HTTPException(status_code=409, detail="provider name already exists")
+    if body.organization_id is not None and db.get(Organization, body.organization_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
     row = LlmProvider(
         name=body.name,
         kind=LlmProviderKind(body.kind),
         base_url=body.base_url,
         api_key_encrypted=encrypt_value(body.api_key) if body.api_key else None,
         model=body.model,
+        organization_id=body.organization_id,
     )
     db.add(row)
     db.commit()
@@ -116,7 +108,7 @@ def create_session(
     provider = db.get(LlmProvider, body.provider_id)
     if project is None or provider is None:
         raise HTTPException(status_code=404, detail="project or provider not found")
-    _require_admin_for_external(provider, key)
+    llm_service.require_provider_access(provider, project, key)
     session = ChatSession(project_id=project.id, provider_id=provider.id, branch="")
     db.add(session)
     db.commit()
@@ -353,7 +345,7 @@ async def review_project(
     provider = db.get(LlmProvider, body.provider_id)
     if project is None or provider is None:
         raise HTTPException(status_code=404, detail="project or provider not found")
-    _require_admin_for_external(provider, key)
+    llm_service.require_provider_access(provider, project, key)
 
     diff = body.diff
     if diff is None:

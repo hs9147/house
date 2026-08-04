@@ -328,6 +328,7 @@ export const api = {
   deleteProvider: (id: number) => request<void>('DELETE', `/llm/providers/${id}`),
   createProvider: (body: {
     name: string; kind: string; base_url: string; api_key?: string; model: string;
+    organization_id?: number | null;
   }) => request<LlmProviderOut>('POST', '/llm/providers', body),
   createChatSession: (project_id: number, provider_id: number, branch?: string) =>
     request<ChatSessionOut>('POST', '/chat/sessions', {

@@ -209,6 +209,12 @@ class LlmProvider(Base):
     base_url: Mapped[str] = mapped_column(String(512))
     api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     model: Mapped[str] = mapped_column(String(128))
+    # Module과 동일한 조직 범위 규칙 — 미지정(NULL) = 전역(모든 프로젝트에서 사용 가능),
+    # 지정 시 해당 조직 소속 프로젝트에서만 사용 가능(services/llm.py require_provider_access 참고).
+    organization_id: Mapped[int | None] = mapped_column(
+        ForeignKey("organizations.id"), nullable=True
+    )
+    organization: Mapped["Organization | None"] = relationship()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

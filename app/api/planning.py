@@ -20,7 +20,6 @@ from ..models import (
     ChatMessage,
     ChatSession,
     LlmProvider,
-    LlmProviderKind,
     PlanArtifact,
     PlanStage,
     Project,
@@ -42,12 +41,6 @@ from ..services import planning as planning_service
 from ..services import workspace
 
 router = APIRouter(tags=["planning"])
-
-
-def _require_admin_for_external(provider: LlmProvider, key: ApiKey) -> None:
-    """외부 LLM 프로바이더 사용은 admin 키만 허용(에이전트 빌더와 동일 정책)."""
-    if provider.kind != LlmProviderKind.internal and not key.is_admin:
-        raise HTTPException(status_code=403, detail="외부 LLM 프로바이더는 admin 키만 사용할 수 있습니다.")
 
 
 def _parse_stage(stage: str) -> PlanStage:
@@ -99,7 +92,7 @@ def create_plan_session(
     provider = db.get(LlmProvider, body.provider_id)
     if project is None or provider is None:
         raise HTTPException(status_code=404, detail="project or provider not found")
-    _require_admin_for_external(provider, key)
+    llm_service.require_provider_access(provider, project, key)
     session = ChatSession(project_id=project.id, provider_id=provider.id, branch="")
     db.add(session)
     db.commit()
@@ -136,7 +129,7 @@ async def post_plan_message(
     plan_stage = _parse_stage(stage)
     project = db.get(Project, session.project_id)
     provider = db.get(LlmProvider, session.provider_id)
-    _require_admin_for_external(provider, key)
+    llm_service.require_provider_access(provider, project, key)
 
     # 앞 단계 확정을 전제로 한다(순차 진행 강제)
     prev = planning_service.prev_stage(plan_stage)
