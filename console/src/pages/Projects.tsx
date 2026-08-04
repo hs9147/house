@@ -203,11 +203,10 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
           display: 'flex',
           flexDirection: 'column',
           gap: 12,
-          // 소스 등록 방식 전환 시 창 크기가 변하지 않도록 고정 — 내부만 스크롤한다.
+          // 가장 큰 '소스 업로드' 모드가 스크롤 없이 다 들어가도록 minHeight로 고정하고,
+          // 스크롤바가 생기지 않게 overflow는 두지 않는다. 다른 모드는 이 높이에 맞춰 안정된다.
           width: 520,
-          height: 560,
-          overflowY: 'auto',
-          paddingRight: 4,
+          minHeight: 620,
         }}
       >
         {userOrgs.length > 1 ? (
