@@ -75,6 +75,7 @@ export default function Projects() {
 export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (created?: ProjectOut) => void }) {
   const me = useApi(() => api.me());
   const orgs = useApi(() => api.listOrgs());
+  const health = useApi(() => api.health());
   const [form, setForm] = useState({
     name: '',
     type: 'react' as ProjectType,
@@ -85,7 +86,7 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
     health_check_path: '/',
     default_profile: 'release' as BuildProfile,
   });
-  const [sourceMode, setSourceMode] = useState<'upload' | 'git' | 'empty'>('upload'); // 기본값: 직접 업로드
+  const [sourceMode, setSourceMode] = useState<'upload' | 'git' | 'empty'>('empty'); // 기본값: 빈 프로젝트
   const [uploadKind, setUploadKind] = useState<'zip' | 'folder' | 'files'>('zip');
   const [zipFile, setZipFile] = useState<File | null>(null);
   const [folderFiles, setFolderFiles] = useState<FileList | null>(null);
@@ -106,6 +107,13 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
   });
 
   const targetOrgId = selectedOrgId || (userOrgs.length > 0 ? String(userOrgs[0].id) : '1');
+
+  // Git 주소 예시는 설정된 사내 Gitea URL(PAAS_GITEA_URL)을 반영한다. 미설정 시 일반 예시.
+  const giteaBase = (health.data?.gitea_url || '').replace(/\/+$/, '');
+  const exampleOrg = userOrgs.find((o) => String(o.id) === targetOrgId)?.name || userOrgs[0]?.name || 'org';
+  const gitPlaceholder = giteaBase
+    ? `${giteaBase}/${exampleOrg}/${form.name || 'repo'}.git`
+    : 'https://github.com/user/repo.git';
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -246,10 +254,19 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
               <input
                 type="radio"
                 name="sourceMode"
+                checked={sourceMode === 'empty'}
+                onChange={() => setSourceMode('empty')}
+              />
+              📦 빈 프로젝트
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
+              <input
+                type="radio"
+                name="sourceMode"
                 checked={sourceMode === 'upload'}
                 onChange={() => setSourceMode('upload')}
               />
-              📁 소스 직접 업로드 (파일 / ZIP / 폴더)
+              📁 소스 업로드
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
               <input
@@ -258,16 +275,7 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
                 checked={sourceMode === 'git'}
                 onChange={() => setSourceMode('git')}
               />
-              🔗 외부 Git URL 연동
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
-              <input
-                type="radio"
-                name="sourceMode"
-                checked={sourceMode === 'empty'}
-                onChange={() => setSourceMode('empty')}
-              />
-              📦 빈 프로젝트
+              🔗 Git 연동
             </label>
           </div>
 
@@ -350,7 +358,7 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
               <input
                 value={form.git_url}
                 onChange={(e) => set('git_url', e.target.value)}
-                placeholder="https://github.com/user/repo.git"
+                placeholder={gitPlaceholder}
                 required={sourceMode === 'git'}
               />
             </label>
