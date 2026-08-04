@@ -6,7 +6,7 @@ import StatusPill from '../components/StatusPill';
 import { api } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
-import type { BuildProfile, ProjectCreate, ProjectType } from '../lib/types';
+import type { BuildProfile, ProjectCreate, ProjectOut, ProjectType } from '../lib/types';
 
 export default function Projects() {
   const me = useApi(() => api.me());
@@ -72,7 +72,7 @@ export default function Projects() {
   );
 }
 
-export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (created?: ProjectOut) => void }) {
   const me = useApi(() => api.me());
   const orgs = useApi(() => api.listOrgs());
   const [form, setForm] = useState({
@@ -85,7 +85,7 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
     health_check_path: '/',
     default_profile: 'release' as BuildProfile,
   });
-  const [sourceMode, setSourceMode] = useState<'upload' | 'git'>('upload'); // 기본값: 직접 업로드
+  const [sourceMode, setSourceMode] = useState<'upload' | 'git' | 'empty'>('upload'); // 기본값: 직접 업로드
   const [uploadKind, setUploadKind] = useState<'zip' | 'folder' | 'files'>('zip');
   const [zipFile, setZipFile] = useState<File | null>(null);
   const [folderFiles, setFolderFiles] = useState<FileList | null>(null);
@@ -136,7 +136,7 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
 
       setBusy(true);
       try {
-        await api.uploadProject(
+        const created = await api.uploadProject(
           {
             name: form.name,
             type: form.type,
@@ -149,7 +149,7 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
           },
           source,
         );
-        onCreated();
+        onCreated(created);
       } catch (err) {
         setError((err as Error).message);
         setBusy(false);
@@ -158,18 +158,29 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
     }
 
     setBusy(true);
-    const payload: ProjectCreate = {
-      name: form.name,
-      type: form.type,
-      branch: form.branch,
-      domain: form.domain || null,
-      health_check_path: form.health_check_path,
-      default_profile: form.default_profile,
-      organization_id: Number(targetOrgId),
-    };
+    // 빈 프로젝트: 조직에 빈 리포 자동 생성(git_url 없음). 외부 Git: git_url 연동(조직 없음).
+    const payload: ProjectCreate = sourceMode === 'git'
+      ? {
+          name: form.name,
+          type: form.type,
+          branch: form.branch,
+          domain: form.domain || null,
+          health_check_path: form.health_check_path,
+          default_profile: form.default_profile,
+          git_url: form.git_url,
+        }
+      : {
+          name: form.name,
+          type: form.type,
+          branch: form.branch,
+          domain: form.domain || null,
+          health_check_path: form.health_check_path,
+          default_profile: form.default_profile,
+          organization_id: Number(targetOrgId),
+        };
     try {
-      await api.createProject(payload);
-      onCreated();
+      const created = await api.createProject(payload);
+      onCreated(created);
     } catch (err) {
       setError((err as Error).message);
       setBusy(false);
@@ -249,9 +260,22 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
               />
               🔗 외부 Git URL 연동
             </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 14 }}>
+              <input
+                type="radio"
+                name="sourceMode"
+                checked={sourceMode === 'empty'}
+                onChange={() => setSourceMode('empty')}
+              />
+              📦 빈 프로젝트
+            </label>
           </div>
 
-          {sourceMode === 'upload' ? (
+          {sourceMode === 'empty' ? (
+            <div style={{ fontSize: 13, color: '#9ca3af', marginTop: 6 }}>
+              소스 없이 <strong>빈 리포지토리</strong>가 조직에 생성됩니다. 이후 에이전트 기획/빌더로 코드를 채웁니다.
+            </div>
+          ) : sourceMode === 'upload' ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 6 }}>
               <div className="row" style={{ gap: 12 }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 13, cursor: 'pointer' }}>
