@@ -81,6 +81,55 @@ def test_ensure_repo_auto_init_false_for_upload(monkeypatch):
     assert calls[0]["json"]["auto_init"] is False
 
 
+def test_repo_slug_parses_internal_repo_only():
+    assert gitea.repo_slug("https://git.example.com/shop-team/api.git") == ("shop-team", "api")
+    assert gitea.repo_slug("https://git.example.com/shop-team/api") == ("shop-team", "api")
+    # 사내 Gitea가 아니거나 owner/repo 형태가 아니면 API를 쓸 수 없다
+    assert gitea.repo_slug("https://github.com/shop-team/api.git") is None
+    assert gitea.repo_slug("https://git.example.com/api") is None
+
+
+def test_ensure_pull_request_created(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        gitea.httpx, "post",
+        lambda url, **kw: (calls.append((url, kw)), _Res(201, {"number": 3}))[1],
+    )
+    pr = gitea.ensure_pull_request("shop-team", "api", "paas/plan-1", "main", "제목", "본문")
+    url, kw = calls[0]
+    assert url == "https://git.example.com/api/v1/repos/shop-team/api/pulls"
+    assert kw["json"] == {"head": "paas/plan-1", "base": "main", "title": "제목", "body": "본문"}
+    assert pr["number"] == 3
+
+
+def test_ensure_pull_request_reuses_open_pr_on_conflict(monkeypatch):
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(409))
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: _Res(200, [
+        {"number": 1, "head": {"ref": "other"}, "base": {"ref": "main"}},
+        {"number": 9, "head": {"ref": "paas/plan-1"}, "base": {"ref": "main"}},
+    ]))
+    pr = gitea.ensure_pull_request("shop-team", "api", "paas/plan-1", "main", "제목")
+    assert pr["number"] == 9
+
+
+def test_ensure_pull_request_error_raises(monkeypatch):
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(500, text="boom"))
+    with pytest.raises(gitea.GiteaError, match="500"):
+        gitea.ensure_pull_request("shop-team", "api", "b", "main", "제목")
+
+
+def test_merge_pull_request_success_and_not_mergeable(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        gitea.httpx, "post", lambda url, **kw: (calls.append(url), _Res(200))[1]
+    )
+    assert gitea.merge_pull_request("shop-team", "api", 3) is True
+    assert calls[0] == "https://git.example.com/api/v1/repos/shop-team/api/pulls/3/merge"
+
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(405, text="conflict"))
+    assert gitea.merge_pull_request("shop-team", "api", 3) is False
+
+
 def test_ensure_webhook_skips_without_public_url(monkeypatch, fresh_settings):
     monkeypatch.setenv("PAAS_GITEA_URL", "https://git.example.com")
     monkeypatch.setenv("PAAS_GITEA_API_TOKEN", "tok-123")

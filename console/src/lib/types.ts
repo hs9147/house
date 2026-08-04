@@ -162,6 +162,11 @@ export interface PlanArtifactOut {
   repo_path: string;
   commit_sha: string | null;
   confirmed: boolean;
+  default_request?: string; // 입력창 기본값(바로 초안 생성 가능)
+  // 확정 시 git 상태에 따라 자동 수행된 결과
+  git_action?: 'committed' | 'merged' | 'pr_opened' | 'skipped' | null;
+  git_detail?: string | null;
+  pull_request_url?: string | null;
 }
 
 export interface PlanSessionOut {
@@ -176,6 +181,7 @@ export interface PlanSessionOut {
 export interface PlanMessageReply {
   reply: string;
   used_modules?: string[];
+  context_files?: string[]; // 본문까지 참조한 리포 파일
 }
 
 export interface PlanBuildEvent {

@@ -10,14 +10,18 @@ import json
 
 from sqlalchemy.orm import Session
 
-from ..models import PlanStage, Project
+from ..models import LlmProvider, PlanStage, Project
 from . import a2a as a2a_service
+from . import gitea as gitea_service
+from . import llm as llm_service
 from . import modules as modules_service
 
 # 산출물이 커밋되는 리포 내 표준 경로(개발도구가 clone/open으로 그대로 열람).
 ARTIFACT_DIR = "docs/agent-planning"
 
-# 단계별 메타: 순서·제목·리포 파일명·문서 작성 지시(스테이지 프롬프트).
+# 단계별 메타: 순서·제목·리포 파일명·문서 작성 지시(스테이지 프롬프트)·기본 생성 요청.
+# "request"는 콘솔 입력창에 미리 채워지는 기본값 — 사용자가 아무것도 쓰지 않아도
+# 바로 '초안 생성'을 누를 수 있어야 한다.
 STAGES: dict[PlanStage, dict[str, str]] = {
     PlanStage.spec: {
         "title": "기획서",
@@ -26,6 +30,10 @@ STAGES: dict[PlanStage, dict[str, str]] = {
             "이번 단계는 '기획서 확정'이다. 요구사항·목적·범위·사용자 시나리오·성공 기준을 "
             "구조화해 확정 가능한 기획서 문서를 작성하라."
         ),
+        "request": (
+            "이 프로젝트의 리포 구성과 가용 모듈 제약을 참고해 기획서 초안을 작성해줘. "
+            "목적·범위·주요 사용자 시나리오·기능 요구사항·비기능 요구사항·성공 기준을 포함해줘."
+        ),
     },
     PlanStage.architecture: {
         "title": "아키텍처 설계",
@@ -33,6 +41,10 @@ STAGES: dict[PlanStage, dict[str, str]] = {
         "prompt": (
             "이번 단계는 '아키텍처 설계'다. 확정된 기획서를 바탕으로 컴포넌트·데이터 흐름·경계·"
             "비기능 요건을 담은 아키텍처 설계 문서를 작성하라."
+        ),
+        "request": (
+            "확정된 기획서를 근거로 아키텍처 설계 초안을 작성해줘. "
+            "컴포넌트 구성·데이터 흐름·인터페이스 경계·저장소 설계·비기능 요건을 포함해줘."
         ),
     },
     PlanStage.solution: {
@@ -43,6 +55,10 @@ STAGES: dict[PlanStage, dict[str, str]] = {
             "사용하고, 외부 직접 호출 대신 중앙 게이트웨이(A2A/프록시) 경유를 전제로 솔루션 구성 "
             "문서를 작성하라. 제약에 없는 자원은 사용하지 말라."
         ),
+        "request": (
+            "확정된 기획서·아키텍처 설계와 가용 모듈 제약을 근거로 솔루션 구성 초안을 작성해줘. "
+            "사용할 내부 모듈과 게이트웨이 경유 방식, 배포 형상, 외부 연동 대체 방안을 포함해줘."
+        ),
     },
     PlanStage.principles: {
         "title": "개발원칙",
@@ -50,6 +66,10 @@ STAGES: dict[PlanStage, dict[str, str]] = {
         "prompt": (
             "이번 단계는 '개발원칙'이다. 구현계획 및 현황관리, 스키마 및 의사결정사항, 배포 및 "
             "사용 가이드를 포함한 개발원칙 문서를 작성하라."
+        ),
+        "request": (
+            "앞 단계 확정 산출물을 근거로 개발원칙 초안을 작성해줘. "
+            "구현계획 및 현황관리, 스키마 및 의사결정사항, 배포 및 사용 가이드를 포함해줘."
         ),
     },
 }
@@ -82,9 +102,107 @@ def stage_prompt(stage: PlanStage) -> str:
     return STAGES[stage]["prompt"]
 
 
+def stage_request(stage: PlanStage) -> str:
+    """콘솔 입력창에 미리 채워지는 기본 생성 요청 프롬프트."""
+    return STAGES[stage]["request"]
+
+
 def prev_stage(stage: PlanStage) -> PlanStage | None:
     idx = STAGE_ORDER.index(stage)
     return STAGE_ORDER[idx - 1] if idx > 0 else None
+
+
+def prev_stages(stage: PlanStage) -> list[PlanStage]:
+    """이 단계 앞의 모든 단계(순서대로) — 각 단계는 앞 단계 문서를 참조해 작성한다."""
+    return STAGE_ORDER[: STAGE_ORDER.index(stage)]
+
+
+# git 파일 목록은 항상 기본 참조하되, 내용까지 넣는 파일은 요청당 이만큼으로 제한한다.
+MAX_TREE_FILES = 400
+AUTO_CONTEXT_FILES = 6
+
+_FILE_SELECT_PROMPT = (
+    "You select which repository files must be read to answer a planning request.\n"
+    "You are given the repository file list and the user's request.\n"
+    "Reply with ONLY a JSON array of file paths copied verbatim from the list "
+    "(at most {limit}). Reply with [] when the file list alone is enough."
+)
+
+
+def select_context_files(
+    provider: LlmProvider,
+    db: Session,
+    tree: list[str],
+    request: str,
+    explicit: list[str] | None = None,
+    limit: int = AUTO_CONTEXT_FILES,
+) -> list[str]:
+    """이번 요청에서 '내용 확인이 필요한' 리포 파일을 고른다.
+
+    사용자가 직접 지정한 파일은 항상 포함하고, 나머지는 파일 목록과 요청을 LLM에 주어
+    고르게 한다(요청이 한국어여도 동작해야 하므로 경로 키워드 매칭이 아니라 모델이 고른다).
+    선정 실패는 조용히 무시한다 — 파일 목록(기본 참조)만으로도 대화는 성립한다.
+    """
+    selected = [p for p in (explicit or []) if p.strip()]
+    if not tree or not request.strip() or limit <= 0:
+        return selected
+    messages = [
+        {"role": "system", "content": _FILE_SELECT_PROMPT.format(limit=limit)},
+        {"role": "user", "content": "\n".join(tree) + f"\n\n=== REQUEST ===\n{request}"},
+    ]
+    try:
+        reply = llm_service.chat_completion(provider, messages, db)
+        picked = json.loads(reply[reply.index("["): reply.rindex("]") + 1])
+    except Exception:  # noqa: BLE001 — 선정 실패는 대화를 막지 않는다
+        return selected
+    known = set(tree)
+    auto = 0
+    for path in picked:
+        if isinstance(path, str) and path in known and path not in selected:
+            selected.append(path)
+            auto += 1
+            if auto >= limit:
+                break
+    return selected
+
+
+def auto_pull_request(project: Project, branch: str, title: str, body: str = "") -> dict:
+    """커밋 후 git 상태에 따라 PR 생성·머지를 자동 수행하고 그 결과를 반환한다.
+
+    - 작업 브랜치가 곧 기본 브랜치면 커밋 자체가 반영이므로 PR을 만들지 않는다.
+    - 그 외에는 PR을 만들고(이미 있으면 재사용) 머지 가능하면 머지한다.
+    - 충돌 등으로 머지가 안 되면 PR을 열어둔 채 사람이 처리하도록 보고한다.
+    커밋은 이미 성공했으므로 Gitea 연동 실패로 확정을 되돌리지는 않는다(skipped 보고).
+    """
+    if branch == project.branch:
+        return {"action": "committed", "detail": f"기본 브랜치({project.branch})에 직접 커밋"}
+    slug = gitea_service.repo_slug(project.git_url)
+    if slug is None:
+        return {"action": "skipped", "detail": "사내 Gitea 리포가 아니어서 PR을 만들지 않았습니다."}
+    owner, repo = slug
+    try:
+        pr = gitea_service.ensure_pull_request(owner, repo, branch, project.branch, title, body)
+    except gitea_service.GiteaError as e:
+        return {"action": "skipped", "detail": str(e)}
+
+    number = pr.get("number")
+    result = {"action": "pr_opened", "url": pr.get("html_url")}
+    if number is None:
+        result["detail"] = "PR 번호를 확인할 수 없어 자동 머지를 건너뜁니다."
+        return result
+    if pr.get("mergeable") is False:
+        result["detail"] = "충돌로 자동 머지할 수 없어 PR을 열어 두었습니다."
+        return result
+    try:
+        merged = gitea_service.merge_pull_request(owner, repo, number, title=title)
+    except gitea_service.GiteaError as e:
+        result["detail"] = str(e)
+        return result
+    if merged:
+        result["action"] = "merged"
+    else:
+        result["detail"] = "자동 머지가 거부되어 PR을 열어 두었습니다."
+    return result
 
 
 def build_constraints(db: Session, project: Project) -> dict:

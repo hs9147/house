@@ -5,6 +5,8 @@
 않는다 — git_url은 서버 내부에서만 사용되고 비관리자 API 응답에서는 마스킹된다
 (api/projects.py `_serialize_project` 참고).
 """
+from urllib.parse import urlsplit
+
 import httpx
 
 from ..config import get_settings
@@ -87,6 +89,75 @@ def _paginated(url: str, headers: dict[str, str]) -> list[dict]:
             break
         page += 1
     return items
+
+
+def repo_slug(git_url: str) -> tuple[str, str] | None:
+    """git_url에서 (owner, repo)를 뽑는다. 사내 Gitea 리포가 아니면 None.
+
+    Gitea REST API(PR·머지)를 쓸 수 있는지 판별하는 관문 — git_auth.auth_args와 동일하게
+    호스트가 PAAS_GITEA_URL과 일치할 때만 유효하다.
+    """
+    settings = get_settings()
+    if not settings.gitea_url:
+        return None
+    if urlsplit(git_url).netloc != urlsplit(settings.gitea_url).netloc:
+        return None
+    path = urlsplit(git_url).path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = path.split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    return parts[0], parts[1]
+
+
+def ensure_pull_request(
+    owner: str, repo: str, head: str, base: str, title: str, body: str = ""
+) -> dict:
+    """head→base PR을 만들고, 이미 열려 있으면 그 PR을 반환한다(멱등)."""
+    api, headers = _base_and_headers()
+    res = httpx.post(
+        f"{api}/api/v1/repos/{owner}/{repo}/pulls", headers=headers,
+        json={"head": head, "base": base, "title": title, "body": body}, timeout=15,
+    )
+    if res.status_code == 201:
+        return res.json()
+    if res.status_code == 409:  # 동일 head→base PR이 이미 열려 있음
+        existing = _find_open_pull(api, headers, owner, repo, head, base)
+        if existing is not None:
+            return existing
+    raise GiteaError(f"Gitea PR 생성 실패 (HTTP {res.status_code}): {res.text[:300]}")
+
+
+def _find_open_pull(
+    api: str, headers: dict[str, str], owner: str, repo: str, head: str, base: str
+) -> dict | None:
+    res = httpx.get(
+        f"{api}/api/v1/repos/{owner}/{repo}/pulls", headers=headers,
+        params={"state": "open", "limit": 50}, timeout=15,
+    )
+    if res.status_code != 200:
+        return None
+    for pr in res.json():
+        head_ref = (pr.get("head") or {}).get("ref")
+        base_ref = (pr.get("base") or {}).get("ref")
+        if head_ref == head and base_ref == base:
+            return pr
+    return None
+
+
+def merge_pull_request(owner: str, repo: str, index: int, title: str = "") -> bool:
+    """PR을 머지한다. 충돌 등으로 머지 불가면 False(호출부가 PR을 열어둔 채 보고)."""
+    api, headers = _base_and_headers()
+    res = httpx.post(
+        f"{api}/api/v1/repos/{owner}/{repo}/pulls/{index}/merge", headers=headers,
+        json={"Do": "merge", "MergeTitleField": title}, timeout=30,
+    )
+    if res.status_code in (200, 204):
+        return True
+    if res.status_code in (405, 409):  # 머지 불가(충돌·미승인 등)
+        return False
+    raise GiteaError(f"Gitea PR 머지 실패 (HTTP {res.status_code}): {res.text[:300]}")
 
 
 def ensure_webhook(org_name: str, repo_name: str) -> None:

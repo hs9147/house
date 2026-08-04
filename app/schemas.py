@@ -196,6 +196,7 @@ class PlanMessageIn(BaseModel):
 class PlanMessageReply(BaseModel):
     reply: str  # 단계 산출물 문서 초안(마크다운)
     used_modules: list[str] = []
+    context_files: list[str] = []  # 이번 요청에서 본문까지 참조한 리포 파일
 
 
 class PlanConfirmIn(BaseModel):
@@ -208,6 +209,11 @@ class PlanArtifactOut(BaseModel):
     repo_path: str
     commit_sha: str | None = None
     confirmed: bool = False
+    default_request: str = ""  # 콘솔 입력창 기본값(바로 초안 생성 가능)
+    # 확정 시 git 상태에 따라 자동 수행된 결과: committed | merged | pr_opened | skipped
+    git_action: str | None = None
+    git_detail: str | None = None
+    pull_request_url: str | None = None
 
 
 class PlanSessionOut(BaseModel):
