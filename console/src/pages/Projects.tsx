@@ -120,6 +120,7 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
   const [folderFiles, setFolderFiles] = useState<FileList | null>(null);
   const [singleFiles, setSingleFiles] = useState<FileList | null>(null);
   const [deployAfterUpload, setDeployAfterUpload] = useState(true);
+  const [gitUrlEdited, setGitUrlEdited] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -139,9 +140,12 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
   // Git 주소 예시는 설정된 사내 Gitea URL(PAAS_GITEA_URL)을 반영한다. 미설정 시 일반 예시.
   const giteaBase = (health.data?.gitea_url || '').replace(/\/+$/, '');
   const exampleOrg = userOrgs.find((o) => String(o.id) === targetOrgId)?.name || userOrgs[0]?.name || 'org';
-  const gitPlaceholder = giteaBase
+  const gitExample = giteaBase
     ? `${giteaBase}/${exampleOrg}/${form.name || 'repo'}.git`
     : 'https://github.com/user/repo.git';
+  // 예시를 입력값 기본값으로 쓴다 — 손대지 않으면 이 주소가 그대로 제출된다.
+  // 직접 고치기 전까지는 이름·조직 변경을 따라 계속 갱신된다.
+  const gitUrl = gitUrlEdited ? form.git_url : gitExample;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -203,7 +207,7 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
           domain: form.domain || null,
           health_check_path: form.health_check_path,
           default_profile: form.default_profile,
-          git_url: form.git_url,
+          git_url: gitUrl,
         }
       : {
           name: form.name,
@@ -395,9 +399,12 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
             <label className="field" style={{ marginTop: 6 }}>
               Git 주소 (HTTPS/SSH)
               <input
-                value={form.git_url}
-                onChange={(e) => set('git_url', e.target.value)}
-                placeholder={gitPlaceholder}
+                value={gitUrl}
+                onChange={(e) => {
+                  setGitUrlEdited(true);
+                  set('git_url', e.target.value);
+                }}
+                placeholder={gitExample}
                 required={sourceMode === 'git'}
               />
             </label>
