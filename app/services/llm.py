@@ -5,6 +5,7 @@
 """
 import json
 import re
+from pathlib import Path
 from typing import Callable
 
 import httpx
@@ -15,6 +16,24 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..models import ApiKey, BuildProfile, LlmProvider, LlmProviderKind, Project
 from ..security import decrypt_value
+
+# 플랫폼이 정한 기획·구현 원칙. 문서 하나가 원천이고, 기획(에이전트 기획)과 구현(에이전트
+# 빌더) 양쪽 시스템 프롬프트에 그대로 주입된다.
+AGENT_PRINCIPLES_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "docs" / "agent-planning" / "AGENT.md"
+)
+
+
+def agent_principles_prompt() -> str:
+    """기획·구현 원칙 문서를 시스템 프롬프트 조각으로 만든다. 문서가 없으면 빈 문자열."""
+    try:
+        text = AGENT_PRINCIPLES_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    return "=== 기획·구현 원칙 (플랫폼 표준 — 반드시 준수) ===\n" + text
+
 
 EDIT_SYSTEM_PROMPT = """You are a coding assistant working inside an internal PaaS.
 When the user asks for a code change, reply with a short explanation followed by

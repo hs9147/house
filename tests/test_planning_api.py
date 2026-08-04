@@ -132,6 +132,32 @@ def test_stage_order_enforced_and_confirm_commits(monkeypatch):
     assert r.status_code == 200
 
 
+def test_stage_system_prompt_carries_agent_principles(monkeypatch):
+    """기획·구현 원칙 문서(docs/agent-planning/AGENT.md)가 단계 시스템 프롬프트에 들어간다."""
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    calls = _mock_llm(monkeypatch)
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+               json={"content": "기획서 써줘"}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    system = next(p for p in calls if _FILE_SELECT_MARK not in p["messages"][0]["content"]
+                  )["messages"][0]["content"]
+    assert "기획·구현 원칙" in system
+    assert "Simplicity First" in system  # 문서 본문이 그대로 실린다
+    assert system.index("Agent Planning AI") < system.index("기획·구현 원칙")  # 역할 → 원칙 → 단계 지시
+    assert system.index("기획·구현 원칙") < system.index("기획서 확정")
+
+
+def test_agent_principles_absent_document_injects_nothing(monkeypatch, tmp_path):
+    from app.services import llm as llm_service
+
+    monkeypatch.setattr(llm_service, "AGENT_PRINCIPLES_PATH", tmp_path / "없는파일.md")
+    assert llm_service.agent_principles_prompt() == ""
+
+
 def test_every_stage_carries_default_request_prompt():
     """입력창 기본값 — 사용자가 아무것도 쓰지 않아도 바로 '초안 생성'을 누를 수 있어야 한다."""
     c = _client()

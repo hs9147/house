@@ -140,7 +140,12 @@ async def post_plan_message(
             detail=f"앞 단계('{planning_service.stage_title(prev)}')를 먼저 확정하세요.",
         )
 
-    system_prompt = planning_service.PLANNING_SYSTEM_PROMPT + "\n\n" + planning_service.stage_prompt(plan_stage)
+    # 역할 → 기획·구현 원칙(플랫폼 표준 문서) → 이번 단계 지시 순으로 쌓는다.
+    system_prompt = "\n\n".join(filter(None, [
+        planning_service.PLANNING_SYSTEM_PROMPT,
+        llm_service.agent_principles_prompt(),
+        planning_service.stage_prompt(plan_stage),
+    ]))
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
     context_parts = [f"Project: {project.name} (type={project.type.value})"]
