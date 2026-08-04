@@ -25,7 +25,6 @@ export default function AgentPlanning() {
 
   const userOrgs = me.data?.organizations ?? [];
   const userOrgIds = userOrgs.map((o) => o.id);
-  const orgNamesLabel = userOrgs.length > 0 ? userOrgs.map((o) => o.name).join(', ') : me.data?.organization_name;
 
   // 관리자만 모든 조직의 프로젝트를 본다. 일반 사용자는 소속 조직 프로젝트 +
   // 조직 미지정(전역) 프로젝트만 — 소속이 없다고 해서 다른 조직 프로젝트가 보이면 안 된다.
@@ -159,9 +158,7 @@ export default function AgentPlanning() {
 
         <form className="row" onSubmit={start}>
           <select value={projectId} onChange={(e) => setProjectId(e.target.value)} required>
-            <option value="">
-              {orgNamesLabel ? `🏢 [${orgNamesLabel}] 프로젝트 선택...` : '프로젝트 선택...'}
-            </option>
+            <option value="">프로젝트 선택...</option>
             {availableProjects.map((p) => (
               <option key={p.id} value={p.id}>{p.org_name ? `[${p.org_name}] ${p.name}` : p.name}</option>
             ))}
