@@ -65,6 +65,7 @@ def _artifacts_out(db: Session, session_id: int) -> list[PlanArtifactOut]:
             repo_path=a.repo_path if a else planning_service.stage_repo_path(stage),
             commit_sha=a.commit_sha if a else None,
             confirmed=bool(a and a.confirmed),
+            default_request=planning_service.stage_request(stage),
         ))
     return out
 
@@ -155,23 +156,40 @@ async def post_plan_message(
     context_parts.append("=== 가용 모듈 제약 (사용 가능 자원·게이트웨이 규칙) ===\n"
                          + planning_service.render_constraints_doc(constraints))
 
-    # 앞 단계에서 확정된 산출물 본문 누적 주입(리포 워킹카피에서 읽음)
+    # 앞 단계에서 확정된 산출물 본문을 순서대로 주입 — 각 단계는 이전 단계 문서를 근거로 쓴다.
+    # 세션 브랜치에 커밋된 본문을 읽으므로 워킹카피가 어떤 브랜치에 있든 동일하게 참조된다.
+    for idx, s in enumerate(planning_service.prev_stages(plan_stage), start=1):
+        if not _is_confirmed(db, session_id, s):
+            continue
+        path = planning_service.stage_repo_path(s)
+        content = None
+        if workdir.exists():
+            content = workspace.read_file_at_ref(workdir, session.branch, path)
+            if content is None:
+                content = workspace.read_context_files(workdir, [path]).get(path)
+        if content:
+            context_parts.append(
+                f"=== 이전 단계 확정 산출물 {idx}. {planning_service.stage_title(s)} ({path}) ===\n{content}"
+            )
+
+    # git 파일 목록은 기본 참조, 내용 확인이 필요한 파일만 골라 본문을 덧붙인다.
+    context_files: list[str] = []
     if workdir.exists():
-        confirmed_paths = [
-            planning_service.stage_repo_path(s)
-            for s in planning_service.STAGE_ORDER
-            if s != plan_stage and _is_confirmed(db, session_id, s)
-        ]
-        for path, content in workspace.read_context_files(workdir, confirmed_paths).items():
-            context_parts.append(f"=== 확정된 앞 단계 산출물: {path} ===\n{content}")
+        tree = workspace.file_tree(workdir, limit=planning_service.MAX_TREE_FILES)
+        if tree:
+            context_parts.append("=== GIT 파일 목록 (리포 추적 파일) ===\n" + "\n".join(tree))
         # 코드 구조 개요
         try:
             outline = codemap_service.render_outline(codemap_service.build_code_map(workdir))
             context_parts.append("=== CODE STRUCTURE (OUTLINE) ===\n" + outline)
         except Exception:  # noqa: BLE001
             pass
-        for path, content in workspace.read_context_files(workdir, body.files).items():
+        selected = await asyncio.to_thread(
+            planning_service.select_context_files, provider, db, tree, body.content, body.files,
+        )
+        for path, content in workspace.read_context_files(workdir, selected).items():
             context_parts.append(f"--- {path} ---\n{content}")
+            context_files.append(path)
 
     messages.append({"role": "system", "content": "\n\n".join(context_parts)})
 
@@ -196,7 +214,7 @@ async def post_plan_message(
     db.add(ChatMessage(session_id=session_id, role="user", content=body.content))
     db.add(ChatMessage(session_id=session_id, role="assistant", content=reply))
     db.commit()
-    return PlanMessageReply(reply=reply, used_modules=used_modules)
+    return PlanMessageReply(reply=reply, used_modules=used_modules, context_files=context_files)
 
 
 @router.post("/plan/sessions/{session_id}/stages/{stage}/confirm", response_model=PlanArtifactOut)
@@ -231,6 +249,12 @@ async def confirm_plan_stage(
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Gitea 커밋 실패: {e}")
 
+    # 커밋 후 git 상태에 따라 PR 생성·머지를 자동 수행(작업 브랜치일 때만).
+    git_result = await asyncio.to_thread(
+        planning_service.auto_pull_request, project, session.branch, message,
+        f"에이전트 기획 산출물 확정: {repo_path}",
+    )
+
     artifact = db.execute(
         select(PlanArtifact).where(
             PlanArtifact.session_id == session_id, PlanArtifact.stage == plan_stage
@@ -244,10 +268,15 @@ async def confirm_plan_stage(
     artifact.confirmed = True
     db.commit()
     audit.record(db, key.name, "plan.stage.confirm", project.name,
-                 {"stage": plan_stage.value, "sha": sha, "branch": session.branch})
+                 {"stage": plan_stage.value, "sha": sha, "branch": session.branch,
+                  "git_action": git_result["action"]})
     return PlanArtifactOut(
         stage=plan_stage.value, title=planning_service.stage_title(plan_stage),
         repo_path=repo_path, commit_sha=sha, confirmed=True,
+        default_request=planning_service.stage_request(plan_stage),
+        git_action=git_result["action"],
+        git_detail=git_result.get("detail"),
+        pull_request_url=git_result.get("url"),
     )
 
 

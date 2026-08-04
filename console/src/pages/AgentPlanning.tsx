@@ -8,7 +8,16 @@ interface Msg {
   role: 'user' | 'assistant';
   content: string;
   usedModules?: string[];
+  contextFiles?: string[];
 }
+
+// 확정 시 git 상태에 따라 자동 수행된 결과의 표시 문구
+const GIT_ACTION_LABEL: Record<string, string> = {
+  committed: '기본 브랜치에 직접 커밋',
+  merged: 'PR 생성 후 자동 머지 완료',
+  pr_opened: 'PR 생성됨 (자동 머지 불가 — 확인 필요)',
+  skipped: 'PR 미수행',
+};
 
 // 에이전트 기획 4단계(진행단계 표시) — 순차 진행, 앞 단계 확정을 전제로 한다.
 const STAGES: { key: PlanArtifactOut['stage']; label: string }[] = [
@@ -45,6 +54,7 @@ export default function AgentPlanning() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [buildEvents, setBuildEvents] = useState<PlanBuildEvent[]>([]);
+  const [gitResult, setGitResult] = useState<PlanArtifactOut | null>(null);
 
   // 프로젝트 페이지와 동일한 CreateModal(빈 프로젝트 옵션 포함)을 재사용한다.
   const [showCreate, setShowCreate] = useState(false);
@@ -57,6 +67,9 @@ export default function AgentPlanning() {
 
   const artifactOf = (stage: string) => session?.artifacts.find((a) => a.stage === stage);
   const isConfirmed = (stage: string) => !!artifactOf(stage)?.confirmed;
+  // 서버가 내려준 단계별 기본 생성 요청 — 입력창 기본값이라 바로 '초안 생성'을 누를 수 있다.
+  const defaultRequestOf = (s: PlanSessionOut | null, stage: string) =>
+    s?.artifacts.find((a) => a.stage === stage)?.default_request ?? '';
   const stageIndex = (stage: string) => STAGES.findIndex((s) => s.key === stage);
   // 앞 단계가 모두 확정돼야 진입 가능(진행단계 순차 강제)
   const stageUnlocked = (stage: string) =>
@@ -71,6 +84,8 @@ export default function AgentPlanning() {
       setActiveStage('spec');
       setMessages([]);
       setDraft('');
+      setGitResult(null);
+      setInput(defaultRequestOf(s, 'spec'));
     } catch (err) {
       setError((err as Error).message);
     }
@@ -87,6 +102,7 @@ export default function AgentPlanning() {
     setMessages([]);
     setDraft('');
     setError('');
+    setInput(defaultRequestOf(session, stage));
   };
 
   const send = async (e: React.FormEvent) => {
@@ -100,7 +116,10 @@ export default function AgentPlanning() {
     try {
       const fileList = files.split(',').map((f) => f.trim()).filter(Boolean);
       const res = await api.sendPlanMessage(session.id, activeStage, content, fileList);
-      setMessages((prev) => [...prev, { role: 'assistant', content: res.reply, usedModules: res.used_modules }]);
+      setMessages((prev) => [...prev, {
+        role: 'assistant', content: res.reply,
+        usedModules: res.used_modules, contextFiles: res.context_files,
+      }]);
       setDraft(res.reply); // 확정용 편집 초안으로 채운다
     } catch (err) {
       setError((err as Error).message);
@@ -114,7 +133,8 @@ export default function AgentPlanning() {
     setBusy(true);
     setError('');
     try {
-      await api.confirmPlanStage(session.id, activeStage, draft);
+      const confirmed = await api.confirmPlanStage(session.id, activeStage, draft);
+      setGitResult(confirmed); // 커밋 후 자동 수행된 PR/머지 결과
       await refreshSession();
       // 다음 단계로 자동 이동
       const next = STAGES[stageIndex(activeStage) + 1];
@@ -122,6 +142,7 @@ export default function AgentPlanning() {
         setActiveStage(next.key);
         setMessages([]);
         setDraft('');
+        setInput(defaultRequestOf(session, next.key));
       }
     } catch (err) {
       setError((err as Error).message);
@@ -152,8 +173,9 @@ export default function AgentPlanning() {
           <button onClick={() => setShowCreate(true)}>+ 새 프로젝트</button>
         </div>
         <p className="mutedtext" style={{ fontSize: 12, marginTop: 6, marginBottom: 12 }}>
-          코딩 전에 기획서 → 아키텍처 → 솔루션 구성 → 개발원칙을 순서대로 확정합니다. 확정 산출물은
-          프로젝트 Gitea 리포에 커밋되어 외부 개발도구(VSCode·Claude·Antigravity)에서 그대로 활용합니다.
+          코딩 전에 기획서 → 아키텍처 → 솔루션 구성 → 개발원칙을 순서대로 확정합니다. 각 단계는 앞 단계의
+          확정 문서를 참조하고, 확정 산출물은 프로젝트 Gitea 리포에 커밋되며 작업 브랜치면 PR·머지까지
+          자동 수행됩니다. 커밋된 문서는 외부 개발도구(VSCode·Claude·Antigravity)에서 그대로 활용합니다.
         </p>
 
         <form className="row" onSubmit={start}>
@@ -245,6 +267,14 @@ export default function AgentPlanning() {
                       ))}
                     </div>
                   )}
+                  {m.contextFiles && m.contextFiles.length > 0 && (
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                      <span className="mutedtext" style={{ fontSize: 11 }}>내용 참조 파일:</span>
+                      {m.contextFiles.map((f) => (
+                        <span key={f} className="mono" style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(148, 163, 184, 0.2)' }}>{f}</span>
+                      ))}
+                    </div>
+                  )}
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{m.content}</div>
                 </div>
               ))}
@@ -286,6 +316,15 @@ export default function AgentPlanning() {
                 <button className="primary" onClick={confirm} disabled={busy || !draft.trim()}>
                   ✅ 이 단계 확정 (Gitea 커밋)
                 </button>
+                {gitResult?.git_action && (
+                  <span className="mutedtext" style={{ fontSize: 12 }}>
+                    {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
+                    {gitResult.pull_request_url && (
+                      <> · <a href={gitResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
+                    )}
+                    {gitResult.git_detail && <> · {gitResult.git_detail}</>}
+                  </span>
+                )}
               </div>
             </div>
           </div>

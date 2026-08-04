@@ -56,6 +56,20 @@ def read_context_files(workdir: Path, paths: list[str]) -> dict[str, str]:
     return result
 
 
+def read_file_at_ref(workdir: Path, ref: str, rel: str) -> str | None:
+    """특정 브랜치(ref)에 커밋된 파일 내용. 없으면 None.
+
+    확정 산출물은 세션 브랜치에 커밋되므로, 워킹카피가 지금 어떤 브랜치에 있든
+    (다른 세션이 체크아웃해 갔더라도) 커밋된 본문을 그대로 읽는다.
+    """
+    out = subprocess.run(
+        ["git", "show", f"{ref}:{rel}"], cwd=workdir, capture_output=True, text=True
+    )
+    if out.returncode != 0:
+        return None
+    return out.stdout[:MAX_CONTEXT_FILE_BYTES]
+
+
 def read_file(workdir: Path, rel: str) -> str:
     """코드 확인 화면용 단일 파일 조회(읽기 전용). 경로 탈출·과대 파일을 차단한다."""
     root = workdir.resolve()
