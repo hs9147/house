@@ -12,6 +12,7 @@ to_thread로 호출해 이벤트 루프를 블로킹하지 않는다.
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -21,6 +22,25 @@ from uuid import uuid4
 POWERSHELL_EXE = "powershell.exe"
 # -NoLogo: 배너 억제, 파이프된 stdin에서 REPL로 동작(명령을 한 줄씩 읽어 실행).
 _ARGS = ["-NoProfile", "-NoLogo"]
+
+# Windows 프로세스 생성 플래그 — paas 프로세스와 데몬을 분리하기 위한 것.
+# BREAKAWAY_FROM_JOB이 핵심: nssm 등으로 paas가 Job Object에 묶여 있을 때, 데몬이 그 Job에서
+# 벗어나 paas가 재시작(Stop-Process/Restart-Service)돼도 함께 죽지 않게 한다(self-kill 방지).
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_CREATE_NO_WINDOW = 0x08000000
+_DETACHED_PROCESS = 0x00000008
+_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
+def _creation_flags(*, detached: bool, breakaway: bool) -> int:
+    """비-Windows는 0. detached=True면 콘솔에서 완전 분리(파이프 불필요한 fire-and-forget용),
+    아니면 창만 숨긴다(파이프로 계속 통신하는 상주 데몬용)."""
+    if sys.platform != "win32":
+        return 0
+    flags = _CREATE_NEW_PROCESS_GROUP | (_DETACHED_PROCESS if detached else _CREATE_NO_WINDOW)
+    if breakaway:
+        flags |= _CREATE_BREAKAWAY_FROM_JOB
+    return flags
 
 MAX_OUTPUT_CHARS = 200_000
 # 파이프된 stdin에서 PowerShell REPL은 입력 명령을 프롬프트와 함께 에코한다
@@ -50,8 +70,7 @@ class PowerShellDaemon:
         return self._proc is not None and self._proc.poll() is None
 
     def start(self) -> None:
-        self._proc = subprocess.Popen(
-            [self._exe, *_ARGS],
+        kwargs = dict(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -61,6 +80,16 @@ class PowerShellDaemon:
             errors="replace",
             bufsize=1,
         )
+        # paas의 Job에서 벗어나(breakaway) paas 재시작 시 함께 죽지 않도록 띄운다.
+        # Job이 breakaway를 불허하면 OSError가 나므로 플래그를 빼고 재시도한다.
+        try:
+            self._proc = subprocess.Popen(
+                [self._exe, *_ARGS], creationflags=_creation_flags(detached=False, breakaway=True), **kwargs
+            )
+        except OSError:
+            self._proc = subprocess.Popen(
+                [self._exe, *_ARGS], creationflags=_creation_flags(detached=False, breakaway=False), **kwargs
+            )
         self._q = queue.Queue()
         self._reader = threading.Thread(target=self._read_loop, args=(self._proc,), daemon=True)
         self._reader.start()
@@ -141,6 +170,20 @@ class PowerShellDaemon:
     @property
     def cwd(self) -> str | None:
         return self._cwd
+
+
+def run_detached_script(script: str, cwd: str | None = None) -> None:
+    """paas와 분리된 독립 PowerShell 프로세스로 스크립트를 실행한다(fire-and-forget).
+
+    paas가 자기 자신을 재시작할 때(포트 해제·Restart-Service) 쓰는 경로 — 이 프로세스는
+    paas의 Job에서 breakaway해 살아남으므로, paas 프로세스가 내려가도 재시작 작업이 끝까지
+    진행된다(self-kill 방지). Job이 breakaway를 불허하면 플래그를 빼고 재시도한다.
+    """
+    args = [POWERSHELL_EXE, "-NoProfile", "-NonInteractive", "-Command", script]
+    try:
+        subprocess.Popen(args, cwd=cwd, creationflags=_creation_flags(detached=True, breakaway=True), close_fds=True)
+    except OSError:
+        subprocess.Popen(args, cwd=cwd, creationflags=_creation_flags(detached=True, breakaway=False), close_fds=True)
 
 
 # --- 공유 데몬 (REST /exec 용 — 호출 간 세션 유지) ---

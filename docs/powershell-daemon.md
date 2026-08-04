@@ -94,6 +94,25 @@ curl -X POST https://<플랫폼>/paas/api/v1/system/powershell/exec \
 - **프로세스 사멸**: 데몬 프로세스가 죽으면 리더 스레드가 EOF를 큐에 넣어 `run()`이 그 상태를
   감지하고, 공유 데몬은 다음 호출에서 다시 뜬다.
 
+## 6.5 paas와의 프로세스 분리 · self-kill 방지
+
+데몬과 재시작 작업은 **paas 프로세스와 분리된 독립 프로세스**로 띄운다. Windows에서 paas가
+nssm 등으로 **Job Object**에 묶여 있으면, paas 서비스가 stop/restart될 때 그 Job의 하위
+프로세스가 함께 종료된다. 데몬이 같은 Job 안에 있으면 paas가 자기 자신을 재시작하는 순간
+재시작을 수행하던 프로세스까지 죽는 **self-kill**이 발생한다.
+
+이를 막기 위해 PowerShell 프로세스를 생성할 때 `CREATE_BREAKAWAY_FROM_JOB`(+ `DETACHED_PROCESS`
+또는 `CREATE_NO_WINDOW`, `CREATE_NEW_PROCESS_GROUP`)로 **Job에서 breakaway**시킨다. 관련 상수·헬퍼는
+`app/services/powershell_daemon.py`의 `_creation_flags()`에 모여 있다(분리의 단일 지점).
+
+- **상주 데몬**(`PowerShellDaemon.start`): `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP |
+  CREATE_BREAKAWAY_FROM_JOB`로 기동. paas가 재시작돼도 데몬 자신은 죽지 않는다.
+- **자기 재시작 / SW 업데이트**(`run_detached_script`): `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
+  CREATE_BREAKAWAY_FROM_JOB`로 fire-and-forget 실행. paas 프로세스가 내려가도 `git pull` ·
+  포트 해제 · `Restart-Service`가 **끝까지 진행**된다. `/system/restart`·`/system/sw-update`가 이 경로를 쓴다.
+- Job이 breakaway를 불허하면(`JOB_OBJECT_LIMIT_BREAKAWAY_OK` 미설정) 생성이 `OSError`로 실패하므로,
+  플래그를 빼고 자동 재시도한다(비-Windows는 플래그 0).
+
 ## 7. 플랫폼별 주의
 
 - Windows 전용 `powershell.exe`를 사용한다. `powershell.exe`가 없는 환경(비-Windows)에서는

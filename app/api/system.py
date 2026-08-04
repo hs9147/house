@@ -507,12 +507,15 @@ def restart_backend_service(
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
-    """Self-Kill 대응: 백엔드가 자기 자신을 재시작할 때 8000 포트 점유 프로세스를 해제하고 DETACHED 독립 프로세스로 안전 재기동한다."""
+    """Self-Kill 대응: 백엔드가 자기 자신을 재시작할 때 8000 포트 점유 프로세스를 해제하고,
+    paas의 Job에서 분리된 독립 PowerShell 프로세스(powershell_daemon.run_detached_script)로
+    안전 재기동한다 — paas가 내려가도 재시작 작업이 죽지 않는다."""
     import os  # noqa: PLC0415
     import sys  # noqa: PLC0415
     import threading  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
     from pathlib import Path  # noqa: PLC0415
+
+    from ..services import powershell_daemon  # noqa: PLC0415
 
     root_dir = Path(__file__).resolve().parent.parent.parent
     py_exe = sys.executable
@@ -540,13 +543,7 @@ def restart_backend_service(
     )
 
     try:
-        flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0
-        subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", restart_script],
-            cwd=str(root_dir),
-            creationflags=flags,
-            close_fds=True,
-        )
+        powershell_daemon.run_detached_script(restart_script, cwd=str(root_dir))
         actor_name = getattr(admin, "name", "admin")
         audit.record(db, actor_name, "system.restart", "backend_service", {"py_exe": py_exe})
 
@@ -573,11 +570,11 @@ def sw_update(
 ):
     """SW 업데이트: 프로젝트 폴더에서 git pull 후 paas·console Windows 서비스를 재시작한다.
 
-    Restart-Service가 paas 서비스(현재 프로세스)를 stop→start 하므로, 스크립트를 DETACHED
-    독립 프로세스로 띄워 백엔드가 내려가도 업데이트가 끝까지 진행되게 한다.
+    Restart-Service가 paas 서비스(현재 프로세스)를 stop→start 하므로, paas의 Job에서 분리된
+    독립 PowerShell 프로세스(run_detached_script)로 띄워 백엔드가 내려가도 업데이트가 끝까지
+    진행되게 한다(self-kill 방지).
     """
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
+    from ..services import powershell_daemon  # noqa: PLC0415
 
     settings = get_settings()
     repo_dir = str(settings.resolved_repo_root)
@@ -601,13 +598,7 @@ def sw_update(
     )
 
     try:
-        flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0
-        subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", update_script],
-            cwd=repo_dir,
-            creationflags=flags,
-            close_fds=True,
-        )
+        powershell_daemon.run_detached_script(update_script, cwd=repo_dir)
         audit.record(db, getattr(admin, "name", "admin"), "system.sw_update", "backend_service",
                      {"repo_dir": repo_dir, "services": services})
         return {
