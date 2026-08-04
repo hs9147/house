@@ -27,10 +27,11 @@ export default function AgentPlanning() {
   const userOrgIds = userOrgs.map((o) => o.id);
   const orgNamesLabel = userOrgs.length > 0 ? userOrgs.map((o) => o.name).join(', ') : me.data?.organization_name;
 
-  // 사용자가 소속된 조직들의 프로젝트만 노출(관리자/미지정이면 전체)
+  // 관리자만 모든 조직의 프로젝트를 본다. 일반 사용자는 소속 조직 프로젝트 +
+  // 조직 미지정(전역) 프로젝트만 — 소속이 없다고 해서 다른 조직 프로젝트가 보이면 안 된다.
   const availableProjects = (projects.data ?? []).filter((p) => {
-    if (userOrgIds.length === 0 || me.data?.is_admin) return true;
-    return p.organization_id != null && userOrgIds.includes(p.organization_id);
+    if (me.data?.is_admin) return true;
+    return p.organization_id == null || userOrgIds.includes(p.organization_id);
   });
 
   const [projectId, setProjectId] = useState('');
