@@ -293,7 +293,7 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
 
           {sourceMode === 'empty' ? (
             <div style={{ fontSize: 13, color: '#9ca3af', marginTop: 6 }}>
-              소스 없이 <strong>빈 리포지토리</strong>가 조직에 생성됩니다. 이후 에이전트 기획/빌더로 코드를 채웁니다.
+              소스 없이 <strong>빈 리포지토리</strong>가 조직에 생성됩니다. 이후 에이전트 기획을 진행할 수 있습니다.
             </div>
           ) : sourceMode === 'upload' ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 6 }}>
