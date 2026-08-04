@@ -197,7 +197,19 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
 
   return (
     <Modal title="새 프로젝트 생성" onClose={onClose}>
-      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <form
+        onSubmit={submit}
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+          // 소스 등록 방식 전환 시 창 크기가 변하지 않도록 고정 — 내부만 스크롤한다.
+          width: 520,
+          height: 560,
+          overflowY: 'auto',
+          paddingRight: 4,
+        }}
+      >
         {userOrgs.length > 1 ? (
           <label className="field">
             소속 조직 선택 (다수 소속 조직 중 프로젝트를 생성할 조직을 선택하세요)
