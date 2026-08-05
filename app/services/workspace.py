@@ -25,11 +25,34 @@ def workdir_for(project: Project) -> Path:
 
 
 def ensure_branch(project: Project, branch: str) -> Path:
-    """기준 브랜치를 최신화한 뒤 작업 브랜치로 전환(없으면 생성)한다."""
+    """기준 브랜치를 최신화한 뒤 작업 브랜치로 전환한다.
+
+    이미 있는 작업 브랜치는 **이어서 쓴다**. 매번 `checkout -B`로 기준 브랜치 끝에
+    새로 만들면 앞서 그 브랜치에 올린 커밋이 로컬에서 사라지고, 다음 push가
+    non-fast-forward로 거절된다(연속 확정이 깨지던 원인).
+    """
     workdir, _ = checkout(project)
-    if branch != project.branch:
-        _git(workdir, "checkout", "-B", branch)
+    if branch == project.branch:
+        return workdir
+    remote = subprocess.run(
+        ["git", *auth_args(project.git_url), "fetch", "origin", branch],
+        cwd=workdir, capture_output=True, text=True,
+    )
+    if remote.returncode == 0:
+        _git(workdir, "checkout", "-B", branch, "FETCH_HEAD")  # 원격 상태에 맞춰 이어간다
+    elif _branch_exists(workdir, branch):
+        _git(workdir, "checkout", branch)
+    else:
+        _git(workdir, "checkout", "-B", branch)  # 첫 커밋 — 기준 브랜치에서 뻗는다
     return workdir
+
+
+def _branch_exists(workdir: Path, branch: str) -> bool:
+    out = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=workdir, capture_output=True, text=True,
+    )
+    return out.returncode == 0
 
 
 def file_tree(workdir: Path, limit: int = 200) -> list[str]:
@@ -99,12 +122,18 @@ def write_and_commit(project: Project, branch: str, rel_path: str, content: str,
     target.write_text(normalized, encoding="utf-8")
 
     _git(workdir, "add", "--", rel_path)
-    _git(
-        workdir,
-        "-c", "user.name=paas-bot",
-        "-c", "user.email=paas-bot@localhost",
-        "commit", "-m", message,
+    # 같은 내용을 다시 확정하면 바뀐 게 없다 — git commit은 이걸 오류로 내지만
+    # 사용자에겐 "이미 그 상태"라 실패가 아니다. 커밋을 건너뛰고 현재 커밋을 돌려준다.
+    staged = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=workdir, capture_output=True, text=True
     )
+    if staged.stdout.strip():
+        _git(
+            workdir,
+            "-c", "user.name=paas-bot",
+            "-c", "user.email=paas-bot@localhost",
+            "commit", "-m", message,
+        )
     _git(workdir, *auth_args(project.git_url), "push", "-u", "origin", branch)
     out = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, text=True, check=True

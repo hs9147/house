@@ -72,6 +72,60 @@ DIFF = """--- a/hello.py
 """
 
 
+def _remote_project(tmp_path, monkeypatch, fresh_settings):
+    """실제 원격(bare 리포)과 프로젝트 한 개 — 연속 커밋의 push까지 진짜로 검증한다."""
+    from app.config import get_settings
+    from app.models import Project, ProjectType
+
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    seed = tmp_path / "seed"
+    _init_repo(seed)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=seed, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "main"], cwd=seed, check=True)
+
+    monkeypatch.setenv("PAAS_WORK_DIR", str(tmp_path / "workspaces"))
+    get_settings.cache_clear()
+    return Project(name="plan-app", type=ProjectType.python, git_url=str(origin), branch="main")
+
+
+def _committed_at(origin: Path, ref: str, rel: str) -> str:
+    out = subprocess.run(["git", "show", f"{ref}:{rel}"], cwd=origin,
+                         capture_output=True, text=True, check=True)
+    return out.stdout
+
+
+def test_consecutive_commits_keep_the_branch_history(tmp_path, monkeypatch, fresh_settings):
+    """회귀: 매번 기준 브랜치에서 새로 뻗으면 두 번째 push가 non-fast-forward로 거절된다."""
+    project = _remote_project(tmp_path, monkeypatch, fresh_settings)
+    branch = "paas/plan-1-abcd1234"
+
+    first = workspace.write_and_commit(
+        project, branch, "docs/agent-planning/01-기획서.md", "# 기획서\n", "plan(spec)")
+    second = workspace.write_and_commit(
+        project, branch, "docs/agent-planning/02-아키텍처설계.md", "# 설계\n", "plan(architecture)")
+    assert first != second
+
+    origin = tmp_path / "origin.git"
+    # 앞 단계 산출물이 살아 있고, 뒤 단계가 그 위에 쌓였다
+    assert _committed_at(origin, branch, "docs/agent-planning/01-기획서.md") == "# 기획서\n"
+    assert _committed_at(origin, branch, "docs/agent-planning/02-아키텍처설계.md") == "# 설계\n"
+    log = subprocess.run(["git", "log", "--format=%s", branch], cwd=origin,
+                         capture_output=True, text=True, check=True)
+    assert log.stdout.split("\n")[:2] == ["plan(architecture)", "plan(spec)"]
+
+
+def test_reconfirming_identical_content_is_not_an_error(tmp_path, monkeypatch, fresh_settings):
+    """같은 내용을 다시 확정하면 '바뀐 게 없다'는 실패가 아니라 현재 커밋 그대로다."""
+    project = _remote_project(tmp_path, monkeypatch, fresh_settings)
+    branch = "paas/plan-2-beef0001"
+    path = "docs/agent-planning/01-기획서.md"
+
+    sha = workspace.write_and_commit(project, branch, path, "# 기획서\n", "plan(spec)")
+    again = workspace.write_and_commit(project, branch, path, "# 기획서\n", "plan(spec) 재확정")
+    assert again == sha  # 새 커밋을 만들지 않는다
+
+
 def test_context_files_guardrails(tmp_path):
     repo = tmp_path / "repo"
     _init_repo(repo)
