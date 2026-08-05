@@ -7,6 +7,7 @@
 설계 근거: docs/agent-planning/ (기획서·아키텍처·솔루션 구성·개발원칙).
 """
 import json
+from typing import Callable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -16,6 +17,7 @@ from ..models import LlmProvider, Module, ModuleBinding, PlanStage, Project
 from . import a2a as a2a_service
 from . import gitea as gitea_service
 from . import llm as llm_service
+from . import mcp_client
 from . import modules as modules_service
 
 # 산출물이 커밋되는 리포 내 표준 경로(개발도구가 clone/open으로 그대로 열람).
@@ -251,6 +253,35 @@ def module_bind_tools(resources: list[dict]) -> list[dict]:
             },
         },
     }]
+
+
+def solution_tools(db: Session, project: Project, resources: list[dict], actor: str,
+                   bound: list[str]) -> tuple[list[dict], Callable[[str, dict], str] | None]:
+    """솔루션 구성 단계의 도구 묶음 — 모듈 바인딩 + 바인딩된 MCP 서버가 광고하는 도구.
+
+    MCP 도구는 이번 턴 기준으로 **이미 바인딩된** 서버에서만 모은다. 이번 턴에 새로
+    바인딩한 MCP 모듈의 도구는 다음 턴부터 잡힌다 — 도구 목록은 LLM 호출 전에 확정되기
+    때문이며, 응답하지 않는 서버는 조용히 빠진다(services/mcp_client).
+    """
+    tools = module_bind_tools(resources)
+    bind_execute = make_bind_executor(db, project, actor, bound) if tools else None
+
+    servers = modules_service.mcp_servers_for_project(db, project)
+    mcp_tools, mcp_registry = mcp_client.build_openai_tools(servers) if servers else ([], {})
+    tools += mcp_tools
+    mcp_execute = mcp_client.make_tool_executor(mcp_registry) if mcp_tools else None
+
+    if not tools:
+        return [], None
+
+    def execute(fn_name: str, arguments: dict) -> str:
+        if fn_name == BIND_TOOL and bind_execute is not None:
+            return bind_execute(fn_name, arguments)
+        if mcp_execute is not None:
+            return mcp_execute(fn_name, arguments)
+        return f"unknown tool: {fn_name}"
+
+    return tools, execute
 
 
 def make_bind_executor(db: Session, project: Project, actor: str, bound: list[str]):

@@ -221,6 +221,66 @@ def test_solution_stage_binds_modules_it_decided_to_use(monkeypatch, fresh_setti
     assert fn["parameters"]["properties"]["module_name"]["enum"] == ["orders-db"]
 
 
+def test_solution_stage_offers_bound_mcp_server_tools(monkeypatch, fresh_settings, tmp_path):
+    """바인딩된 MCP 서버의 도구도 솔루션 구성 단계에서 함께 쓸 수 있다."""
+    from app.services import llm as llm_service, mcp_client, workspace
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    mid = _module(c, name="docs-mcp", type_="mcp")
+    # mcp 모듈은 config.url이 필요하다 — 등록 후 바인딩해 둔다(이번 턴에 이미 바인딩된 상태)
+    c.put(f"/paas/api/v1/modules/{mid}",
+          json={"config": {"url": "https://mcp.example.com"}}, headers=ADMIN)
+    assert c.post(f"/paas/api/v1/projects/{pid}/modules/{mid}/bind",
+                  json={"env_prefix": "DOCS"}, headers=ADMIN).status_code == 201
+
+    monkeypatch.setattr(mcp_client, "list_tools", lambda url, api_key=None: [
+        {"name": "search", "description": "문서 검색",
+         "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}},
+    ])
+    called: list[tuple] = []
+    monkeypatch.setattr(mcp_client, "call_tool",
+                        lambda url, key, name, args: (called.append((name, args)), "결과 3건")[1])
+
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid := c.post(
+        "/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+        headers=ADMIN).json()["id"], repo)
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, br, path, content, message: "cafe123")
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/architecture/confirm",
+                  json={"content": "# 설계 확정본"}, headers=ADMIN).status_code == 200
+
+    payloads: list[dict] = []
+
+    def fake_post(url, headers, payload):
+        payloads.append(payload)
+        if _FILE_SELECT_MARK in payload["messages"][0]["content"]:
+            return {"choices": [{"message": {"content": "[]"}}]}
+        if not any(m.get("role") == "tool" for m in payload["messages"]):
+            return {"choices": [{"message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "t1", "function": {
+                    "name": "docs-mcp__search", "arguments": '{"q": "결제 규격"}',
+                }}],
+            }}]}
+        return {"choices": [{"message": {"content": "# 솔루션 구성 초안"}}]}
+
+    monkeypatch.setattr(llm_service, "_post_chat", fake_post)
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/solution/messages",
+               json={"content": "솔루션 구성 써줘"}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+
+    # 바인딩 도구와 MCP 도구가 함께 노출되고, 호출은 해당 서버로 전달된다
+    tool_payload = next(p for p in payloads if p.get("tools"))
+    names = [t["function"]["name"] for t in tool_payload["tools"]]
+    assert names == ["bind_module", "docs-mcp__search"]
+    assert called == [("search", {"q": "결제 규격"})]
+    tool_msg = next(m for m in payloads[-1]["messages"] if m.get("role") == "tool")
+    assert tool_msg["content"] == "결과 3건"
+
+
 def test_bind_tool_absent_outside_solution_stage(monkeypatch, fresh_settings, tmp_path):
     _workspace_repo(monkeypatch, fresh_settings, tmp_path)
     c = _client()
