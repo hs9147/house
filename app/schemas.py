@@ -173,9 +173,10 @@ class PlanSessionCreate(BaseModel):
 
 class PlanMessageIn(BaseModel):
     content: str
-    files: list[str] = []  # 컨텍스트로 포함할 리포 내 파일 경로
     # 지금 편집 중인 산출물 본문 — 주면 새로 쓰지 않고 이것을 고친다.
     draft: str = ""
+    # 컨텍스트 한도 초과(413) 후 재시도 — 앞 단계 문서를 개요로 줄이고 코드 컨텍스트를 뺀다.
+    compact: bool = False
 
 
 class PlanMessageReply(BaseModel):
@@ -184,6 +185,7 @@ class PlanMessageReply(BaseModel):
     used_modules: list[str] = []
     context_files: list[str] = []  # 이번 요청에서 본문까지 참조한 리포 파일
     bound_modules: list[str] = []  # 솔루션 구성 단계에서 이번에 바인딩된 모듈
+    compacted: bool = False  # 압축된 컨텍스트로 생성됐는지
 
 
 class PlanArtifactContentOut(BaseModel):

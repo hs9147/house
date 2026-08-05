@@ -15,6 +15,7 @@ interface Msg {
   usedModules?: string[];
   contextFiles?: string[];
   boundModules?: string[];
+  compacted?: boolean;
 }
 
 // 확정 시 git 상태에 따라 자동 수행된 결과의 표시 문구
@@ -74,7 +75,6 @@ export default function AgentPlanning() {
   const [activeStage, setActiveStage] = useState<StepKey>('spec');
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
-  const [files, setFiles] = useState('');
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -203,13 +203,29 @@ export default function AgentPlanning() {
     setBusy(true);
     setError('');
     try {
-      const fileList = files.split(',').map((f) => f.trim()).filter(Boolean);
       // 편집 중인 산출물을 함께 보낸다 — 새로 쓰지 않고 이것을 고치게 한다.
-      const res = await api.sendPlanMessage(session.id, activeStage, content, fileList, draft);
+      let res;
+      try {
+        res = await api.sendPlanMessage(session.id, activeStage, content, draft);
+      } catch (err) {
+        // 413 = 컨텍스트가 모델 한도를 넘었다 — 압축해서 다시 시도할지 묻는다.
+        if ((err as ApiError).status !== 413) throw err;
+        if (!window.confirm(
+          `${(err as Error).message}\n\n` +
+          '압축하면 앞 단계 문서는 제목만 싣고 코드 구조·참조 파일 본문은 빠집니다.\n' +
+          '컨텍스트를 압축해 다시 실행할까요?',
+        )) {
+          setMessages((prev) => prev.slice(0, -1)); // 보낸 요청을 되돌린다
+          setInput(content);
+          setBusy(false);
+          return;
+        }
+        res = await api.sendPlanMessage(session.id, activeStage, content, draft, true);
+      }
       setMessages((prev) => [...prev, {
         role: 'assistant', content: res.summary,
         usedModules: res.used_modules, contextFiles: res.context_files,
-        boundModules: res.bound_modules,
+        boundModules: res.bound_modules, compacted: res.compacted,
       }]);
       setDraft(res.document); // 문서 본문은 산출물 란으로
       setDraftSource('session');
@@ -495,7 +511,7 @@ export default function AgentPlanning() {
                     )}
                     {m.contextFiles && m.contextFiles.length > 0 && (
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                        <span className="mutedtext" style={{ fontSize: 11 }}>내용 참조 파일:</span>
+                        <span className="mutedtext" style={{ fontSize: 11 }}>자동 참조된 파일:</span>
                         {m.contextFiles.map((f) => (
                           <span key={f} className="mono" style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(148, 163, 184, 0.2)' }}>{f}</span>
                         ))}
@@ -507,12 +523,6 @@ export default function AgentPlanning() {
               </div>
 
               <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <input
-                  className="mono"
-                  placeholder="참조할 파일 경로들 (쉼표 구분, 선택)"
-                  value={files}
-                  onChange={(e) => setFiles(e.target.value)}
-                />
                 <div className="row">
                   <textarea
                     style={{ flex: 1, minHeight: 70, fontFamily: 'inherit' }}
