@@ -77,7 +77,7 @@ def _project_and_provider(c: TestClient) -> tuple[int, int]:
     return pid, prov
 
 
-def test_session_lists_all_four_stages_unconfirmed():
+def test_session_lists_all_five_stages_unconfirmed():
     c = _client()
     pid, prov = _project_and_provider(c)
     r = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov}, headers=ADMIN)
@@ -86,7 +86,7 @@ def test_session_lists_all_four_stages_unconfirmed():
     # 세션마다 고유한 작업 브랜치 — id 뒤에 hex 접미사가 붙는다
     assert re.fullmatch(rf"paas/plan-{body['id']}-[0-9a-f]{{8}}", body["branch"]), body["branch"]
     stages = [a["stage"] for a in body["artifacts"]]
-    assert stages == ["spec", "architecture", "solution", "principles"]
+    assert stages == ["spec", "architecture", "solution", "principles", "tasks"]
     assert all(a["confirmed"] is False for a in body["artifacts"])
 
 
@@ -648,6 +648,41 @@ def test_context_files_are_chosen_without_a_path_input(monkeypatch, fresh_settin
     assert "--- app.py ---" in _draft_context(calls)
 
 
+def test_merge_creates_the_pull_request_when_none_exists(monkeypatch, fresh_settings, tmp_path):
+    """머지는 PR이 없으면 만들어서 진행하고, 반영할 커밋이 없으면 오류가 아니라 '이미 반영'이다."""
+    from app.services import gitea
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    monkeypatch.setattr(gitea, "repo_slug", lambda git_url: ("o", "plan-app"))
+
+    # PR이 없으면 만든다 — 만든 PR로 곧장 머지한다
+    created: list[tuple] = []
+    monkeypatch.setattr(gitea, "ensure_pull_request",
+                        lambda o, r, head, base, title, body="":
+                        (created.append((head, base)), {"number": 5, "html_url": "u",
+                                                        "mergeable": True})[1])
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": True)
+    body = c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).json()
+    assert body["action"] == "merged"
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
+    assert created == [(branch, "main")]
+
+    # 이미 반영돼 만들 PR이 없으면 실패가 아니라 '이미 반영됨'으로 보고한다
+    def _nothing(o, r, head, base, title, body=""):
+        raise gitea.GiteaNothingToMerge("no commits between")
+
+    monkeypatch.setattr(gitea, "ensure_pull_request", _nothing)
+    body = c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).json()
+    assert body["action"] == "committed"
+    assert "이미 반영" in body["detail"]
+
+
 def test_every_stage_carries_default_request_prompt():
     """입력창 기본값 — 사용자가 아무것도 쓰지 않아도 바로 '초안 생성'을 누를 수 있어야 한다."""
     c = _client()
@@ -906,6 +941,104 @@ def test_generate_tasks_refuses_to_overwrite_started_work(monkeypatch, fresh_set
                   headers=ADMIN).status_code == 409
 
 
+def _confirm_doc_stages(c, monkeypatch, sid: int, repo):
+    """①~④를 확정하고 확정본을 세션 브랜치에 실제로 커밋한다(커밋 자체는 목킹)."""
+    from app.services import workspace
+
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, br, path, content, message: "deadbeef")
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
+    _git(repo, "checkout", "-q", "-b", branch)
+    for stage in ("spec", "architecture", "solution", "principles"):
+        body = f"# {stage} 확정본\n요구사항 A\n"
+        r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/{stage}/confirm",
+                   json={"content": body}, headers=ADMIN)
+        assert r.status_code == 200, r.text
+        doc = repo / r.json()["repo_path"]
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.write_text(body, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "plan(docs)")
+    _git(repo, "checkout", "-q", "main")
+    return branch
+
+
+def test_work_order_is_the_fifth_confirm_stage(monkeypatch, fresh_settings, tmp_path):
+    """⑤ 작업 지시도 다른 단계와 같은 확정 단계다 — 다만 본문을 대화가 아니라 목록에서 만든다."""
+    from app.services import workspace
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+
+    # 앞 단계를 확정하기 전에는 확정할 수 없다(다른 단계와 같은 순차 강제)
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/confirm",
+                  json={"content": "# 작업 지시"}, headers=ADMIN).status_code == 409
+
+    _confirm_doc_stages(c, monkeypatch, sid, repo)
+
+    # 대화로는 쓰지 않는다 — 문서와 MCP list_tasks의 원천이 갈리면 안 된다
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/messages",
+               json={"content": "작업 지시 써줘"}, headers=ADMIN)
+    assert r.status_code == 409 and "작업 지시 생성" in r.json()["detail"]
+
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate",
+                  headers=ADMIN).status_code == 200
+
+    # 산출물은 작업 지시 목록을 렌더한 문서다
+    a = c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/artifact", headers=ADMIN).json()
+    assert a["repo_path"] == "docs/agent-planning/05-작업지시.md"
+    assert a["source"] == "tasks"
+    assert "결제 API 구현" in a["content"] and "pytest tests/test_pay.py 통과" in a["content"]
+
+    written: dict = {}
+    monkeypatch.setattr(workspace, "write_and_commit", lambda project, br, path, content, message: (
+        written.update(path=path, content=content, branch=br), "cafe123")[1])
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/confirm",
+               json={"content": a["content"]}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert written["path"] == "docs/agent-planning/05-작업지시.md"
+    assert "결제 API 구현" in written["content"]
+
+    stages = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["artifacts"]
+    assert stages[-1]["stage"] == "tasks" and stages[-1]["confirmed"] is True
+
+
+def test_work_order_document_is_not_its_own_input(monkeypatch, fresh_settings, tmp_path):
+    """재생성 시 ⑤ 문서 자신은 근거로 넣지 않는다 — 넣으면 출력이 다음 입력이 되는 순환이다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    branch = _confirm_doc_stages(c, monkeypatch, sid, repo)
+
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN)
+    a = c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/artifact", headers=ADMIN).json()
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/confirm",
+           json={"content": a["content"]}, headers=ADMIN)
+
+    # 확정본이 실제로 세션 브랜치에 올라간 상태를 만든다
+    _git(repo, "checkout", "-q", branch)
+    (repo / "docs" / "agent-planning" / "05-작업지시.md").write_text(a["content"], encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "plan(tasks)")
+    _git(repo, "checkout", "-q", "main")
+
+    calls = _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate",
+                  headers=ADMIN).status_code == 200
+    documents = calls[-1]["messages"][1]["content"]
+    assert "01-기획서.md" in documents
+    assert "05-작업지시.md" not in documents
+
+
 def test_mcp_read_artifact_and_build_report_loop(monkeypatch, fresh_settings, tmp_path):
     """외부 빌더가 MCP만으로 산출물 열람 → 작업 수행 → 결과 제출 → 질의까지 한다."""
     repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
@@ -1014,7 +1147,7 @@ def test_push_records_compliance_warning_without_blocking(monkeypatch, fresh_set
     r = c.post("/paas/webhooks/git", content=body,
                headers={"x-hub-signature-256": f"sha256={sig}",
                         "content-type": "application/json"})
-    assert r.json() == {"triggered": ["plan-app"]}  # 위반이 있어도 배포는 막지 않는다
+    assert r.json()["triggered"] == ["plan-app"]  # 위반이 있어도 배포는 막지 않는다
 
     events = c.get(f"/paas/api/v1/plan/sessions/{sid}/build-status", headers=ADMIN).json()["events"]
     warning = next(e for e in events if e["action"] == "plan.build.compliance")
@@ -1024,6 +1157,109 @@ def test_push_records_compliance_warning_without_blocking(monkeypatch, fresh_set
     # 빌더는 작업 목록만 봐도 경고를 알게 된다
     text = _mcp(c, pid, "list_tasks")["result"]["content"][0]["text"]
     assert "제약 위반이 감지됐습니다" in text and "check_compliance" in text
+
+
+def _push_webhook(c: TestClient, payload: dict):
+    import hashlib
+    import hmac
+
+    body = json.dumps(payload).encode()
+    sig = hmac.new(b"test-webhook-secret", body, hashlib.sha256).hexdigest()
+    return c.post("/paas/webhooks/git", content=body,
+                  headers={"x-hub-signature-256": f"sha256={sig}",
+                           "content-type": "application/json"})
+
+
+def test_builder_branch_push_opens_a_pull_request(monkeypatch, fresh_settings, tmp_path):
+    """외주 빌더가 올린 작업 브랜치는 사내 Gitea에서 기본 브랜치로 가는 PR이 자동 생성된다.
+
+    결과가 기본 브랜치에 닿을 길이 없으면 진행 현황(기본 브랜치 기준)이 갱신되지 않는다.
+    """
+    from app.config import get_settings
+    from app.services import gitea
+
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    monkeypatch.setenv("PAAS_GITEA_URL", "https://git.example.com")
+    monkeypatch.setenv("PAAS_GITEA_API_TOKEN", "tok-123")
+    get_settings.cache_clear()
+
+    c = _client()
+    pid, _ = _project_and_provider(c)
+    posts: list[tuple[str, dict]] = []
+
+    class _Res:
+        status_code = 201
+
+        @staticmethod
+        def json():
+            return {"number": 7, "html_url": "https://git.example.com/o/plan-app/pulls/7"}
+
+    monkeypatch.setattr(gitea.httpx, "post",
+                        lambda url, **kw: (posts.append((url, kw["json"])), _Res)[1])
+
+    r = _push_webhook(c, {
+        "ref": "refs/heads/build/pay",
+        "repository": {"clone_url": "https://git.example.com/o/plan-app"},
+        "commits": [{"modified": ["pay.py"], "added": [], "removed": []}],
+    })
+    assert r.json()["pull_requests"] == ["plan-app"]
+    assert r.json()["triggered"] == []  # 기본 브랜치가 아니므로 배포는 하지 않는다
+    url, body = posts[0]
+    assert url == "https://git.example.com/api/v1/repos/o/plan-app/pulls"
+    assert body["head"] == "build/pay" and body["base"] == "main"
+
+    events = c.get(f"/paas/api/v1/audit", headers=ADMIN).json()
+    assert any(e["action"] == "plan.build.pull_request" for e in events)
+
+    # 기본 브랜치 push는 배포 신호일 뿐 — 자기 자신에게 PR을 만들지 않는다
+    posts.clear()
+    monkeypatch.setattr("app.api.webhooks._deploy_task", lambda project_id: None)
+    r = _push_webhook(c, {
+        "ref": "refs/heads/main",
+        "repository": {"clone_url": "https://git.example.com/o/plan-app"},
+        "commits": [{"modified": ["pay.py"], "added": [], "removed": []}],
+    })
+    assert r.json()["pull_requests"] == [] and posts == []
+
+
+def test_task_progress_follows_the_default_branch(monkeypatch, fresh_settings, tmp_path):
+    """진행 현황은 빌더의 보고가 아니라 기본 브랜치에 반영된 커밋을 기준으로 갱신된다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+
+    # 빌더가 작업 브랜치에 커밋하고 완료로 보고한다(아직 main에는 없다)
+    _git(repo, "checkout", "-q", "-b", "build/pay")
+    (repo / "pay.py").write_text("PRICE = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "pay")
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    _git(repo, "checkout", "-q", "main")
+    _mcp(c, pid, "submit_build_result",
+         {"task_id": tasks[0]["id"], "commit_sha": sha, "summary": "결제 구현 완료"})
+    _mcp(c, pid, "request_clarification",
+         {"task_id": tasks[1]["id"], "question": "결제 수단 범위가 불명확합니다"})
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}/tasks", headers=ADMIN).json()[0]["status"] == "done"
+
+    # 보고는 완료지만 기본 브랜치에 없다 — 머지 대기로 되돌린다
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
+    assert r["base_ref"] == "main" and (r["merged"], r["pending"]) == (0, 1)
+    assert r["tasks"][0]["status"] == "in_progress"
+    assert r["tasks"][0]["note"] == "결제 구현 완료"  # 빌더가 남긴 기록은 건드리지 않는다
+    assert r["tasks"][1]["status"] == "blocked"  # 질의로 막힌 작업은 그대로 둔다
+
+    # PR이 머지돼 기본 브랜치에 올라가면 완료가 된다
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge build/pay", "build/pay")
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
+    assert (r["merged"], r["pending"]) == (1, 0)
+    assert r["tasks"][0]["status"] == "done"
 
 
 def test_compliance_clean_repo_has_nothing_to_send(monkeypatch, fresh_settings, tmp_path):

@@ -195,7 +195,8 @@ class PlanArtifactContentOut(BaseModel):
     repo_path: str
     content: str
     confirmed: bool = False
-    # session = 이 세션에서 확정한 산출물 · repo = 리포에 이미 있던 문서 · "" = 없음
+    # session = 이 세션에서 확정한 산출물 · repo = 리포에 이미 있던 문서
+    # tasks = 작업 지시 목록에서 렌더한 문서(5단계) · "" = 없음
     source: str = ""
 
 
@@ -271,6 +272,15 @@ class BuildTaskUpdate(BaseModel):
     status: str | None = None  # pending | in_progress | done | blocked
     note: str | None = None
     commit_sha: str | None = None
+
+
+class BuildTaskSyncOut(BaseModel):
+    """작업 지시 진행 현황을 기본 브랜치 기준으로 맞춘 결과."""
+
+    base_ref: str  # 판정 기준 ref(예: origin/main) — 비어 있으면 판정하지 못함
+    merged: int  # 보고된 커밋이 기본 브랜치에 반영된 작업 수
+    pending: int  # 커밋은 보고됐지만 아직 기본 브랜치에 없는 작업 수
+    tasks: list[BuildTaskOut]
 
 
 class ComplianceOut(BaseModel):

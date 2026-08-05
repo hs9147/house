@@ -187,6 +187,37 @@ def delete_branch(project: Project, branch: str) -> bool:
     return pushed.returncode == 0
 
 
+def default_branch_ref(workdir: Path, branch: str) -> str | None:
+    """기본 브랜치를 가리키는 ref — 원격 추적본을 우선한다.
+
+    origin/{branch}가 사실상의 '반영됐다'의 기준이다. 원격이 없는 워킹카피(로컬 전용)
+    에서는 로컬 브랜치로 떨어지고, 둘 다 없으면 판정할 근거가 없다는 뜻으로 None.
+    """
+    for ref in (f"origin/{branch}", branch):
+        out = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=workdir, capture_output=True, **_TEXT,
+        )
+        if out.returncode == 0:
+            return ref
+    return None
+
+
+def is_merged(workdir: Path, base_ref: str, sha: str) -> bool:
+    """sha가 base_ref에서 도달 가능한지 — 즉 기본 브랜치에 실제로 반영됐는지.
+
+    커밋 객체가 로컬에 아예 없으면(작업 브랜치에만 있어 아직 가져오지 않은 경우) git이
+    오류를 내는데, 그것도 '기본 브랜치에 없다'와 같은 답이라 False로 떨어뜨린다.
+    """
+    if not sha:
+        return False
+    out = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", sha, base_ref],
+        cwd=workdir, capture_output=True, **_TEXT,
+    )
+    return out.returncode == 0
+
+
 def diff_between(workdir: Path, base_ref: str, head_ref: str = "HEAD") -> str:
     out = subprocess.run(
         ["git", "diff", f"{base_ref}..{head_ref}"], cwd=workdir, capture_output=True, **_TEXT

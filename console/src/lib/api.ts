@@ -5,6 +5,7 @@ import type {
   AuditRow,
   BuildProfile,
   BuildTaskOut,
+  BuildTaskSync,
   CodeMapOut,
   ComplianceOut,
   GiteaSyncResult,
@@ -379,6 +380,9 @@ export const api = {
     request<BuildTaskOut[]>('POST', `/plan/sessions/${sessionId}/tasks/generate`),
   listPlanTasks: (sessionId: number) =>
     request<BuildTaskOut[]>('GET', `/plan/sessions/${sessionId}/tasks`),
+  // 진행 현황을 기본 브랜치(main) 기준으로 갱신 — 보고가 아니라 반영된 커밋이 기준이다
+  syncPlanTasks: (sessionId: number) =>
+    request<BuildTaskSync>('POST', `/plan/sessions/${sessionId}/tasks/sync`),
   updatePlanTask: (taskId: number, body: { status?: string; note?: string }) =>
     request<BuildTaskOut>('PATCH', `/plan/tasks/${taskId}`, body),
   // 외주 결과의 LLM·모듈 사용 검증

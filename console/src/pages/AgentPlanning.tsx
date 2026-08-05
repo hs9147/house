@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import Async from '../components/Async';
 import { ApiError, api } from '../lib/api';
+import { getEmail } from '../lib/auth';
 import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
 import type {
-  BuildTaskOut, ComplianceOut, PlanArtifactContent, PlanArtifactOut, PlanBuildEvent,
-  PlanMergeOut, PlanSessionOut, PlanSessionSummary, ProjectOut,
+  BuildTaskOut, BuildTaskSync, ComplianceOut, PlanArtifactContent, PlanArtifactOut,
+  PlanBuildEvent, PlanMergeOut, PlanSessionOut, PlanSessionSummary, ProjectOut,
 } from '../lib/types';
 import { CreateModal } from './Projects';
 
@@ -40,18 +41,17 @@ const COMPLIANCE_RULE_LABEL: Record<string, string> = {
   unknown_module: '가용 목록 밖 모듈 호출',
 };
 
-// 에이전트 기획 4단계(진행단계 표시) — 순차 진행, 앞 단계 확정을 전제로 한다.
+// 에이전트 기획 5단계(진행단계 표시) — 순차 진행, 앞 단계 확정을 전제로 한다.
+// ⑤ 작업 지시도 다른 단계와 같은 확정 단계다. 다만 본문을 대화로 쓰지 않고 작업 지시
+// 목록에서 렌더한다 — 문서와 MCP(list_tasks)가 어긋나지 않게 원천을 하나로 둔다.
+const TASK_STAGE = 'tasks';
 const STAGES: { key: PlanArtifactOut['stage']; label: string }[] = [
   { key: 'spec', label: '① 기획서' },
   { key: 'architecture', label: '② 아키텍처 설계' },
   { key: 'solution', label: '③ 솔루션 구성' },
   { key: 'principles', label: '④ 개발원칙' },
+  { key: TASK_STAGE, label: '⑤ 작업 지시' },
 ];
-
-// 개발원칙 다음 단계 — 문서가 아니라 외주 빌드 작업 지시를 만들고 브랜치를 마무리한다.
-const TASK_STEP = 'tasks' as const;
-type StepKey = PlanArtifactOut['stage'] | typeof TASK_STEP;
-const STEPS: { key: StepKey; label: string }[] = [...STAGES, { key: TASK_STEP, label: '⑤ 작업 지시' }];
 
 export default function AgentPlanning() {
   const me = useApi(() => api.me());
@@ -72,7 +72,7 @@ export default function AgentPlanning() {
   const [providerId, setProviderId] = useState('');
   const [branch, setBranch] = useState('');
   const [session, setSession] = useState<PlanSessionOut | null>(null);
-  const [activeStage, setActiveStage] = useState<StepKey>('spec');
+  const [activeStage, setActiveStage] = useState<PlanArtifactOut['stage']>('spec');
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [draft, setDraft] = useState('');
@@ -81,6 +81,7 @@ export default function AgentPlanning() {
   const [buildEvents, setBuildEvents] = useState<PlanBuildEvent[]>([]);
   const [gitResult, setGitResult] = useState<PlanArtifactOut | null>(null);
   const [tasks, setTasks] = useState<BuildTaskOut[]>([]);
+  const [taskSync, setTaskSync] = useState<BuildTaskSync | null>(null);
   const [compliance, setCompliance] = useState<ComplianceOut | null>(null);
   const [mergeResult, setMergeResult] = useState<PlanMergeOut | null>(null);
   const [draftSource, setDraftSource] = useState<PlanArtifactContent['source']>('');
@@ -95,17 +96,24 @@ export default function AgentPlanning() {
     if (created) setProjectId(String(created.id)); // 생성 즉시 선택
   };
 
+  // 대화에 찍히는 사용자 식별자 — 계정 로그인은 이메일, API 키는 키 이름이 곧 id다.
+  const userLabel = me.data?.name || getEmail() || '사용자';
+
   const artifactOf = (stage: string) => session?.artifacts.find((a) => a.stage === stage);
   const isConfirmed = (stage: string) => !!artifactOf(stage)?.confirmed;
   // 서버가 내려준 단계별 기본 생성 요청 — 입력창 기본값이라 바로 '생성 요청'을 누를 수 있다.
   const defaultRequestOf = (s: PlanSessionOut | null, stage: string) =>
     s?.artifacts.find((a) => a.stage === stage)?.default_request ?? '';
   const stageIndex = (stage: string) => STAGES.findIndex((s) => s.key === stage);
-  // 앞 단계가 모두 확정돼야 진입 가능(진행단계 순차 강제). 작업 지시는 4단계를 모두 확정해야 열린다.
-  const stageUnlocked = (stage: StepKey) =>
-    stage === TASK_STEP
-      ? STAGES.every((s) => isConfirmed(s.key))
-      : STAGES.slice(0, stageIndex(stage)).every((s) => isConfirmed(s.key));
+  // 앞 단계가 모두 확정돼야 진입 가능(진행단계 순차 강제).
+  const stageUnlocked = (stage: string) =>
+    STAGES.slice(0, stageIndex(stage)).every((s) => isConfirmed(s.key));
+
+  // ⑤ 단계에서 지금 강조할 버튼 — 작업 지시 생성 → 단계 확정 → 브랜치 머지 → 진행 현황 순.
+  const taskStep: 'generate' | 'confirm' | 'merge' | 'progress' =
+    tasks.length === 0 ? 'generate'
+      : !isConfirmed(TASK_STAGE) ? 'confirm'
+        : mergeResult ? 'progress' : 'merge';
 
   const start = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -181,14 +189,14 @@ export default function AgentPlanning() {
     setSession(await api.getPlanSession(session.id));
   };
 
-  const selectStage = (stage: StepKey) => {
+  const selectStage = (stage: PlanArtifactOut['stage']) => {
     if (!stageUnlocked(stage) || !session) return;
     setActiveStage(stage);
     setMessages([]);
     setError('');
-    if (stage === TASK_STEP) {
+    // ⑤ 산출물은 작업 지시 목록에서 렌더되므로 목록도 함께 불러온다.
+    if (stage === TASK_STAGE) {
       void api.listPlanTasks(session.id).then(setTasks).catch(() => setTasks([]));
-      return;
     }
     setInput(defaultRequestOf(session, stage));
     void loadArtifact(session.id, stage); // 확정된 산출물이 있으면 그대로 보여준다
@@ -237,7 +245,7 @@ export default function AgentPlanning() {
   };
 
   const confirm = async () => {
-    if (!session || !draft.trim() || activeStage === TASK_STEP) return;
+    if (!session || !draft.trim()) return;
     setBusy(true);
     setError('');
     try {
@@ -255,17 +263,16 @@ export default function AgentPlanning() {
       }
       setGitResult(confirmed); // 커밋 후 자동 수행된 PR/머지 결과
       await refreshSession();
-      // 다음 단계로 자동 이동
+      // 다음 단계로 자동 이동. 마지막 단계면 그 자리에 남아 머지로 이어진다.
       const next = STAGES[stageIndex(activeStage) + 1];
       setMessages([]);
       if (next) {
         setActiveStage(next.key);
         setInput(defaultRequestOf(session, next.key));
         await loadArtifact(session.id, next.key);
+        if (next.key === TASK_STAGE) setTasks(await api.listPlanTasks(session.id));
       } else {
-        // 개발원칙까지 끝났다 — 작업 지시 단계로 넘어간다.
-        setActiveStage(TASK_STEP);
-        setTasks(await api.listPlanTasks(session.id));
+        setDraftSource('session');
       }
     } catch (err) {
       setError((err as Error).message);
@@ -274,15 +281,18 @@ export default function AgentPlanning() {
     }
   };
 
+  // 진행 현황은 기본 브랜치(main) 기준으로 갱신한다 — 빌더의 보고가 아니라 거기에
+  // 반영된 커밋이 완료의 근거다.
   const loadBuildStatus = async () => {
     if (!session) return;
     try {
-      const [s, t] = await Promise.all([
+      const [s, sync] = await Promise.all([
         api.planBuildStatus(session.id),
-        api.listPlanTasks(session.id),
+        api.syncPlanTasks(session.id),
       ]);
       setBuildEvents(s.events);
-      setTasks(t);
+      setTasks(sync.tasks);
+      setTaskSync(sync);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -294,6 +304,8 @@ export default function AgentPlanning() {
     setError('');
     try {
       setTasks(await api.generatePlanTasks(session.id));
+      // 산출물 문서는 이 목록을 렌더한 것이다 — 편집기도 새 목록으로 맞춘다.
+      await loadArtifact(session.id, TASK_STAGE);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -350,10 +362,10 @@ export default function AgentPlanning() {
           <button onClick={() => setShowCreate(true)}>+ 새 프로젝트</button>
         </div>
         <p className="mutedtext" style={{ fontSize: 12, marginTop: 6, marginBottom: 12 }}>
-          코딩 전에 기획서 → 아키텍처 → 솔루션 구성 → 개발원칙을 순서대로 확정하고, 마지막 ⑤ 작업 지시에서
-          외주 빌드 단위를 만든 뒤 브랜치를 머지해 세션을 마무리합니다. 각 단계는 앞 단계의 확정 문서를
-          참조하며, 확정 산출물은 프로젝트 Gitea 리포에 커밋되어 외부 개발도구(VSCode·Claude·Antigravity)에서
-          그대로 활용합니다.
+          코딩 전에 기획서 → 아키텍처 → 솔루션 구성 → 개발원칙 → 작업 지시 5단계를 순서대로 확정하고,
+          마지막에 브랜치를 머지해 세션을 마무리합니다. ⑤ 작업 지시는 대화 대신 앞 단계 확정 산출물에서
+          외주 빌드 단위를 뽑아 문서로 확정합니다. 각 단계는 앞 단계의 확정 문서를 참조하며, 확정 산출물은
+          프로젝트 Gitea 리포에 커밋되어 외부 개발도구(VSCode·Claude·Antigravity)에서 그대로 활용합니다.
         </p>
 
         <form className="row" onSubmit={start}>
@@ -418,7 +430,7 @@ export default function AgentPlanning() {
                         {r.confirmed_stages.length > 0 && (
                           <span className="mutedtext">
                             {' '}({STAGES.filter((s) => r.confirmed_stages.includes(s.key))
-                              .map((s) => s.label.replace(/^[①-④]\s*/, '')).join(', ')})
+                              .map((s) => s.label.replace(/^[①-⑤]\s*/, '')).join(', ')})
                           </span>
                         )}
                       </td>
@@ -444,8 +456,8 @@ export default function AgentPlanning() {
           {/* 진행단계 표시 */}
           <div className="panel">
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {STEPS.map((s) => {
-                const confirmed = s.key === TASK_STEP ? tasks.length > 0 : isConfirmed(s.key);
+              {STAGES.map((s) => {
+                const confirmed = isConfirmed(s.key);
                 const unlocked = stageUnlocked(s.key);
                 const active = s.key === activeStage;
                 return (
@@ -464,175 +476,221 @@ export default function AgentPlanning() {
             </div>
           </div>
 
-          {/* 문서 단계(①~④) — 대화·산출물 편집 */}
-          {activeStage !== TASK_STEP && (
-            <div className="panel">
-              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                <h3 style={{ margin: 0 }}>
-                  {STAGES.find((s) => s.key === activeStage)?.label} 단계
-                  {isConfirmed(activeStage) && <span style={{ color: '#10b981', fontSize: 13 }}> · 확정됨 ({artifactOf(activeStage)?.commit_sha?.substring(0, 7)})</span>}
-                </h3>
-                <span className="mutedtext" style={{ fontSize: 12 }}>
-                  저장 경로 <span className="mono">{artifactOf(activeStage)?.repo_path}</span>
-                </span>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, margin: '12px 0' }}>
-                {messages.map((m, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                      maxWidth: '90%',
-                      background: m.role === 'user' ? 'rgba(59, 130, 246, 0.15)' : 'var(--panel-bg)',
-                      border: '1px solid var(--border)',
-                      borderRadius: 8,
-                      padding: 12,
-                    }}
-                  >
-                    <div className="mutedtext" style={{ fontSize: 11, marginBottom: 4 }}>
-                      {m.role === 'user' ? '👤 나 (User)' : '🧭 기획 에이전트'}
-                    </div>
-                    {m.usedModules && m.usedModules.length > 0 && (
-                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                        <span className="mutedtext" style={{ fontSize: 11 }}>참조된 모듈:</span>
-                        {m.usedModules.map((mod) => (
-                          <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8' }}>{mod}</span>
-                        ))}
-                      </div>
-                    )}
-                    {m.boundModules && m.boundModules.length > 0 && (
-                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                        <span className="mutedtext" style={{ fontSize: 11 }}>이번에 바인딩된 모듈:</span>
-                        {m.boundModules.map((mod) => (
-                          <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(16, 185, 129, 0.2)', color: '#10b981' }}>🔗 {mod}</span>
-                        ))}
-                      </div>
-                    )}
-                    {m.contextFiles && m.contextFiles.length > 0 && (
-                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                        <span className="mutedtext" style={{ fontSize: 11 }}>자동 참조된 파일:</span>
-                        {m.contextFiles.map((f) => (
-                          <span key={f} className="mono" style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(148, 163, 184, 0.2)' }}>{f}</span>
-                        ))}
-                      </div>
-                    )}
-                    <div style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{m.content}</div>
-                  </div>
-                ))}
-              </div>
-
-              <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div className="row">
-                  <textarea
-                    style={{ flex: 1, minHeight: 70, fontFamily: 'inherit' }}
-                    placeholder={`${STAGES.find((s) => s.key === activeStage)?.label} 생성·수정을 요청하세요...`}
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                  />
-                  <button type="submit" className="primary" disabled={busy || !input.trim()}>
-                    {busy ? '처리 중...' : '생성 요청'}
-                  </button>
-                </div>
-              </form>
-
-              {/* 확정용 산출물 편집기 */}
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
-                  📄 산출물 (마크다운) — 검토·수정 후 확정하면 Gitea에 커밋됩니다. 생성 요청 시 이 내용이 수정 대상으로 함께 전달됩니다
-                  {draftSource === 'repo' && (
-                    <span style={{ marginLeft: 6, fontWeight: 400, color: '#f59e0b' }}>
-                      · 리포에 이미 있는 문서를 불러왔습니다 (이 세션에서는 아직 미확정)
-                    </span>
-                  )}
-                </div>
-                <textarea
-                  className="mono"
-                  style={{ width: '100%', minHeight: 220, fontSize: 12 }}
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  placeholder="생성 요청 결과가 여기에 들어옵니다. 직접 편집해도 됩니다."
-                />
-                <div className="row" style={{ marginTop: 8 }}>
-                  <button className="primary" onClick={confirm} disabled={busy || !draft.trim()}>
-                    ✅ 이 단계 확정 (Gitea 커밋)
-                  </button>
-                  {gitResult?.git_action && (
-                    <span className="mutedtext" style={{ fontSize: 12 }}>
-                      {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
-                      {gitResult.pull_request_url && (
-                        <> · <a href={gitResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
-                      )}
-                      {gitResult.git_detail && <> · {gitResult.git_detail}</>}
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ⑤ 작업 지시 — 개발원칙 다음 단계. 여기서 브랜치를 마무리한다. */}
-          <div className="panel" style={{ display: activeStage === TASK_STEP ? undefined : 'none' }}>
+          {/* 단계 작업 영역 — ①~④는 대화로, ⑤는 작업 지시 목록으로 산출물을 만든다 */}
+          <div className="panel">
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={{ margin: 0 }}>⑤ 외주 빌드 작업 지시</h3>
-              <div className="row" style={{ gap: 8 }}>
-                <button className="secondary small" onClick={generateTasks} disabled={busy}>
-                  확정 산출물에서 작업 지시 생성
+              <h3 style={{ margin: 0 }}>
+                {STAGES.find((s) => s.key === activeStage)?.label} 단계
+                {isConfirmed(activeStage) && <span style={{ color: '#10b981', fontSize: 13 }}> · 확정됨 ({artifactOf(activeStage)?.commit_sha?.substring(0, 7)})</span>}
+              </h3>
+              <span className="mutedtext" style={{ fontSize: 12 }}>
+                저장 경로 <span className="mono">{artifactOf(activeStage)?.repo_path}</span>
+              </span>
+            </div>
+
+            {activeStage !== TASK_STAGE ? (
+              <>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, margin: '12px 0' }}>
+                  {messages.map((m, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                        maxWidth: '90%',
+                        background: m.role === 'user' ? 'rgba(59, 130, 246, 0.15)' : 'var(--panel-bg)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 8,
+                        padding: 12,
+                      }}
+                    >
+                      <div className="mutedtext" style={{ fontSize: 11, marginBottom: 4 }}>
+                        {m.role === 'user' ? `👤 ${userLabel}` : '🧭 기획 에이전트'}
+                      </div>
+                      {m.usedModules && m.usedModules.length > 0 && (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                          <span className="mutedtext" style={{ fontSize: 11 }}>참조된 모듈:</span>
+                          {m.usedModules.map((mod) => (
+                            <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8' }}>{mod}</span>
+                          ))}
+                        </div>
+                      )}
+                      {m.boundModules && m.boundModules.length > 0 && (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                          <span className="mutedtext" style={{ fontSize: 11 }}>이번에 바인딩된 모듈:</span>
+                          {m.boundModules.map((mod) => (
+                            <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(16, 185, 129, 0.2)', color: '#10b981' }}>🔗 {mod}</span>
+                          ))}
+                        </div>
+                      )}
+                      {m.contextFiles && m.contextFiles.length > 0 && (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                          <span className="mutedtext" style={{ fontSize: 11 }}>자동 참조된 파일:</span>
+                          {m.contextFiles.map((f) => (
+                            <span key={f} className="mono" style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(148, 163, 184, 0.2)' }}>{f}</span>
+                          ))}
+                        </div>
+                      )}
+                      <div style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{m.content}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div className="row">
+                    <textarea
+                      style={{ flex: 1, minHeight: 70, fontFamily: 'inherit' }}
+                      placeholder={`${STAGES.find((s) => s.key === activeStage)?.label} 생성·수정을 요청하세요...`}
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                    />
+                    <button type="submit" className="primary" disabled={busy || !input.trim()}>
+                      {busy ? '처리 중...' : '생성 요청'}
+                    </button>
+                  </div>
+                </form>
+              </>
+            ) : (
+              <>
+                {/* ⑤ 작업 지시 — 산출물 본문은 이 목록을 렌더한 것이다(대화 없음).
+                    지금 할 일 하나만 강조한다: 생성 → 단계 확정 → 브랜치 머지 → 진행 현황.
+                    지난 단계 버튼은 남겨 두되(재생성·재머지가 필요할 수 있다) 강조는 뺀다. */}
+                <div className="row" style={{ gap: 8, marginTop: 12 }}>
+                  <button
+                    className={taskStep === 'generate' ? 'primary small' : 'secondary small'}
+                    onClick={generateTasks}
+                    disabled={busy}
+                  >
+                    {tasks.length === 0 ? '확정 산출물에서 작업 지시 생성' : '작업 지시 재생성'}
+                  </button>
+                  {isConfirmed(TASK_STAGE) && (
+                    <button
+                      className={taskStep === 'merge' ? 'primary small' : 'secondary small'}
+                      onClick={mergeSession}
+                      disabled={busy}
+                    >
+                      🔀 브랜치 머지 (세션 마무리)
+                    </button>
+                  )}
+                  {mergeResult && (
+                    <button
+                      className={taskStep === 'progress' ? 'primary small' : 'secondary small'}
+                      onClick={loadBuildStatus}
+                      disabled={busy}
+                    >
+                      🔄 진행 현황 업데이트
+                    </button>
+                  )}
+                </div>
+                {mergeResult && (
+                  <p style={{ fontSize: 12, marginTop: 6, color: mergeResult.action === 'merged' ? '#10b981' : '#f59e0b' }}>
+                    {mergeResult.branch} → {GIT_ACTION_LABEL[mergeResult.action] ?? mergeResult.action}
+                    {mergeResult.pull_request_url && (
+                      <> · <a href={mergeResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
+                    )}
+                    {mergeResult.detail && <> · {mergeResult.detail}</>}
+                  </p>
+                )}
+                <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
+                  외부 빌더가 MCP(<span className="mono">list_tasks·update_task·submit_build_result</span>)로
+                  집어가고 상태를 갱신합니다. 막히면 <span className="mono">request_clarification</span>으로
+                  질의가 이 기획 세션에 남습니다. 진행 현황은 빌더의 보고가 아니라
+                  <b> 기본 브랜치에 반영된 커밋</b>을 기준으로 갱신됩니다 — 빌더가 작업 브랜치를 push하면
+                  기본 브랜치로 가는 PR이 자동 생성되고, 그 PR이 머지되면 완료로 바뀝니다.
+                </p>
+                {taskSync && (
+                  <p style={{ fontSize: 12, marginTop: 6 }}>
+                    {taskSync.base_ref ? (
+                      <>
+                        <span className="mono">{taskSync.base_ref}</span> 기준 ·
+                        <span style={{ color: '#10b981' }}> 반영 {taskSync.merged}건</span> ·
+                        <span style={{ color: '#f59e0b' }}> 머지 대기 {taskSync.pending}건</span>
+                      </>
+                    ) : (
+                      <span className="mutedtext">
+                        기본 브랜치를 읽지 못해 진행 현황을 판정하지 못했습니다 (워킹카피 없음).
+                      </span>
+                    )}
+                  </p>
+                )}
+                {tasks.length === 0 ? (
+                  <p className="mutedtext" style={{ fontSize: 12 }}>작업 지시가 없습니다.</p>
+                ) : (
+                  <table>
+                    <thead>
+                      <tr><th>작업</th><th>완료 판정</th><th>상태</th><th>커밋</th></tr>
+                    </thead>
+                    <tbody>
+                      {tasks.map((t) => (
+                        <tr key={t.id}>
+                          <td>
+                            <div style={{ fontWeight: 600 }}>{t.title}</div>
+                            {t.detail && <div className="mutedtext" style={{ fontSize: 12 }}>{t.detail}</div>}
+                            {t.note && (
+                              <div style={{ fontSize: 12, color: '#f59e0b' }}>💬 {t.note}</div>
+                            )}
+                          </td>
+                          <td className="mutedtext" style={{ fontSize: 12 }}>{t.verify}</td>
+                          <td>
+                            <select
+                              value={t.status}
+                              onChange={(e) => setTaskStatus(t, e.target.value)}
+                              style={{ fontSize: 12, color: TASK_STATUS.find((s) => s.key === t.status)?.color }}
+                            >
+                              {TASK_STATUS.map((s) => (
+                                <option key={s.key} value={s.key}>{s.label}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="mono" style={{ fontSize: 12 }}>{t.commit_sha?.substring(0, 7) ?? '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </>
+            )}
+
+            {/* 확정용 산출물 편집기 — 모든 단계 공통. 여기서 확정하면 Gitea에 커밋된다. */}
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                📄 산출물 (마크다운) — 검토·수정 후 확정하면 Gitea에 커밋됩니다.
+                {activeStage === TASK_STAGE
+                  ? ' 위 작업 지시 목록에서 생성된 문서입니다'
+                  : ' 생성 요청 시 이 내용이 수정 대상으로 함께 전달됩니다'}
+                {draftSource === 'repo' && (
+                  <span style={{ marginLeft: 6, fontWeight: 400, color: '#f59e0b' }}>
+                    · 리포에 이미 있는 문서를 불러왔습니다 (이 세션에서는 아직 미확정)
+                  </span>
+                )}
+              </div>
+              <textarea
+                className="mono"
+                style={{ width: '100%', minHeight: 220, fontSize: 12 }}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder={activeStage === TASK_STAGE
+                  ? '작업 지시를 생성하면 여기에 문서가 만들어집니다. 직접 편집해도 됩니다.'
+                  : '생성 요청 결과가 여기에 들어옵니다. 직접 편집해도 됩니다.'}
+              />
+              <div className="row" style={{ marginTop: 8 }}>
+                <button
+                  className={activeStage === TASK_STAGE && taskStep !== 'confirm' ? 'secondary' : 'primary'}
+                  onClick={confirm}
+                  disabled={busy || !draft.trim()}
+                >
+                  ✅ 이 단계 확정 (Gitea 커밋)
                 </button>
-                <button className="primary small" onClick={mergeSession} disabled={busy}>
-                  🔀 브랜치 머지 (세션 마무리)
-                </button>
+                {gitResult?.git_action && (
+                  <span className="mutedtext" style={{ fontSize: 12 }}>
+                    {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
+                    {gitResult.pull_request_url && (
+                      <> · <a href={gitResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
+                    )}
+                    {gitResult.git_detail && <> · {gitResult.git_detail}</>}
+                  </span>
+                )}
               </div>
             </div>
-            {mergeResult && (
-              <p style={{ fontSize: 12, marginTop: 6, color: mergeResult.action === 'merged' ? '#10b981' : '#f59e0b' }}>
-                {mergeResult.branch} → {GIT_ACTION_LABEL[mergeResult.action] ?? mergeResult.action}
-                {mergeResult.pull_request_url && (
-                  <> · <a href={mergeResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
-                )}
-                {mergeResult.detail && <> · {mergeResult.detail}</>}
-              </p>
-            )}
-            <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
-              외부 빌더가 MCP(<span className="mono">list_tasks·update_task·submit_build_result</span>)로
-              집어가고 상태를 갱신합니다. 막히면 <span className="mono">request_clarification</span>으로
-              질의가 이 기획 세션에 남습니다.
-            </p>
-            {tasks.length === 0 ? (
-              <p className="mutedtext" style={{ fontSize: 12 }}>작업 지시가 없습니다.</p>
-            ) : (
-              <table>
-                <thead>
-                  <tr><th>작업</th><th>완료 판정</th><th>상태</th><th>커밋</th></tr>
-                </thead>
-                <tbody>
-                  {tasks.map((t) => (
-                    <tr key={t.id}>
-                      <td>
-                        <div style={{ fontWeight: 600 }}>{t.title}</div>
-                        {t.detail && <div className="mutedtext" style={{ fontSize: 12 }}>{t.detail}</div>}
-                        {t.note && (
-                          <div style={{ fontSize: 12, color: '#f59e0b' }}>💬 {t.note}</div>
-                        )}
-                      </td>
-                      <td className="mutedtext" style={{ fontSize: 12 }}>{t.verify}</td>
-                      <td>
-                        <select
-                          value={t.status}
-                          onChange={(e) => setTaskStatus(t, e.target.value)}
-                          style={{ fontSize: 12, color: TASK_STATUS.find((s) => s.key === t.status)?.color }}
-                        >
-                          {TASK_STATUS.map((s) => (
-                            <option key={s.key} value={s.key}>{s.label}</option>
-                          ))}
-                        </select>
-                      </td>
-                      <td className="mono" style={{ fontSize: 12 }}>{t.commit_sha?.substring(0, 7) ?? '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
           </div>
 
           {/* 외주 결과 검증 — LLM·모듈 사용 */}

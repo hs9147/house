@@ -145,7 +145,7 @@ export interface LlmProviderOut {
 
 // 에이전트 기획 (Agent Planning)
 export interface PlanArtifactOut {
-  stage: 'spec' | 'architecture' | 'solution' | 'principles';
+  stage: 'spec' | 'architecture' | 'solution' | 'principles' | 'tasks';
   title: string;
   repo_path: string;
   commit_sha: string | null;
@@ -180,8 +180,9 @@ export interface PlanArtifactContent {
   repo_path: string;
   content: string;
   confirmed: boolean;
-  // session = 이 세션에서 확정 · repo = 리포에 이미 있던 문서 · '' = 없음
-  source: 'session' | 'repo' | '';
+  // session = 이 세션에서 확정 · repo = 리포에 이미 있던 문서
+  // tasks = 작업 지시 목록에서 렌더한 문서(⑤단계) · '' = 없음
+  source: 'session' | 'repo' | 'tasks' | '';
 }
 
 // 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영한 결과
@@ -221,6 +222,14 @@ export interface BuildTaskOut {
   status: BuildTaskStatus;
   note: string;
   commit_sha: string | null;
+}
+
+// 진행 현황을 기본 브랜치 기준으로 맞춘 결과 — 보고가 아니라 반영된 커밋이 기준이다
+export interface BuildTaskSync {
+  base_ref: string; // 판정 기준 ref(예: origin/main) — 비어 있으면 판정하지 못함
+  merged: number; // 기본 브랜치에 반영된 작업 수
+  pending: number; // 커밋은 보고됐지만 아직 반영되지 않은 작업 수
+  tasks: BuildTaskOut[];
 }
 
 // 외주 빌드 결과의 LLM·모듈 사용 검증
