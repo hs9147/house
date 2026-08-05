@@ -49,6 +49,7 @@ from ..services import llm as llm_service
 from ..services import modules as modules_service
 from ..services import planning as planning_service
 from ..services import workspace
+from ..services.build import checkout
 
 router = APIRouter(tags=["planning"])
 
@@ -262,10 +263,8 @@ async def post_plan_message(
             )
 
     # 지금 편집 중인 산출물 — 있으면 새로 쓰지 않고 이것을 고치게 한다(수정 요청 문맥).
-    # 편집기가 비어 있으면 이 단계의 확정본을 대신 싣는다.
-    current = body.draft.strip()
-    if not current and _is_confirmed(db, session_id, plan_stage):
-        current = _artifact_content(db, project, session, plan_stage) or ""
+    # 편집기가 비어 있으면 확정본이나 리포에 이미 있는 이 단계 문서를 대신 싣는다.
+    current = body.draft.strip() or (_artifact_content(db, project, session, plan_stage) or "")
     if current:
         context_parts.append(
             f"=== 현재 산출물 (수정 대상: {planning_service.stage_title(plan_stage)}) ===\n{current}"
@@ -398,22 +397,26 @@ async def confirm_plan_stage(
 
 def _artifact_content(db: Session, project: Project, session: ChatSession,
                       stage: PlanStage) -> str | None:
-    """세션 브랜치에 커밋된 단계 산출물 본문(없으면 기본 브랜치·워킹카피 순으로 확인)."""
+    """단계 산출물 본문 — 세션 확정본이 없으면 리포의 표준 경로 문서를 그대로 쓴다.
+
+    이 세션에서 확정한 적이 없어도 리포에 docs/agent-planning/*.md가 이미 있으면
+    (다른 세션·외부 개발도구가 남긴 문서) 그것이 이 단계의 현재 산출물이다.
+    세션 브랜치 → 기본 브랜치 → 워킹카피 순으로 찾는다.
+    """
+    workdir = workspace.workdir_for(project)
+    if not workdir.exists():
+        return None
     artifact = db.execute(
         select(PlanArtifact).where(
             PlanArtifact.session_id == session.id, PlanArtifact.stage == stage
         )
     ).scalar_one_or_none()
-    if artifact is None:
-        return None
-    workdir = workspace.workdir_for(project)
-    if not workdir.exists():
-        return None
+    path = artifact.repo_path if artifact else planning_service.stage_repo_path(stage)
     for ref in (session.branch, project.branch):
-        content = workspace.read_file_at_ref(workdir, ref, artifact.repo_path)
+        content = workspace.read_file_at_ref(workdir, ref, path)
         if content:
             return content
-    return workspace.read_context_files(workdir, [artifact.repo_path]).get(artifact.repo_path)
+    return workspace.read_context_files(workdir, [path]).get(path)
 
 
 @router.get("/plan/sessions/{session_id}/stages/{stage}/artifact",
@@ -424,22 +427,38 @@ def get_plan_artifact_content(
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_api_key),
 ):
-    """단계 산출물 본문 — 세션을 재개하면 편집기를 이 내용으로 채운다."""
+    """단계 산출물 본문 — 세션을 재개하거나 단계를 열면 편집기를 이 내용으로 채운다.
+
+    리포를 먼저 최신화한다. 아직 한 번도 체크아웃하지 않은 프로젝트라도 리포에 이미
+    있는 기획 문서를 보여줄 수 있어야 하기 때문이다(실패해도 있는 것으로 진행).
+    """
     session = db.get(ChatSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
     plan_stage = _parse_stage(stage)
     project = db.get(Project, session.project_id)
+    try:
+        checkout(project)
+    except Exception:  # noqa: BLE001 — 원격이 없어도 워킹카피가 있으면 읽는다
+        pass
     artifact = db.execute(
         select(PlanArtifact).where(
             PlanArtifact.session_id == session_id, PlanArtifact.stage == plan_stage
         )
     ).scalar_one_or_none()
+    content = _artifact_content(db, project, session, plan_stage) or ""
+    if artifact is not None and artifact.confirmed:
+        source = "session"  # 이 세션에서 확정한 산출물
+    elif content:
+        source = "repo"  # 리포에 이미 있던 문서
+    else:
+        source = ""
     return PlanArtifactContentOut(
         stage=plan_stage.value,
         repo_path=artifact.repo_path if artifact else planning_service.stage_repo_path(plan_stage),
-        content=_artifact_content(db, project, session, plan_stage) or "",
+        content=content,
         confirmed=bool(artifact and artifact.confirmed),
+        source=source,
     )
 
 

@@ -410,7 +410,7 @@ def test_artifact_content_endpoint_restores_editor_on_resume(
     assert r.status_code == 200, r.text
     assert r.json() == {
         "stage": "spec", "repo_path": "docs/agent-planning/01-기획서.md",
-        "content": "# 기획서 확정본\n요구사항 A\n", "confirmed": True,
+        "content": "# 기획서 확정본\n요구사항 A\n", "confirmed": True, "source": "session",
     }
 
     # 아직 확정 전 단계는 빈 본문
@@ -419,6 +419,40 @@ def test_artifact_content_endpoint_restores_editor_on_resume(
     assert empty["content"] == "" and empty["confirmed"] is False
     assert c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/nope/artifact",
                  headers=ADMIN).status_code == 404
+
+
+def test_existing_repo_documents_show_up_as_artifacts(monkeypatch, fresh_settings, tmp_path):
+    """리포에 이미 docs/agent-planning/*.md가 있으면 이 세션에서 확정한 적 없어도 산출물로 보인다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    doc = repo / "docs" / "agent-planning" / "01-기획서.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# 기존 기획서\n외부 도구가 남긴 문서\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "docs")
+
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    body = c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/artifact", headers=ADMIN).json()
+    assert body["content"] == "# 기존 기획서\n외부 도구가 남긴 문서\n"
+    assert body["source"] == "repo" and body["confirmed"] is False  # 확정은 아니다
+
+    # 리포에 없는 단계는 그대로 빈 값
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/architecture/artifact",
+                 headers=ADMIN).json() == {
+        "stage": "architecture", "repo_path": "docs/agent-planning/02-아키텍처설계.md",
+        "content": "", "confirmed": False, "source": "",
+    }
+
+    # 생성 요청에도 수정 대상으로 실린다 — "새로 쓰기"가 아니라 "고치기"가 된다
+    calls = _mock_llm(monkeypatch)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+           json={"content": "성공 기준 추가"}, headers=ADMIN)
+    context = _draft_context(calls)
+    assert "=== 현재 산출물 (수정 대상: 기획서) ===" in context
+    assert "외부 도구가 남긴 문서" in context
 
 
 def test_every_stage_carries_default_request_prompt():

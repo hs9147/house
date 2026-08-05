@@ -187,12 +187,14 @@ class PlanMessageReply(BaseModel):
 
 
 class PlanArtifactContentOut(BaseModel):
-    """확정된 단계 산출물 본문 — 세션 재개 시 편집기를 채운다."""
+    """단계 산출물 본문 — 세션 재개·단계 이동 시 편집기를 채운다."""
 
     stage: str
     repo_path: str
     content: str
     confirmed: bool = False
+    # session = 이 세션에서 확정한 산출물 · repo = 리포에 이미 있던 문서 · "" = 없음
+    source: str = ""
 
 
 class PlanConfirmIn(BaseModel):

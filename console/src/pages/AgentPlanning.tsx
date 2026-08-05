@@ -4,8 +4,8 @@ import { api } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
 import type {
-  BuildTaskOut, ComplianceOut, PlanArtifactOut, PlanBuildEvent, PlanSessionOut,
-  PlanSessionSummary, ProjectOut,
+  BuildTaskOut, ComplianceOut, PlanArtifactContent, PlanArtifactOut, PlanBuildEvent,
+  PlanSessionOut, PlanSessionSummary, ProjectOut,
 } from '../lib/types';
 import { CreateModal } from './Projects';
 
@@ -77,6 +77,7 @@ export default function AgentPlanning() {
   const [gitResult, setGitResult] = useState<PlanArtifactOut | null>(null);
   const [tasks, setTasks] = useState<BuildTaskOut[]>([]);
   const [compliance, setCompliance] = useState<ComplianceOut | null>(null);
+  const [draftSource, setDraftSource] = useState<PlanArtifactContent['source']>('');
   const history = useApi(() => api.listPlanSessions());
 
   // 프로젝트 페이지와 동일한 CreateModal(빈 프로젝트 옵션 포함)을 재사용한다.
@@ -109,6 +110,7 @@ export default function AgentPlanning() {
       setDraft('');
       setGitResult(null);
       setInput(defaultRequestOf(s, 'spec'));
+      await loadArtifact(s.id, 'spec'); // 리포에 이미 기획 문서가 있으면 그대로 불러온다
       history.reload();
     } catch (err) {
       setError((err as Error).message);
@@ -120,8 +122,10 @@ export default function AgentPlanning() {
     try {
       const a = await api.planArtifactContent(sessionId, stage);
       setDraft(a.content);
+      setDraftSource(a.source);
     } catch {
       setDraft('');
+      setDraftSource('');
     }
   };
 
@@ -196,6 +200,7 @@ export default function AgentPlanning() {
         boundModules: res.bound_modules,
       }]);
       setDraft(res.document); // 문서 본문은 산출물 란으로
+      setDraftSource('session');
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -480,6 +485,11 @@ export default function AgentPlanning() {
             <div style={{ marginTop: 16 }}>
               <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
                 📄 산출물 (마크다운) — 검토·수정 후 확정하면 Gitea에 커밋됩니다. 생성 요청 시 이 내용이 수정 대상으로 함께 전달됩니다
+                {draftSource === 'repo' && (
+                  <span style={{ marginLeft: 6, fontWeight: 400, color: '#f59e0b' }}>
+                    · 리포에 이미 있는 문서를 불러왔습니다 (이 세션에서는 아직 미확정)
+                  </span>
+                )}
               </div>
               <textarea
                 className="mono"

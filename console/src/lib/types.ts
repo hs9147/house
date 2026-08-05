@@ -179,6 +179,8 @@ export interface PlanArtifactContent {
   repo_path: string;
   content: string;
   confirmed: boolean;
+  // session = 이 세션에서 확정 · repo = 리포에 이미 있던 문서 · '' = 없음
+  source: 'session' | 'repo' | '';
 }
 
 // 기획 세션 이력 — 재개·삭제 대상 선택용
