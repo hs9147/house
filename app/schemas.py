@@ -174,13 +174,25 @@ class PlanSessionCreate(BaseModel):
 class PlanMessageIn(BaseModel):
     content: str
     files: list[str] = []  # 컨텍스트로 포함할 리포 내 파일 경로
+    # 지금 편집 중인 산출물 본문 — 주면 새로 쓰지 않고 이것을 고친다.
+    draft: str = ""
 
 
 class PlanMessageReply(BaseModel):
-    reply: str  # 단계 산출물 문서 초안(마크다운)
+    summary: str  # 대화창에 보일 응답 개요(무엇을 담았는지·무엇을 고쳤는지)
+    document: str  # 산출물 편집기에 들어갈 문서 본문(마크다운)
     used_modules: list[str] = []
     context_files: list[str] = []  # 이번 요청에서 본문까지 참조한 리포 파일
     bound_modules: list[str] = []  # 솔루션 구성 단계에서 이번에 바인딩된 모듈
+
+
+class PlanArtifactContentOut(BaseModel):
+    """확정된 단계 산출물 본문 — 세션 재개 시 편집기를 채운다."""
+
+    stage: str
+    repo_path: str
+    content: str
+    confirmed: bool = False
 
 
 class PlanConfirmIn(BaseModel):
@@ -193,7 +205,7 @@ class PlanArtifactOut(BaseModel):
     repo_path: str
     commit_sha: str | None = None
     confirmed: bool = False
-    default_request: str = ""  # 콘솔 입력창 기본값(바로 초안 생성 가능)
+    default_request: str = ""  # 콘솔 입력창 기본값(바로 생성 요청 가능)
     # 확정 시 git 상태에 따라 자동 수행된 결과: committed | merged | pr_opened | skipped
     git_action: str | None = None
     git_detail: str | None = None

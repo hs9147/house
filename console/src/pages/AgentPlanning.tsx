@@ -90,7 +90,7 @@ export default function AgentPlanning() {
 
   const artifactOf = (stage: string) => session?.artifacts.find((a) => a.stage === stage);
   const isConfirmed = (stage: string) => !!artifactOf(stage)?.confirmed;
-  // 서버가 내려준 단계별 기본 생성 요청 — 입력창 기본값이라 바로 '초안 생성'을 누를 수 있다.
+  // 서버가 내려준 단계별 기본 생성 요청 — 입력창 기본값이라 바로 '생성 요청'을 누를 수 있다.
   const defaultRequestOf = (s: PlanSessionOut | null, stage: string) =>
     s?.artifacts.find((a) => a.stage === stage)?.default_request ?? '';
   const stageIndex = (stage: string) => STAGES.findIndex((s) => s.key === stage);
@@ -115,7 +115,17 @@ export default function AgentPlanning() {
     }
   };
 
-  // 이력에서 세션을 다시 연다 — 대화를 복원하고 첫 미확정 단계로 이동한다.
+  // 기존 산출물이 있으면 편집기를 그 내용으로 채운다(없으면 비운다).
+  const loadArtifact = async (sessionId: number, stage: string) => {
+    try {
+      const a = await api.planArtifactContent(sessionId, stage);
+      setDraft(a.content);
+    } catch {
+      setDraft('');
+    }
+  };
+
+  // 이력에서 세션을 다시 연다 — 대화·산출물을 복원하고 첫 미확정 단계로 이동한다.
   const resume = async (row: PlanSessionSummary) => {
     setError('');
     try {
@@ -128,10 +138,10 @@ export default function AgentPlanning() {
       setSession(s);
       setActiveStage(next.key);
       setMessages(msgs.map((m) => ({ role: m.role, content: m.content })));
-      setDraft('');
       setGitResult(null);
       setCompliance(null);
       setInput(defaultRequestOf(s, next.key));
+      await loadArtifact(row.id, next.key);
       setTasks(await api.listPlanTasks(row.id));
     } catch (err) {
       setError((err as Error).message);
@@ -160,12 +170,12 @@ export default function AgentPlanning() {
   };
 
   const selectStage = (stage: PlanArtifactOut['stage']) => {
-    if (!stageUnlocked(stage)) return;
+    if (!stageUnlocked(stage) || !session) return;
     setActiveStage(stage);
     setMessages([]);
-    setDraft('');
     setError('');
     setInput(defaultRequestOf(session, stage));
+    void loadArtifact(session.id, stage); // 확정된 산출물이 있으면 그대로 보여준다
   };
 
   const send = async (e: React.FormEvent) => {
@@ -178,13 +188,14 @@ export default function AgentPlanning() {
     setError('');
     try {
       const fileList = files.split(',').map((f) => f.trim()).filter(Boolean);
-      const res = await api.sendPlanMessage(session.id, activeStage, content, fileList);
+      // 편집 중인 산출물을 함께 보낸다 — 새로 쓰지 않고 이것을 고치게 한다.
+      const res = await api.sendPlanMessage(session.id, activeStage, content, fileList, draft);
       setMessages((prev) => [...prev, {
-        role: 'assistant', content: res.reply,
+        role: 'assistant', content: res.summary,
         usedModules: res.used_modules, contextFiles: res.context_files,
         boundModules: res.bound_modules,
       }]);
-      setDraft(res.reply); // 확정용 편집 초안으로 채운다
+      setDraft(res.document); // 문서 본문은 산출물 란으로
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -205,8 +216,8 @@ export default function AgentPlanning() {
       if (next) {
         setActiveStage(next.key);
         setMessages([]);
-        setDraft('');
         setInput(defaultRequestOf(session, next.key));
+        await loadArtifact(session.id, next.key);
       }
     } catch (err) {
       setError((err as Error).message);
@@ -455,12 +466,12 @@ export default function AgentPlanning() {
               <div className="row">
                 <textarea
                   style={{ flex: 1, minHeight: 70, fontFamily: 'inherit' }}
-                  placeholder={`${STAGES.find((s) => s.key === activeStage)?.label} 초안 생성을 요청하세요...`}
+                  placeholder={`${STAGES.find((s) => s.key === activeStage)?.label} 생성·수정을 요청하세요...`}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                 />
                 <button type="submit" className="primary" disabled={busy || !input.trim()}>
-                  {busy ? '처리 중...' : '초안 생성'}
+                  {busy ? '처리 중...' : '생성 요청'}
                 </button>
               </div>
             </form>
@@ -468,14 +479,14 @@ export default function AgentPlanning() {
             {/* 확정용 산출물 편집기 */}
             <div style={{ marginTop: 16 }}>
               <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
-                📄 확정할 산출물 (마크다운) — 검토·수정 후 확정하면 Gitea에 커밋됩니다
+                📄 산출물 (마크다운) — 검토·수정 후 확정하면 Gitea에 커밋됩니다. 생성 요청 시 이 내용이 수정 대상으로 함께 전달됩니다
               </div>
               <textarea
                 className="mono"
                 style={{ width: '100%', minHeight: 220, fontSize: 12 }}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="초안 생성 후 여기서 편집하거나 직접 작성하세요."
+                placeholder="생성 요청 결과가 여기에 들어옵니다. 직접 편집해도 됩니다."
               />
               <div className="row" style={{ marginTop: 8 }}>
                 <button className="primary" onClick={confirm} disabled={busy || !draft.trim()}>

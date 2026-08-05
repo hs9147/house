@@ -150,7 +150,7 @@ export interface PlanArtifactOut {
   repo_path: string;
   commit_sha: string | null;
   confirmed: boolean;
-  default_request?: string; // 입력창 기본값(바로 초안 생성 가능)
+  default_request?: string; // 입력창 기본값(바로 생성 요청 가능)
   // 확정 시 git 상태에 따라 자동 수행된 결과
   git_action?: 'committed' | 'merged' | 'pr_opened' | 'skipped' | null;
   git_detail?: string | null;
@@ -167,10 +167,18 @@ export interface PlanSessionOut {
 }
 
 export interface PlanMessageReply {
-  reply: string;
+  summary: string; // 대화창에 보일 응답 개요
+  document: string; // 산출물 편집기에 들어갈 문서 본문
   used_modules?: string[];
   context_files?: string[]; // 본문까지 참조한 리포 파일
   bound_modules?: string[]; // 솔루션 구성 단계에서 이번에 바인딩된 모듈
+}
+
+export interface PlanArtifactContent {
+  stage: string;
+  repo_path: string;
+  content: string;
+  confirmed: boolean;
 }
 
 // 기획 세션 이력 — 재개·삭제 대상 선택용

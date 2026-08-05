@@ -31,6 +31,7 @@ from ..schemas import (
     BuildTaskOut,
     BuildTaskUpdate,
     ComplianceOut,
+    PlanArtifactContentOut,
     PlanArtifactOut,
     PlanChatMessageOut,
     PlanConfirmIn,
@@ -260,6 +261,16 @@ async def post_plan_message(
                 f"=== 이전 단계 확정 산출물 {idx}. {planning_service.stage_title(s)} ({path}) ===\n{content}"
             )
 
+    # 지금 편집 중인 산출물 — 있으면 새로 쓰지 않고 이것을 고치게 한다(수정 요청 문맥).
+    # 편집기가 비어 있으면 이 단계의 확정본을 대신 싣는다.
+    current = body.draft.strip()
+    if not current and _is_confirmed(db, session_id, plan_stage):
+        current = _artifact_content(db, project, session, plan_stage) or ""
+    if current:
+        context_parts.append(
+            f"=== 현재 산출물 (수정 대상: {planning_service.stage_title(plan_stage)}) ===\n{current}"
+        )
+
     # git 파일 목록은 기본 참조, 내용 확인이 필요한 파일만 골라 본문을 덧붙인다.
     context_files: list[str] = []
     if workdir.exists():
@@ -312,10 +323,13 @@ async def post_plan_message(
         if r_name and (r_name in reply or r_name.upper().replace("-", "_") in reply_upper):
             used_modules.append(r_name)
 
+    # 대화에는 요약만, 산출물 본문은 편집기로 — 대화 이력에도 요약만 쌓아 컨텍스트를
+    # 부풀리지 않는다(수정 대상 문서는 매 요청 '현재 산출물'로 따로 실린다).
+    summary, document = planning_service.split_reply(reply)
     db.add(ChatMessage(session_id=session_id, role="user", content=body.content))
-    db.add(ChatMessage(session_id=session_id, role="assistant", content=reply))
+    db.add(ChatMessage(session_id=session_id, role="assistant", content=summary))
     db.commit()
-    return PlanMessageReply(reply=reply, used_modules=used_modules,
+    return PlanMessageReply(summary=summary, document=document, used_modules=used_modules,
                             context_files=context_files, bound_modules=bound_modules)
 
 
@@ -379,6 +393,53 @@ async def confirm_plan_stage(
         git_action=git_result["action"],
         git_detail=git_result.get("detail"),
         pull_request_url=git_result.get("url"),
+    )
+
+
+def _artifact_content(db: Session, project: Project, session: ChatSession,
+                      stage: PlanStage) -> str | None:
+    """세션 브랜치에 커밋된 단계 산출물 본문(없으면 기본 브랜치·워킹카피 순으로 확인)."""
+    artifact = db.execute(
+        select(PlanArtifact).where(
+            PlanArtifact.session_id == session.id, PlanArtifact.stage == stage
+        )
+    ).scalar_one_or_none()
+    if artifact is None:
+        return None
+    workdir = workspace.workdir_for(project)
+    if not workdir.exists():
+        return None
+    for ref in (session.branch, project.branch):
+        content = workspace.read_file_at_ref(workdir, ref, artifact.repo_path)
+        if content:
+            return content
+    return workspace.read_context_files(workdir, [artifact.repo_path]).get(artifact.repo_path)
+
+
+@router.get("/plan/sessions/{session_id}/stages/{stage}/artifact",
+            response_model=PlanArtifactContentOut)
+def get_plan_artifact_content(
+    session_id: int,
+    stage: str,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """단계 산출물 본문 — 세션을 재개하면 편집기를 이 내용으로 채운다."""
+    session = db.get(ChatSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    plan_stage = _parse_stage(stage)
+    project = db.get(Project, session.project_id)
+    artifact = db.execute(
+        select(PlanArtifact).where(
+            PlanArtifact.session_id == session_id, PlanArtifact.stage == plan_stage
+        )
+    ).scalar_one_or_none()
+    return PlanArtifactContentOut(
+        stage=plan_stage.value,
+        repo_path=artifact.repo_path if artifact else planning_service.stage_repo_path(plan_stage),
+        content=_artifact_content(db, project, session, plan_stage) or "",
+        confirmed=bool(artifact and artifact.confirmed),
     )
 
 

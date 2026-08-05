@@ -25,7 +25,7 @@ ARTIFACT_DIR = "docs/agent-planning"
 
 # 단계별 메타: 순서·제목·리포 파일명·문서 작성 지시(스테이지 프롬프트)·기본 생성 요청.
 # "request"는 콘솔 입력창에 미리 채워지는 기본값 — 사용자가 아무것도 쓰지 않아도
-# 바로 '초안 생성'을 누를 수 있어야 한다.
+# 바로 '생성 요청'을 누를 수 있어야 한다.
 STAGES: dict[PlanStage, dict[str, str]] = {
     PlanStage.spec: {
         "title": "기획서",
@@ -81,6 +81,9 @@ STAGES: dict[PlanStage, dict[str, str]] = {
 STAGE_ORDER: list[PlanStage] = list(STAGES.keys())
 
 # 문서 작성 지시의 공통 골격 — 코드 diff가 아니라 마크다운 문서를 만들게 한다.
+# 대화창에는 요약만, 산출물 편집기에는 문서 본문만 간다. 모델이 둘을 이 마커로 나눠 준다.
+DOCUMENT_MARKER = "---DOCUMENT---"
+
 PLANNING_SYSTEM_PROMPT = (
     "You are an Agent Planning AI for an enterprise PaaS platform.\n"
     "You do NOT write code or unified diffs. You produce a single, review-ready planning "
@@ -90,8 +93,37 @@ PLANNING_SYSTEM_PROMPT = (
     "2. Ground every claim in the injected project context (stack, modules, resources).\n"
     "3. Respect the injected '가용 모듈 제약' — never propose resources outside it, and always "
     "route resource access through the central PaaS gateway (A2A/proxy), never external direct calls.\n"
-    "4. Build on the confirmed artifacts of previous stages when provided; do not contradict them."
+    "4. Build on the confirmed artifacts of previous stages when provided; do not contradict them.\n"
+    "5. When a '현재 산출물' is given, revise THAT document instead of starting over — keep the "
+    "parts that still hold and change only what the request asks for.\n"
+    "OUTPUT FORMAT (exactly):\n"
+    "First a short Korean summary (2-4 sentences) of what this document covers and, on a "
+    "revision, what you changed and why.\n"
+    f"Then a line containing only {DOCUMENT_MARKER}\n"
+    "Then the full document body. Do not repeat the summary inside the document."
 )
+
+
+def split_reply(reply: str) -> tuple[str, str]:
+    """모델 응답을 (대화용 요약, 산출물 본문)으로 나눈다.
+
+    마커가 없으면 전체를 문서로 보고 제목 줄에서 개요를 만든다 — 형식이 어긋나도
+    산출물을 잃지 않는 쪽으로 떨어진다.
+    """
+    if DOCUMENT_MARKER in reply:
+        summary, _, document = reply.partition(DOCUMENT_MARKER)
+        summary, document = summary.strip(), document.strip()
+        if document:
+            return summary or _outline(document), document
+    return _outline(reply), reply.strip()
+
+
+def _outline(document: str, limit: int = 8) -> str:
+    """문서의 제목·소제목만 뽑은 개요(마커 없는 응답의 대화용 대체 요약)."""
+    heads = [line.strip() for line in document.splitlines() if line.strip().startswith("#")]
+    if not heads:
+        return document.strip()[:300]
+    return "\n".join(heads[:limit])
 
 
 def stage_title(stage: PlanStage) -> str:
