@@ -166,7 +166,10 @@ def chat_completion(
                 "role": "tool", "tool_call_id": tc.get("id", ""), "content": result,
             })
         return chat_completion(provider, next_messages, db, tools, tool_executor, _round + 1)
-    return message["content"]
+    # content가 null인 응답(길이 초과·거절·도구 호출만 있는 경우)이 있다. 호출부가
+    # 문자열을 전제로 후처리하므로 여기서 빈 문자열로 떨어뜨린다 — None이 새 나가면
+    # 엉뚱한 자리에서 AttributeError로 터진다.
+    return message.get("content") or ""
 
 
 def _post_chat(url: str, headers: dict, payload: dict) -> dict:

@@ -173,7 +173,6 @@ class PlanSessionCreate(BaseModel):
 
 class PlanMessageIn(BaseModel):
     content: str
-    files: list[str] = []  # 컨텍스트로 포함할 리포 내 파일 경로
     # 지금 편집 중인 산출물 본문 — 주면 새로 쓰지 않고 이것을 고친다.
     draft: str = ""
 

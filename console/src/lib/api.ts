@@ -354,9 +354,10 @@ export const api = {
     request<PlanChatMessage[]>('GET', `/plan/sessions/${sessionId}/messages`),
   deletePlanSession: (sessionId: number) =>
     request<void>('DELETE', `/plan/sessions/${sessionId}`),
-  sendPlanMessage: (sessionId: number, stage: string, content: string, files: string[], draft: string) =>
+  // 참조 파일은 서버가 요청 문장을 보고 고른다 — 경로를 사람이 적지 않는다.
+  sendPlanMessage: (sessionId: number, stage: string, content: string, draft: string) =>
     request<PlanMessageReply>('POST', `/plan/sessions/${sessionId}/stages/${stage}/messages`,
-      { content, files, draft }),
+      { content, draft }),
   // 단계 산출물 본문 — 세션 재개·단계 이동 시 편집기를 채운다
   planArtifactContent: (sessionId: number, stage: string) =>
     request<PlanArtifactContent>('GET', `/plan/sessions/${sessionId}/stages/${stage}/artifact`),

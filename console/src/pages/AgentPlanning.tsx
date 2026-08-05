@@ -74,7 +74,6 @@ export default function AgentPlanning() {
   const [activeStage, setActiveStage] = useState<StepKey>('spec');
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
-  const [files, setFiles] = useState('');
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -203,9 +202,8 @@ export default function AgentPlanning() {
     setBusy(true);
     setError('');
     try {
-      const fileList = files.split(',').map((f) => f.trim()).filter(Boolean);
       // 편집 중인 산출물을 함께 보낸다 — 새로 쓰지 않고 이것을 고치게 한다.
-      const res = await api.sendPlanMessage(session.id, activeStage, content, fileList, draft);
+      const res = await api.sendPlanMessage(session.id, activeStage, content, draft);
       setMessages((prev) => [...prev, {
         role: 'assistant', content: res.summary,
         usedModules: res.used_modules, contextFiles: res.context_files,
@@ -495,7 +493,7 @@ export default function AgentPlanning() {
                     )}
                     {m.contextFiles && m.contextFiles.length > 0 && (
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                        <span className="mutedtext" style={{ fontSize: 11 }}>내용 참조 파일:</span>
+                        <span className="mutedtext" style={{ fontSize: 11 }}>자동 참조된 파일:</span>
                         {m.contextFiles.map((f) => (
                           <span key={f} className="mono" style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(148, 163, 184, 0.2)' }}>{f}</span>
                         ))}
@@ -507,12 +505,6 @@ export default function AgentPlanning() {
               </div>
 
               <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <input
-                  className="mono"
-                  placeholder="참조할 파일 경로들 (쉼표 구분, 선택)"
-                  value={files}
-                  onChange={(e) => setFiles(e.target.value)}
-                />
                 <div className="row">
                   <textarea
                     style={{ flex: 1, minHeight: 70, fontFamily: 'inherit' }}

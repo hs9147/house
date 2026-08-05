@@ -71,8 +71,9 @@ def test_chat_completion_stops_after_max_rounds(monkeypatch):
         tools=TOOLS, tool_executor=lambda name, args: "result",
     )
     assert call_count["n"] == llm_service.MAX_TOOL_ROUNDS + 1
-    # 상한에 도달하면 마지막 응답의 content(None)를 그대로 반환한다 — 호출부가 처리
-    assert reply is None
+    # 상한에 도달하면 마지막 응답의 content를 반환한다. content가 null이어도 None이
+    # 아니라 빈 문자열이다 — None이 새 나가면 호출부가 문자열로 다루다 터진다.
+    assert reply == ""
 
 
 def test_chat_completion_without_tool_executor_ignores_tool_calls(monkeypatch):
@@ -85,4 +86,4 @@ def test_chat_completion_without_tool_executor_ignores_tool_calls(monkeypatch):
         }}]},
     )
     reply = llm_service.chat_completion(_provider(), [{"role": "user", "content": "hi"}], tools=TOOLS)
-    assert reply is None
+    assert reply == ""  # content=null → 빈 문자열(호출부가 문자열을 전제로 후처리한다)

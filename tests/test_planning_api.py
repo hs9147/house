@@ -563,6 +563,51 @@ def test_session_merge_finishes_the_branch(monkeypatch, fresh_settings, tmp_path
     assert any(e["action"] == "plan.session.merge" for e in events)
 
 
+def test_empty_llm_reply_reports_instead_of_crashing(monkeypatch, fresh_settings, tmp_path):
+    """회귀: content=null 응답이 오면 reply.upper()에서 500으로 터졌다.
+
+    컨텍스트가 큰 뒤 단계(아키텍처 이후)에서 나기 쉬운데, 원인을 알 수 없는 500 대신
+    무엇을 해야 하는지 알려주는 502가 되어야 한다.
+    """
+    from app.services import llm as llm_service
+
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    monkeypatch.setattr(llm_service, "_post_chat", lambda url, headers, payload: {
+        "choices": [{"message": {"role": "assistant", "content": None}}],
+    })
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+               json={"content": "기획서 써줘"}, headers=ADMIN)
+    assert r.status_code == 502, r.text
+    assert "빈 응답" in r.json()["detail"]
+
+    # content 키 자체가 없는 응답도 같은 경로로 떨어진다
+    monkeypatch.setattr(llm_service, "_post_chat", lambda url, headers, payload: {
+        "choices": [{"message": {"role": "assistant"}}],
+    })
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+                  json={"content": "다시"}, headers=ADMIN).status_code == 502
+
+
+def test_context_files_are_chosen_without_a_path_input(monkeypatch, fresh_settings, tmp_path):
+    """참조 파일은 사용자가 경로를 적지 않아도 요청 문장만으로 선정된다."""
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    calls = _mock_llm(monkeypatch, select_reply='["app.py"]')
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+               json={"content": "진입점 확인하고 기획서 써줘"}, headers=ADMIN)
+    assert r.json()["context_files"] == ["app.py"]
+    assert "--- app.py ---" in _draft_context(calls)
+
+
 def test_every_stage_carries_default_request_prompt():
     """입력창 기본값 — 사용자가 아무것도 쓰지 않아도 바로 '초안 생성'을 누를 수 있어야 한다."""
     c = _client()

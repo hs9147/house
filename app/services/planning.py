@@ -170,16 +170,15 @@ def select_context_files(
     db: Session,
     tree: list[str],
     request: str,
-    explicit: list[str] | None = None,
     limit: int = AUTO_CONTEXT_FILES,
 ) -> list[str]:
     """이번 요청에서 '내용 확인이 필요한' 리포 파일을 고른다.
 
-    사용자가 직접 지정한 파일은 항상 포함하고, 나머지는 파일 목록과 요청을 LLM에 주어
-    고르게 한다(요청이 한국어여도 동작해야 하므로 경로 키워드 매칭이 아니라 모델이 고른다).
-    선정 실패는 조용히 무시한다 — 파일 목록(기본 참조)만으로도 대화는 성립한다.
+    사용자가 경로를 적어 주지 않아도 요청 문장만 보고 모델이 고른다(경로 키워드 매칭이
+    아니라 모델 판단이라 한국어 요청에도 동작한다). 선정 실패는 조용히 무시한다 —
+    파일 목록(기본 참조)만으로도 대화는 성립한다.
     """
-    selected = [p for p in (explicit or []) if p.strip()]
+    selected: list[str] = []
     if not tree or not request.strip() or limit <= 0:
         return selected
     messages = [

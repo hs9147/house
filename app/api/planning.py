@@ -296,7 +296,7 @@ async def post_plan_message(
         except Exception:  # noqa: BLE001
             pass
         selected = await asyncio.to_thread(
-            planning_service.select_context_files, provider, db, tree, body.content, body.files,
+            planning_service.select_context_files, provider, db, tree, body.content,
         )
         for path, content in workspace.read_context_files(workdir, selected).items():
             context_parts.append(f"--- {path} ---\n{content}")
@@ -327,6 +327,15 @@ async def post_plan_message(
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"llm call failed: {e}")
+
+    if not reply.strip():
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "LLM이 빈 응답을 반환했습니다. 컨텍스트가 모델의 한도를 넘었을 수 있습니다 — "
+                "요청을 더 좁게 나누거나 다른 프로바이더로 다시 시도하세요."
+            ),
+        )
 
     used_modules: list[str] = []
     reply_upper = reply.upper()
