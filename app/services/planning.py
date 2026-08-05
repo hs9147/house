@@ -379,7 +379,11 @@ def auto_pull_request(project: Project, branch: str, title: str, body: str = "")
         return {"action": "skipped", "detail": "사내 Gitea 리포가 아니어서 PR을 만들지 않았습니다."}
     owner, repo = slug
     try:
+        # PR이 없으면 여기서 만든다(있으면 그 PR을 재사용).
         pr = gitea_service.ensure_pull_request(owner, repo, branch, project.branch, title, body)
+    except gitea_service.GiteaNothingToMerge:
+        return {"action": "committed",
+                "detail": f"기본 브랜치({project.branch})에 이미 반영되어 있습니다."}
     except gitea_service.GiteaError as e:
         return {"action": "skipped", "detail": str(e)}
 

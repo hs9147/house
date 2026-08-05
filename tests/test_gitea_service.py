@@ -112,6 +112,14 @@ def test_ensure_pull_request_reuses_open_pr_on_conflict(monkeypatch):
     assert pr["number"] == 9
 
 
+def test_ensure_pull_request_without_commits_is_not_a_failure(monkeypatch):
+    """409인데 열린 PR도 없으면 남는 해석은 '반영할 커밋이 없다'다 — 오류가 아니다."""
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(409, text="no commits between"))
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: _Res(200, []))
+    with pytest.raises(gitea.GiteaNothingToMerge):
+        gitea.ensure_pull_request("shop-team", "api", "paas/plan-1", "main", "제목")
+
+
 def test_ensure_pull_request_error_raises(monkeypatch):
     monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(500, text="boom"))
     with pytest.raises(gitea.GiteaError, match="500"):

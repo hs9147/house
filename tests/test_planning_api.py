@@ -648,6 +648,41 @@ def test_context_files_are_chosen_without_a_path_input(monkeypatch, fresh_settin
     assert "--- app.py ---" in _draft_context(calls)
 
 
+def test_merge_creates_the_pull_request_when_none_exists(monkeypatch, fresh_settings, tmp_path):
+    """머지는 PR이 없으면 만들어서 진행하고, 반영할 커밋이 없으면 오류가 아니라 '이미 반영'이다."""
+    from app.services import gitea
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    monkeypatch.setattr(gitea, "repo_slug", lambda git_url: ("o", "plan-app"))
+
+    # PR이 없으면 만든다 — 만든 PR로 곧장 머지한다
+    created: list[tuple] = []
+    monkeypatch.setattr(gitea, "ensure_pull_request",
+                        lambda o, r, head, base, title, body="":
+                        (created.append((head, base)), {"number": 5, "html_url": "u",
+                                                        "mergeable": True})[1])
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": True)
+    body = c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).json()
+    assert body["action"] == "merged"
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
+    assert created == [(branch, "main")]
+
+    # 이미 반영돼 만들 PR이 없으면 실패가 아니라 '이미 반영됨'으로 보고한다
+    def _nothing(o, r, head, base, title, body=""):
+        raise gitea.GiteaNothingToMerge("no commits between")
+
+    monkeypatch.setattr(gitea, "ensure_pull_request", _nothing)
+    body = c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).json()
+    assert body["action"] == "committed"
+    assert "이미 반영" in body["detail"]
+
+
 def test_every_stage_carries_default_request_prompt():
     """입력창 기본값 — 사용자가 아무것도 쓰지 않아도 바로 '초안 생성'을 누를 수 있어야 한다."""
     c = _client()

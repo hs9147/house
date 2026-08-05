@@ -96,6 +96,10 @@ export default function AgentPlanning() {
     if (created) setProjectId(String(created.id)); // 생성 즉시 선택
   };
 
+  // ⑤ 단계에서 지금 강조할 버튼 — 작업 지시 생성 → 브랜치 머지 → 진행 현황 확인 순.
+  const taskStep: 'generate' | 'merge' | 'progress' =
+    tasks.length === 0 ? 'generate' : (mergeResult ? 'progress' : 'merge');
+
   // 대화에 찍히는 사용자 식별자 — 계정 로그인은 이메일, API 키는 키 이름이 곧 id다.
   const userLabel = me.data?.name || getEmail() || '사용자';
 
@@ -579,13 +583,34 @@ export default function AgentPlanning() {
           <div className="panel" style={{ display: activeStage === TASK_STEP ? undefined : 'none' }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <h3 style={{ margin: 0 }}>⑤ 외주 빌드 작업 지시</h3>
+              {/* 지금 할 일 하나만 강조한다: 작업 지시 생성 → 브랜치 머지 → 진행 현황 확인.
+                  지난 단계 버튼은 남겨 두되(재생성·재머지가 필요할 수 있다) 강조는 뺀다. */}
               <div className="row" style={{ gap: 8 }}>
-                <button className="secondary small" onClick={generateTasks} disabled={busy}>
-                  확정 산출물에서 작업 지시 생성
+                <button
+                  className={taskStep === 'generate' ? 'primary small' : 'secondary small'}
+                  onClick={generateTasks}
+                  disabled={busy}
+                >
+                  {tasks.length === 0 ? '확정 산출물에서 작업 지시 생성' : '작업 지시 재생성'}
                 </button>
-                <button className="primary small" onClick={mergeSession} disabled={busy}>
-                  🔀 브랜치 머지 (세션 마무리)
-                </button>
+                {tasks.length > 0 && (
+                  <button
+                    className={taskStep === 'merge' ? 'primary small' : 'secondary small'}
+                    onClick={mergeSession}
+                    disabled={busy}
+                  >
+                    🔀 브랜치 머지 (세션 마무리)
+                  </button>
+                )}
+                {mergeResult && (
+                  <button
+                    className={taskStep === 'progress' ? 'primary small' : 'secondary small'}
+                    onClick={loadBuildStatus}
+                    disabled={busy}
+                  >
+                    🔄 진행 현황 업데이트
+                  </button>
+                )}
               </div>
             </div>
             {mergeResult && (
