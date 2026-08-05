@@ -160,6 +160,129 @@ def test_agent_principles_absent_document_injects_nothing(monkeypatch, tmp_path)
     assert llm_service.agent_principles_prompt() == ""
 
 
+def _module(c, name="orders-db", type_="database") -> int:
+    return c.post("/paas/api/v1/modules", json={
+        "name": name, "type": type_, "config": {"dsn": "postgres://x/y"},
+    }, headers=ADMIN).json()["id"]
+
+
+def test_solution_stage_binds_modules_it_decided_to_use(monkeypatch, fresh_settings, tmp_path):
+    """솔루션 구성 단계에서 쓰기로 한 모듈이 그 자리에서 프로젝트에 바인딩된다."""
+    from app.services import llm as llm_service, workspace
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    _module(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    # 솔루션 단계로 가려면 앞 두 단계가 확정돼야 한다
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, br, path, content, message: "cafe123")
+    for stage in ("architecture",):
+        assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/{stage}/confirm",
+                      json={"content": "# 설계 확정본"}, headers=ADMIN).status_code == 200
+
+    calls: list[dict] = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        system = payload["messages"][0]["content"]
+        if _FILE_SELECT_MARK in system:
+            return {"choices": [{"message": {"content": "[]"}}]}
+        if not any(m.get("role") == "tool" for m in payload["messages"]):
+            return {"choices": [{"message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "t1", "function": {
+                    "name": "bind_module",
+                    "arguments": '{"module_name": "orders-db", "env_prefix": "orders"}',
+                }}],
+            }}]}
+        return {"choices": [{"message": {"content": "# 솔루션 구성 초안"}}]}
+
+    monkeypatch.setattr(llm_service, "_post_chat", fake_post)
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/solution/messages",
+               json={"content": "솔루션 구성 써줘"}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["bound_modules"] == ["orders-db"]
+
+    # 실제로 프로젝트에 붙었고 접두사는 대문자로 정규화된다
+    bound = c.get(f"/paas/api/v1/projects/{pid}/modules", headers=ADMIN).json()
+    assert [b["agent_name"] for b in bound] == ["orders-db"]
+    assert bound[0]["env_prefix"] == "ORDERS"
+
+    # 도구는 솔루션 단계에서만, 가용 목록 안에서만 고를 수 있다
+    tool_payload = next(p for p in calls if p.get("tools"))
+    fn = tool_payload["tools"][0]["function"]
+    assert fn["name"] == "bind_module"
+    assert fn["parameters"]["properties"]["module_name"]["enum"] == ["orders-db"]
+
+
+def test_bind_tool_absent_outside_solution_stage(monkeypatch, fresh_settings, tmp_path):
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    _module(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    calls = _mock_llm(monkeypatch)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+           json={"content": "기획서"}, headers=ADMIN)
+    assert not any(p.get("tools") for p in calls)
+
+
+def test_duplicate_bind_is_reported_not_raised(monkeypatch, fresh_settings, tmp_path):
+    """도구 실패는 예외가 아니라 모델이 읽을 문장으로 돌아간다 — 문서 작성이 끊기면 안 된다."""
+    from app.db import SessionLocal
+    from app.models import Project as ProjectModel
+    from app.services import planning as planning_service
+
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    _module(c)
+    with SessionLocal() as db:
+        project = db.get(ProjectModel, pid)
+        bound: list[str] = []
+        execute = planning_service.make_bind_executor(db, project, "tester", bound)
+        assert "바인딩 완료" in execute("bind_module", {"module_name": "orders-db", "env_prefix": "ORD"})
+        assert "이미 바인딩된 모듈" in execute("bind_module", {"module_name": "orders-db", "env_prefix": "X"})
+        assert "찾을 수 없습니다" in execute("bind_module", {"module_name": "ghost", "env_prefix": "G"})
+        assert bound == ["orders-db"]
+
+
+def test_session_history_resume_and_delete(monkeypatch, fresh_settings, tmp_path):
+    """세션 이력 조회 → 대화 복원(재개) → 삭제."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch, draft_reply="# 기획서 초안")
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+           json={"content": "요구사항 정리"}, headers=ADMIN)
+    _confirm_spec(c, monkeypatch, sid, repo)
+
+    rows = c.get("/paas/api/v1/plan/sessions", headers=ADMIN).json()
+    assert [r["id"] for r in rows] == [sid]
+    assert rows[0]["confirmed_stages"] == ["spec"] and rows[0]["project_name"] == "plan-app"
+    assert c.get("/paas/api/v1/plan/sessions", params={"project_id": 9999},
+                 headers=ADMIN).json() == []
+
+    # 재개 — 대화가 그대로 복원된다
+    messages = c.get(f"/paas/api/v1/plan/sessions/{sid}/messages", headers=ADMIN).json()
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[0]["content"] == "요구사항 정리"
+
+    assert c.delete(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 204
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 404
+    assert c.get("/paas/api/v1/plan/sessions", headers=ADMIN).json() == []
+    assert c.delete(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 404
+
+
 def test_every_stage_carries_default_request_prompt():
     """입력창 기본값 — 사용자가 아무것도 쓰지 않아도 바로 '초안 생성'을 누를 수 있어야 한다."""
     c = _client()

@@ -9,6 +9,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -31,11 +32,13 @@ from ..schemas import (
     BuildTaskUpdate,
     ComplianceOut,
     PlanArtifactOut,
+    PlanChatMessageOut,
     PlanConfirmIn,
     PlanMessageIn,
     PlanMessageReply,
     PlanSessionCreate,
     PlanSessionOut,
+    PlanSessionSummary,
 )
 from ..security import require_api_key
 from ..services import a2a as a2a_service
@@ -108,6 +111,80 @@ def create_plan_session(
     audit.record(db, key.name, "plan.session.create", project.name,
                  {"provider": provider.name, "branch": session.branch})
     return _session_out(db, session)
+
+
+@router.get("/plan/sessions", response_model=list[PlanSessionSummary])
+def list_plan_sessions(
+    project_id: int | None = None,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """기획 세션 이력 — 재개·삭제 대상을 고르기 위한 목록(최근 순)."""
+    stmt = select(ChatSession).order_by(ChatSession.id.desc())
+    if project_id is not None:
+        stmt = stmt.where(ChatSession.project_id == project_id)
+    out: list[PlanSessionSummary] = []
+    for session in db.execute(stmt).scalars().all():
+        project = db.get(Project, session.project_id)
+        provider = db.get(LlmProvider, session.provider_id)
+        confirmed = [
+            s.value for s in planning_service.STAGE_ORDER
+            if _is_confirmed(db, session.id, s)
+        ]
+        task_count = len(db.execute(
+            select(BuildTask.id).where(BuildTask.session_id == session.id)
+        ).scalars().all())
+        out.append(PlanSessionSummary(
+            id=session.id,
+            project_id=session.project_id,
+            project_name=project.name if project else "",
+            provider=provider.name if provider else "",
+            branch=session.branch,
+            confirmed_stages=confirmed,
+            task_count=task_count,
+            created_at=session.created_at,
+        ))
+    return out
+
+
+@router.get("/plan/sessions/{session_id}/messages", response_model=list[PlanChatMessageOut])
+def list_plan_messages(
+    session_id: int,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """세션 재개용 대화 이력 — 어디까지 이야기했는지 그대로 복원한다."""
+    if db.get(ChatSession, session_id) is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    rows = db.execute(
+        select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)
+    ).scalars().all()
+    return [PlanChatMessageOut(role=m.role, content=m.content, created_at=m.created_at)
+            for m in rows]
+
+
+@router.delete("/plan/sessions/{session_id}", status_code=204)
+def delete_plan_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """기획 세션과 그 대화·산출물 포인터·작업 지시를 지운다.
+
+    이미 커밋된 산출물 문서와 감사 로그는 건드리지 않는다 — 리포에 남은 기록은
+    세션과 별개이고, 세션을 지웠다고 사라져서는 안 된다.
+    """
+    session = db.get(ChatSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    project = db.get(Project, session.project_id)
+    for model in (ChatMessage, PlanArtifact, BuildTask):
+        db.execute(sa_delete(model).where(model.session_id == session_id))
+    db.delete(session)
+    db.commit()
+    audit.record(db, key.name, "plan.session.delete",
+                 project.name if project else str(session.project_id),
+                 {"session_id": session_id, "branch": session.branch})
 
 
 @router.get("/plan/sessions/{session_id}", response_model=PlanSessionOut)
@@ -210,8 +287,19 @@ async def post_plan_message(
     messages.extend({"role": m.role, "content": m.content} for m in history)
     messages.append({"role": "user", "content": body.content})
 
+    # 솔루션 구성 단계에서만 모듈 바인딩 도구를 준다 — 쓰기로 결정한 모듈을 문서와 같은
+    # 자리에서 프로젝트에 붙여, 문서와 실제 주입 환경변수가 어긋나지 않게 한다.
+    bound_modules: list[str] = []
+    tools = tool_executor = None
+    if plan_stage == PlanStage.solution:
+        tools = planning_service.module_bind_tools(constraints.get("available_resources") or [])
+        if tools:
+            tool_executor = planning_service.make_bind_executor(db, project, key.name, bound_modules)
+
     try:
-        reply = await asyncio.to_thread(llm_service.chat_completion, provider, messages, db)
+        reply = await asyncio.to_thread(
+            llm_service.chat_completion, provider, messages, db, tools or None, tool_executor,
+        )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"llm call failed: {e}")
 
@@ -225,7 +313,8 @@ async def post_plan_message(
     db.add(ChatMessage(session_id=session_id, role="user", content=body.content))
     db.add(ChatMessage(session_id=session_id, role="assistant", content=reply))
     db.commit()
-    return PlanMessageReply(reply=reply, used_modules=used_modules, context_files=context_files)
+    return PlanMessageReply(reply=reply, used_modules=used_modules,
+                            context_files=context_files, bound_modules=bound_modules)
 
 
 @router.post("/plan/sessions/{session_id}/stages/{stage}/confirm", response_model=PlanArtifactOut)

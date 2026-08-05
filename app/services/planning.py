@@ -8,9 +8,11 @@
 """
 import json
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import LlmProvider, PlanStage, Project
+from .. import audit
+from ..models import LlmProvider, Module, ModuleBinding, PlanStage, Project
 from . import a2a as a2a_service
 from . import gitea as gitea_service
 from . import llm as llm_service
@@ -215,6 +217,80 @@ def decompose_tasks(
         if len(tasks) >= limit:
             break
     return tasks
+
+
+# 솔루션 구성 단계 전용 도구 — 쓰기로 결정한 내부 모듈을 그 자리에서 프로젝트에 바인딩한다.
+# 문서로만 "이 모듈을 쓴다"고 적어 두면 배포 시 환경변수가 주입되지 않아 외주 빌더가
+# 받을 자원과 문서가 어긋난다. 결정과 바인딩을 같은 단계에서 끝낸다.
+BIND_TOOL = "bind_module"
+
+
+def module_bind_tools(resources: list[dict]) -> list[dict]:
+    names = [str(r.get("name", "")) for r in resources if r.get("name")]
+    if not names:
+        return []
+    return [{
+        "type": "function",
+        "function": {
+            "name": BIND_TOOL,
+            "description": (
+                "솔루션에 사용하기로 결정한 내부 모듈을 이 프로젝트에 바인딩한다. "
+                "바인딩하면 배포 시 규약된 환경변수가 자동 주입된다. "
+                "문서에 사용한다고 적은 모듈은 반드시 이 도구로 바인딩하라."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "module_name": {"type": "string", "enum": names},
+                    "env_prefix": {
+                        "type": "string",
+                        "description": "주입 환경변수 접두사(대문자·숫자·밑줄, 예: PAY → PAY_URL)",
+                    },
+                },
+                "required": ["module_name", "env_prefix"],
+            },
+        },
+    }]
+
+
+def make_bind_executor(db: Session, project: Project, actor: str, bound: list[str]):
+    """도구 호출을 실제 바인딩으로 처리한다. 성공한 모듈명은 bound에 쌓인다.
+
+    실패는 예외로 올리지 않고 모델이 읽을 문장으로 돌려준다 — 도구 하나가 실패해도
+    문서 작성 자체는 이어져야 한다(services/mcp_client와 같은 규약).
+    """
+    def execute(fn_name: str, arguments: dict) -> str:
+        if fn_name != BIND_TOOL:
+            return f"unknown tool: {fn_name}"
+        name = str(arguments.get("module_name", "")).strip()
+        prefix = str(arguments.get("env_prefix", "")).strip().upper()
+        if not name or not prefix:
+            return "module_name과 env_prefix가 모두 필요합니다."
+        module = db.execute(select(Module).where(Module.name == name)).scalar_one_or_none()
+        if module is None:
+            return f"모듈을 찾을 수 없습니다: {name}"
+        allowed = {r["name"] for r in modules_service.available_resources(db, project)}
+        if name not in allowed:
+            return f"이 프로젝트에서 사용할 수 없는 모듈입니다: {name}"
+
+        existing = db.execute(
+            select(ModuleBinding).where(ModuleBinding.project_id == project.id)
+        ).scalars().all()
+        for b in existing:
+            if b.module_id == module.id:
+                return f"이미 바인딩된 모듈입니다: {name} (prefix={b.env_prefix})"
+            if b.env_prefix == prefix:
+                return f"이 프로젝트에서 이미 쓰는 접두사입니다: {prefix}"
+
+        db.add(ModuleBinding(project_id=project.id, module_id=module.id, env_prefix=prefix))
+        db.commit()
+        audit.record(db, actor, "module.bind", project.name,
+                     {"module": name, "prefix": prefix, "via": "plan.solution"})
+        bound.append(name)
+        keys = sorted(modules_service.binding_env(module, prefix, db=db).keys())
+        return f"바인딩 완료: {name} (prefix={prefix}) — 주입될 환경변수: {', '.join(keys)}"
+
+    return execute
 
 
 def auto_pull_request(project: Project, branch: str, title: str, body: str = "") -> dict:
