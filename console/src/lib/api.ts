@@ -16,6 +16,7 @@ import type {
   ModuleOut,
   ModuleSummary,
   OrgOut,
+  PlanArtifactContent,
   PlanArtifactOut,
   PlanBuildStatus,
   PlanChatMessage,
@@ -352,9 +353,12 @@ export const api = {
     request<PlanChatMessage[]>('GET', `/plan/sessions/${sessionId}/messages`),
   deletePlanSession: (sessionId: number) =>
     request<void>('DELETE', `/plan/sessions/${sessionId}`),
-  sendPlanMessage: (sessionId: number, stage: string, content: string, files: string[]) =>
+  sendPlanMessage: (sessionId: number, stage: string, content: string, files: string[], draft: string) =>
     request<PlanMessageReply>('POST', `/plan/sessions/${sessionId}/stages/${stage}/messages`,
-      { content, files }),
+      { content, files, draft }),
+  // 단계 산출물 본문 — 세션 재개·단계 이동 시 편집기를 채운다
+  planArtifactContent: (sessionId: number, stage: string) =>
+    request<PlanArtifactContent>('GET', `/plan/sessions/${sessionId}/stages/${stage}/artifact`),
   confirmPlanStage: (sessionId: number, stage: string, content: string) =>
     request<PlanArtifactOut>('POST', `/plan/sessions/${sessionId}/stages/${stage}/confirm`,
       { content }),

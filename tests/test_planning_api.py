@@ -108,7 +108,7 @@ def test_stage_order_enforced_and_confirm_commits(monkeypatch):
     r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
                json={"content": "요구사항 정리해줘"}, headers=ADMIN)
     assert r.status_code == 200, r.text
-    assert r.json()["reply"] == "# 기획서 초안"
+    assert r.json()["document"] == "# 기획서 초안"
 
     # 확정 → Gitea 커밋(목킹) → 포인터 기록
     monkeypatch.setattr(workspace, "write_and_commit",
@@ -341,6 +341,84 @@ def test_session_history_resume_and_delete(monkeypatch, fresh_settings, tmp_path
     assert c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 404
     assert c.get("/paas/api/v1/plan/sessions", headers=ADMIN).json() == []
     assert c.delete(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 404
+
+
+def test_reply_splits_into_chat_summary_and_artifact_body(monkeypatch, fresh_settings, tmp_path):
+    """대화에는 개요만, 산출물은 편집기로 — 대화 이력에도 개요만 쌓인다."""
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    _mock_llm(monkeypatch, draft_reply="목적과 범위를 정리했습니다.\n---DOCUMENT---\n# 기획서\n## 1. 목적\n")
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+               json={"content": "기획서 써줘"}, headers=ADMIN)
+    body = r.json()
+    assert body["summary"] == "목적과 범위를 정리했습니다."
+    assert body["document"] == "# 기획서\n## 1. 목적"
+
+    messages = c.get(f"/paas/api/v1/plan/sessions/{sid}/messages", headers=ADMIN).json()
+    assert messages[1]["content"] == "목적과 범위를 정리했습니다."  # 문서 본문은 이력에 쌓지 않는다
+
+    # 마커가 없으면 전체를 문서로 보고 제목에서 개요를 만든다(산출물을 잃지 않는다)
+    _mock_llm(monkeypatch, draft_reply="# 기획서\n본문\n## 2. 범위\n")
+    body = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+                  json={"content": "다시"}, headers=ADMIN).json()
+    assert body["document"].startswith("# 기획서")
+    assert body["summary"] == "# 기획서\n## 2. 범위"
+
+
+def test_generation_request_carries_current_draft_for_revision(
+    monkeypatch, fresh_settings, tmp_path
+):
+    """생성 요청에 편집 중인 산출물을 실어 '수정'으로 이어지게 한다."""
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    calls = _mock_llm(monkeypatch)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+           json={"content": "성공 기준 추가해줘", "draft": "# 기획서\n## 1. 목적\n결제 자동화"},
+           headers=ADMIN)
+    context = _draft_context(calls)
+    assert "=== 현재 산출물 (수정 대상: 기획서) ===" in context
+    assert "결제 자동화" in context
+
+    # draft를 안 보내면 확정본이 대신 실린다
+    calls = _mock_llm(monkeypatch)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+           json={"content": "처음부터"}, headers=ADMIN)
+    assert "=== 현재 산출물" not in _draft_context(calls)
+
+
+def test_artifact_content_endpoint_restores_editor_on_resume(
+    monkeypatch, fresh_settings, tmp_path
+):
+    """세션을 재개하면 확정된 산출물 본문을 편집기에 그대로 되살릴 수 있다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo, body="# 기획서 확정본\n요구사항 A\n")
+
+    r = c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/artifact", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "stage": "spec", "repo_path": "docs/agent-planning/01-기획서.md",
+        "content": "# 기획서 확정본\n요구사항 A\n", "confirmed": True,
+    }
+
+    # 아직 확정 전 단계는 빈 본문
+    empty = c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/architecture/artifact",
+                  headers=ADMIN).json()
+    assert empty["content"] == "" and empty["confirmed"] is False
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/nope/artifact",
+                 headers=ADMIN).status_code == 404
 
 
 def test_every_stage_carries_default_request_prompt():
