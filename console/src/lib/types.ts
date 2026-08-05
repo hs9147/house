@@ -145,7 +145,7 @@ export interface LlmProviderOut {
 
 // 에이전트 기획 (Agent Planning)
 export interface PlanArtifactOut {
-  stage: 'spec' | 'architecture' | 'solution' | 'principles';
+  stage: 'spec' | 'architecture' | 'solution' | 'principles' | 'tasks';
   title: string;
   repo_path: string;
   commit_sha: string | null;
@@ -180,8 +180,9 @@ export interface PlanArtifactContent {
   repo_path: string;
   content: string;
   confirmed: boolean;
-  // session = 이 세션에서 확정 · repo = 리포에 이미 있던 문서 · '' = 없음
-  source: 'session' | 'repo' | '';
+  // session = 이 세션에서 확정 · repo = 리포에 이미 있던 문서
+  // tasks = 작업 지시 목록에서 렌더한 문서(⑤단계) · '' = 없음
+  source: 'session' | 'repo' | 'tasks' | '';
 }
 
 // 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영한 결과

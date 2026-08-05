@@ -1,10 +1,10 @@
 """에이전트 기획(Agent Planning) — 단계 정의·스테이지 프롬프트·가용 모듈 제약 문서.
 
-에이전트 빌더가 곧바로 코드 diff를 만들던 것과 달리, 기획은 코딩 전 4단계를 순차
+에이전트 빌더가 곧바로 코드 diff를 만들던 것과 달리, 기획은 코딩 전 5단계를 순차
 수행하며 각 단계에서 **문서 산출물**을 만든다. 산출물 본문은 프로젝트 Gitea 리포에
 커밋되고(services/workspace.write_and_commit), DB(PlanArtifact)에는 포인터만 남는다.
 
-설계 근거: docs/agent-planning/ (기획서·아키텍처·솔루션 구성·개발원칙).
+설계 근거: docs/agent-planning/ (기획서·아키텍처·솔루션 구성·개발원칙·작업 지시).
 """
 import json
 from typing import Callable
@@ -74,6 +74,21 @@ STAGES: dict[PlanStage, dict[str, str]] = {
         "request": (
             "앞 단계 확정 산출물을 근거로 개발원칙 초안을 작성해줘. "
             "구현계획 및 현황관리, 스키마 및 의사결정사항, 배포 및 사용 가이드를 포함해줘."
+        ),
+    },
+    # 5단계는 문서를 LLM 대화로 쓰지 않는다 — 작업 지시(BuildTask)를 만들고 그것을
+    # 렌더한 문서를 확정한다. 표(진행 상태)와 문서(리포 산출물)의 원천이 하나여야
+    # 외주 빌더가 MCP로 보는 것과 clone으로 보는 것이 어긋나지 않는다.
+    PlanStage.tasks: {
+        "title": "작업 지시",
+        "filename": "05-작업지시.md",
+        "prompt": (
+            "이번 단계는 '작업 지시'다. 확정된 앞 단계 산출물을 외주 빌더가 집어갈 작업 "
+            "단위로 나눈 목록 문서를 작성하라."
+        ),
+        "request": (
+            "확정 산출물을 근거로 외주 빌드 작업 지시를 만들어줘. "
+            "작업별 구현 내용과 완료 판정 기준을 포함해줘."
         ),
     },
 }
@@ -362,6 +377,31 @@ def make_bind_executor(db: Session, project: Project, actor: str, bound: list[st
         return f"바인딩 완료: {name} (prefix={prefix}) — 주입될 환경변수: {', '.join(keys)}"
 
     return execute
+
+
+def render_tasks_doc(tasks: list[dict]) -> str:
+    """작업 지시(BuildTask)를 5단계 산출물 문서로 렌더한다.
+
+    표(진행 상태)와 리포 문서의 원천을 하나로 둔다 — 외주 빌더가 MCP로 보는 목록과
+    clone해서 보는 문서가 어긋나면 어느 쪽을 믿어야 할지 알 수 없다.
+    """
+    lines = ["# 작업 지시 (외주 빌드)", ""]
+    if not tasks:
+        lines.append("(아직 작업 지시가 없습니다.)")
+        return "\n".join(lines) + "\n"
+    lines += [
+        "확정된 기획 산출물에서 나눈 외주 빌드 단위다. 상태는 플랫폼(MCP `list_tasks`)이",
+        "원천이며, 이 문서는 확정 시점의 스냅샷이다.",
+        "",
+    ]
+    for idx, task in enumerate(tasks, start=1):
+        lines.append(f"## {idx}. {task['title']}")
+        if task.get("detail"):
+            lines += ["", task["detail"]]
+        if task.get("verify"):
+            lines += ["", f"- **완료 판정**: {task['verify']}"]
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def auto_pull_request(project: Project, branch: str, title: str, body: str = "") -> dict:

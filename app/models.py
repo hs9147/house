@@ -245,6 +245,7 @@ class PlanStage(str, enum.Enum):
     architecture = "architecture"  # 아키텍처 설계
     solution = "solution"  # 솔루션 구성(내부 솔루션 사용)
     principles = "principles"  # 개발원칙
+    tasks = "tasks"  # 작업 지시(외주 빌드 단위) — 산출물은 BuildTask를 렌더한 문서
 
 
 class PlanArtifact(Base):

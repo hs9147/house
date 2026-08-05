@@ -226,6 +226,13 @@ async def post_plan_message(
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
     plan_stage = _parse_stage(stage)
+    if plan_stage == PlanStage.tasks:
+        # 5단계 문서는 대화로 쓰지 않는다 — 작업 지시 목록을 렌더한 것이 산출물이다.
+        # 대화로 따로 쓰게 두면 문서와 MCP list_tasks가 어긋난다.
+        raise HTTPException(
+            status_code=409,
+            detail="작업 지시 단계는 '작업 지시 생성'으로 산출물을 만듭니다.",
+        )
     project = db.get(Project, session.project_id)
     provider = db.get(LlmProvider, session.provider_id)
     llm_service.require_provider_access(provider, project, key)
@@ -509,6 +516,12 @@ def _artifact_content(db: Session, project: Project, session: ChatSession,
     return workspace.read_context_files(workdir, [path]).get(path)
 
 
+def _tasks_document(db: Session, session_id: int) -> str:
+    """현재 작업 지시를 5단계 산출물 문서로 렌더한다(아직 커밋 전 미리보기)."""
+    return planning_service.render_tasks_doc(
+        [_task_out(t).model_dump() for t in _session_tasks(db, session_id)])
+
+
 @router.get("/plan/sessions/{session_id}/stages/{stage}/artifact",
             response_model=PlanArtifactContentOut)
 def get_plan_artifact_content(
@@ -536,8 +549,14 @@ def get_plan_artifact_content(
             PlanArtifact.session_id == session_id, PlanArtifact.stage == plan_stage
         )
     ).scalar_one_or_none()
-    content = _artifact_content(db, project, session, plan_stage) or ""
-    if artifact is not None and artifact.confirmed:
+    # 5단계 산출물의 원천은 작업 지시 목록이다 — 목록이 있으면 리포 문서보다 그것을 보여
+    # 준다. '작업 지시 생성'을 다시 돌리면 편집기 내용도 바로 따라와야 하기 때문이다.
+    tasks_rendered = (plan_stage == PlanStage.tasks and bool(_session_tasks(db, session_id)))
+    content = (_tasks_document(db, session_id) if tasks_rendered
+               else _artifact_content(db, project, session, plan_stage) or "")
+    if tasks_rendered and not (artifact and artifact.confirmed):
+        source = "tasks"  # 작업 지시 목록에서 렌더한 문서(아직 확정 전)
+    elif artifact is not None and artifact.confirmed:
         source = "session"  # 이 세션에서 확정한 산출물
     elif content:
         source = "repo"  # 리포에 이미 있던 문서
@@ -609,7 +628,9 @@ async def generate_build_tasks(
     if any(t.status != BuildTaskStatus.pending for t in existing):
         raise HTTPException(status_code=409, detail="이미 진행 중인 작업 지시가 있습니다.")
 
-    confirmed = [s for s in planning_service.STAGE_ORDER if _is_confirmed(db, session_id, s)]
+    # 5단계 자신은 근거가 아니다 — 작업 지시에서 만든 문서를 다시 넣으면 순환이 된다.
+    confirmed = [s for s in planning_service.STAGE_ORDER
+                 if s != PlanStage.tasks and _is_confirmed(db, session_id, s)]
     if not confirmed:
         raise HTTPException(status_code=409, detail="확정된 산출물이 없습니다. 단계를 먼저 확정하세요.")
 

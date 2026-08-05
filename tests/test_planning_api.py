@@ -77,7 +77,7 @@ def _project_and_provider(c: TestClient) -> tuple[int, int]:
     return pid, prov
 
 
-def test_session_lists_all_four_stages_unconfirmed():
+def test_session_lists_all_five_stages_unconfirmed():
     c = _client()
     pid, prov = _project_and_provider(c)
     r = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov}, headers=ADMIN)
@@ -86,7 +86,7 @@ def test_session_lists_all_four_stages_unconfirmed():
     # 세션마다 고유한 작업 브랜치 — id 뒤에 hex 접미사가 붙는다
     assert re.fullmatch(rf"paas/plan-{body['id']}-[0-9a-f]{{8}}", body["branch"]), body["branch"]
     stages = [a["stage"] for a in body["artifacts"]]
-    assert stages == ["spec", "architecture", "solution", "principles"]
+    assert stages == ["spec", "architecture", "solution", "principles", "tasks"]
     assert all(a["confirmed"] is False for a in body["artifacts"])
 
 
@@ -939,6 +939,104 @@ def test_generate_tasks_refuses_to_overwrite_started_work(monkeypatch, fresh_set
                   headers=ADMIN).json()["id"]
     assert c.post(f"/paas/api/v1/plan/sessions/{sid2}/tasks/generate",
                   headers=ADMIN).status_code == 409
+
+
+def _confirm_doc_stages(c, monkeypatch, sid: int, repo):
+    """①~④를 확정하고 확정본을 세션 브랜치에 실제로 커밋한다(커밋 자체는 목킹)."""
+    from app.services import workspace
+
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, br, path, content, message: "deadbeef")
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
+    _git(repo, "checkout", "-q", "-b", branch)
+    for stage in ("spec", "architecture", "solution", "principles"):
+        body = f"# {stage} 확정본\n요구사항 A\n"
+        r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/{stage}/confirm",
+                   json={"content": body}, headers=ADMIN)
+        assert r.status_code == 200, r.text
+        doc = repo / r.json()["repo_path"]
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.write_text(body, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "plan(docs)")
+    _git(repo, "checkout", "-q", "main")
+    return branch
+
+
+def test_work_order_is_the_fifth_confirm_stage(monkeypatch, fresh_settings, tmp_path):
+    """⑤ 작업 지시도 다른 단계와 같은 확정 단계다 — 다만 본문을 대화가 아니라 목록에서 만든다."""
+    from app.services import workspace
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+
+    # 앞 단계를 확정하기 전에는 확정할 수 없다(다른 단계와 같은 순차 강제)
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/confirm",
+                  json={"content": "# 작업 지시"}, headers=ADMIN).status_code == 409
+
+    _confirm_doc_stages(c, monkeypatch, sid, repo)
+
+    # 대화로는 쓰지 않는다 — 문서와 MCP list_tasks의 원천이 갈리면 안 된다
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/messages",
+               json={"content": "작업 지시 써줘"}, headers=ADMIN)
+    assert r.status_code == 409 and "작업 지시 생성" in r.json()["detail"]
+
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate",
+                  headers=ADMIN).status_code == 200
+
+    # 산출물은 작업 지시 목록을 렌더한 문서다
+    a = c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/artifact", headers=ADMIN).json()
+    assert a["repo_path"] == "docs/agent-planning/05-작업지시.md"
+    assert a["source"] == "tasks"
+    assert "결제 API 구현" in a["content"] and "pytest tests/test_pay.py 통과" in a["content"]
+
+    written: dict = {}
+    monkeypatch.setattr(workspace, "write_and_commit", lambda project, br, path, content, message: (
+        written.update(path=path, content=content, branch=br), "cafe123")[1])
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/confirm",
+               json={"content": a["content"]}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert written["path"] == "docs/agent-planning/05-작업지시.md"
+    assert "결제 API 구현" in written["content"]
+
+    stages = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["artifacts"]
+    assert stages[-1]["stage"] == "tasks" and stages[-1]["confirmed"] is True
+
+
+def test_work_order_document_is_not_its_own_input(monkeypatch, fresh_settings, tmp_path):
+    """재생성 시 ⑤ 문서 자신은 근거로 넣지 않는다 — 넣으면 출력이 다음 입력이 되는 순환이다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    branch = _confirm_doc_stages(c, monkeypatch, sid, repo)
+
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN)
+    a = c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/artifact", headers=ADMIN).json()
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/confirm",
+           json={"content": a["content"]}, headers=ADMIN)
+
+    # 확정본이 실제로 세션 브랜치에 올라간 상태를 만든다
+    _git(repo, "checkout", "-q", branch)
+    (repo / "docs" / "agent-planning" / "05-작업지시.md").write_text(a["content"], encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "plan(tasks)")
+    _git(repo, "checkout", "-q", "main")
+
+    calls = _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate",
+                  headers=ADMIN).status_code == 200
+    documents = calls[-1]["messages"][1]["content"]
+    assert "01-기획서.md" in documents
+    assert "05-작업지시.md" not in documents
 
 
 def test_mcp_read_artifact_and_build_report_loop(monkeypatch, fresh_settings, tmp_path):

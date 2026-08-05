@@ -195,7 +195,8 @@ class PlanArtifactContentOut(BaseModel):
     repo_path: str
     content: str
     confirmed: bool = False
-    # session = 이 세션에서 확정한 산출물 · repo = 리포에 이미 있던 문서 · "" = 없음
+    # session = 이 세션에서 확정한 산출물 · repo = 리포에 이미 있던 문서
+    # tasks = 작업 지시 목록에서 렌더한 문서(5단계) · "" = 없음
     source: str = ""
 
 

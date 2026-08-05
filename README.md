@@ -203,12 +203,15 @@ GET  /paas/api/v1/plan/sessions?project_id=         # 세션 이력(최근 순) 
 GET  /paas/api/v1/plan/sessions/{id}/messages       # 재개용 대화 이력 복원
 DELETE /paas/api/v1/plan/sessions/{id}              # 세션·대화·산출물 포인터·작업 지시 + 작업 브랜치 삭제(머지된 문서는 남음)
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/messages   # 단계 생성 요청 — git 파일 목록·앞 단계 확정본이 컨텍스트
+                                                # 단계는 spec → architecture → solution → principles → tasks(5단계)
+                                                # tasks 단계는 대화로 쓰지 않는다 — 409, tasks/generate로 산출물을 만든다
                                                 # 빈 응답(컨텍스트 한도 초과)이면 413 — compact=true로 압축 재시도
                                                 # solution 단계에서는 bind_module 도구로 사용 결정 모듈을 즉시 바인딩하고,
                                                 # 바인딩된 mcp 모듈의 도구({모듈명}__{도구명})로 실제 규격을 확인
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/confirm    # 확정 → Gitea 커밋 후 git 상태에 따라 PR·머지 자동
                                                 # 리포에 다른 내용의 같은 문서가 있으면 412 — overwrite=true로 재요청
 POST /paas/api/v1/plan/sessions/{id}/tasks/generate # 확정 산출물 → 외주 빌드 작업 지시(work order)
+                                                # ⑤ tasks 단계 산출물(05-작업지시.md)은 이 목록을 렌더한 문서
 GET  /paas/api/v1/plan/sessions/{id}/tasks          # 작업 지시 목록·상태
 PATCH /paas/api/v1/plan/tasks/{id}                  # {status?, note?, commit_sha?}
 POST /paas/api/v1/plan/sessions/{id}/merge          # 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영
