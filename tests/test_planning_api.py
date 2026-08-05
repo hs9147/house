@@ -1,5 +1,6 @@
 """에이전트 기획(Agent Planning) API — 단계 순차 진행·확정(커밋 목킹)·제약·작업 지시·MCP 서버."""
 import json
+import re
 import subprocess
 
 import pytest
@@ -82,7 +83,8 @@ def test_session_lists_all_four_stages_unconfirmed():
     r = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov}, headers=ADMIN)
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["branch"].startswith("paas/plan-")
+    # 세션마다 고유한 작업 브랜치 — id 뒤에 hex 접미사가 붙는다
+    assert re.fullmatch(rf"paas/plan-{body['id']}-[0-9a-f]{{8}}", body["branch"]), body["branch"]
     stages = [a["stage"] for a in body["artifacts"]]
     assert stages == ["spec", "architecture", "solution", "principles"]
     assert all(a["confirmed"] is False for a in body["artifacts"])
@@ -337,7 +339,15 @@ def test_session_history_resume_and_delete(monkeypatch, fresh_settings, tmp_path
     assert [m["role"] for m in messages] == ["user", "assistant"]
     assert messages[0]["content"] == "요구사항 정리"
 
+    # 삭제하면 세션의 작업 브랜치도 함께 정리된다
+    deleted: list[tuple] = []
+    from app.api import planning as planning_api
+
+    monkeypatch.setattr(planning_api.workspace, "delete_branch",
+                        lambda project, br: (deleted.append((project.name, br)), True)[1])
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
     assert c.delete(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 204
+    assert deleted == [("plan-app", branch)]
     assert c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 404
     assert c.get("/paas/api/v1/plan/sessions", headers=ADMIN).json() == []
     assert c.delete(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 404
@@ -410,7 +420,7 @@ def test_artifact_content_endpoint_restores_editor_on_resume(
     assert r.status_code == 200, r.text
     assert r.json() == {
         "stage": "spec", "repo_path": "docs/agent-planning/01-기획서.md",
-        "content": "# 기획서 확정본\n요구사항 A\n", "confirmed": True,
+        "content": "# 기획서 확정본\n요구사항 A\n", "confirmed": True, "source": "session",
     }
 
     # 아직 확정 전 단계는 빈 본문
@@ -419,6 +429,138 @@ def test_artifact_content_endpoint_restores_editor_on_resume(
     assert empty["content"] == "" and empty["confirmed"] is False
     assert c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/nope/artifact",
                  headers=ADMIN).status_code == 404
+
+
+def test_existing_repo_documents_show_up_as_artifacts(monkeypatch, fresh_settings, tmp_path):
+    """리포에 이미 docs/agent-planning/*.md가 있으면 이 세션에서 확정한 적 없어도 산출물로 보인다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    doc = repo / "docs" / "agent-planning" / "01-기획서.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# 기존 기획서\n외부 도구가 남긴 문서\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "docs")
+
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    body = c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/artifact", headers=ADMIN).json()
+    assert body["content"] == "# 기존 기획서\n외부 도구가 남긴 문서\n"
+    assert body["source"] == "repo" and body["confirmed"] is False  # 확정은 아니다
+
+    # 리포에 없는 단계는 그대로 빈 값
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/architecture/artifact",
+                 headers=ADMIN).json() == {
+        "stage": "architecture", "repo_path": "docs/agent-planning/02-아키텍처설계.md",
+        "content": "", "confirmed": False, "source": "",
+    }
+
+    # 생성 요청에도 수정 대상으로 실린다 — "새로 쓰기"가 아니라 "고치기"가 된다
+    calls = _mock_llm(monkeypatch)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+           json={"content": "성공 기준 추가"}, headers=ADMIN)
+    context = _draft_context(calls)
+    assert "=== 현재 산출물 (수정 대상: 기획서) ===" in context
+    assert "외부 도구가 남긴 문서" in context
+
+
+def test_delete_branch_never_touches_the_default_branch(monkeypatch, fresh_settings, tmp_path):
+    """세션 정리가 프로젝트 기본 브랜치를 지우면 안 된다."""
+    from app.db import SessionLocal
+    from app.models import Project as ProjectModel
+    from app.services import workspace
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, _ = _project_and_provider(c)
+    _git(repo, "checkout", "-q", "-b", "paas/plan-9-abcd1234")
+
+    with SessionLocal() as db:
+        project = db.get(ProjectModel, pid)
+        assert workspace.delete_branch(project, project.branch) is False
+        assert workspace.delete_branch(project, "") is False
+        # 작업 브랜치는 로컬에서 실제로 사라진다(원격이 없어 push는 실패 → False)
+        assert workspace.delete_branch(project, "paas/plan-9-abcd1234") is False
+
+    out = subprocess.run(["git", "branch", "--format=%(refname:short)"],
+                         cwd=repo, capture_output=True, text=True)
+    assert out.stdout.split() == ["main"]
+
+
+def test_confirm_asks_before_overwriting_an_existing_repo_document(
+    monkeypatch, fresh_settings, tmp_path
+):
+    """리포에 이미 있는 문서는 확인 없이 덮어쓰지 않는다."""
+    from app.services import workspace
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    doc = repo / "docs" / "agent-planning" / "01-기획서.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# 기존 기획서\n외부 도구가 남긴 문서\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "docs")
+
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    committed: list[str] = []
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, br, path, content, message:
+                        (committed.append(content), "deadbeef")[1])
+
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+               json={"content": "# 새 기획서\n"}, headers=ADMIN)
+    assert r.status_code == 412
+    assert "덮어쓰려면 확인이 필요합니다" in r.json()["detail"]
+    assert committed == []  # 커밋되지 않았다
+
+    # 같은 내용이면 덮어쓸 것이 없으니 묻지 않는다
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+                  json={"content": "# 기존 기획서\n외부 도구가 남긴 문서\n"},
+                  headers=ADMIN).status_code == 200
+
+    # 확인하면 진행한다
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+               json={"content": "# 새 기획서\n", "overwrite": True}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert committed[-1] == "# 새 기획서\n"
+
+    # 이 세션에서 확정한 뒤에는 고칠 때마다 묻지 않는다
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+                  json={"content": "# 또 고친 기획서\n"}, headers=ADMIN).status_code == 200
+
+
+def test_session_merge_finishes_the_branch(monkeypatch, fresh_settings, tmp_path):
+    """작업 지시까지 끝낸 세션은 작업 브랜치를 기본 브랜치로 반영하며 마무리된다."""
+    from app.services import gitea
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    # 확정 전에는 머지할 것이 없다
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).status_code == 409
+
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    monkeypatch.setattr(gitea, "repo_slug", lambda git_url: ("o", "plan-app"))
+    monkeypatch.setattr(gitea, "ensure_pull_request", lambda o, r, head, base, title, body="": {
+        "number": 11, "html_url": "https://git.example.com/o/plan-app/pulls/11", "mergeable": True,
+    })
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": True)
+
+    body = c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).json()
+    assert body["action"] == "merged"
+    assert body["pull_request_url"] == "https://git.example.com/o/plan-app/pulls/11"
+    assert body["branch"] == c.get(f"/paas/api/v1/plan/sessions/{sid}",
+                                   headers=ADMIN).json()["branch"]
+
+    events = c.get(f"/paas/api/v1/plan/sessions/{sid}/build-status", headers=ADMIN).json()["events"]
+    assert any(e["action"] == "plan.session.merge" for e in events)
 
 
 def test_every_stage_carries_default_request_prompt():
@@ -484,7 +626,7 @@ def test_stage_prompt_includes_previous_stage_documents(monkeypatch, fresh_setti
     pid, prov = _project_and_provider(c)
     sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
                  headers=ADMIN).json()["id"]
-    branch = f"paas/plan-{sid}"
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
 
     _mock_llm(monkeypatch)
     monkeypatch.setattr(workspace, "write_and_commit",
@@ -592,7 +734,8 @@ def _confirm_spec(c, monkeypatch, sid: int, repo, body: str = "# 기획서 확�
     r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
                json={"content": body}, headers=ADMIN)
     assert r.status_code == 200, r.text
-    _git(repo, "checkout", "-q", "-b", f"paas/plan-{sid}")
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
+    _git(repo, "checkout", "-q", "-b", branch)
     doc = repo / "docs" / "agent-planning" / "01-기획서.md"
     doc.parent.mkdir(parents=True, exist_ok=True)
     doc.write_text(body, encoding="utf-8")

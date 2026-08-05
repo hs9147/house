@@ -168,7 +168,7 @@ class ReviewRequest(BaseModel):
 class PlanSessionCreate(BaseModel):
     project_id: int
     provider_id: int
-    branch: str | None = None  # 기본: paas/plan-{session_id}
+    branch: str | None = None  # 기본: paas/plan-{session_id}-{hex}
 
 
 class PlanMessageIn(BaseModel):
@@ -187,16 +187,29 @@ class PlanMessageReply(BaseModel):
 
 
 class PlanArtifactContentOut(BaseModel):
-    """확정된 단계 산출물 본문 — 세션 재개 시 편집기를 채운다."""
+    """단계 산출물 본문 — 세션 재개·단계 이동 시 편집기를 채운다."""
 
     stage: str
     repo_path: str
     content: str
     confirmed: bool = False
+    # session = 이 세션에서 확정한 산출물 · repo = 리포에 이미 있던 문서 · "" = 없음
+    source: str = ""
 
 
 class PlanConfirmIn(BaseModel):
     content: str  # 확정할 단계 산출물 본문(마크다운) — Gitea 리포에 커밋된다
+    # 리포에 이미 다른 내용의 같은 문서가 있을 때만 필요 — 확인 없이 덮어쓰지 않는다.
+    overwrite: bool = False
+
+
+class PlanMergeOut(BaseModel):
+    """세션 마무리 — 작업 브랜치를 기본 브랜치로 반영한 결과."""
+
+    branch: str
+    action: str  # merged | pr_opened | committed | skipped
+    detail: str | None = None
+    pull_request_url: str | None = None
 
 
 class PlanArtifactOut(BaseModel):

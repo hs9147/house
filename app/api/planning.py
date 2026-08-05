@@ -7,6 +7,7 @@ DB(PlanArtifact)에는 위치·커밋·확정 포인터만 남긴다. 빌드는 
 """
 import asyncio
 import json
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import delete as sa_delete
@@ -35,6 +36,7 @@ from ..schemas import (
     PlanArtifactOut,
     PlanChatMessageOut,
     PlanConfirmIn,
+    PlanMergeOut,
     PlanMessageIn,
     PlanMessageReply,
     PlanSessionCreate,
@@ -49,6 +51,7 @@ from ..services import llm as llm_service
 from ..services import modules as modules_service
 from ..services import planning as planning_service
 from ..services import workspace
+from ..services.build import checkout
 
 router = APIRouter(tags=["planning"])
 
@@ -107,7 +110,9 @@ def create_plan_session(
     session = ChatSession(project_id=project.id, provider_id=provider.id, branch="")
     db.add(session)
     db.commit()
-    session.branch = body.branch or f"paas/plan-{session.id}"
+    # 세션마다 고유한 작업 브랜치를 만든다. id만 쓰면 세션을 지우고 다시 열었을 때
+    # 원격에 남은 동명 브랜치와 얽히므로 hex 접미사로 갈라 둔다.
+    session.branch = body.branch or f"paas/plan-{session.id}-{secrets.token_hex(4)}"
     db.commit()
     audit.record(db, key.name, "plan.session.create", project.name,
                  {"provider": provider.name, "branch": session.branch})
@@ -170,22 +175,31 @@ def delete_plan_session(
     db: Session = Depends(get_db),
     key: ApiKey = Depends(require_api_key),
 ):
-    """기획 세션과 그 대화·산출물 포인터·작업 지시를 지운다.
+    """기획 세션과 그 대화·산출물 포인터·작업 지시, 그리고 작업 브랜치를 지운다.
 
-    이미 커밋된 산출물 문서와 감사 로그는 건드리지 않는다 — 리포에 남은 기록은
-    세션과 별개이고, 세션을 지웠다고 사라져서는 안 된다.
+    기본 브랜치로 머지된 산출물 문서와 감사 로그는 건드리지 않는다 — 리포에 남은
+    기록은 세션과 별개이고, 세션을 지웠다고 사라져서는 안 된다. 브랜치 삭제는 베스트
+    에포트라 실패해도 세션 삭제는 성공 처리한다.
     """
     session = db.get(ChatSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
     project = db.get(Project, session.project_id)
+    branch = session.branch
     for model in (ChatMessage, PlanArtifact, BuildTask):
         db.execute(sa_delete(model).where(model.session_id == session_id))
     db.delete(session)
     db.commit()
+
+    branch_deleted = False
+    if project is not None:
+        try:
+            branch_deleted = workspace.delete_branch(project, branch)
+        except Exception:  # noqa: BLE001 — 브랜치 정리 실패가 세션 삭제를 되돌리지 않는다
+            branch_deleted = False
     audit.record(db, key.name, "plan.session.delete",
                  project.name if project else str(session.project_id),
-                 {"session_id": session_id, "branch": session.branch})
+                 {"session_id": session_id, "branch": branch, "branch_deleted": branch_deleted})
 
 
 @router.get("/plan/sessions/{session_id}", response_model=PlanSessionOut)
@@ -262,10 +276,8 @@ async def post_plan_message(
             )
 
     # 지금 편집 중인 산출물 — 있으면 새로 쓰지 않고 이것을 고치게 한다(수정 요청 문맥).
-    # 편집기가 비어 있으면 이 단계의 확정본을 대신 싣는다.
-    current = body.draft.strip()
-    if not current and _is_confirmed(db, session_id, plan_stage):
-        current = _artifact_content(db, project, session, plan_stage) or ""
+    # 편집기가 비어 있으면 확정본이나 리포에 이미 있는 이 단계 문서를 대신 싣는다.
+    current = body.draft.strip() or (_artifact_content(db, project, session, plan_stage) or "")
     if current:
         context_parts.append(
             f"=== 현재 산출물 (수정 대상: {planning_service.stage_title(plan_stage)}) ===\n{current}"
@@ -356,6 +368,19 @@ async def confirm_plan_stage(
             detail=f"앞 단계('{planning_service.stage_title(prev)}')를 먼저 확정하세요.",
         )
 
+    # 리포에 이미 다른 내용의 같은 문서가 있으면(다른 세션·외부 도구가 남긴 것) 확인 없이
+    # 덮어쓰지 않는다. 이 세션에서 이미 확정한 문서를 고치는 것은 정상 경로라 묻지 않는다.
+    if not body.overwrite and not _is_confirmed(db, session_id, plan_stage):
+        existing = _artifact_content(db, project, session, plan_stage)
+        if existing and existing.strip() != body.content.strip():
+            raise HTTPException(
+                status_code=412,
+                detail=(
+                    f"리포에 이미 '{planning_service.stage_repo_path(plan_stage)}' 문서가 있습니다. "
+                    "덮어쓰려면 확인이 필요합니다."
+                ),
+            )
+
     repo_path = planning_service.stage_repo_path(plan_stage)
     message = f"plan({plan_stage.value}): {planning_service.stage_title(plan_stage)} 확정 (session #{session_id})"
     try:
@@ -396,24 +421,62 @@ async def confirm_plan_stage(
     )
 
 
+@router.post("/plan/sessions/{session_id}/merge", response_model=PlanMergeOut)
+async def merge_plan_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """세션 마무리 — 작업 브랜치를 기본 브랜치로 반영한다.
+
+    단계별 확정도 매번 PR·머지를 시도하지만(auto_pull_request), 충돌 등으로 열린 채
+    남은 PR이 있을 수 있다. 작업 지시까지 끝낸 뒤 여기서 한 번 더 마무리한다.
+    """
+    session = db.get(ChatSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    project = db.get(Project, session.project_id)
+    confirmed = [s for s in planning_service.STAGE_ORDER if _is_confirmed(db, session_id, s)]
+    if not confirmed:
+        raise HTTPException(status_code=409, detail="확정된 산출물이 없습니다.")
+
+    result = await asyncio.to_thread(
+        planning_service.auto_pull_request, project, session.branch,
+        f"plan: 기획 산출물 반영 (session #{session_id})",
+        "에이전트 기획 세션 마무리 — 확정 산출물과 작업 지시를 기본 브랜치로 반영합니다.",
+    )
+    audit.record(db, key.name, "plan.session.merge", project.name,
+                 {"session_id": session_id, "branch": session.branch, "action": result["action"]})
+    return PlanMergeOut(
+        branch=session.branch,
+        action=result["action"],
+        detail=result.get("detail"),
+        pull_request_url=result.get("url"),
+    )
+
+
 def _artifact_content(db: Session, project: Project, session: ChatSession,
                       stage: PlanStage) -> str | None:
-    """세션 브랜치에 커밋된 단계 산출물 본문(없으면 기본 브랜치·워킹카피 순으로 확인)."""
+    """단계 산출물 본문 — 세션 확정본이 없으면 리포의 표준 경로 문서를 그대로 쓴다.
+
+    이 세션에서 확정한 적이 없어도 리포에 docs/agent-planning/*.md가 이미 있으면
+    (다른 세션·외부 개발도구가 남긴 문서) 그것이 이 단계의 현재 산출물이다.
+    세션 브랜치 → 기본 브랜치 → 워킹카피 순으로 찾는다.
+    """
+    workdir = workspace.workdir_for(project)
+    if not workdir.exists():
+        return None
     artifact = db.execute(
         select(PlanArtifact).where(
             PlanArtifact.session_id == session.id, PlanArtifact.stage == stage
         )
     ).scalar_one_or_none()
-    if artifact is None:
-        return None
-    workdir = workspace.workdir_for(project)
-    if not workdir.exists():
-        return None
+    path = artifact.repo_path if artifact else planning_service.stage_repo_path(stage)
     for ref in (session.branch, project.branch):
-        content = workspace.read_file_at_ref(workdir, ref, artifact.repo_path)
+        content = workspace.read_file_at_ref(workdir, ref, path)
         if content:
             return content
-    return workspace.read_context_files(workdir, [artifact.repo_path]).get(artifact.repo_path)
+    return workspace.read_context_files(workdir, [path]).get(path)
 
 
 @router.get("/plan/sessions/{session_id}/stages/{stage}/artifact",
@@ -424,22 +487,38 @@ def get_plan_artifact_content(
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_api_key),
 ):
-    """단계 산출물 본문 — 세션을 재개하면 편집기를 이 내용으로 채운다."""
+    """단계 산출물 본문 — 세션을 재개하거나 단계를 열면 편집기를 이 내용으로 채운다.
+
+    리포를 먼저 최신화한다. 아직 한 번도 체크아웃하지 않은 프로젝트라도 리포에 이미
+    있는 기획 문서를 보여줄 수 있어야 하기 때문이다(실패해도 있는 것으로 진행).
+    """
     session = db.get(ChatSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
     plan_stage = _parse_stage(stage)
     project = db.get(Project, session.project_id)
+    try:
+        checkout(project)
+    except Exception:  # noqa: BLE001 — 원격이 없어도 워킹카피가 있으면 읽는다
+        pass
     artifact = db.execute(
         select(PlanArtifact).where(
             PlanArtifact.session_id == session_id, PlanArtifact.stage == plan_stage
         )
     ).scalar_one_or_none()
+    content = _artifact_content(db, project, session, plan_stage) or ""
+    if artifact is not None and artifact.confirmed:
+        source = "session"  # 이 세션에서 확정한 산출물
+    elif content:
+        source = "repo"  # 리포에 이미 있던 문서
+    else:
+        source = ""
     return PlanArtifactContentOut(
         stage=plan_stage.value,
         repo_path=artifact.repo_path if artifact else planning_service.stage_repo_path(plan_stage),
-        content=_artifact_content(db, project, session, plan_stage) or "",
+        content=content,
         confirmed=bool(artifact and artifact.confirmed),
+        source=source,
     )
 
 
