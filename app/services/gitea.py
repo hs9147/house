@@ -20,6 +20,10 @@ class GiteaNotConfigured(GiteaError):
     """PAAS_GITEA_URL/PAAS_GITEA_API_TOKEN 미설정 — 503으로 매핑."""
 
 
+class GiteaNothingToMerge(GiteaError):
+    """머지할 커밋이 없어 PR을 만들 수 없음 — 실패가 아니라 '이미 반영됨'이다."""
+
+
 def _base_and_headers() -> tuple[str, dict[str, str]]:
     settings = get_settings()
     if not settings.gitea_url:
@@ -122,10 +126,14 @@ def ensure_pull_request(
     )
     if res.status_code == 201:
         return res.json()
-    if res.status_code == 409:  # 동일 head→base PR이 이미 열려 있음
+    if res.status_code == 409:
+        # 409는 두 가지다: 같은 head→base PR이 이미 열려 있거나, 두 브랜치 사이에
+        # 커밋이 없거나. 열린 PR이 없으면 남는 해석은 후자다 — 이미 반영된 상태다.
         existing = _find_open_pull(api, headers, owner, repo, head, base)
         if existing is not None:
             return existing
+        raise GiteaNothingToMerge(
+            f"'{head}'에 기본 브랜치로 반영할 커밋이 없습니다: {res.text[:200]}")
     raise GiteaError(f"Gitea PR 생성 실패 (HTTP {res.status_code}): {res.text[:300]}")
 
 

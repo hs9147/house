@@ -8,25 +8,6 @@ from app.services import llm, workspace
 from app.services.build import BuildError
 
 
-def test_extract_diff_from_fence():
-    reply = (
-        "설명입니다.\n```diff\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n```\n끝."
-    )
-    diff = llm.extract_diff(reply)
-    assert diff.startswith("--- a/x.py")
-    assert "+b" in diff
-
-
-def test_extract_diff_absent():
-    assert llm.extract_diff("코드 변경이 필요 없습니다.") is None
-    assert llm.extract_diff("```diff\n\n```") is None
-
-
-def test_extract_diff_unfenced():
-    reply = "diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n-1\n+2\n"
-    assert llm.extract_diff(reply).startswith("diff --git")
-
-
 def test_resolve_internal_project_url():
     """db 없이 호출하면(조직 조회 불가) 서브패스 조직 자리가 "_"로 안전하게 떨어진다."""
     assert llm.resolve_base_url("project://llm-main") == "http://apps.test/apps/_/llm-main/"
@@ -91,73 +72,58 @@ DIFF = """--- a/hello.py
 """
 
 
-def test_apply_diff_commits(tmp_path):
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    sha = workspace.apply_diff(repo, DIFF, "chat: greeting")
-    assert len(sha) == 40
-    assert (repo / "hello.py").read_text() == 'print("hello, paas")\n'
-    log = subprocess.run(["git", "log", "--oneline"], cwd=repo,
-                         capture_output=True, text=True).stdout
-    assert "chat: greeting" in log
-    assert not (repo / ".paas-proposed.patch").exists()
+def _remote_project(tmp_path, monkeypatch, fresh_settings):
+    """실제 원격(bare 리포)과 프로젝트 한 개 — 연속 커밋의 push까지 진짜로 검증한다."""
+    from app.config import get_settings
+    from app.models import Project, ProjectType
+
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    seed = tmp_path / "seed"
+    _init_repo(seed)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=seed, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "main"], cwd=seed, check=True)
+
+    monkeypatch.setenv("PAAS_WORK_DIR", str(tmp_path / "workspaces"))
+    get_settings.cache_clear()
+    return Project(name="plan-app", type=ProjectType.python, git_url=str(origin), branch="main")
 
 
-def test_apply_bad_diff_raises(tmp_path):
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    bad = DIFF.replace('-print("hello")', '-print("nope")')
-    with pytest.raises(Exception):
-        workspace.apply_diff(repo, bad, "x")
-    # 거부된 패치가 파일을 건드리면 안 된다
-    assert (repo / "hello.py").read_text() == 'print("hello")\n'
+def _committed_at(origin: Path, ref: str, rel: str) -> str:
+    out = subprocess.run(["git", "show", f"{ref}:{rel}"], cwd=origin,
+                         capture_output=True, text=True, check=True)
+    return out.stdout
 
 
-def _long_file(repo: Path) -> str:
-    body = "\n".join(f"line{i}" for i in range(1, 21)) + "\n"
-    (repo / "app.py").write_text(body)
-    return body
+def test_consecutive_commits_keep_the_branch_history(tmp_path, monkeypatch, fresh_settings):
+    """회귀: 매번 기준 브랜치에서 새로 뻗으면 두 번째 push가 non-fast-forward로 거절된다."""
+    project = _remote_project(tmp_path, monkeypatch, fresh_settings)
+    branch = "paas/plan-1-abcd1234"
+
+    first = workspace.write_and_commit(
+        project, branch, "docs/agent-planning/01-기획서.md", "# 기획서\n", "plan(spec)")
+    second = workspace.write_and_commit(
+        project, branch, "docs/agent-planning/02-아키텍처설계.md", "# 설계\n", "plan(architecture)")
+    assert first != second
+
+    origin = tmp_path / "origin.git"
+    # 앞 단계 산출물이 살아 있고, 뒤 단계가 그 위에 쌓였다
+    assert _committed_at(origin, branch, "docs/agent-planning/01-기획서.md") == "# 기획서\n"
+    assert _committed_at(origin, branch, "docs/agent-planning/02-아키텍처설계.md") == "# 설계\n"
+    log = subprocess.run(["git", "log", "--format=%s", branch], cwd=origin,
+                         capture_output=True, text=True, check=True)
+    assert log.stdout.split("\n")[:2] == ["plan(architecture)", "plan(spec)"]
 
 
-def test_fallback_keeps_lines_outside_the_hunk(tmp_path):
-    """폴백은 hunk 구간만 바꾼다 — 파일 나머지를 hunk 내용으로 덮어쓰면 안 된다."""
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _long_file(repo)
+def test_reconfirming_identical_content_is_not_an_error(tmp_path, monkeypatch, fresh_settings):
+    """같은 내용을 다시 확정하면 '바뀐 게 없다'는 실패가 아니라 현재 커밋 그대로다."""
+    project = _remote_project(tmp_path, monkeypatch, fresh_settings)
+    branch = "paas/plan-2-beef0001"
+    path = "docs/agent-planning/01-기획서.md"
 
-    # @@ 줄번호가 완전히 틀린 패치(LLM이 흔히 내는 오류) — 내용으로 위치를 찾아 붙어야 한다
-    workspace._apply_patch_fallback(repo, (
-        "--- a/app.py\n+++ b/app.py\n@@ -999,3 +999,3 @@\n"
-        " line9\n-line10\n+line10_FIXED\n line11\n"
-    ))
-
-    after = (repo / "app.py").read_text().splitlines()
-    assert len(after) == 20
-    assert after[9] == "line10_FIXED"
-    assert after[0] == "line1" and after[-1] == "line20"
-
-
-def test_fallback_refuses_when_context_does_not_match(tmp_path):
-    """문맥이 원본과 다르면 추측하지 않는다 — 승인한 diff와 다른 내용이 커밋되면 안 된다."""
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    before = _long_file(repo)
-
-    with pytest.raises(BuildError):
-        workspace._apply_patch_fallback(repo, (
-            "--- a/app.py\n+++ b/app.py\n@@ -9,3 +9,3 @@\n"
-            " line9\n-lineTEN_WRONG\n line11\n"
-        ))
-    assert (repo / "app.py").read_text() == before
-
-
-def test_fallback_creates_new_file(tmp_path):
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    workspace._apply_patch_fallback(repo, (
-        "--- /dev/null\n+++ b/pkg/new.py\n@@ -0,0 +1,2 @@\n+a = 1\n+b = 2\n"
-    ))
-    assert (repo / "pkg" / "new.py").read_text() == "a = 1\nb = 2\n"
+    sha = workspace.write_and_commit(project, branch, path, "# 기획서\n", "plan(spec)")
+    again = workspace.write_and_commit(project, branch, path, "# 기획서\n", "plan(spec) 재확정")
+    assert again == sha  # 새 커밋을 만들지 않는다
 
 
 def test_context_files_guardrails(tmp_path):
@@ -195,3 +161,61 @@ def test_read_file_rejects_oversized_file(tmp_path):
     (repo / "huge.py").write_text("x" * (workspace.MAX_VIEW_FILE_BYTES + 1))
     with pytest.raises(ValueError):
         workspace.read_file(repo, "huge.py")
+
+
+def test_korean_paths_survive_a_non_utf8_locale(tmp_path, monkeypatch, fresh_settings):
+    """회귀: POSIX/C 로케일에서 한글 산출물 경로·문서가 깨져 요청이 통째로 실패했다.
+
+    git 출력 디코딩은 로케일이 아니라 UTF-8로 고정해야 하고, 파일시스템 인코딩으로
+    표현할 수 없는 경로는 원인을 알려주며 멈춰야 한다. 인코딩은 인터프리터 기동 시
+    결정되므로 자식 프로세스를 띄워 검증한다.
+    """
+    import json as _json
+    import os
+    import sys
+
+    project = _remote_project(tmp_path, monkeypatch, fresh_settings)
+    script = tmp_path / "run.py"
+    script.write_text(
+        "import json, sys\n"
+        f"sys.path.insert(0, {str(Path.cwd())!r})\n"
+        "from app.models import Project, ProjectType\n"
+        "from app.services import workspace\n"
+        f"p = Project(name='plan-app', type=ProjectType.python, git_url={project.git_url!r},"
+        " branch='main')\n"
+        "out = {'fs': sys.getfilesystemencoding()}\n"
+        "try:\n"
+        "    sha = workspace.write_and_commit(\n"
+        "        p, 'paas/plan-1-abcd1234', 'docs/agent-planning/01-기획서.md',\n"
+        "        '# 기획서\\n한글 본문\\n', 'plan(spec): 기획서 확정')\n"
+        "    out['committed'] = bool(sha)\n"
+        "    body = workspace.read_file_at_ref(\n"
+        "        workspace.workdir_for(p), 'paas/plan-1-abcd1234',\n"
+        "        'docs/agent-planning/01-기획서.md')\n"
+        "    out['read'] = body\n"
+        "except Exception as e:\n"
+        "    out['error'] = f'{type(e).__name__}: {e}'\n"
+        "print(json.dumps(out, ensure_ascii=True))\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "1",
+        "PAAS_WORK_DIR": str(tmp_path / "workspaces"),
+        "PYTHONIOENCODING": "utf-8",
+    }
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True,
+                          text=True, encoding="utf-8", env=env)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    result = _json.loads(proc.stdout.strip().splitlines()[-1])
+    assert "error" not in result, result["error"]
+    assert result["committed"] is True
+    assert result["read"] == "# 기획서\n한글 본문\n"  # 로케일과 무관하게 UTF-8로 읽는다
+
+    # UTF-8 모드마저 꺼져 파일시스템 인코딩이 ascii면, 무엇을 고쳐야 하는지 알려주며 멈춘다
+    ascii_env = {**env, "PYTHONUTF8": "0", "PAAS_WORK_DIR": str(tmp_path / "ws-ascii")}
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True,
+                          text=True, encoding="utf-8", env=ascii_env)
+    result = _json.loads(proc.stdout.strip().splitlines()[-1])
+    if result["fs"] == "utf-8":
+        return  # 이 플랫폼은 로케일과 무관하게 utf-8(Windows 등) — 검증할 실패 경로가 없다
+    assert "PYTHONUTF8=1" in result["error"], result

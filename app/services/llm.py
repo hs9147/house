@@ -17,8 +17,8 @@ from ..config import get_settings
 from ..models import ApiKey, BuildProfile, LlmProvider, LlmProviderKind, Project
 from ..security import decrypt_value
 
-# 플랫폼이 정한 기획·구현 원칙. 문서 하나가 원천이고, 기획(에이전트 기획)과 구현(에이전트
-# 빌더) 양쪽 시스템 프롬프트에 그대로 주입된다.
+# 플랫폼이 정한 기획·구현 원칙. 문서 하나가 원천이고, 에이전트 기획의 시스템 프롬프트에
+# 주입되는 동시에 외부 빌더가 받아 가는 구현 규범이기도 하다.
 AGENT_PRINCIPLES_PATH = (
     Path(__file__).resolve().parent.parent.parent / "docs" / "agent-planning" / "AGENT.md"
 )
@@ -34,12 +34,6 @@ def agent_principles_prompt() -> str:
         return ""
     return "=== 기획·구현 원칙 (플랫폼 표준 — 반드시 준수) ===\n" + text
 
-
-EDIT_SYSTEM_PROMPT = """You are a coding assistant working inside an internal PaaS.
-When the user asks for a code change, reply with a short explanation followed by
-ONE unified diff enclosed in a ```diff fenced block. The diff must apply cleanly
-with `git apply` from the repository root (use a/ and b/ path prefixes).
-If no code change is needed, reply without a diff block."""
 
 REVIEW_SYSTEM_PROMPT = """You are a strict code reviewer. Review the given unified diff.
 Reply in Korean as a JSON array of findings:
@@ -172,7 +166,10 @@ def chat_completion(
                 "role": "tool", "tool_call_id": tc.get("id", ""), "content": result,
             })
         return chat_completion(provider, next_messages, db, tools, tool_executor, _round + 1)
-    return message["content"]
+    # content가 null인 응답(길이 초과·거절·도구 호출만 있는 경우)이 있다. 호출부가
+    # 문자열을 전제로 후처리하므로 여기서 빈 문자열로 떨어뜨린다 — None이 새 나가면
+    # 엉뚱한 자리에서 AttributeError로 터진다.
+    return message.get("content") or ""
 
 
 def _post_chat(url: str, headers: dict, payload: dict) -> dict:
@@ -180,22 +177,6 @@ def _post_chat(url: str, headers: dict, payload: dict) -> dict:
     res = httpx.post(url, headers=headers, json=payload, timeout=120)
     res.raise_for_status()
     return res.json()
-
-
-_DIFF_FENCE = re.compile(r"```(?:diff|patch)\n(.*?)```", re.DOTALL)
-
-
-def extract_diff(text: str) -> str | None:
-    """응답에서 unified diff를 추출한다. 펜스 우선, 없으면 원문에서 diff 헤더 탐색."""
-    m = _DIFF_FENCE.search(text)
-    if m:
-        diff = m.group(1)
-        return diff if diff.strip() else None
-    lines = text.splitlines(keepends=True)
-    for i, line in enumerate(lines):
-        if line.startswith(("diff --git ", "--- a/", "--- /dev/null")):
-            return "".join(lines[i:])
-    return None
 
 
 def review_diff(provider: LlmProvider, diff: str, db: Session | None = None) -> list[dict]:

@@ -4,11 +4,12 @@ import type {
   ApiSearchResult,
   AuditRow,
   BuildProfile,
+  BuildTaskOut,
+  BuildTaskSync,
   CodeMapOut,
+  ComplianceOut,
   GiteaSyncResult,
   HealthInfo,
-  ChatReply,
-  ChatSessionOut,
   DeploymentOut,
   EnvVarRow,
   LlmProviderOut,
@@ -16,10 +17,14 @@ import type {
   ModuleOut,
   ModuleSummary,
   OrgOut,
+  PlanArtifactContent,
   PlanArtifactOut,
   PlanBuildStatus,
+  PlanChatMessage,
+  PlanMergeOut,
   PlanMessageReply,
   PlanSessionOut,
+  PlanSessionSummary,
   PreviewOut,
   ProjectCreate,
   ProjectFileContentOut,
@@ -332,15 +337,6 @@ export const api = {
     name: string; kind: string; base_url: string; api_key?: string; model: string;
     organization_id?: number | null;
   }) => request<LlmProviderOut>('POST', '/llm/providers', body),
-  createChatSession: (project_id: number, provider_id: number, branch?: string) =>
-    request<ChatSessionOut>('POST', '/chat/sessions', {
-      project_id, provider_id, branch: branch || null,
-    }),
-  sendChatMessage: (sessionId: number, content: string, files: string[]) =>
-    request<ChatReply>('POST', `/chat/sessions/${sessionId}/messages`, { content, files }),
-  applyChange: (id: number) =>
-    request<{ applied_sha: string; branch: string }>('POST', `/changes/${id}/apply`),
-  rejectChange: (id: number) => request<void>('POST', `/changes/${id}/reject`),
   review: (projectId: number, provider_id: number, diff?: string, base_ref?: string) =>
     request<ReviewResult>('POST', `/projects/${projectId}/review`, {
       provider_id, diff: diff || null, base_ref: base_ref || null,
@@ -353,16 +349,45 @@ export const api = {
     }),
   getPlanSession: (sessionId: number) =>
     request<PlanSessionOut>('GET', `/plan/sessions/${sessionId}`),
-  sendPlanMessage: (sessionId: number, stage: string, content: string, files: string[]) =>
+  // 세션 이력 — 목록·대화 복원(재개)·삭제
+  listPlanSessions: () => request<PlanSessionSummary[]>('GET', '/plan/sessions'),
+  planSessionMessages: (sessionId: number) =>
+    request<PlanChatMessage[]>('GET', `/plan/sessions/${sessionId}/messages`),
+  deletePlanSession: (sessionId: number) =>
+    request<void>('DELETE', `/plan/sessions/${sessionId}`),
+  // 참조 파일은 서버가 요청 문장을 보고 고른다 — 경로를 사람이 적지 않는다.
+  // compact=true는 컨텍스트 한도 초과(413) 후 재시도할 때만.
+  sendPlanMessage: (sessionId: number, stage: string, content: string, draft: string,
+                    compact = false) =>
     request<PlanMessageReply>('POST', `/plan/sessions/${sessionId}/stages/${stage}/messages`,
-      { content, files }),
-  confirmPlanStage: (sessionId: number, stage: string, content: string) =>
+      { content, draft, compact }),
+  // 단계 산출물 본문 — 세션 재개·단계 이동 시 편집기를 채운다
+  planArtifactContent: (sessionId: number, stage: string) =>
+    request<PlanArtifactContent>('GET', `/plan/sessions/${sessionId}/stages/${stage}/artifact`),
+  // overwrite=true는 리포에 이미 있는 문서를 덮어쓸 때만(412 확인 후 재시도)
+  confirmPlanStage: (sessionId: number, stage: string, content: string, overwrite = false) =>
     request<PlanArtifactOut>('POST', `/plan/sessions/${sessionId}/stages/${stage}/confirm`,
-      { content }),
+      { content, overwrite }),
+  // 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영
+  mergePlanSession: (sessionId: number) =>
+    request<PlanMergeOut>('POST', `/plan/sessions/${sessionId}/merge`),
   planBuildStatus: (sessionId: number) =>
     request<PlanBuildStatus>('GET', `/plan/sessions/${sessionId}/build-status`),
   planConstraints: (projectId: number) =>
     request<{ document: string }>('GET', `/plan/projects/${projectId}/constraints`),
+  // 외주 빌드 작업 지시(work order)
+  generatePlanTasks: (sessionId: number) =>
+    request<BuildTaskOut[]>('POST', `/plan/sessions/${sessionId}/tasks/generate`),
+  listPlanTasks: (sessionId: number) =>
+    request<BuildTaskOut[]>('GET', `/plan/sessions/${sessionId}/tasks`),
+  // 진행 현황을 기본 브랜치(main) 기준으로 갱신 — 보고가 아니라 반영된 커밋이 기준이다
+  syncPlanTasks: (sessionId: number) =>
+    request<BuildTaskSync>('POST', `/plan/sessions/${sessionId}/tasks/sync`),
+  updatePlanTask: (taskId: number, body: { status?: string; note?: string }) =>
+    request<BuildTaskOut>('PATCH', `/plan/tasks/${taskId}`, body),
+  // 외주 결과의 LLM·모듈 사용 검증
+  planCompliance: (projectId: number) =>
+    request<ComplianceOut>('GET', `/plan/projects/${projectId}/compliance`),
 
   // 서버구성 (런타임/프록시 백엔드 시각화 + redirect/rewrite 규칙)
   serverConfig: () => request<ServerConfigOut>('GET', '/server-config'),

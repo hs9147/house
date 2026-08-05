@@ -20,6 +20,10 @@ from ..config import get_settings
 from ..models import BuildProfile, Project, ProjectType
 from .git_auth import auth_args
 
+# git 출력은 로케일이 아니라 UTF-8로 읽는다 — 한글 경로·문서가 섞이면
+# 로케일 인코딩(POSIX/cp949)에서 디코딩이 깨져 요청 전체가 실패한다.
+_TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent.parent / "templates" / "dockerfiles"
 START_SCRIPT_NAME = "start.cmd"
 
@@ -288,7 +292,7 @@ def checkout(project: Project, git_sha: str | None = None) -> tuple[Path, str]:
         _run_git(["checkout", git_sha], cwd=workdir)
     try:
         out = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, text=True, check=True
+            ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, **_TEXT, check=True
         )
     except FileNotFoundError as e:
         raise BuildError(f"[WinError 2] git 실행 파일을 찾을 수 없습니다: {e}") from e
@@ -298,7 +302,7 @@ def checkout(project: Project, git_sha: str | None = None) -> tuple[Path, str]:
 def _run_git(args: list[str], cwd: Path | None = None, git_url: str | None = None) -> None:
     auth = auth_args(git_url) if git_url else []
     try:
-        proc = subprocess.run(["git", *auth, *args], cwd=cwd, capture_output=True, text=True)
+        proc = subprocess.run(["git", *auth, *args], cwd=cwd, capture_output=True, **_TEXT)
     except FileNotFoundError as e:
         raise BuildError(f"[WinError 2] git 실행 파일을 찾을 수 없습니다: {e}") from e
     if proc.returncode != 0:

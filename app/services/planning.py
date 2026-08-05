@@ -1,19 +1,23 @@
 """에이전트 기획(Agent Planning) — 단계 정의·스테이지 프롬프트·가용 모듈 제약 문서.
 
-에이전트 빌더가 곧바로 코드 diff를 만들던 것과 달리, 기획은 코딩 전 4단계를 순차
+에이전트 빌더가 곧바로 코드 diff를 만들던 것과 달리, 기획은 코딩 전 5단계를 순차
 수행하며 각 단계에서 **문서 산출물**을 만든다. 산출물 본문은 프로젝트 Gitea 리포에
 커밋되고(services/workspace.write_and_commit), DB(PlanArtifact)에는 포인터만 남는다.
 
-설계 근거: docs/agent-planning/ (기획서·아키텍처·솔루션 구성·개발원칙).
+설계 근거: docs/agent-planning/ (기획서·아키텍처·솔루션 구성·개발원칙·작업 지시).
 """
 import json
+from typing import Callable
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import LlmProvider, PlanStage, Project
+from .. import audit
+from ..models import LlmProvider, Module, ModuleBinding, PlanStage, Project
 from . import a2a as a2a_service
 from . import gitea as gitea_service
 from . import llm as llm_service
+from . import mcp_client
 from . import modules as modules_service
 
 # 산출물이 커밋되는 리포 내 표준 경로(개발도구가 clone/open으로 그대로 열람).
@@ -21,7 +25,7 @@ ARTIFACT_DIR = "docs/agent-planning"
 
 # 단계별 메타: 순서·제목·리포 파일명·문서 작성 지시(스테이지 프롬프트)·기본 생성 요청.
 # "request"는 콘솔 입력창에 미리 채워지는 기본값 — 사용자가 아무것도 쓰지 않아도
-# 바로 '초안 생성'을 누를 수 있어야 한다.
+# 바로 '생성 요청'을 누를 수 있어야 한다.
 STAGES: dict[PlanStage, dict[str, str]] = {
     PlanStage.spec: {
         "title": "기획서",
@@ -72,11 +76,29 @@ STAGES: dict[PlanStage, dict[str, str]] = {
             "구현계획 및 현황관리, 스키마 및 의사결정사항, 배포 및 사용 가이드를 포함해줘."
         ),
     },
+    # 5단계는 문서를 LLM 대화로 쓰지 않는다 — 작업 지시(BuildTask)를 만들고 그것을
+    # 렌더한 문서를 확정한다. 표(진행 상태)와 문서(리포 산출물)의 원천이 하나여야
+    # 외주 빌더가 MCP로 보는 것과 clone으로 보는 것이 어긋나지 않는다.
+    PlanStage.tasks: {
+        "title": "작업 지시",
+        "filename": "05-작업지시.md",
+        "prompt": (
+            "이번 단계는 '작업 지시'다. 확정된 앞 단계 산출물을 외주 빌더가 집어갈 작업 "
+            "단위로 나눈 목록 문서를 작성하라."
+        ),
+        "request": (
+            "확정 산출물을 근거로 외주 빌드 작업 지시를 만들어줘. "
+            "작업별 구현 내용과 완료 판정 기준을 포함해줘."
+        ),
+    },
 }
 
 STAGE_ORDER: list[PlanStage] = list(STAGES.keys())
 
 # 문서 작성 지시의 공통 골격 — 코드 diff가 아니라 마크다운 문서를 만들게 한다.
+# 대화창에는 요약만, 산출물 편집기에는 문서 본문만 간다. 모델이 둘을 이 마커로 나눠 준다.
+DOCUMENT_MARKER = "---DOCUMENT---"
+
 PLANNING_SYSTEM_PROMPT = (
     "You are an Agent Planning AI for an enterprise PaaS platform.\n"
     "You do NOT write code or unified diffs. You produce a single, review-ready planning "
@@ -86,8 +108,40 @@ PLANNING_SYSTEM_PROMPT = (
     "2. Ground every claim in the injected project context (stack, modules, resources).\n"
     "3. Respect the injected '가용 모듈 제약' — never propose resources outside it, and always "
     "route resource access through the central PaaS gateway (A2A/proxy), never external direct calls.\n"
-    "4. Build on the confirmed artifacts of previous stages when provided; do not contradict them."
+    "4. Build on the confirmed artifacts of previous stages when provided; do not contradict them.\n"
+    "5. When a '현재 산출물' is given, revise THAT document instead of starting over — keep the "
+    "parts that still hold and change only what the request asks for.\n"
+    "OUTPUT FORMAT (exactly):\n"
+    "First a short Korean summary (2-4 sentences) of what this document covers and, on a "
+    "revision, what you changed and why.\n"
+    f"Then a line containing only {DOCUMENT_MARKER}\n"
+    "Then the full document body. Do not repeat the summary inside the document."
 )
+
+
+def split_reply(reply: str) -> tuple[str, str]:
+    """모델 응답을 (대화용 요약, 산출물 본문)으로 나눈다.
+
+    마커가 없으면 전체를 문서로 보고 제목 줄에서 개요를 만든다 — 형식이 어긋나도
+    산출물을 잃지 않는 쪽으로 떨어진다.
+    """
+    if DOCUMENT_MARKER in reply:
+        summary, _, document = reply.partition(DOCUMENT_MARKER)
+        summary, document = summary.strip(), document.strip()
+        if document:
+            return summary or document_outline(document), document
+    return document_outline(reply), reply.strip()
+
+
+def document_outline(document: str, limit: int = 8) -> str:
+    """문서의 제목·소제목만 뽑은 개요.
+
+    대화용 대체 요약이자, 컨텍스트 압축 시 본문을 대신해 싣는 축약본이다.
+    """
+    heads = [line.strip() for line in document.splitlines() if line.strip().startswith("#")]
+    if not heads:
+        return document.strip()[:300]
+    return "\n".join(heads[:limit])
 
 
 def stage_title(stage: PlanStage) -> str:
@@ -121,6 +175,12 @@ def prev_stages(stage: PlanStage) -> list[PlanStage]:
 MAX_TREE_FILES = 400
 AUTO_CONTEXT_FILES = 6
 
+# 컨텍스트 압축 모드 — 모델이 한도를 넘어 빈 응답을 낸 뒤 재시도할 때 쓴다.
+# 앞 단계 문서는 개요만, 파일 목록은 줄이고, 코드 개요·파일 본문은 아예 뺀다.
+COMPACT_TREE_FILES = 60
+COMPACT_OUTLINE_HEADS = 40
+COMPACT_HISTORY_MESSAGES = 4
+
 _FILE_SELECT_PROMPT = (
     "You select which repository files must be read to answer a planning request.\n"
     "You are given the repository file list and the user's request.\n"
@@ -134,16 +194,15 @@ def select_context_files(
     db: Session,
     tree: list[str],
     request: str,
-    explicit: list[str] | None = None,
     limit: int = AUTO_CONTEXT_FILES,
 ) -> list[str]:
     """이번 요청에서 '내용 확인이 필요한' 리포 파일을 고른다.
 
-    사용자가 직접 지정한 파일은 항상 포함하고, 나머지는 파일 목록과 요청을 LLM에 주어
-    고르게 한다(요청이 한국어여도 동작해야 하므로 경로 키워드 매칭이 아니라 모델이 고른다).
-    선정 실패는 조용히 무시한다 — 파일 목록(기본 참조)만으로도 대화는 성립한다.
+    사용자가 경로를 적어 주지 않아도 요청 문장만 보고 모델이 고른다(경로 키워드 매칭이
+    아니라 모델 판단이라 한국어 요청에도 동작한다). 선정 실패는 조용히 무시한다 —
+    파일 목록(기본 참조)만으로도 대화는 성립한다.
     """
-    selected = [p for p in (explicit or []) if p.strip()]
+    selected: list[str] = []
     if not tree or not request.strip() or limit <= 0:
         return selected
     messages = [
@@ -166,6 +225,185 @@ def select_context_files(
     return selected
 
 
+# 작업 지시(work order) 분해 — 확정 산출물을 외주 빌더가 집어갈 단위로 쪼갠다.
+MAX_TASKS = 12
+
+_TASK_DECOMPOSE_PROMPT = (
+    "You turn confirmed planning documents into a build work order for an EXTERNAL builder "
+    "(VSCode/Claude/Antigravity) that will implement the code outside this platform.\n"
+    "Reply with ONLY a JSON array of at most {limit} objects:\n"
+    '[{{"title": "...", "detail": "...", "verify": "..."}}]\n'
+    "- title: 한 줄 작업명\n"
+    "- detail: 무엇을 어떻게 구현할지 (근거가 된 산출물 내용에 기반)\n"
+    "- verify: 완료 판정 기준 — 실행 가능한 확인 방법(테스트·명령·확인 절차)\n"
+    "Write the values in Korean. Ground every task in the given documents. "
+    "Never propose resources outside the given constraints, and route all resource access "
+    "through the central PaaS gateway."
+)
+
+
+def decompose_tasks(
+    provider: LlmProvider,
+    db: Session,
+    documents: str,
+    constraints_doc: str,
+    limit: int = MAX_TASKS,
+) -> list[dict]:
+    """확정 산출물 + 제약에서 작업 지시 목록을 만든다. 형식이 깨지면 빈 목록."""
+    messages = [
+        {"role": "system", "content": _TASK_DECOMPOSE_PROMPT.format(limit=limit)},
+        {"role": "user", "content": f"{documents}\n\n=== 가용 모듈 제약 ===\n{constraints_doc}"},
+    ]
+    try:
+        reply = llm_service.chat_completion(provider, messages, db)
+        items = json.loads(reply[reply.index("["): reply.rindex("]") + 1])
+    except Exception:  # noqa: BLE001
+        return []
+    tasks: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        if not title:
+            continue
+        tasks.append({
+            "title": title[:255],
+            "detail": str(item.get("detail", "")).strip(),
+            "verify": str(item.get("verify", "")).strip(),
+        })
+        if len(tasks) >= limit:
+            break
+    return tasks
+
+
+# 솔루션 구성 단계 전용 도구 — 쓰기로 결정한 내부 모듈을 그 자리에서 프로젝트에 바인딩한다.
+# 문서로만 "이 모듈을 쓴다"고 적어 두면 배포 시 환경변수가 주입되지 않아 외주 빌더가
+# 받을 자원과 문서가 어긋난다. 결정과 바인딩을 같은 단계에서 끝낸다.
+BIND_TOOL = "bind_module"
+
+
+def module_bind_tools(resources: list[dict]) -> list[dict]:
+    names = [str(r.get("name", "")) for r in resources if r.get("name")]
+    if not names:
+        return []
+    return [{
+        "type": "function",
+        "function": {
+            "name": BIND_TOOL,
+            "description": (
+                "솔루션에 사용하기로 결정한 내부 모듈을 이 프로젝트에 바인딩한다. "
+                "바인딩하면 배포 시 규약된 환경변수가 자동 주입된다. "
+                "문서에 사용한다고 적은 모듈은 반드시 이 도구로 바인딩하라."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "module_name": {"type": "string", "enum": names},
+                    "env_prefix": {
+                        "type": "string",
+                        "description": "주입 환경변수 접두사(대문자·숫자·밑줄, 예: PAY → PAY_URL)",
+                    },
+                },
+                "required": ["module_name", "env_prefix"],
+            },
+        },
+    }]
+
+
+def solution_tools(db: Session, project: Project, resources: list[dict], actor: str,
+                   bound: list[str]) -> tuple[list[dict], Callable[[str, dict], str] | None]:
+    """솔루션 구성 단계의 도구 묶음 — 모듈 바인딩 + 바인딩된 MCP 서버가 광고하는 도구.
+
+    MCP 도구는 이번 턴 기준으로 **이미 바인딩된** 서버에서만 모은다. 이번 턴에 새로
+    바인딩한 MCP 모듈의 도구는 다음 턴부터 잡힌다 — 도구 목록은 LLM 호출 전에 확정되기
+    때문이며, 응답하지 않는 서버는 조용히 빠진다(services/mcp_client).
+    """
+    tools = module_bind_tools(resources)
+    bind_execute = make_bind_executor(db, project, actor, bound) if tools else None
+
+    servers = modules_service.mcp_servers_for_project(db, project)
+    mcp_tools, mcp_registry = mcp_client.build_openai_tools(servers) if servers else ([], {})
+    tools += mcp_tools
+    mcp_execute = mcp_client.make_tool_executor(mcp_registry) if mcp_tools else None
+
+    if not tools:
+        return [], None
+
+    def execute(fn_name: str, arguments: dict) -> str:
+        if fn_name == BIND_TOOL and bind_execute is not None:
+            return bind_execute(fn_name, arguments)
+        if mcp_execute is not None:
+            return mcp_execute(fn_name, arguments)
+        return f"unknown tool: {fn_name}"
+
+    return tools, execute
+
+
+def make_bind_executor(db: Session, project: Project, actor: str, bound: list[str]):
+    """도구 호출을 실제 바인딩으로 처리한다. 성공한 모듈명은 bound에 쌓인다.
+
+    실패는 예외로 올리지 않고 모델이 읽을 문장으로 돌려준다 — 도구 하나가 실패해도
+    문서 작성 자체는 이어져야 한다(services/mcp_client와 같은 규약).
+    """
+    def execute(fn_name: str, arguments: dict) -> str:
+        if fn_name != BIND_TOOL:
+            return f"unknown tool: {fn_name}"
+        name = str(arguments.get("module_name", "")).strip()
+        prefix = str(arguments.get("env_prefix", "")).strip().upper()
+        if not name or not prefix:
+            return "module_name과 env_prefix가 모두 필요합니다."
+        module = db.execute(select(Module).where(Module.name == name)).scalar_one_or_none()
+        if module is None:
+            return f"모듈을 찾을 수 없습니다: {name}"
+        allowed = {r["name"] for r in modules_service.available_resources(db, project)}
+        if name not in allowed:
+            return f"이 프로젝트에서 사용할 수 없는 모듈입니다: {name}"
+
+        existing = db.execute(
+            select(ModuleBinding).where(ModuleBinding.project_id == project.id)
+        ).scalars().all()
+        for b in existing:
+            if b.module_id == module.id:
+                return f"이미 바인딩된 모듈입니다: {name} (prefix={b.env_prefix})"
+            if b.env_prefix == prefix:
+                return f"이 프로젝트에서 이미 쓰는 접두사입니다: {prefix}"
+
+        db.add(ModuleBinding(project_id=project.id, module_id=module.id, env_prefix=prefix))
+        db.commit()
+        audit.record(db, actor, "module.bind", project.name,
+                     {"module": name, "prefix": prefix, "via": "plan.solution"})
+        bound.append(name)
+        keys = sorted(modules_service.binding_env(module, prefix, db=db).keys())
+        return f"바인딩 완료: {name} (prefix={prefix}) — 주입될 환경변수: {', '.join(keys)}"
+
+    return execute
+
+
+def render_tasks_doc(tasks: list[dict]) -> str:
+    """작업 지시(BuildTask)를 5단계 산출물 문서로 렌더한다.
+
+    표(진행 상태)와 리포 문서의 원천을 하나로 둔다 — 외주 빌더가 MCP로 보는 목록과
+    clone해서 보는 문서가 어긋나면 어느 쪽을 믿어야 할지 알 수 없다.
+    """
+    lines = ["# 작업 지시 (외주 빌드)", ""]
+    if not tasks:
+        lines.append("(아직 작업 지시가 없습니다.)")
+        return "\n".join(lines) + "\n"
+    lines += [
+        "확정된 기획 산출물에서 나눈 외주 빌드 단위다. 상태는 플랫폼(MCP `list_tasks`)이",
+        "원천이며, 이 문서는 확정 시점의 스냅샷이다.",
+        "",
+    ]
+    for idx, task in enumerate(tasks, start=1):
+        lines.append(f"## {idx}. {task['title']}")
+        if task.get("detail"):
+            lines += ["", task["detail"]]
+        if task.get("verify"):
+            lines += ["", f"- **완료 판정**: {task['verify']}"]
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def auto_pull_request(project: Project, branch: str, title: str, body: str = "") -> dict:
     """커밋 후 git 상태에 따라 PR 생성·머지를 자동 수행하고 그 결과를 반환한다.
 
@@ -181,7 +419,11 @@ def auto_pull_request(project: Project, branch: str, title: str, body: str = "")
         return {"action": "skipped", "detail": "사내 Gitea 리포가 아니어서 PR을 만들지 않았습니다."}
     owner, repo = slug
     try:
+        # PR이 없으면 여기서 만든다(있으면 그 PR을 재사용).
         pr = gitea_service.ensure_pull_request(owner, repo, branch, project.branch, title, body)
+    except gitea_service.GiteaNothingToMerge:
+        return {"action": "committed",
+                "detail": f"기본 브랜치({project.branch})에 이미 반영되어 있습니다."}
     except gitea_service.GiteaError as e:
         return {"action": "skipped", "detail": str(e)}
 

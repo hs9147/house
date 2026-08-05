@@ -1,17 +1,21 @@
-"""워크스페이스 파일 컨텍스트 + LLM diff의 적용(승인 커밋).
+"""워크스페이스 파일 컨텍스트 + 기획 산출물 커밋.
 
-LLM은 리포에 직접 쓰지 않는다: diff는 ProposedChange로 저장되고,
-apply 승인 시에만 여기서 작업 브랜치에 git apply + commit 된다.
+플랫폼이 리포에 쓰는 경로는 하나다: 확정된 기획 산출물을 작업 브랜치에 커밋하는
+write_and_commit. 구현 코드는 외부 빌더가 직접 커밋한다(플랫폼에 diff 적용 경로 없음).
 """
 import json
-import re
 import subprocess
+import sys
 from pathlib import Path
 
 from ..config import get_settings
 from ..models import Project
 from .build import BuildError, checkout
 from .git_auth import auth_args
+
+# git 출력은 로케일이 아니라 UTF-8로 읽는다 — 한글 경로·문서가 섞이면
+# 로케일 인코딩(POSIX/cp949)에서 디코딩이 깨져 요청 전체가 실패한다.
+_TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
 
 MAX_CONTEXT_FILE_BYTES = 40_000
 CONTEXT_EXTENSIONS = {
@@ -26,22 +30,45 @@ def workdir_for(project: Project) -> Path:
 
 
 def ensure_branch(project: Project, branch: str) -> Path:
-    """기준 브랜치를 최신화한 뒤 작업 브랜치로 전환(없으면 생성)한다."""
+    """기준 브랜치를 최신화한 뒤 작업 브랜치로 전환한다.
+
+    이미 있는 작업 브랜치는 **이어서 쓴다**. 매번 `checkout -B`로 기준 브랜치 끝에
+    새로 만들면 앞서 그 브랜치에 올린 커밋이 로컬에서 사라지고, 다음 push가
+    non-fast-forward로 거절된다(연속 확정이 깨지던 원인).
+    """
     workdir, _ = checkout(project)
-    if branch != project.branch:
-        _git(workdir, "checkout", "-B", branch)
+    if branch == project.branch:
+        return workdir
+    remote = subprocess.run(
+        ["git", *auth_args(project.git_url), "fetch", "origin", branch],
+        cwd=workdir, capture_output=True, **_TEXT,
+    )
+    if remote.returncode == 0:
+        _git(workdir, "checkout", "-B", branch, "FETCH_HEAD")  # 원격 상태에 맞춰 이어간다
+    elif _branch_exists(workdir, branch):
+        _git(workdir, "checkout", branch)
+    else:
+        _git(workdir, "checkout", "-B", branch)  # 첫 커밋 — 기준 브랜치에서 뻗는다
     return workdir
+
+
+def _branch_exists(workdir: Path, branch: str) -> bool:
+    out = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=workdir, capture_output=True, **_TEXT,
+    )
+    return out.returncode == 0
 
 
 def file_tree(workdir: Path, limit: int = 200) -> list[str]:
     out = subprocess.run(
-        ["git", "ls-files"], cwd=workdir, capture_output=True, text=True
+        ["git", "ls-files"], cwd=workdir, capture_output=True, **_TEXT
     )
     return out.stdout.splitlines()[:limit]
 
 
 def read_context_files(workdir: Path, paths: list[str]) -> dict[str, str]:
-    """채팅 컨텍스트로 주입할 파일 내용. 경로 탈출·바이너리·과대 파일 차단."""
+    """LLM 컨텍스트로 주입할 파일 내용. 경로 탈출·바이너리·과대 파일 차단."""
     result: dict[str, str] = {}
     root = workdir.resolve()
     for rel in paths:
@@ -63,7 +90,7 @@ def read_file_at_ref(workdir: Path, ref: str, rel: str) -> str | None:
     (다른 세션이 체크아웃해 갔더라도) 커밋된 본문을 그대로 읽는다.
     """
     out = subprocess.run(
-        ["git", "show", f"{ref}:{rel}"], cwd=workdir, capture_output=True, text=True
+        ["git", "show", f"{ref}:{rel}"], cwd=workdir, capture_output=True, **_TEXT
     )
     if out.returncode != 0:
         return None
@@ -82,123 +109,23 @@ def read_file(workdir: Path, rel: str) -> str:
     return p.read_text(encoding="utf-8", errors="replace")
 
 
-def apply_diff(workdir: Path, diff: str, message: str) -> str:
-    """diff를 적용하고 커밋한 뒤 커밋 SHA를 반환한다.
-    LLM이 생성한 패치의 Hunk count 및 CRLF/줄바꿈 오류(corrupt patch)에 유연하게 대응한다.
+def _require_fs_encodable(*values: str) -> None:
+    """프로세스의 파일시스템 인코딩으로 표현할 수 없는 문자열이면 미리 막는다.
+
+    산출물 경로·커밋 메시지에는 한글이 들어간다. POSIX/C 로케일로 뜬 프로세스는
+    파일시스템 인코딩이 ascii라 git 인자로 넘기는 순간 UnicodeEncodeError로 죽는데,
+    그 원인이 응답에 드러나지 않는다. 무엇을 고쳐야 하는지 알려주고 멈춘다.
     """
-    patch = workdir / ".paas-proposed.patch"
-    # LF 줄바꿈으로 정규화하여 패치 파일 작성
-    normalized_diff = diff.replace("\r\n", "\n")
-    if not normalized_diff.endswith("\n"):
-        normalized_diff += "\n"
-    patch.write_text(normalized_diff, encoding="utf-8")
-
-    applied = False
-    # 1차 시도: Hunk 카운트 자동 재계산 (--recount) 및 트레일링 공백 수정 (--whitespace=fix)
-    for apply_opts in [
-        ["apply", "--whitespace=fix", "--recount", "--unidiff-zero", str(patch)],
-        ["apply", "--whitespace=fix", "--recount", "--ignore-space-change", "--ignore-whitespace", str(patch)],
-        ["apply", "--whitespace=nowarn", "--recount", "--3way", str(patch)],
-    ]:
-        proc = subprocess.run(["git", *apply_opts], cwd=workdir, capture_output=True, text=True)
-        if proc.returncode == 0:
-            applied = True
-            break
-
-    # 2차 시도: git apply가 corrupt patch로 모두 실패한 경우 파이썬 diff 파서 폴백 실행
-    if not applied:
+    fs = sys.getfilesystemencoding()
+    for value in values:
         try:
-            _apply_patch_fallback(workdir, normalized_diff)
-            applied = True
-        except Exception as e:
-            patch.unlink(missing_ok=True)
-            raise BuildError(f"git apply failed: corrupt patch could not be parsed: {e}")
-
-    patch.unlink(missing_ok=True)
-    _git(workdir, "add", "-A")
-    _git(
-        workdir,
-        "-c", "user.name=paas-bot",
-        "-c", "user.email=paas-bot@localhost",
-        "commit", "-m", message,
-    )
-    out = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, text=True, check=True
-    )
-    return out.stdout.strip()
-
-
-def _locate(haystack: list[str], needle: list[str]) -> int:
-    """needle이 haystack에 나타나는 유일한 위치를 찾는다. 없거나 여러 곳이면 -1.
-
-    @@ 줄번호를 신뢰하지 않고 내용으로 찾기 때문에 헤더가 틀린 패치도 붙는다.
-    1차는 그대로, 2차는 좌우 공백을 무시하고 맞춘다.
-    """
-    for key in (lambda s: s, lambda s: s.strip()):
-        keyed_hay = [key(line) for line in haystack]
-        keyed_needle = [key(line) for line in needle]
-        hits = [
-            i for i in range(len(keyed_hay) - len(keyed_needle) + 1)
-            if keyed_hay[i:i + len(keyed_needle)] == keyed_needle
-        ]
-        if len(hits) == 1:
-            return hits[0]
-    return -1
-
-
-def _apply_patch_fallback(workdir: Path, diff_text: str) -> None:
-    """git apply가 corrupt patch로 거절할 때 쓰는 파이썬 폴백.
-
-    관대하게 봐주는 것은 **hunk 헤더(@@ 줄번호·개수)와 좌우 공백**까지다. 원본에서
-    hunk 위치를 내용으로 다시 찾아 그 구간만 바꾸고, 나머지 줄은 손대지 않는다.
-    찾지 못하거나 후보가 여러 개면 추측하지 않고 예외를 던진다 — 승인한 diff와 다른
-    내용이 커밋되면 안 된다.
-    """
-    file_chunks = re.split(r'(?=^diff --git |^--- a/|^\+\+\+ b/)', diff_text, flags=re.MULTILINE)
-    for chunk in file_chunks:
-        target_file_match = re.search(r'^\+\+\+ b/(.+)$', chunk, re.MULTILINE)
-        if not target_file_match:
-            continue
-        rel_path = target_file_match.group(1).strip()
-        target_path = workdir / rel_path
-
-        # hunk별로 (원본에 있어야 할 줄, 바뀐 뒤의 줄)을 모은다.
-        hunks: list[tuple[list[str], list[str]]] = []
-        for body in re.split(r'^@@.*$\n?', chunk, flags=re.MULTILINE)[1:]:
-            old, new = [], []
-            for line in body.splitlines():
-                if line.startswith("\\"):
-                    continue  # "\ No newline at end of file"
-                if line.startswith("+"):
-                    new.append(line[1:])
-                elif line.startswith("-"):
-                    old.append(line[1:])
-                else:
-                    # 문맥 줄. 앞의 공백이 떨어져 나간 빈 줄도 문맥으로 본다.
-                    text = line[1:] if line.startswith(" ") else line
-                    old.append(text)
-                    new.append(text)
-            if old or new:
-                hunks.append((old, new))
-
-        if not hunks:
-            continue
-
-        exists = target_path.is_file()
-        lines = target_path.read_text(encoding="utf-8").splitlines() if exists else []
-        for old, new in hunks:
-            if not old:
-                if exists:
-                    raise BuildError(f"{rel_path}: 문맥 없는 hunk는 위치를 특정할 수 없다")
-                lines = new
-                continue
-            at = _locate(lines, old)
-            if at < 0:
-                raise BuildError(f"{rel_path}: hunk 문맥이 원본과 맞지 않아 적용할 수 없다")
-            lines[at:at + len(old)] = new
-
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            value.encode(fs)
+        except UnicodeEncodeError:
+            raise BuildError(
+                f"현재 프로세스의 파일시스템 인코딩({fs})으로는 '{value[:60]}'을(를) "
+                "git에 넘길 수 없습니다. PYTHONUTF8=1 또는 UTF-8 로케일(LANG=C.UTF-8)로 "
+                "플랫폼을 실행하세요."
+            ) from None
 
 
 def write_and_commit(project: Project, branch: str, rel_path: str, content: str, message: str) -> str:
@@ -207,6 +134,7 @@ def write_and_commit(project: Project, branch: str, rel_path: str, content: str,
     에이전트 기획의 단계 산출물 확정 경로 — diff가 아니라 완성된 문서를 리포에 남긴다.
     경로 탈출을 막고, 인증(git_auth)은 push에서만 주입한다(git_url은 로그·원격 인자로만).
     """
+    _require_fs_encodable(rel_path, message)
     workdir = ensure_branch(project, branch)
     root = workdir.resolve()
     target = (root / rel_path).resolve()
@@ -219,22 +147,80 @@ def write_and_commit(project: Project, branch: str, rel_path: str, content: str,
     target.write_text(normalized, encoding="utf-8")
 
     _git(workdir, "add", "--", rel_path)
-    _git(
-        workdir,
-        "-c", "user.name=paas-bot",
-        "-c", "user.email=paas-bot@localhost",
-        "commit", "-m", message,
+    # 같은 내용을 다시 확정하면 바뀐 게 없다 — git commit은 이걸 오류로 내지만
+    # 사용자에겐 "이미 그 상태"라 실패가 아니다. 커밋을 건너뛰고 현재 커밋을 돌려준다.
+    staged = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=workdir, capture_output=True, **_TEXT
     )
+    if staged.stdout.strip():
+        _git(
+            workdir,
+            "-c", "user.name=paas-bot",
+            "-c", "user.email=paas-bot@localhost",
+            "commit", "-m", message,
+        )
     _git(workdir, *auth_args(project.git_url), "push", "-u", "origin", branch)
     out = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, text=True, check=True
+        ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, **_TEXT, check=True
     )
     return out.stdout.strip()
 
 
+def delete_branch(project: Project, branch: str) -> bool:
+    """작업 브랜치를 로컬·원격에서 지운다. 원격 삭제 성공 여부를 반환한다.
+
+    기본 브랜치는 절대 지우지 않는다 — 세션 정리가 프로젝트를 망가뜨리면 안 된다.
+    이미 없는 브랜치나 원격 거절은 실패로 보지 않고 조용히 넘어간다(정리는 베스트 에포트).
+    """
+    if not branch or branch == project.branch:
+        return False
+    workdir = workdir_for(project)
+    if not workdir.exists():
+        return False
+    # 지우려는 브랜치에 체크아웃돼 있으면 삭제할 수 없다 — 기본 브랜치로 먼저 옮긴다.
+    subprocess.run(["git", "checkout", project.branch], cwd=workdir, capture_output=True, **_TEXT)
+    subprocess.run(["git", "branch", "-D", branch], cwd=workdir, capture_output=True, **_TEXT)
+    pushed = subprocess.run(
+        ["git", *auth_args(project.git_url), "push", "origin", "--delete", branch],
+        cwd=workdir, capture_output=True, **_TEXT,
+    )
+    return pushed.returncode == 0
+
+
+def default_branch_ref(workdir: Path, branch: str) -> str | None:
+    """기본 브랜치를 가리키는 ref — 원격 추적본을 우선한다.
+
+    origin/{branch}가 사실상의 '반영됐다'의 기준이다. 원격이 없는 워킹카피(로컬 전용)
+    에서는 로컬 브랜치로 떨어지고, 둘 다 없으면 판정할 근거가 없다는 뜻으로 None.
+    """
+    for ref in (f"origin/{branch}", branch):
+        out = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=workdir, capture_output=True, **_TEXT,
+        )
+        if out.returncode == 0:
+            return ref
+    return None
+
+
+def is_merged(workdir: Path, base_ref: str, sha: str) -> bool:
+    """sha가 base_ref에서 도달 가능한지 — 즉 기본 브랜치에 실제로 반영됐는지.
+
+    커밋 객체가 로컬에 아예 없으면(작업 브랜치에만 있어 아직 가져오지 않은 경우) git이
+    오류를 내는데, 그것도 '기본 브랜치에 없다'와 같은 답이라 False로 떨어뜨린다.
+    """
+    if not sha:
+        return False
+    out = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", sha, base_ref],
+        cwd=workdir, capture_output=True, **_TEXT,
+    )
+    return out.returncode == 0
+
+
 def diff_between(workdir: Path, base_ref: str, head_ref: str = "HEAD") -> str:
     out = subprocess.run(
-        ["git", "diff", f"{base_ref}..{head_ref}"], cwd=workdir, capture_output=True, text=True
+        ["git", "diff", f"{base_ref}..{head_ref}"], cwd=workdir, capture_output=True, **_TEXT
     )
     if out.returncode != 0:
         raise BuildError(f"git diff failed: {out.stderr.strip()[:300]}")
@@ -242,7 +228,7 @@ def diff_between(workdir: Path, base_ref: str, head_ref: str = "HEAD") -> str:
 
 
 def _git(workdir: Path, *args: str) -> None:
-    proc = subprocess.run(["git", *args], cwd=workdir, capture_output=True, text=True)
+    proc = subprocess.run(["git", *args], cwd=workdir, capture_output=True, **_TEXT)
     if proc.returncode != 0:
         raise BuildError(f"git {args[0]} failed: {(proc.stderr or proc.stdout).strip()[:500]}")
 

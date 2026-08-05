@@ -143,26 +143,14 @@ export interface LlmProviderOut {
   org_name?: string | null;
 }
 
-export interface ChatSessionOut {
-  id: number;
-  branch: string;
-  provider: string;
-}
-
-export interface ChatReply {
-  reply: string;
-  proposed_change_id: number | null;
-  used_modules?: string[];
-}
-
 // 에이전트 기획 (Agent Planning)
 export interface PlanArtifactOut {
-  stage: 'spec' | 'architecture' | 'solution' | 'principles';
+  stage: 'spec' | 'architecture' | 'solution' | 'principles' | 'tasks';
   title: string;
   repo_path: string;
   commit_sha: string | null;
   confirmed: boolean;
-  default_request?: string; // 입력창 기본값(바로 초안 생성 가능)
+  default_request?: string; // 입력창 기본값(바로 생성 요청 가능)
   // 확정 시 git 상태에 따라 자동 수행된 결과
   git_action?: 'committed' | 'merged' | 'pr_opened' | 'skipped' | null;
   git_detail?: string | null;
@@ -179,9 +167,85 @@ export interface PlanSessionOut {
 }
 
 export interface PlanMessageReply {
-  reply: string;
+  summary: string; // 대화창에 보일 응답 개요
+  document: string; // 산출물 편집기에 들어갈 문서 본문
   used_modules?: string[];
   context_files?: string[]; // 본문까지 참조한 리포 파일
+  bound_modules?: string[]; // 솔루션 구성 단계에서 이번에 바인딩된 모듈
+  compacted?: boolean; // 압축된 컨텍스트로 생성됐는지
+}
+
+export interface PlanArtifactContent {
+  stage: string;
+  repo_path: string;
+  content: string;
+  confirmed: boolean;
+  // session = 이 세션에서 확정 · repo = 리포에 이미 있던 문서
+  // tasks = 작업 지시 목록에서 렌더한 문서(⑤단계) · '' = 없음
+  source: 'session' | 'repo' | 'tasks' | '';
+}
+
+// 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영한 결과
+export interface PlanMergeOut {
+  branch: string;
+  action: 'merged' | 'pr_opened' | 'committed' | 'skipped';
+  detail: string | null;
+  pull_request_url: string | null;
+}
+
+// 기획 세션 이력 — 재개·삭제 대상 선택용
+export interface PlanSessionSummary {
+  id: number;
+  project_id: number;
+  project_name: string;
+  provider: string;
+  branch: string;
+  confirmed_stages: string[];
+  task_count: number;
+  created_at: string | null;
+}
+
+export interface PlanChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string | null;
+}
+
+// 외주 빌드 작업 지시(work order)
+export type BuildTaskStatus = 'pending' | 'in_progress' | 'done' | 'blocked';
+
+export interface BuildTaskOut {
+  id: number;
+  title: string;
+  detail: string;
+  verify: string; // 완료 판정 기준
+  status: BuildTaskStatus;
+  note: string;
+  commit_sha: string | null;
+}
+
+// 진행 현황을 기본 브랜치 기준으로 맞춘 결과 — 보고가 아니라 반영된 커밋이 기준이다
+export interface BuildTaskSync {
+  base_ref: string; // 판정 기준 ref(예: origin/main) — 비어 있으면 판정하지 못함
+  merged: number; // 기본 브랜치에 반영된 작업 수
+  pending: number; // 커밋은 보고됐지만 아직 반영되지 않은 작업 수
+  tasks: BuildTaskOut[];
+}
+
+// 외주 빌드 결과의 LLM·모듈 사용 검증
+export interface ComplianceFinding {
+  rule: string;
+  file: string;
+  line: number;
+  snippet: string;
+  detail: string;
+}
+
+export interface ComplianceOut {
+  project: string;
+  findings: ComplianceFinding[];
+  summary: Record<string, number>;
+  builder_prompt: string;
 }
 
 export interface PlanBuildEvent {

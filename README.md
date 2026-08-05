@@ -58,7 +58,7 @@ Dockerfile 결정 규칙: 리포에 `Dockerfile`이 있으면 우선 사용(`--b
 | --- | --- | --- |
 | core (항상) | 프로젝트·환경변수·API 키·감사 로그·Module 레지스트리·/status | — |
 | `deploy` | 배포·롤백·로그·웹훅 자동 배포·프리뷰 | Docker 또는 K8s |
-| `workspace` | LLM 코드 워크스페이스 (프로바이더·채팅·diff 승인·리뷰) | LLM 프로바이더 |
+| `workspace` | 에이전트 기획 (프로바이더·기획 세션·작업 지시·사용 검증·리뷰) | LLM 프로바이더 |
 
 ```bash
 PAAS_FEATURES=deploy                          # 배포 전용 서버
@@ -150,7 +150,7 @@ POST /paas/api/v1/projects/upload          # multipart: zip_file 또는 files[](
                                       #   업로드 내용을 사내 Gitea 신규 리포에 최초 push (대용량/zip bomb/zip slip 방어)
                                       #   deploy_after_upload=true면 push 직후 배포 큐에 등록(원클릭)
 GET  /paas/api/v1/projects/{id}/files      # 읽기 전용 파일 트리 (workspace 기능)
-GET  /paas/api/v1/projects/{id}/files/content?path=  # 읽기 전용 파일 내용 — 수정 엔드포인트는 없음(채팅/diff로만)
+GET  /paas/api/v1/projects/{id}/files/content?path=  # 읽기 전용 파일 내용 — 수정 엔드포인트 없음(구현은 외부 빌더)
 GET  /paas/api/v1/projects/{id}/codemap    # 코드 구조 트리(파일→클래스/함수+요약, 정적 파싱)
 POST /paas/api/v1/projects/{id}/deploy     # {profile?: development|release, git_sha?}
 POST /paas/api/v1/projects/{id}/rollback?profile=release
@@ -198,11 +198,28 @@ curl -X POST "$BASE/projects/1/rollback?profile=release" -H "x-api-key: $ADMIN"
 ```
 POST /paas/api/v1/llm/providers                     # 외부(Claude/OpenAI) 또는 내부(project://<llm 프로젝트>) 등록 (admin)
 GET  /paas/api/v1/llm/providers                     # api_key는 has_api_key로만 노출
-POST /paas/api/v1/chat/sessions                     # {project_id, provider_id, branch?} — 기본 브랜치 paas/chat-{id}
-POST /paas/api/v1/chat/sessions/{id}/messages       # 코드 구조 개요·모듈 규약·요청 파일을 컨텍스트로 LLM 호출
-                                                # (전체 구조·항목별 요약을 참조해 대응) 응답 diff는 ProposedChange 자동 생성
-POST /paas/api/v1/changes/{id}/apply                # 승인 → 작업 브랜치에 git apply + commit (LLM 직접 쓰기 없음)
-POST /paas/api/v1/changes/{id}/reject
+POST /paas/api/v1/plan/sessions                     # {project_id, provider_id, branch?} — 기본 브랜치 paas/plan-{id}-{hex}
+GET  /paas/api/v1/plan/sessions?project_id=         # 세션 이력(최근 순) — 확정 단계·작업 수 요약
+GET  /paas/api/v1/plan/sessions/{id}/messages       # 재개용 대화 이력 복원
+DELETE /paas/api/v1/plan/sessions/{id}              # 세션·대화·산출물 포인터·작업 지시 + 작업 브랜치 삭제(머지된 문서는 남음)
+POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/messages   # 단계 생성 요청 — git 파일 목록·앞 단계 확정본이 컨텍스트
+                                                # 단계는 spec → architecture → solution → principles → tasks(5단계)
+                                                # tasks 단계는 대화로 쓰지 않는다 — 409, tasks/generate로 산출물을 만든다
+                                                # 빈 응답(컨텍스트 한도 초과)이면 413 — compact=true로 압축 재시도
+                                                # solution 단계에서는 bind_module 도구로 사용 결정 모듈을 즉시 바인딩하고,
+                                                # 바인딩된 mcp 모듈의 도구({모듈명}__{도구명})로 실제 규격을 확인
+POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/confirm    # 확정 → Gitea 커밋 후 git 상태에 따라 PR·머지 자동
+                                                # 리포에 다른 내용의 같은 문서가 있으면 412 — overwrite=true로 재요청
+POST /paas/api/v1/plan/sessions/{id}/tasks/generate # 확정 산출물 → 외주 빌드 작업 지시(work order)
+                                                # ⑤ tasks 단계 산출물(05-작업지시.md)은 이 목록을 렌더한 문서
+GET  /paas/api/v1/plan/sessions/{id}/tasks          # 작업 지시 목록·상태
+POST /paas/api/v1/plan/sessions/{id}/tasks/sync     # 진행 현황을 기본 브랜치 기준으로 갱신
+                                                # 보고된 커밋이 기본 브랜치에 도달 가능할 때만 완료
+PATCH /paas/api/v1/plan/tasks/{id}                  # {status?, note?, commit_sha?}
+POST /paas/api/v1/plan/sessions/{id}/merge          # 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영
+GET  /paas/api/v1/plan/projects/{id}/constraints    # 가용 모듈 제약(외부 빌드 guardrail)
+GET  /paas/api/v1/plan/projects/{id}/compliance     # LLM·모듈 사용 검증 + 외주 빌더 전달용 수정 지시
+POST /paas/api/v1/plan/projects/{id}/mcp            # 외부 빌드 도구용 MCP 서버(JSON-RPC 2.0)
 POST /paas/api/v1/projects/{id}/review              # {provider_id, diff? , base_ref?} → 심각도 분류 findings
 
 POST /paas/api/v1/modules                           # external_api | internal_api | database | file_storage | mcp
@@ -236,9 +253,8 @@ DELETE /paas/api/v1/previews/{id}
   정규화되어(`services/a2a.py`) `/a2a/agents`에서 열거됩니다. 호출은 반드시 게이트웨이를
   거치며 **호출자는 대상의 자격증명을 보지 못합니다** — 게이트웨이가 복호화해
   `Authorization`에 싣고, 호출자 신원을 `x-paas-calling-agent`로 전달한 뒤 감사 로그에
-  남깁니다. 같은 카드가 채팅 컨텍스트에도 주입되고 카드 하나가 도구 하나(`a2a__{이름}`,
-  capability는 카드의 `skills` enum)로 모델에 전달되므로, 모델은 카드에서 본 이름으로
-  다른 에이전트를 직접 호출할 수 있습니다.
+  남깁니다. 같은 카드가 에이전트 기획의 **가용 모듈 제약**으로 정리되어 외부 빌더에게
+  전달되므로, 외부 빌더는 카드에서 본 이름으로만 게이트웨이를 통해 다른 에이전트를 호출합니다.
   현재 카드는 자체 규약입니다 — 표준 A2A 클라이언트가 붙으려면 `/.well-known/agent-card.json`
   공개와 JSON-RPC `message/send` 수용이 남아 있습니다(미구현).
 - **파일 저장소는 URL로만 다룹니다**: `file_storage` 모듈이 실제로 어느 디렉터리에
@@ -253,22 +269,23 @@ DELETE /paas/api/v1/previews/{id}
   해석됩니다(small: target 프로젝트의 실제 배포 URL과 동일한 서브패스 —
   `https://{base_domain}/{조직 또는 "_"}/{target}/`, enterprise: `http://paas-{target}.{ns}.svc`).
 - 프리뷰는 development 프로필 빌드를 재사용하되 CPU 50%·GPU 금지·동시 5개 제한·TTL 회수가 걸립니다.
-- **코드 구조 시각화**: 콘솔 "채팅" 화면에서 프로젝트를 고르면 정적 파싱(Python `ast`,
+- **코드 구조 시각화**: 콘솔 "코드 확인" 화면에서 정적 파싱(Python `ast`,
   JS/TS 정규식)으로 만든 파일→클래스/함수 계층 트리를 확대/축소로 확인할 수 있고,
-  **같은 개요가 채팅 LLM 컨텍스트에도 주입**되어 전체 구조·항목별 기능 요약을 참조해
-  요청에 대응합니다(`services/codemap.py`, `GET /projects/{id}/codemap`).
+  **같은 개요가 에이전트 기획의 LLM 컨텍스트에도 주입**되어 전체 구조·항목별 기능 요약을
+  참조해 문서를 작성합니다(`services/codemap.py`, `GET /projects/{id}/codemap`).
 - **외부 API 검색 → 모듈 자동 추가**: 모듈 레지스트리에서 키워드로 공개 API 디렉터리
   (기본 apis.guru, `PAAS_API_DIRECTORY_URL`로 사내 미러 교체 가능)를 검색해 선택 결과를
   external_api 모듈로 바로 추가합니다(admin 전용 — 아웃바운드 메타데이터 조회이므로).
   이름은 모듈 규약으로 자동 정규화(`services/apisearch.py`).
 - **mcp 모듈 — 외부 MCP(Model Context Protocol) 서버**: `config: {url, api_key?}`로
-  등록하면 다른 모듈처럼 배포 앱에 `{PREFIX}_URL`/`{PREFIX}_API_KEY`가 주입되는 것에
-  더해, **채팅(`/chat/sessions/{id}/messages`)이 그 서버의 도구를 OpenAI 호환
-  tools=로 모델에 넘겨 직접 호출하게 합니다** — 모델이 도구를 요청하면
+  등록하면 다른 모듈처럼 배포 앱에 `{PREFIX}_URL`/`{PREFIX}_API_KEY`가 주입되고,
+  가용 모듈 제약에 실려 외부 빌더가 게이트웨이 경유로 쓸 수 있게 됩니다.
   `services/mcp_client.py`(JSON-RPC 2.0 tools/list·tools/call, 단일 JSON 응답
-  트랜스포트만 지원 — SSE 스트리밍은 범위 밖)가 실제 서버를 호출하고 결과를 다시
-  모델에 돌려주는 왕복을 최대 `MAX_TOOL_ROUNDS`(6)회까지 반복합니다. 서버 이름이
-  겹치는 도구는 `{모듈명}__{도구명}`으로 구분됩니다.
+  트랜스포트만 지원 — SSE 스트리밍은 범위 밖)가 플랫폼이 MCP **클라이언트**로 붙는 경로이며,
+  **에이전트 기획의 솔루션 구성 단계**에서 바인딩된 MCP 서버의 도구를 모델에 넘겨
+  직접 호출하게 합니다(서버 간 이름 충돌은 `{모듈명}__{도구명}`으로 구분, 응답하지 않는
+  서버는 조용히 빠짐). 반대 방향 — 외부 빌드 도구가 붙는 MCP **서버**는
+  `/plan/projects/{id}/mcp`입니다.
 
 ## 콘솔 UI (`console/`)
 
@@ -289,7 +306,7 @@ npm run build        # tsc 타입체크 + vite build → dist/
 - 화면: 시스템 대시보드(CPU/메모리/디스크/GPU 게이지, 키 발급), 프로젝트(생성 시 git_url 직접
   입력/조직 소속 자동 생성/zip·폴더 업로드 3가지 방식 선택, dev/release 배포·롤백·중지·배포
   이력·로그 3초 폴링·환경변수·모듈 바인딩·프리뷰), 코드 확인(읽기 전용 파일 트리·내용 뷰어 —
-  수정은 채팅 탭에서 diff로만), 모듈 레지스트리(카테고리·조직 범위 표시 + admin은 "외부 API
+  수정 경로 없음 — 구현은 외부 개발도구), 모듈 레지스트리(카테고리·조직 범위 표시 + admin은 "외부 API
   검색"으로 공개 디렉터리에서 external_api 자동 추가), 파일 관리(file_storage 모듈의
   창구 URL 표시 + 목록·업로드·다운로드·삭제), 계정 승인(가입 신청 승인/거절), LLM 프로바이더,
   대화식 코드 편집(diff 뷰 + 승인/거절 + 브랜치 리뷰 + 프로젝트 선택 시 카테고리별 사용 가능
@@ -342,8 +359,8 @@ npm run build        # tsc 타입체크 + vite build → dist/
   절대경로·상위 디렉토리 탈출(zip slip)·심볼릭 링크 엔트리 거부. `deploy_after_upload`로
   push 직후 배포까지 원클릭 진행 가능.
 - **코드 확인 화면**: `GET /paas/api/v1/projects/{id}/files`, `/files/content`로 리포를 읽기 전용
-  브라우징. 저장/수정 엔드포인트는 존재하지 않으며, 실제 코드 변경은 항상 LLM 채팅 →
-  diff 제안 → `POST /paas/api/v1/changes/{id}/apply` 승인 경로로만 이뤄진다(12절 원칙 유지).
+  브라우징. 저장/수정 엔드포인트는 존재하지 않는다 — 실제 코드 변경은 외부 개발도구가
+  리포에 직접 커밋하며, 플랫폼은 기획·제약·검증·모니터링만 담당한다.
 - **웹훅 자동 등록**: `PAAS_PLATFORM_PUBLIC_URL` 설정 시 조직 소속/업로드로 리포를 만들
   때마다 플랫폼이 자신의 `/paas/webhooks/git`을 Gitea 웹훅으로 자동 등록한다(베스트 에포트 —
   실패해도 프로젝트 생성은 성공 처리). 비워두면 기존처럼 `infra/gitea/README.md`의
@@ -415,13 +432,13 @@ npm run build        # tsc 타입체크 + vite build → dist/
 | --- | --- | --- |
 | **배포 체크아웃** | `services/build.py` `checkout()` | 최초엔 `git clone --branch`, 이후는 `fetch`+`reset --hard`로 매 배포마다 최신화. `git_sha` 지정 시 해당 커밋으로 `checkout`. **읽기 전용** — 이 리포에 커밋하지 않음 |
 | **웹훅 자동 배포** | `api/webhooks.py` | GitHub/Gitea push 이벤트를 **수신**(HMAC 서명 검증 필수)해 위 checkout→build 파이프라인을 트리거. 플랫폼이 밖으로 나가는 방향이 아니라 받는 방향 |
-| **코드 워크스페이스(채팅 편집)** | `services/workspace.py` | LLM이 제안한 diff를 `git apply` 후 작업 브랜치(`paas/chat-{id}`)에 **로컬 커밋만** 한다(`ensure_branch`, `apply_diff`). **자동 push 없음** — 승인(`/changes/{id}/apply`)해도 원격에 반영되지 않고, 실제 배포(release/development)를 실행해야 그 브랜치가 빌드된다 |
+| **기획 산출물 커밋** | `services/workspace.py` `write_and_commit()` | 확정된 기획 문서만 세션별 작업 브랜치(`paas/plan-{id}-{hex}`)에 커밋하고 사내 Gitea로 push한 뒤, git 상태에 따라 PR·머지를 자동 수행한다. 플랫폼이 리포에 쓰는 경로는 이것뿐이며 **구현 코드는 쓰지 않는다** |
 | **GitOps 연계** | `services/runtime/k8s_runtime.py` `_gitops_push`/`_sync_gitops_repo` | 2차(K8s) 티어에서 `PAAS_K8S_GITOPS_REPO` 설정 시에만 활성화. 배포 **매니페스트**(이미지 태그·비-시크릿 env)를 별도 GitOps 리포에 커밋·푸시해 ArgoCD가 반영하게 한다. **시크릿은 여기 포함되지 않음**(15절) — 애초에 소스 코드가 아니라 K8s 매니페스트만 다루는 경로 |
 | **프리뷰** | `services/preview.py` | 위 checkout 재사용, 별도 git 조작 없음 |
 
 **핵심 경계선**: 프로젝트 소스 코드 자체가 플랫폼 밖의 git 리포로 나가는 경로는 없다
-(체크아웃은 읽기 전용, 채팅 편집은 로컬 커밋만). 외부로 실제 전송되는 것은 두 가지뿐이다 —
-① LLM 채팅 시 파일 **내용**이 API 호출로 프로바이더에 전송(어느 프로바이더인지는 12절/15절의
+(체크아웃은 읽기 전용, 플랫폼이 쓰는 것은 사내 Gitea의 기획 산출물뿐). 외부로 실제 전송되는
+것은 두 가지뿐이다 — ① 기획 시 파일 **내용**이 API 호출로 프로바이더에 전송(어느 프로바이더인지는 12절/15절의
 internal·external 구분과 admin 게이트로 통제), ② GitOps 모드에서 배포 **매니페스트**(소스 아님)가
 운영자가 지정한 리포로 푸시.
 
