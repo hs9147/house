@@ -18,8 +18,10 @@ import type {
   OrgOut,
   PlanArtifactOut,
   PlanBuildStatus,
+  PlanChatMessage,
   PlanMessageReply,
   PlanSessionOut,
+  PlanSessionSummary,
   PreviewOut,
   ProjectCreate,
   ProjectFileContentOut,
@@ -344,6 +346,12 @@ export const api = {
     }),
   getPlanSession: (sessionId: number) =>
     request<PlanSessionOut>('GET', `/plan/sessions/${sessionId}`),
+  // 세션 이력 — 목록·대화 복원(재개)·삭제
+  listPlanSessions: () => request<PlanSessionSummary[]>('GET', '/plan/sessions'),
+  planSessionMessages: (sessionId: number) =>
+    request<PlanChatMessage[]>('GET', `/plan/sessions/${sessionId}/messages`),
+  deletePlanSession: (sessionId: number) =>
+    request<void>('DELETE', `/plan/sessions/${sessionId}`),
   sendPlanMessage: (sessionId: number, stage: string, content: string, files: string[]) =>
     request<PlanMessageReply>('POST', `/plan/sessions/${sessionId}/stages/${stage}/messages`,
       { content, files }),

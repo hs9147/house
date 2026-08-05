@@ -199,7 +199,11 @@ curl -X POST "$BASE/projects/1/rollback?profile=release" -H "x-api-key: $ADMIN"
 POST /paas/api/v1/llm/providers                     # 외부(Claude/OpenAI) 또는 내부(project://<llm 프로젝트>) 등록 (admin)
 GET  /paas/api/v1/llm/providers                     # api_key는 has_api_key로만 노출
 POST /paas/api/v1/plan/sessions                     # {project_id, provider_id, branch?} — 기본 브랜치 paas/plan-{id}
+GET  /paas/api/v1/plan/sessions?project_id=         # 세션 이력(최근 순) — 확정 단계·작업 수 요약
+GET  /paas/api/v1/plan/sessions/{id}/messages       # 재개용 대화 이력 복원
+DELETE /paas/api/v1/plan/sessions/{id}              # 세션·대화·산출물 포인터·작업 지시 삭제(커밋된 문서는 남음)
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/messages   # 단계 문서 초안 — git 파일 목록·앞 단계 확정본이 컨텍스트
+                                                # solution 단계에서는 bind_module 도구로 사용 결정 모듈을 즉시 바인딩
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/confirm    # 확정 → Gitea 커밋 후 git 상태에 따라 PR·머지 자동
 POST /paas/api/v1/plan/sessions/{id}/tasks/generate # 확정 산출물 → 외주 빌드 작업 지시(work order)
 GET  /paas/api/v1/plan/sessions/{id}/tasks          # 작업 지시 목록·상태

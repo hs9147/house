@@ -1,8 +1,11 @@
 import { useState } from 'react';
+import Async from '../components/Async';
 import { api } from '../lib/api';
+import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
 import type {
-  BuildTaskOut, ComplianceOut, PlanArtifactOut, PlanBuildEvent, PlanSessionOut, ProjectOut,
+  BuildTaskOut, ComplianceOut, PlanArtifactOut, PlanBuildEvent, PlanSessionOut,
+  PlanSessionSummary, ProjectOut,
 } from '../lib/types';
 import { CreateModal } from './Projects';
 
@@ -11,6 +14,7 @@ interface Msg {
   content: string;
   usedModules?: string[];
   contextFiles?: string[];
+  boundModules?: string[];
 }
 
 // 확정 시 git 상태에 따라 자동 수행된 결과의 표시 문구
@@ -73,6 +77,7 @@ export default function AgentPlanning() {
   const [gitResult, setGitResult] = useState<PlanArtifactOut | null>(null);
   const [tasks, setTasks] = useState<BuildTaskOut[]>([]);
   const [compliance, setCompliance] = useState<ComplianceOut | null>(null);
+  const history = useApi(() => api.listPlanSessions());
 
   // 프로젝트 페이지와 동일한 CreateModal(빈 프로젝트 옵션 포함)을 재사용한다.
   const [showCreate, setShowCreate] = useState(false);
@@ -104,6 +109,46 @@ export default function AgentPlanning() {
       setDraft('');
       setGitResult(null);
       setInput(defaultRequestOf(s, 'spec'));
+      history.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  // 이력에서 세션을 다시 연다 — 대화를 복원하고 첫 미확정 단계로 이동한다.
+  const resume = async (row: PlanSessionSummary) => {
+    setError('');
+    try {
+      const [s, msgs] = await Promise.all([
+        api.getPlanSession(row.id),
+        api.planSessionMessages(row.id),
+      ]);
+      const next = STAGES.find((st) => !s.artifacts.find((a) => a.stage === st.key)?.confirmed)
+        ?? STAGES[STAGES.length - 1];
+      setSession(s);
+      setActiveStage(next.key);
+      setMessages(msgs.map((m) => ({ role: m.role, content: m.content })));
+      setDraft('');
+      setGitResult(null);
+      setCompliance(null);
+      setInput(defaultRequestOf(s, next.key));
+      setTasks(await api.listPlanTasks(row.id));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const removeSession = async (row: PlanSessionSummary) => {
+    // confirm은 이 컴포넌트의 '단계 확정' 함수와 이름이 겹친다 — window.confirm을 명시한다.
+    if (!window.confirm(
+      `기획 세션 #${row.id} (${row.project_name})을(를) 삭제하시겠습니까?\n` +
+      '대화·단계 확정 기록·작업 지시가 삭제됩니다.\n' +
+      '이미 Gitea에 커밋된 산출물 문서와 감사 로그는 남습니다.',
+    )) return;
+    try {
+      await api.deletePlanSession(row.id);
+      if (session?.id === row.id) setSession(null);
+      history.reload();
     } catch (err) {
       setError((err as Error).message);
     }
@@ -137,6 +182,7 @@ export default function AgentPlanning() {
       setMessages((prev) => [...prev, {
         role: 'assistant', content: res.reply,
         usedModules: res.used_modules, contextFiles: res.context_files,
+        boundModules: res.bound_modules,
       }]);
       setDraft(res.reply); // 확정용 편집 초안으로 채운다
     } catch (err) {
@@ -264,6 +310,60 @@ export default function AgentPlanning() {
         </form>
       </div>
 
+      {/* 기획 세션 이력 — 재개·삭제 */}
+      <div className="panel">
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ margin: 0 }}>🗂️ 기획 세션 이력</h3>
+          <button className="secondary small" onClick={() => history.reload()}>새로고침</button>
+        </div>
+        <Async state={history} empty="기획 세션이 없습니다.">
+          {(rows) => {
+            // 목록에 보이는 프로젝트(조직 범위)의 세션만 노출한다.
+            const visible = rows.filter((r) =>
+              availableProjects.some((p) => p.id === r.project_id));
+            if (visible.length === 0) {
+              return <p className="mutedtext" style={{ fontSize: 12 }}>기획 세션이 없습니다.</p>;
+            }
+            return (
+              <table>
+                <thead>
+                  <tr>
+                    <th>세션</th><th>프로젝트</th><th>브랜치</th>
+                    <th>확정 단계</th><th>작업</th><th>생성일</th><th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((r) => (
+                    <tr key={r.id} style={{ background: session?.id === r.id ? 'rgba(56, 189, 248, 0.08)' : undefined }}>
+                      <td className="mono">#{r.id}</td>
+                      <td>{r.project_name}</td>
+                      <td className="mono" style={{ fontSize: 12 }}>{r.branch}</td>
+                      <td style={{ fontSize: 12 }}>
+                        {r.confirmed_stages.length}/{STAGES.length}
+                        {r.confirmed_stages.length > 0 && (
+                          <span className="mutedtext">
+                            {' '}({STAGES.filter((s) => r.confirmed_stages.includes(s.key))
+                              .map((s) => s.label.replace(/^[①-④]\s*/, '')).join(', ')})
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ fontSize: 12 }}>{r.task_count}</td>
+                      <td className="mono" style={{ fontSize: 12 }}>{fmtDate(r.created_at)}</td>
+                      <td>
+                        <div className="row" style={{ gap: 6 }}>
+                          <button className="small" onClick={() => resume(r)}>재개</button>
+                          <button className="small danger" onClick={() => removeSession(r)}>삭제</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            );
+          }}
+        </Async>
+      </div>
+
       {session && (
         <>
           {/* 진행단계 표시 */}
@@ -321,6 +421,14 @@ export default function AgentPlanning() {
                       <span className="mutedtext" style={{ fontSize: 11 }}>참조된 모듈:</span>
                       {m.usedModules.map((mod) => (
                         <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8' }}>{mod}</span>
+                      ))}
+                    </div>
+                  )}
+                  {m.boundModules && m.boundModules.length > 0 && (
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                      <span className="mutedtext" style={{ fontSize: 11 }}>이번에 바인딩된 모듈:</span>
+                      {m.boundModules.map((mod) => (
+                        <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(16, 185, 129, 0.2)', color: '#10b981' }}>🔗 {mod}</span>
                       ))}
                     </div>
                   )}

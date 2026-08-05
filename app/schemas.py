@@ -180,6 +180,7 @@ class PlanMessageReply(BaseModel):
     reply: str  # 단계 산출물 문서 초안(마크다운)
     used_modules: list[str] = []
     context_files: list[str] = []  # 이번 요청에서 본문까지 참조한 리포 파일
+    bound_modules: list[str] = []  # 솔루션 구성 단계에서 이번에 바인딩된 모듈
 
 
 class PlanConfirmIn(BaseModel):
@@ -206,6 +207,27 @@ class PlanSessionOut(BaseModel):
     project_id: int
     project_name: str
     artifacts: list[PlanArtifactOut] = []
+
+
+class PlanSessionSummary(BaseModel):
+    """기획 세션 이력 한 줄 — 목록에서 재개·삭제 대상을 고르기 위한 최소 정보."""
+
+    id: int
+    project_id: int
+    project_name: str
+    provider: str
+    branch: str
+    confirmed_stages: list[str] = []
+    task_count: int = 0
+    created_at: datetime | None = None
+
+
+class PlanChatMessageOut(BaseModel):
+    """세션 재개 시 복원할 대화 한 줄."""
+
+    role: str
+    content: str
+    created_at: datetime | None = None
 
 
 class BuildTaskOut(BaseModel):

@@ -170,6 +170,25 @@ export interface PlanMessageReply {
   reply: string;
   used_modules?: string[];
   context_files?: string[]; // 본문까지 참조한 리포 파일
+  bound_modules?: string[]; // 솔루션 구성 단계에서 이번에 바인딩된 모듈
+}
+
+// 기획 세션 이력 — 재개·삭제 대상 선택용
+export interface PlanSessionSummary {
+  id: number;
+  project_id: number;
+  project_name: string;
+  provider: string;
+  branch: string;
+  confirmed_stages: string[];
+  task_count: number;
+  created_at: string | null;
+}
+
+export interface PlanChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string | null;
 }
 
 // 외주 빌드 작업 지시(work order)
