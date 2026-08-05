@@ -1,6 +1,9 @@
-"""LLM 프로바이더 · 대화식 편집(diff 제안/승인) · 코드 리뷰."""
+"""LLM 프로바이더 · 읽기 전용 코드 열람 · 코드 리뷰.
+
+플랫폼 안에서 diff를 만들어 승인·커밋하던 '에이전트 빌더'는 제거됐다 — 구현은 외부
+개발도구가 맡고(에이전트 기획 → 작업 지시 → MCP), 플랫폼은 제약·검증·모니터링만 한다.
+"""
 import asyncio
-import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -10,29 +13,19 @@ from .. import audit
 from ..db import get_db
 from ..models import (
     ApiKey,
-    ChangeStatus,
-    ChatMessage,
-    ChatSession,
     LlmProvider,
     LlmProviderKind,
     Organization,
     Project,
-    ProposedChange,
 )
 from ..schemas import (
-    ChatMessageIn,
-    ChatReply,
-    ChatSessionCreate,
     LlmProviderCreate,
     LlmProviderOut,
     ReviewRequest,
 )
 from ..security import encrypt_value, require_admin, require_api_key
-from ..services import a2a as a2a_service
 from ..services import codemap as codemap_service
 from ..services import llm as llm_service
-from ..services import mcp_client
-from ..services import modules as modules_service
 from ..services import workspace
 from ..services.build import BuildError, checkout
 
@@ -98,195 +91,13 @@ def delete_provider(
     return None
 
 
-@router.post("/chat/sessions")
-def create_session(
-    body: ChatSessionCreate,
-    db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
-):
-    project = db.get(Project, body.project_id)
-    provider = db.get(LlmProvider, body.provider_id)
-    if project is None or provider is None:
-        raise HTTPException(status_code=404, detail="project or provider not found")
-    llm_service.require_provider_access(provider, project, key)
-    session = ChatSession(project_id=project.id, provider_id=provider.id, branch="")
-    db.add(session)
-    db.commit()
-    session.branch = body.branch or f"paas/chat-{session.id}"
-    db.commit()
-    audit.record(db, key.name, "chat.session.create", project.name,
-                 {"provider": provider.name, "branch": session.branch})
-    return {"id": session.id, "branch": session.branch, "provider": provider.name}
-
-
-@router.post("/chat/sessions/{session_id}/messages", response_model=ChatReply)
-async def post_message(
-    session_id: int,
-    body: ChatMessageIn,
-    db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
-):
-    session = db.get(ChatSession, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    project = db.get(Project, session.project_id)
-    provider = db.get(LlmProvider, session.provider_id)
-
-    agent_system_prompt = (
-        "You are an Agent Builder AI for an enterprise PaaS platform.\n"
-        "STRICT SECURITY & ARCHITECTURE MANDATE:\n"
-        "The generated Agent code MUST NEVER call external LLM APIs or external module/DB URLs directly.\n"
-        "All inputs and outputs MUST be routed through the central PaaS Gateway:\n"
-        "1. LLM Proxy Gateway: Use PaaS endpoint '/paas/api/v1/proxy/llm' (or bound PAAS_LLM_PROXY_URL).\n"
-        "2. Module Proxy Gateway: Use PaaS endpoint '/paas/api/v1/proxy/modules/{module_name}/{path}' (or bound PAAS_MODULE_PROXY_URL).\n"
-        "Always adhere strictly to the injected PaaS proxy gateway architecture and environment variables."
-    )
-    # 역할 → 기획·구현 원칙(플랫폼 표준 문서) → 출력 형식 순으로 쌓는다.
-    messages: list[dict] = [{"role": "system", "content": "\n\n".join(filter(None, [
-        agent_system_prompt,
-        llm_service.agent_principles_prompt(),
-        llm_service.EDIT_SYSTEM_PROMPT,
-    ]))}]
-
-    # 프로젝트 컨텍스트: 바인딩/체크된 모듈 규약 + 사용 가능 전체 자원 목록 + 코드 구조 개요
-    module_ctx = a2a_service.list_project_a2a_cards(db, project)
-    all_resources = modules_service.available_resources(db, project)
-    workdir = workspace.workdir_for(project)
-    
-    # 1. 프로젝트 언어/프레임워크 스택 및 의존성 패키지 감지 및 주입
-    stack_info = workspace.detect_project_stack_and_deps(workdir)
-    context_parts = [
-        f"Project: {project.name} (type={project.type.value})",
-        "=== PROJECT STACK & DEPENDENCIES ===\n" + json.dumps(stack_info, indent=2, ensure_ascii=False)
-    ]
-    
-    # 2. 바인딩/체크된 모듈 규약 및 주입 환경변수 명세
-    if module_ctx:
-        context_parts.append(
-            "=== BOUND & CHECKED MODULES (INJECTED ENV VAR SPECIFICATION) ===\n" +
-            json.dumps(module_ctx, indent=2, ensure_ascii=False)
-        )
-    
-    # 3. 사용 가능한 전체 자원 및 헬스체크 메타데이터
-    if all_resources:
-        context_parts.append(
-            "=== ALL AVAILABLE RESOURCES & MODULE HEALTH STATUS ===\n" +
-            json.dumps(all_resources, indent=2, ensure_ascii=False)
-        )
-
-    if workdir.exists():
-        try:
-            outline = codemap_service.render_outline(codemap_service.build_code_map(workdir))
-        except Exception:  # noqa: BLE001
-            outline = "\n".join(workspace.file_tree(workdir))
-        context_parts.append("=== CODE STRUCTURE (OUTLINE) ===\n" + outline)
-        for path, content in workspace.read_context_files(workdir, body.files).items():
-            context_parts.append(f"--- {path} ---\n{content}")
-    messages.append({"role": "system", "content": "\n\n".join(context_parts)})
-
-    history = db.execute(
-        select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)
-    ).scalars()
-    messages.extend({"role": m.role, "content": m.content} for m in history)
-    messages.append({"role": "user", "content": body.content})
-
-    # 도구는 두 갈래다 — MCP 서버가 직접 광고하는 도구, 그리고 바인딩된 모듈을 A2A
-    # 게이트웨이 경유로 부르는 에이전트 도구(카드의 skills가 그대로 capability enum이 된다).
-    mcp_servers = modules_service.mcp_servers_for_project(db, project)
-    mcp_tools, mcp_registry = mcp_client.build_openai_tools(mcp_servers) if mcp_servers else ([], {})
-    a2a_tools, a2a_registry = a2a_service.build_openai_tools(module_ctx)
-    mcp_exec = mcp_client.make_tool_executor(mcp_registry) if mcp_tools else None
-    a2a_exec = a2a_service.make_tool_executor(db, a2a_registry, key.name) if a2a_tools else None
-
-    tools = mcp_tools + a2a_tools
-
-    def tool_executor(fn_name: str, arguments: dict) -> str:
-        if fn_name in a2a_registry:
-            return a2a_exec(fn_name, arguments)
-        return mcp_exec(fn_name, arguments) if mcp_exec else f"unknown tool: {fn_name}"
-
-    try:
-        reply = await asyncio.to_thread(
-            llm_service.chat_completion, provider, messages, db, tools or None,
-            tool_executor if tools else None,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"llm call failed: {e}")
-
-    # 생성된 답변 및 코드에서 사용된 자원/모듈 감지
-    used_modules: list[str] = []
-    if all_resources:
-        reply_upper = reply.upper()
-        for res_item in all_resources:
-            r_name = str(res_item.get("name", ""))
-            if r_name and (r_name in reply or r_name.upper().replace("-", "_") in reply_upper):
-                used_modules.append(r_name)
-
-    db.add(ChatMessage(session_id=session_id, role="user", content=body.content))
-    db.add(ChatMessage(session_id=session_id, role="assistant", content=reply))
-    db.commit()
-
-    change_id = None
-    diff = llm_service.extract_diff(reply)
-    if diff:
-        change = ProposedChange(
-            session_id=session_id, diff=diff, summary=body.content[:255]
-        )
-        db.add(change)
-        db.commit()
-        change_id = change.id
-    return ChatReply(reply=reply, proposed_change_id=change_id, used_modules=used_modules)
-
-
-@router.post("/changes/{change_id}/apply")
-async def apply_change(
-    change_id: int,
-    db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
-):
-    change = db.get(ProposedChange, change_id)
-    if change is None:
-        raise HTTPException(status_code=404, detail="change not found")
-    if change.status != ChangeStatus.proposed:
-        raise HTTPException(status_code=409, detail=f"change already {change.status.value}")
-    session = db.get(ChatSession, change.session_id)
-    project = db.get(Project, session.project_id)
-    try:
-        workdir = await asyncio.to_thread(workspace.ensure_branch, project, session.branch)
-        sha = await asyncio.to_thread(
-            workspace.apply_diff, workdir, change.diff,
-            f"chat: {change.summary or f'change #{change.id}'}",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"diff apply failed: {e}")
-    change.status = ChangeStatus.applied
-    change.applied_sha = sha
-    db.commit()
-    audit.record(db, key.name, "chat.change.apply", project.name,
-                 {"change_id": change.id, "sha": sha, "branch": session.branch})
-    return {"applied_sha": sha, "branch": session.branch}
-
-
-@router.post("/changes/{change_id}/reject", status_code=204)
-def reject_change(
-    change_id: int,
-    db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
-):
-    change = db.get(ProposedChange, change_id)
-    if change is None:
-        raise HTTPException(status_code=404, detail="change not found")
-    change.status = ChangeStatus.rejected
-    db.commit()
-
-
 @router.get("/projects/{project_id}/files")
 def project_files(
     project_id: int,
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_api_key),
 ):
-    """읽기 전용 파일 트리 — 코드 확인 화면. 실제 수정은 채팅/diff 승인 플로우로만 이뤄진다."""
+    """읽기 전용 파일 트리 — 코드 확인 화면. 플랫폼에는 수정 경로가 없다(구현은 외부 빌더)."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -327,8 +138,8 @@ def project_codemap(
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_api_key),
 ):
-    """코드 구조 트리 — 파일→클래스/함수 계층 + 항목별 요약(정적 파싱). 확대/축소
-    시각화(코드 채팅)용이며, 같은 개요가 채팅 LLM 컨텍스트에도 주입된다."""
+    """코드 구조 트리 — 파일→클래스/함수 계층 + 항목별 요약(정적 파싱). 코드 확인 화면의
+    확대/축소 시각화용이며, 같은 개요가 에이전트 기획의 LLM 컨텍스트에도 주입된다."""
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")

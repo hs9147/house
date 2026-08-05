@@ -25,7 +25,6 @@ from ..models import (
     PreviewSession,
     Project,
     ProjectType,
-    ProposedChange,
     RedirectRule,
 )
 from ..schemas import (
@@ -247,7 +246,7 @@ def delete_project(
         select(ChatSession.id).where(ChatSession.project_id == project_id)
     ).scalars().all()
     if session_ids:
-        for model in (ChatMessage, ProposedChange, PlanArtifact):
+        for model in (ChatMessage, PlanArtifact):
             db.execute(sa_delete(model).where(model.session_id.in_(session_ids)))
     for model in (ChatSession, Deployment, EnvVar, ModuleBinding, RedirectRule, PreviewSession):
         db.execute(sa_delete(model).where(model.project_id == project_id))

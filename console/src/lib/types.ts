@@ -143,18 +143,6 @@ export interface LlmProviderOut {
   org_name?: string | null;
 }
 
-export interface ChatSessionOut {
-  id: number;
-  branch: string;
-  provider: string;
-}
-
-export interface ChatReply {
-  reply: string;
-  proposed_change_id: number | null;
-  used_modules?: string[];
-}
-
 // 에이전트 기획 (Agent Planning)
 export interface PlanArtifactOut {
   stage: 'spec' | 'architecture' | 'solution' | 'principles';

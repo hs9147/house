@@ -9,8 +9,6 @@ import type {
   ComplianceOut,
   GiteaSyncResult,
   HealthInfo,
-  ChatReply,
-  ChatSessionOut,
   DeploymentOut,
   EnvVarRow,
   LlmProviderOut,
@@ -334,15 +332,6 @@ export const api = {
     name: string; kind: string; base_url: string; api_key?: string; model: string;
     organization_id?: number | null;
   }) => request<LlmProviderOut>('POST', '/llm/providers', body),
-  createChatSession: (project_id: number, provider_id: number, branch?: string) =>
-    request<ChatSessionOut>('POST', '/chat/sessions', {
-      project_id, provider_id, branch: branch || null,
-    }),
-  sendChatMessage: (sessionId: number, content: string, files: string[]) =>
-    request<ChatReply>('POST', `/chat/sessions/${sessionId}/messages`, { content, files }),
-  applyChange: (id: number) =>
-    request<{ applied_sha: string; branch: string }>('POST', `/changes/${id}/apply`),
-  rejectChange: (id: number) => request<void>('POST', `/changes/${id}/reject`),
   review: (projectId: number, provider_id: number, diff?: string, base_ref?: string) =>
     request<ReviewResult>('POST', `/projects/${projectId}/review`, {
       provider_id, diff: diff || null, base_ref: base_ref || null,

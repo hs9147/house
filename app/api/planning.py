@@ -648,13 +648,19 @@ async def plan_mcp_server(
             tasks = db.execute(
                 select(BuildTask).where(BuildTask.project_id == project.id).order_by(BuildTask.id)
             ).scalars().all()
-            return _ok(_mcp_text(json.dumps(
-                [_task_out(t).model_dump() for t in tasks], ensure_ascii=False, indent=2)))
+            text = json.dumps(
+                [_task_out(t).model_dump() for t in tasks], ensure_ascii=False, indent=2)
+            # 최근 push에서 잡힌 위반은 작업 목록을 볼 때 함께 알린다 — 빌더가 폴링하지 않아도 안다.
+            warning = _latest_compliance_warning(db, project)
+            return _ok(_mcp_text(f"{warning}\n\n{text}" if warning else text))
         if name in ("update_task", "submit_build_result", "request_clarification"):
             return _mcp_build_report(db, key.name, project, name, args, _ok, req_id)
         if name == "check_compliance":
             result = _compliance_out(db, project)
-            audit.record(db, key.name, "plan.build.compliance", project.name, result.summary)
+            audit.record(db, key.name, "plan.build.compliance", project.name, {
+                "status": "warning" if result.findings else "clean",
+                "summary": result.summary,
+            })
             if not result.findings:
                 return _ok(_mcp_text("위반 없음 — 제약을 지켰습니다."))
             return _ok(_mcp_text(result.builder_prompt))
@@ -667,6 +673,28 @@ async def plan_mcp_server(
 
 def _mcp_error(req_id, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": message}}
+
+
+def _latest_compliance_warning(db: Session, project: Project) -> str:
+    """가장 최근 컴플라이언스 검사에서 위반이 남아 있으면 그 요약 한 줄.
+
+    검사 결과는 감사 이벤트가 원천이라 별도 저장소를 두지 않는다 — 다시 검사해 깨끗하면
+    최신 이벤트가 clean이 되어 경고도 자연히 사라진다.
+    """
+    event = db.execute(
+        select(AuditEvent)
+        .where(AuditEvent.target == project.name,
+               AuditEvent.action == "plan.build.compliance")
+        .order_by(AuditEvent.id.desc())
+    ).scalars().first()
+    summary = (event.detail or {}).get("summary") if event else None
+    if not summary:
+        return ""
+    return (
+        "⚠️ 최근 커밋에서 제약 위반이 감지됐습니다(머지·배포는 막지 않음): "
+        f"{json.dumps(summary, ensure_ascii=False)}\n"
+        "check_compliance를 호출해 수정 지시를 받으세요."
+    )
 
 
 def _latest_session(db: Session, project_id: int) -> ChatSession | None:

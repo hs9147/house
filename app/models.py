@@ -238,26 +238,6 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
-class ChangeStatus(str, enum.Enum):
-    proposed = "proposed"
-    applied = "applied"
-    rejected = "rejected"
-
-
-class ProposedChange(Base):
-    """LLM 수정 제안. 항상 diff로만 존재하며 승인(apply) 시에만 작업 브랜치에 커밋된다."""
-
-    __tablename__ = "proposed_changes"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    session_id: Mapped[int] = mapped_column(ForeignKey("chat_sessions.id"), index=True)
-    diff: Mapped[str] = mapped_column(Text)
-    summary: Mapped[str] = mapped_column(String(255), default="")
-    status: Mapped[ChangeStatus] = mapped_column(Enum(ChangeStatus), default=ChangeStatus.proposed)
-    applied_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 class PlanStage(str, enum.Enum):
     """에이전트 기획의 순차 단계. 순서는 아래 정의 순서를 따른다."""
 

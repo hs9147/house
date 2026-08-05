@@ -128,7 +128,8 @@ export default function CodeTab() {
         <div>
           <h2 style={{ margin: 0 }}>코드 구조 & 모듈 연동 현황</h2>
           <span className="mutedtext" style={{ fontSize: 12 }}>
-            코드 변경에 따라 우측바의 모듈 사용 여부가 실시간 업데이트됩니다. (코드 수정: <Link to="/chat">채팅</Link>)
+            코드 변경에 따라 우측바의 모듈 사용 여부가 실시간 업데이트됩니다. (코드 구현은 외부
+            개발도구에서 수행하고, 기획·작업 지시는 <Link to="/planning">에이전트 기획</Link>에서 합니다)
           </span>
         </div>
       </div>

@@ -9,8 +9,10 @@ from ..config import get_settings
 from ..db import SessionLocal
 from ..models import Project, ProjectType
 from ..security import verify_webhook_signature
+from ..services import compliance as compliance_service
 from ..services import deployer
 from ..services import planning as planning_service
+from ..services import workspace
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -50,6 +52,7 @@ async def git_push(
         for project in matched:
             audit.record(db, "webhook", "deploy.trigger", project.name, {"branch": branch})
             background.add_task(_deploy_task, project.id)
+            background.add_task(_compliance_task, project.id)
     return {"triggered": [p.name for p in matched]}
 
 
@@ -68,6 +71,34 @@ def _deploy_task(project_id: int) -> None:
             pass
         except Exception as e:
             audit.record(db, "webhook", "deploy.failed", project.name, {"error": str(e)[:500]})
+
+
+def _compliance_task(project_id: int) -> None:
+    """외주 빌더가 push한 코드의 LLM·모듈 사용을 검사해 경고로 남긴다.
+
+    **막지 않는다** — 위반이 있어도 머지·배포는 그대로 진행하고 경고만 기록한다
+    (docs/agent-planning/05-운영검토목록.md §2 결정). 빌더는 MCP check_compliance로
+    전문 수정 지시를 받아 스스로 고친다.
+    """
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        if project is None:
+            return
+        try:
+            constraints = planning_service.build_constraints(db, project)
+            findings = compliance_service.scan(workspace.workdir_for(project), constraints)
+        except Exception as e:  # noqa: BLE001 — 검사 실패가 배포를 건드리면 안 된다
+            audit.record(db, "webhook", "plan.build.compliance.failed", project.name,
+                         {"error": str(e)[:500]})
+            return
+        if not findings:
+            return
+        audit.record(db, "webhook", "plan.build.compliance", project.name, {
+            "status": "warning",
+            "summary": compliance_service.summarize(findings),
+            "findings": [{"rule": f["rule"], "file": f["file"], "line": f["line"]}
+                         for f in findings[:20]],
+        })
 
 
 def _only_plan_artifacts(payload: dict) -> bool:
