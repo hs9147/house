@@ -1,5 +1,6 @@
 """에이전트 기획(Agent Planning) API — 단계 순차 진행·확정(커밋 목킹)·제약·작업 지시·MCP 서버."""
 import json
+import re
 import subprocess
 
 import pytest
@@ -82,7 +83,8 @@ def test_session_lists_all_four_stages_unconfirmed():
     r = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov}, headers=ADMIN)
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["branch"].startswith("paas/plan-")
+    # 세션마다 고유한 작업 브랜치 — id 뒤에 hex 접미사가 붙는다
+    assert re.fullmatch(rf"paas/plan-{body['id']}-[0-9a-f]{{8}}", body["branch"]), body["branch"]
     stages = [a["stage"] for a in body["artifacts"]]
     assert stages == ["spec", "architecture", "solution", "principles"]
     assert all(a["confirmed"] is False for a in body["artifacts"])
@@ -337,7 +339,15 @@ def test_session_history_resume_and_delete(monkeypatch, fresh_settings, tmp_path
     assert [m["role"] for m in messages] == ["user", "assistant"]
     assert messages[0]["content"] == "요구사항 정리"
 
+    # 삭제하면 세션의 작업 브랜치도 함께 정리된다
+    deleted: list[tuple] = []
+    from app.api import planning as planning_api
+
+    monkeypatch.setattr(planning_api.workspace, "delete_branch",
+                        lambda project, br: (deleted.append((project.name, br)), True)[1])
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
     assert c.delete(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 204
+    assert deleted == [("plan-app", branch)]
     assert c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 404
     assert c.get("/paas/api/v1/plan/sessions", headers=ADMIN).json() == []
     assert c.delete(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).status_code == 404
@@ -455,6 +465,29 @@ def test_existing_repo_documents_show_up_as_artifacts(monkeypatch, fresh_setting
     assert "외부 도구가 남긴 문서" in context
 
 
+def test_delete_branch_never_touches_the_default_branch(monkeypatch, fresh_settings, tmp_path):
+    """세션 정리가 프로젝트 기본 브랜치를 지우면 안 된다."""
+    from app.db import SessionLocal
+    from app.models import Project as ProjectModel
+    from app.services import workspace
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, _ = _project_and_provider(c)
+    _git(repo, "checkout", "-q", "-b", "paas/plan-9-abcd1234")
+
+    with SessionLocal() as db:
+        project = db.get(ProjectModel, pid)
+        assert workspace.delete_branch(project, project.branch) is False
+        assert workspace.delete_branch(project, "") is False
+        # 작업 브랜치는 로컬에서 실제로 사라진다(원격이 없어 push는 실패 → False)
+        assert workspace.delete_branch(project, "paas/plan-9-abcd1234") is False
+
+    out = subprocess.run(["git", "branch", "--format=%(refname:short)"],
+                         cwd=repo, capture_output=True, text=True)
+    assert out.stdout.split() == ["main"]
+
+
 def test_every_stage_carries_default_request_prompt():
     """입력창 기본값 — 사용자가 아무것도 쓰지 않아도 바로 '초안 생성'을 누를 수 있어야 한다."""
     c = _client()
@@ -518,7 +551,7 @@ def test_stage_prompt_includes_previous_stage_documents(monkeypatch, fresh_setti
     pid, prov = _project_and_provider(c)
     sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
                  headers=ADMIN).json()["id"]
-    branch = f"paas/plan-{sid}"
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
 
     _mock_llm(monkeypatch)
     monkeypatch.setattr(workspace, "write_and_commit",
@@ -626,7 +659,8 @@ def _confirm_spec(c, monkeypatch, sid: int, repo, body: str = "# 기획서 확�
     r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
                json={"content": body}, headers=ADMIN)
     assert r.status_code == 200, r.text
-    _git(repo, "checkout", "-q", "-b", f"paas/plan-{sid}")
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
+    _git(repo, "checkout", "-q", "-b", branch)
     doc = repo / "docs" / "agent-planning" / "01-기획서.md"
     doc.parent.mkdir(parents=True, exist_ok=True)
     doc.write_text(body, encoding="utf-8")

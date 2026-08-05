@@ -168,7 +168,7 @@ class ReviewRequest(BaseModel):
 class PlanSessionCreate(BaseModel):
     project_id: int
     provider_id: int
-    branch: str | None = None  # 기본: paas/plan-{session_id}
+    branch: str | None = None  # 기본: paas/plan-{session_id}-{hex}
 
 
 class PlanMessageIn(BaseModel):

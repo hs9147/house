@@ -156,8 +156,8 @@ export default function AgentPlanning() {
     // confirm은 이 컴포넌트의 '단계 확정' 함수와 이름이 겹친다 — window.confirm을 명시한다.
     if (!window.confirm(
       `기획 세션 #${row.id} (${row.project_name})을(를) 삭제하시겠습니까?\n` +
-      '대화·단계 확정 기록·작업 지시가 삭제됩니다.\n' +
-      '이미 Gitea에 커밋된 산출물 문서와 감사 로그는 남습니다.',
+      `대화·단계 확정 기록·작업 지시와 작업 브랜치(${row.branch})가 삭제됩니다.\n` +
+      '기본 브랜치로 머지된 산출물 문서와 감사 로그는 남습니다.',
     )) return;
     try {
       await api.deletePlanSession(row.id);

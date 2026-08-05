@@ -7,6 +7,7 @@ DB(PlanArtifact)에는 위치·커밋·확정 포인터만 남긴다. 빌드는 
 """
 import asyncio
 import json
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import delete as sa_delete
@@ -108,7 +109,9 @@ def create_plan_session(
     session = ChatSession(project_id=project.id, provider_id=provider.id, branch="")
     db.add(session)
     db.commit()
-    session.branch = body.branch or f"paas/plan-{session.id}"
+    # 세션마다 고유한 작업 브랜치를 만든다. id만 쓰면 세션을 지우고 다시 열었을 때
+    # 원격에 남은 동명 브랜치와 얽히므로 hex 접미사로 갈라 둔다.
+    session.branch = body.branch or f"paas/plan-{session.id}-{secrets.token_hex(4)}"
     db.commit()
     audit.record(db, key.name, "plan.session.create", project.name,
                  {"provider": provider.name, "branch": session.branch})
@@ -171,22 +174,31 @@ def delete_plan_session(
     db: Session = Depends(get_db),
     key: ApiKey = Depends(require_api_key),
 ):
-    """기획 세션과 그 대화·산출물 포인터·작업 지시를 지운다.
+    """기획 세션과 그 대화·산출물 포인터·작업 지시, 그리고 작업 브랜치를 지운다.
 
-    이미 커밋된 산출물 문서와 감사 로그는 건드리지 않는다 — 리포에 남은 기록은
-    세션과 별개이고, 세션을 지웠다고 사라져서는 안 된다.
+    기본 브랜치로 머지된 산출물 문서와 감사 로그는 건드리지 않는다 — 리포에 남은
+    기록은 세션과 별개이고, 세션을 지웠다고 사라져서는 안 된다. 브랜치 삭제는 베스트
+    에포트라 실패해도 세션 삭제는 성공 처리한다.
     """
     session = db.get(ChatSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
     project = db.get(Project, session.project_id)
+    branch = session.branch
     for model in (ChatMessage, PlanArtifact, BuildTask):
         db.execute(sa_delete(model).where(model.session_id == session_id))
     db.delete(session)
     db.commit()
+
+    branch_deleted = False
+    if project is not None:
+        try:
+            branch_deleted = workspace.delete_branch(project, branch)
+        except Exception:  # noqa: BLE001 — 브랜치 정리 실패가 세션 삭제를 되돌리지 않는다
+            branch_deleted = False
     audit.record(db, key.name, "plan.session.delete",
                  project.name if project else str(session.project_id),
-                 {"session_id": session_id, "branch": session.branch})
+                 {"session_id": session_id, "branch": branch, "branch_deleted": branch_deleted})
 
 
 @router.get("/plan/sessions/{session_id}", response_model=PlanSessionOut)

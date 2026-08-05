@@ -112,6 +112,27 @@ def write_and_commit(project: Project, branch: str, rel_path: str, content: str,
     return out.stdout.strip()
 
 
+def delete_branch(project: Project, branch: str) -> bool:
+    """작업 브랜치를 로컬·원격에서 지운다. 원격 삭제 성공 여부를 반환한다.
+
+    기본 브랜치는 절대 지우지 않는다 — 세션 정리가 프로젝트를 망가뜨리면 안 된다.
+    이미 없는 브랜치나 원격 거절은 실패로 보지 않고 조용히 넘어간다(정리는 베스트 에포트).
+    """
+    if not branch or branch == project.branch:
+        return False
+    workdir = workdir_for(project)
+    if not workdir.exists():
+        return False
+    # 지우려는 브랜치에 체크아웃돼 있으면 삭제할 수 없다 — 기본 브랜치로 먼저 옮긴다.
+    subprocess.run(["git", "checkout", project.branch], cwd=workdir, capture_output=True, text=True)
+    subprocess.run(["git", "branch", "-D", branch], cwd=workdir, capture_output=True, text=True)
+    pushed = subprocess.run(
+        ["git", *auth_args(project.git_url), "push", "origin", "--delete", branch],
+        cwd=workdir, capture_output=True, text=True,
+    )
+    return pushed.returncode == 0
+
+
 def diff_between(workdir: Path, base_ref: str, head_ref: str = "HEAD") -> str:
     out = subprocess.run(
         ["git", "diff", f"{base_ref}..{head_ref}"], cwd=workdir, capture_output=True, text=True

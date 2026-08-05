@@ -198,10 +198,10 @@ curl -X POST "$BASE/projects/1/rollback?profile=release" -H "x-api-key: $ADMIN"
 ```
 POST /paas/api/v1/llm/providers                     # 외부(Claude/OpenAI) 또는 내부(project://<llm 프로젝트>) 등록 (admin)
 GET  /paas/api/v1/llm/providers                     # api_key는 has_api_key로만 노출
-POST /paas/api/v1/plan/sessions                     # {project_id, provider_id, branch?} — 기본 브랜치 paas/plan-{id}
+POST /paas/api/v1/plan/sessions                     # {project_id, provider_id, branch?} — 기본 브랜치 paas/plan-{id}-{hex}
 GET  /paas/api/v1/plan/sessions?project_id=         # 세션 이력(최근 순) — 확정 단계·작업 수 요약
 GET  /paas/api/v1/plan/sessions/{id}/messages       # 재개용 대화 이력 복원
-DELETE /paas/api/v1/plan/sessions/{id}              # 세션·대화·산출물 포인터·작업 지시 삭제(커밋된 문서는 남음)
+DELETE /paas/api/v1/plan/sessions/{id}              # 세션·대화·산출물 포인터·작업 지시 + 작업 브랜치 삭제(머지된 문서는 남음)
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/messages   # 단계 문서 초안 — git 파일 목록·앞 단계 확정본이 컨텍스트
                                                 # solution 단계에서는 bind_module 도구로 사용 결정 모듈을 즉시 바인딩하고,
                                                 # 바인딩된 mcp 모듈의 도구({모듈명}__{도구명})로 실제 규격을 확인
@@ -424,7 +424,7 @@ npm run build        # tsc 타입체크 + vite build → dist/
 | --- | --- | --- |
 | **배포 체크아웃** | `services/build.py` `checkout()` | 최초엔 `git clone --branch`, 이후는 `fetch`+`reset --hard`로 매 배포마다 최신화. `git_sha` 지정 시 해당 커밋으로 `checkout`. **읽기 전용** — 이 리포에 커밋하지 않음 |
 | **웹훅 자동 배포** | `api/webhooks.py` | GitHub/Gitea push 이벤트를 **수신**(HMAC 서명 검증 필수)해 위 checkout→build 파이프라인을 트리거. 플랫폼이 밖으로 나가는 방향이 아니라 받는 방향 |
-| **기획 산출물 커밋** | `services/workspace.py` `write_and_commit()` | 확정된 기획 문서만 작업 브랜치(`paas/plan-{id}`)에 커밋하고 사내 Gitea로 push한 뒤, git 상태에 따라 PR·머지를 자동 수행한다. 플랫폼이 리포에 쓰는 경로는 이것뿐이며 **구현 코드는 쓰지 않는다** |
+| **기획 산출물 커밋** | `services/workspace.py` `write_and_commit()` | 확정된 기획 문서만 세션별 작업 브랜치(`paas/plan-{id}-{hex}`)에 커밋하고 사내 Gitea로 push한 뒤, git 상태에 따라 PR·머지를 자동 수행한다. 플랫폼이 리포에 쓰는 경로는 이것뿐이며 **구현 코드는 쓰지 않는다** |
 | **GitOps 연계** | `services/runtime/k8s_runtime.py` `_gitops_push`/`_sync_gitops_repo` | 2차(K8s) 티어에서 `PAAS_K8S_GITOPS_REPO` 설정 시에만 활성화. 배포 **매니페스트**(이미지 태그·비-시크릿 env)를 별도 GitOps 리포에 커밋·푸시해 ArgoCD가 반영하게 한다. **시크릿은 여기 포함되지 않음**(15절) — 애초에 소스 코드가 아니라 K8s 매니페스트만 다루는 경로 |
 | **프리뷰** | `services/preview.py` | 위 checkout 재사용, 별도 git 조작 없음 |
 
