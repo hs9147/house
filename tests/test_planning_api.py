@@ -57,7 +57,8 @@ def _workspace_repo(monkeypatch, fresh_settings, tmp_path, project_name: str = "
     repo = tmp_path / "workspaces" / project_name
     repo.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-    (repo / "app.py").write_text("print('hi')\n", encoding="utf-8")
+    (repo / "app.py").write_text(
+        '"""진입점."""\ndef main():\n    print(\'hi\')\n', encoding="utf-8")
     (repo / "README.md").write_text("# hi\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "init")
@@ -190,8 +191,10 @@ def test_git_tree_is_default_context_and_prompt_selects_file_contents(
 
     context = _draft_context(calls)
     assert "=== GIT 파일 목록" in context and "README.md" in context  # 목록은 전부 기본 참조
-    assert "--- app.py ---\nprint('hi')" in context  # 선정된 파일만 본문 주입
+    assert "--- app.py ---" in context and "def main():" in context  # 선정된 파일만 본문 주입
     assert "--- README.md ---" not in context
+    # 코드 구조 개요도 함께 주입된다
+    assert "CODE STRUCTURE (OUTLINE)" in context and "def main()" in context
 
 
 def test_file_selection_failure_does_not_break_the_conversation(
@@ -471,6 +474,46 @@ def test_compliance_detects_llm_and_module_violations(monkeypatch, fresh_setting
     # 외부 빌더는 같은 검사를 MCP로 직접 돌려 제출 전에 자기 점검한다
     text = _mcp(c, pid, "check_compliance")["result"]["content"][0]["text"]
     assert "agent.py:3" in text
+
+
+def test_push_records_compliance_warning_without_blocking(monkeypatch, fresh_settings, tmp_path):
+    """push는 자동으로 검사되지만 막지 않는다 — 경고만 남고 작업 목록에서 빌더가 본다."""
+    import hashlib
+    import hmac
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path, project_name="plan-app")
+    (repo / "agent.py").write_text(VIOLATING_CODE, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "build")
+
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    # 배포는 이 테스트의 관심사가 아니다(원격이 없으므로 실행만 막는다)
+    from app.api import webhooks
+
+    monkeypatch.setattr(webhooks, "_deploy_task", lambda project_id: None)
+    body = json.dumps({
+        "ref": "refs/heads/main",
+        "repository": {"clone_url": "https://git.example.com/o/plan-app"},
+        "commits": [{"modified": ["agent.py"], "added": [], "removed": []}],
+    }).encode()
+    sig = hmac.new(b"test-webhook-secret", body, hashlib.sha256).hexdigest()
+    r = c.post("/paas/webhooks/git", content=body,
+               headers={"x-hub-signature-256": f"sha256={sig}",
+                        "content-type": "application/json"})
+    assert r.json() == {"triggered": ["plan-app"]}  # 위반이 있어도 배포는 막지 않는다
+
+    events = c.get(f"/paas/api/v1/plan/sessions/{sid}/build-status", headers=ADMIN).json()["events"]
+    warning = next(e for e in events if e["action"] == "plan.build.compliance")
+    assert warning["detail"]["status"] == "warning"
+    assert warning["detail"]["summary"]["llm_direct"] == 2
+
+    # 빌더는 작업 목록만 봐도 경고를 알게 된다
+    text = _mcp(c, pid, "list_tasks")["result"]["content"][0]["text"]
+    assert "제약 위반이 감지됐습니다" in text and "check_compliance" in text
 
 
 def test_compliance_clean_repo_has_nothing_to_send(monkeypatch, fresh_settings, tmp_path):

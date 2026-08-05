@@ -8,25 +8,6 @@ from app.services import llm, workspace
 from app.services.build import BuildError
 
 
-def test_extract_diff_from_fence():
-    reply = (
-        "설명입니다.\n```diff\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n```\n끝."
-    )
-    diff = llm.extract_diff(reply)
-    assert diff.startswith("--- a/x.py")
-    assert "+b" in diff
-
-
-def test_extract_diff_absent():
-    assert llm.extract_diff("코드 변경이 필요 없습니다.") is None
-    assert llm.extract_diff("```diff\n\n```") is None
-
-
-def test_extract_diff_unfenced():
-    reply = "diff --git a/y.py b/y.py\n--- a/y.py\n+++ b/y.py\n@@ -1 +1 @@\n-1\n+2\n"
-    assert llm.extract_diff(reply).startswith("diff --git")
-
-
 def test_resolve_internal_project_url():
     """db 없이 호출하면(조직 조회 불가) 서브패스 조직 자리가 "_"로 안전하게 떨어진다."""
     assert llm.resolve_base_url("project://llm-main") == "http://apps.test/apps/_/llm-main/"
@@ -89,75 +70,6 @@ DIFF = """--- a/hello.py
 -print("hello")
 +print("hello, paas")
 """
-
-
-def test_apply_diff_commits(tmp_path):
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    sha = workspace.apply_diff(repo, DIFF, "chat: greeting")
-    assert len(sha) == 40
-    assert (repo / "hello.py").read_text() == 'print("hello, paas")\n'
-    log = subprocess.run(["git", "log", "--oneline"], cwd=repo,
-                         capture_output=True, text=True).stdout
-    assert "chat: greeting" in log
-    assert not (repo / ".paas-proposed.patch").exists()
-
-
-def test_apply_bad_diff_raises(tmp_path):
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    bad = DIFF.replace('-print("hello")', '-print("nope")')
-    with pytest.raises(Exception):
-        workspace.apply_diff(repo, bad, "x")
-    # 거부된 패치가 파일을 건드리면 안 된다
-    assert (repo / "hello.py").read_text() == 'print("hello")\n'
-
-
-def _long_file(repo: Path) -> str:
-    body = "\n".join(f"line{i}" for i in range(1, 21)) + "\n"
-    (repo / "app.py").write_text(body)
-    return body
-
-
-def test_fallback_keeps_lines_outside_the_hunk(tmp_path):
-    """폴백은 hunk 구간만 바꾼다 — 파일 나머지를 hunk 내용으로 덮어쓰면 안 된다."""
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _long_file(repo)
-
-    # @@ 줄번호가 완전히 틀린 패치(LLM이 흔히 내는 오류) — 내용으로 위치를 찾아 붙어야 한다
-    workspace._apply_patch_fallback(repo, (
-        "--- a/app.py\n+++ b/app.py\n@@ -999,3 +999,3 @@\n"
-        " line9\n-line10\n+line10_FIXED\n line11\n"
-    ))
-
-    after = (repo / "app.py").read_text().splitlines()
-    assert len(after) == 20
-    assert after[9] == "line10_FIXED"
-    assert after[0] == "line1" and after[-1] == "line20"
-
-
-def test_fallback_refuses_when_context_does_not_match(tmp_path):
-    """문맥이 원본과 다르면 추측하지 않는다 — 승인한 diff와 다른 내용이 커밋되면 안 된다."""
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    before = _long_file(repo)
-
-    with pytest.raises(BuildError):
-        workspace._apply_patch_fallback(repo, (
-            "--- a/app.py\n+++ b/app.py\n@@ -9,3 +9,3 @@\n"
-            " line9\n-lineTEN_WRONG\n line11\n"
-        ))
-    assert (repo / "app.py").read_text() == before
-
-
-def test_fallback_creates_new_file(tmp_path):
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    workspace._apply_patch_fallback(repo, (
-        "--- /dev/null\n+++ b/pkg/new.py\n@@ -0,0 +1,2 @@\n+a = 1\n+b = 2\n"
-    ))
-    assert (repo / "pkg" / "new.py").read_text() == "a = 1\nb = 2\n"
 
 
 def test_context_files_guardrails(tmp_path):

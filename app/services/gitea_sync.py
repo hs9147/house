@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..models import (
     BuildProfile, ChatMessage, ChatSession, Deployment, EnvVar, ModuleBinding,
-    Organization, PreviewSession, Project, ProjectType, ProposedChange, RedirectRule,
+    Organization, PreviewSession, Project, ProjectType, RedirectRule,
 )
 from . import gitea
 from .build import COMPOSITE_COMPONENTS, detect_project_type
@@ -166,7 +166,6 @@ def _delete_project(db: Session, project: Project) -> None:
         ).all()
     ]
     if session_ids:
-        db.execute(delete(ProposedChange).where(ProposedChange.session_id.in_(session_ids)))
         db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
         db.execute(delete(ChatSession).where(ChatSession.id.in_(session_ids)))
     db.execute(delete(Deployment).where(Deployment.project_id == project.id))

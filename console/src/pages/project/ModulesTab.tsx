@@ -36,8 +36,8 @@ export default function ModulesTab() {
     <div className="panel">
       <h2>바인딩된 모듈</h2>
       <p className="mutedtext" style={{ fontSize: 12 }}>
-        바인딩하면 다음 배포부터 규약된 환경변수가 자동 주입됩니다. 이 목록은 LLM 채팅
-        컨텍스트에도 제공됩니다.
+        바인딩하면 다음 배포부터 규약된 환경변수가 자동 주입됩니다. 이 목록은 에이전트 기획의
+        가용 모듈 제약(외부 빌드 guardrail)에도 그대로 쓰입니다.
       </p>
       <Async state={bound} empty="바인딩된 모듈이 없습니다.">
         {(rows) => (

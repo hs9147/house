@@ -5,7 +5,6 @@ import { isAdmin, isLoggedIn } from './lib/auth';
 import Accounts from './pages/Accounts';
 import AgentPlanning from './pages/AgentPlanning';
 import Audit from './pages/Audit';
-import Chat from './pages/Chat';
 import Dashboard from './pages/Dashboard';
 import Git from './pages/Git';
 import Login from './pages/Login';
@@ -117,7 +116,6 @@ export default function App() {
           }
         />
         <Route path="/planning" element={<AgentPlanning />} />
-        <Route path="/chat" element={<Chat />} />
         <Route
           path="/audit"
           element={

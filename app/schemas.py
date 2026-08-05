@@ -156,23 +156,6 @@ class LlmProviderOut(BaseModel):
     org_name: str | None = None
 
 
-class ChatSessionCreate(BaseModel):
-    project_id: int
-    provider_id: int
-    branch: str | None = None  # 기본: paas/chat-{session_id}
-
-
-class ChatMessageIn(BaseModel):
-    content: str
-    files: list[str] = []  # 컨텍스트로 포함할 리포 내 파일 경로
-
-
-class ChatReply(BaseModel):
-    reply: str
-    proposed_change_id: int | None = None
-    used_modules: list[str] = []
-
-
 class ReviewRequest(BaseModel):
     provider_id: int
     diff: str | None = None  # 생략 시 base_ref..HEAD로 계산
