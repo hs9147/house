@@ -161,3 +161,61 @@ def test_read_file_rejects_oversized_file(tmp_path):
     (repo / "huge.py").write_text("x" * (workspace.MAX_VIEW_FILE_BYTES + 1))
     with pytest.raises(ValueError):
         workspace.read_file(repo, "huge.py")
+
+
+def test_korean_paths_survive_a_non_utf8_locale(tmp_path, monkeypatch, fresh_settings):
+    """회귀: POSIX/C 로케일에서 한글 산출물 경로·문서가 깨져 요청이 통째로 실패했다.
+
+    git 출력 디코딩은 로케일이 아니라 UTF-8로 고정해야 하고, 파일시스템 인코딩으로
+    표현할 수 없는 경로는 원인을 알려주며 멈춰야 한다. 인코딩은 인터프리터 기동 시
+    결정되므로 자식 프로세스를 띄워 검증한다.
+    """
+    import json as _json
+    import os
+    import sys
+
+    project = _remote_project(tmp_path, monkeypatch, fresh_settings)
+    script = tmp_path / "run.py"
+    script.write_text(
+        "import json, sys\n"
+        f"sys.path.insert(0, {str(Path.cwd())!r})\n"
+        "from app.models import Project, ProjectType\n"
+        "from app.services import workspace\n"
+        f"p = Project(name='plan-app', type=ProjectType.python, git_url={project.git_url!r},"
+        " branch='main')\n"
+        "out = {'fs': sys.getfilesystemencoding()}\n"
+        "try:\n"
+        "    sha = workspace.write_and_commit(\n"
+        "        p, 'paas/plan-1-abcd1234', 'docs/agent-planning/01-기획서.md',\n"
+        "        '# 기획서\\n한글 본문\\n', 'plan(spec): 기획서 확정')\n"
+        "    out['committed'] = bool(sha)\n"
+        "    body = workspace.read_file_at_ref(\n"
+        "        workspace.workdir_for(p), 'paas/plan-1-abcd1234',\n"
+        "        'docs/agent-planning/01-기획서.md')\n"
+        "    out['read'] = body\n"
+        "except Exception as e:\n"
+        "    out['error'] = f'{type(e).__name__}: {e}'\n"
+        "print(json.dumps(out, ensure_ascii=True))\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "1",
+        "PAAS_WORK_DIR": str(tmp_path / "workspaces"),
+        "PYTHONIOENCODING": "utf-8",
+    }
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True,
+                          text=True, encoding="utf-8", env=env)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    result = _json.loads(proc.stdout.strip().splitlines()[-1])
+    assert "error" not in result, result["error"]
+    assert result["committed"] is True
+    assert result["read"] == "# 기획서\n한글 본문\n"  # 로케일과 무관하게 UTF-8로 읽는다
+
+    # UTF-8 모드마저 꺼져 파일시스템 인코딩이 ascii면, 무엇을 고쳐야 하는지 알려주며 멈춘다
+    ascii_env = {**env, "PYTHONUTF8": "0", "PAAS_WORK_DIR": str(tmp_path / "ws-ascii")}
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True,
+                          text=True, encoding="utf-8", env=ascii_env)
+    result = _json.loads(proc.stdout.strip().splitlines()[-1])
+    if result["fs"] == "utf-8":
+        return  # 이 플랫폼은 로케일과 무관하게 utf-8(Windows 등) — 검증할 실패 경로가 없다
+    assert "PYTHONUTF8=1" in result["error"], result

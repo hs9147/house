@@ -738,6 +738,27 @@ def test_stage_prompt_includes_previous_stage_documents(monkeypatch, fresh_setti
     assert "=== 이전 단계 확정 산출물 1. 기획서" in context
     assert "산출물 본문" in context
 
+    # 아키텍처를 확정하면 솔루션 구성 단계는 기획서와 아키텍처를 모두 문맥으로 받는다
+    from app.services import workspace as ws
+
+    monkeypatch.setattr(ws, "write_and_commit",
+                        lambda project, br, path, content, message: "cafe123")
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/architecture/confirm",
+                  json={"content": "# 설계 확정본\n설계 본문\n"}, headers=ADMIN).status_code == 200
+    _git(repo, "checkout", "-q", branch)
+    doc2 = repo / "docs" / "agent-planning" / "02-아키텍처설계.md"
+    doc2.write_text("# 설계 확정본\n설계 본문\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "plan(architecture)")
+    _git(repo, "checkout", "-q", "main")
+
+    calls = _mock_llm(monkeypatch)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/solution/messages",
+           json={"content": "솔루션"}, headers=ADMIN)
+    context = _draft_context(calls)
+    assert "=== 이전 단계 확정 산출물 1. 기획서" in context and "산출물 본문" in context
+    assert "=== 이전 단계 확정 산출물 2. 아키텍처 설계" in context and "설계 본문" in context
+
 
 def test_confirm_opens_pull_request_and_merges_when_mergeable(monkeypatch):
     """작업 브랜치 커밋은 PR 생성 후 머지 가능하면 자동 머지한다."""
