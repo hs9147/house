@@ -199,6 +199,17 @@ class PlanArtifactContentOut(BaseModel):
 
 class PlanConfirmIn(BaseModel):
     content: str  # 확정할 단계 산출물 본문(마크다운) — Gitea 리포에 커밋된다
+    # 리포에 이미 다른 내용의 같은 문서가 있을 때만 필요 — 확인 없이 덮어쓰지 않는다.
+    overwrite: bool = False
+
+
+class PlanMergeOut(BaseModel):
+    """세션 마무리 — 작업 브랜치를 기본 브랜치로 반영한 결과."""
+
+    branch: str
+    action: str  # merged | pr_opened | committed | skipped
+    detail: str | None = None
+    pull_request_url: str | None = None
 
 
 class PlanArtifactOut(BaseModel):

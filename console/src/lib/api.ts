@@ -20,6 +20,7 @@ import type {
   PlanArtifactOut,
   PlanBuildStatus,
   PlanChatMessage,
+  PlanMergeOut,
   PlanMessageReply,
   PlanSessionOut,
   PlanSessionSummary,
@@ -359,9 +360,13 @@ export const api = {
   // 단계 산출물 본문 — 세션 재개·단계 이동 시 편집기를 채운다
   planArtifactContent: (sessionId: number, stage: string) =>
     request<PlanArtifactContent>('GET', `/plan/sessions/${sessionId}/stages/${stage}/artifact`),
-  confirmPlanStage: (sessionId: number, stage: string, content: string) =>
+  // overwrite=true는 리포에 이미 있는 문서를 덮어쓸 때만(412 확인 후 재시도)
+  confirmPlanStage: (sessionId: number, stage: string, content: string, overwrite = false) =>
     request<PlanArtifactOut>('POST', `/plan/sessions/${sessionId}/stages/${stage}/confirm`,
-      { content }),
+      { content, overwrite }),
+  // 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영
+  mergePlanSession: (sessionId: number) =>
+    request<PlanMergeOut>('POST', `/plan/sessions/${sessionId}/merge`),
   planBuildStatus: (sessionId: number) =>
     request<PlanBuildStatus>('GET', `/plan/sessions/${sessionId}/build-status`),
   planConstraints: (projectId: number) =>

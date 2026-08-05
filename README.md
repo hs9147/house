@@ -206,9 +206,11 @@ POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/messages   # 단계 문서 �
                                                 # solution 단계에서는 bind_module 도구로 사용 결정 모듈을 즉시 바인딩하고,
                                                 # 바인딩된 mcp 모듈의 도구({모듈명}__{도구명})로 실제 규격을 확인
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/confirm    # 확정 → Gitea 커밋 후 git 상태에 따라 PR·머지 자동
+                                                # 리포에 다른 내용의 같은 문서가 있으면 412 — overwrite=true로 재요청
 POST /paas/api/v1/plan/sessions/{id}/tasks/generate # 확정 산출물 → 외주 빌드 작업 지시(work order)
 GET  /paas/api/v1/plan/sessions/{id}/tasks          # 작업 지시 목록·상태
 PATCH /paas/api/v1/plan/tasks/{id}                  # {status?, note?, commit_sha?}
+POST /paas/api/v1/plan/sessions/{id}/merge          # 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영
 GET  /paas/api/v1/plan/projects/{id}/constraints    # 가용 모듈 제약(외부 빌드 guardrail)
 GET  /paas/api/v1/plan/projects/{id}/compliance     # LLM·모듈 사용 검증 + 외주 빌더 전달용 수정 지시
 POST /paas/api/v1/plan/projects/{id}/mcp            # 외부 빌드 도구용 MCP 서버(JSON-RPC 2.0)

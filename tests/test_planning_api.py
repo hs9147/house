@@ -488,6 +488,81 @@ def test_delete_branch_never_touches_the_default_branch(monkeypatch, fresh_setti
     assert out.stdout.split() == ["main"]
 
 
+def test_confirm_asks_before_overwriting_an_existing_repo_document(
+    monkeypatch, fresh_settings, tmp_path
+):
+    """리포에 이미 있는 문서는 확인 없이 덮어쓰지 않는다."""
+    from app.services import workspace
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    doc = repo / "docs" / "agent-planning" / "01-기획서.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# 기존 기획서\n외부 도구가 남긴 문서\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "docs")
+
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    committed: list[str] = []
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, br, path, content, message:
+                        (committed.append(content), "deadbeef")[1])
+
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+               json={"content": "# 새 기획서\n"}, headers=ADMIN)
+    assert r.status_code == 412
+    assert "덮어쓰려면 확인이 필요합니다" in r.json()["detail"]
+    assert committed == []  # 커밋되지 않았다
+
+    # 같은 내용이면 덮어쓸 것이 없으니 묻지 않는다
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+                  json={"content": "# 기존 기획서\n외부 도구가 남긴 문서\n"},
+                  headers=ADMIN).status_code == 200
+
+    # 확인하면 진행한다
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+               json={"content": "# 새 기획서\n", "overwrite": True}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert committed[-1] == "# 새 기획서\n"
+
+    # 이 세션에서 확정한 뒤에는 고칠 때마다 묻지 않는다
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+                  json={"content": "# 또 고친 기획서\n"}, headers=ADMIN).status_code == 200
+
+
+def test_session_merge_finishes_the_branch(monkeypatch, fresh_settings, tmp_path):
+    """작업 지시까지 끝낸 세션은 작업 브랜치를 기본 브랜치로 반영하며 마무리된다."""
+    from app.services import gitea
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    # 확정 전에는 머지할 것이 없다
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).status_code == 409
+
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    monkeypatch.setattr(gitea, "repo_slug", lambda git_url: ("o", "plan-app"))
+    monkeypatch.setattr(gitea, "ensure_pull_request", lambda o, r, head, base, title, body="": {
+        "number": 11, "html_url": "https://git.example.com/o/plan-app/pulls/11", "mergeable": True,
+    })
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": True)
+
+    body = c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).json()
+    assert body["action"] == "merged"
+    assert body["pull_request_url"] == "https://git.example.com/o/plan-app/pulls/11"
+    assert body["branch"] == c.get(f"/paas/api/v1/plan/sessions/{sid}",
+                                   headers=ADMIN).json()["branch"]
+
+    events = c.get(f"/paas/api/v1/plan/sessions/{sid}/build-status", headers=ADMIN).json()["events"]
+    assert any(e["action"] == "plan.session.merge" for e in events)
+
+
 def test_every_stage_carries_default_request_prompt():
     """입력창 기본값 — 사용자가 아무것도 쓰지 않아도 바로 '초안 생성'을 누를 수 있어야 한다."""
     c = _client()

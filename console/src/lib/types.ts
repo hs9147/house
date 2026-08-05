@@ -183,6 +183,14 @@ export interface PlanArtifactContent {
   source: 'session' | 'repo' | '';
 }
 
+// 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영한 결과
+export interface PlanMergeOut {
+  branch: string;
+  action: 'merged' | 'pr_opened' | 'committed' | 'skipped';
+  detail: string | null;
+  pull_request_url: string | null;
+}
+
 // 기획 세션 이력 — 재개·삭제 대상 선택용
 export interface PlanSessionSummary {
   id: number;

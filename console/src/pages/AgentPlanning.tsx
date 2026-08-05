@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import Async from '../components/Async';
-import { api } from '../lib/api';
+import { ApiError, api } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
 import type {
   BuildTaskOut, ComplianceOut, PlanArtifactContent, PlanArtifactOut, PlanBuildEvent,
-  PlanSessionOut, PlanSessionSummary, ProjectOut,
+  PlanMergeOut, PlanSessionOut, PlanSessionSummary, ProjectOut,
 } from '../lib/types';
 import { CreateModal } from './Projects';
 
@@ -47,6 +47,11 @@ const STAGES: { key: PlanArtifactOut['stage']; label: string }[] = [
   { key: 'principles', label: '④ 개발원칙' },
 ];
 
+// 개발원칙 다음 단계 — 문서가 아니라 외주 빌드 작업 지시를 만들고 브랜치를 마무리한다.
+const TASK_STEP = 'tasks' as const;
+type StepKey = PlanArtifactOut['stage'] | typeof TASK_STEP;
+const STEPS: { key: StepKey; label: string }[] = [...STAGES, { key: TASK_STEP, label: '⑤ 작업 지시' }];
+
 export default function AgentPlanning() {
   const me = useApi(() => api.me());
   const projects = useApi(() => api.listProjects());
@@ -66,7 +71,7 @@ export default function AgentPlanning() {
   const [providerId, setProviderId] = useState('');
   const [branch, setBranch] = useState('');
   const [session, setSession] = useState<PlanSessionOut | null>(null);
-  const [activeStage, setActiveStage] = useState<PlanArtifactOut['stage']>('spec');
+  const [activeStage, setActiveStage] = useState<StepKey>('spec');
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [files, setFiles] = useState('');
@@ -77,6 +82,7 @@ export default function AgentPlanning() {
   const [gitResult, setGitResult] = useState<PlanArtifactOut | null>(null);
   const [tasks, setTasks] = useState<BuildTaskOut[]>([]);
   const [compliance, setCompliance] = useState<ComplianceOut | null>(null);
+  const [mergeResult, setMergeResult] = useState<PlanMergeOut | null>(null);
   const [draftSource, setDraftSource] = useState<PlanArtifactContent['source']>('');
   const history = useApi(() => api.listPlanSessions());
 
@@ -95,9 +101,11 @@ export default function AgentPlanning() {
   const defaultRequestOf = (s: PlanSessionOut | null, stage: string) =>
     s?.artifacts.find((a) => a.stage === stage)?.default_request ?? '';
   const stageIndex = (stage: string) => STAGES.findIndex((s) => s.key === stage);
-  // 앞 단계가 모두 확정돼야 진입 가능(진행단계 순차 강제)
-  const stageUnlocked = (stage: string) =>
-    STAGES.slice(0, stageIndex(stage)).every((s) => isConfirmed(s.key));
+  // 앞 단계가 모두 확정돼야 진입 가능(진행단계 순차 강제). 작업 지시는 4단계를 모두 확정해야 열린다.
+  const stageUnlocked = (stage: StepKey) =>
+    stage === TASK_STEP
+      ? STAGES.every((s) => isConfirmed(s.key))
+      : STAGES.slice(0, stageIndex(stage)).every((s) => isConfirmed(s.key));
 
   const start = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -173,11 +181,15 @@ export default function AgentPlanning() {
     setSession(await api.getPlanSession(session.id));
   };
 
-  const selectStage = (stage: PlanArtifactOut['stage']) => {
+  const selectStage = (stage: StepKey) => {
     if (!stageUnlocked(stage) || !session) return;
     setActiveStage(stage);
     setMessages([]);
     setError('');
+    if (stage === TASK_STEP) {
+      void api.listPlanTasks(session.id).then(setTasks).catch(() => setTasks([]));
+      return;
+    }
     setInput(defaultRequestOf(session, stage));
     void loadArtifact(session.id, stage); // 확정된 산출물이 있으면 그대로 보여준다
   };
@@ -209,20 +221,35 @@ export default function AgentPlanning() {
   };
 
   const confirm = async () => {
-    if (!session || !draft.trim()) return;
+    if (!session || !draft.trim() || activeStage === TASK_STEP) return;
     setBusy(true);
     setError('');
     try {
-      const confirmed = await api.confirmPlanStage(session.id, activeStage, draft);
+      let confirmed;
+      try {
+        confirmed = await api.confirmPlanStage(session.id, activeStage, draft);
+      } catch (err) {
+        // 412 = 리포에 이미 다른 내용의 같은 문서가 있다 — 덮어쓸지 확인하고 재시도한다.
+        if ((err as ApiError).status !== 412) throw err;
+        if (!window.confirm(`${(err as Error).message}\n\n덮어쓰고 확정할까요?`)) {
+          setBusy(false);
+          return;
+        }
+        confirmed = await api.confirmPlanStage(session.id, activeStage, draft, true);
+      }
       setGitResult(confirmed); // 커밋 후 자동 수행된 PR/머지 결과
       await refreshSession();
       // 다음 단계로 자동 이동
       const next = STAGES[stageIndex(activeStage) + 1];
+      setMessages([]);
       if (next) {
         setActiveStage(next.key);
-        setMessages([]);
         setInput(defaultRequestOf(session, next.key));
         await loadArtifact(session.id, next.key);
+      } else {
+        // 개발원칙까지 끝났다 — 작업 지시 단계로 넘어간다.
+        setActiveStage(TASK_STEP);
+        setTasks(await api.listPlanTasks(session.id));
       }
     } catch (err) {
       setError((err as Error).message);
@@ -267,6 +294,21 @@ export default function AgentPlanning() {
     }
   };
 
+  const mergeSession = async () => {
+    if (!session) return;
+    setBusy(true);
+    setError('');
+    try {
+      setMergeResult(await api.mergePlanSession(session.id));
+      await refreshSession();
+      history.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const runCompliance = async () => {
     if (!session) return;
     setBusy(true);
@@ -292,9 +334,10 @@ export default function AgentPlanning() {
           <button onClick={() => setShowCreate(true)}>+ 새 프로젝트</button>
         </div>
         <p className="mutedtext" style={{ fontSize: 12, marginTop: 6, marginBottom: 12 }}>
-          코딩 전에 기획서 → 아키텍처 → 솔루션 구성 → 개발원칙을 순서대로 확정합니다. 각 단계는 앞 단계의
-          확정 문서를 참조하고, 확정 산출물은 프로젝트 Gitea 리포에 커밋되며 작업 브랜치면 PR·머지까지
-          자동 수행됩니다. 커밋된 문서는 외부 개발도구(VSCode·Claude·Antigravity)에서 그대로 활용합니다.
+          코딩 전에 기획서 → 아키텍처 → 솔루션 구성 → 개발원칙을 순서대로 확정하고, 마지막 ⑤ 작업 지시에서
+          외주 빌드 단위를 만든 뒤 브랜치를 머지해 세션을 마무리합니다. 각 단계는 앞 단계의 확정 문서를
+          참조하며, 확정 산출물은 프로젝트 Gitea 리포에 커밋되어 외부 개발도구(VSCode·Claude·Antigravity)에서
+          그대로 활용합니다.
         </p>
 
         <form className="row" onSubmit={start}>
@@ -385,8 +428,8 @@ export default function AgentPlanning() {
           {/* 진행단계 표시 */}
           <div className="panel">
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {STAGES.map((s) => {
-                const confirmed = isConfirmed(s.key);
+              {STEPS.map((s) => {
+                const confirmed = s.key === TASK_STEP ? tasks.length > 0 : isConfirmed(s.key);
                 const unlocked = stageUnlocked(s.key);
                 const active = s.key === activeStage;
                 return (
@@ -405,124 +448,141 @@ export default function AgentPlanning() {
             </div>
           </div>
 
-          <div className="panel">
-            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={{ margin: 0 }}>
-                {STAGES.find((s) => s.key === activeStage)?.label} 단계
-                {isConfirmed(activeStage) && <span style={{ color: '#10b981', fontSize: 13 }}> · 확정됨 ({artifactOf(activeStage)?.commit_sha?.substring(0, 7)})</span>}
-              </h3>
-              <span className="mutedtext" style={{ fontSize: 12 }}>
-                저장 경로 <span className="mono">{artifactOf(activeStage)?.repo_path}</span>
-              </span>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, margin: '12px 0' }}>
-              {messages.map((m, i) => (
-                <div
-                  key={i}
-                  style={{
-                    alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                    maxWidth: '90%',
-                    background: m.role === 'user' ? 'rgba(59, 130, 246, 0.15)' : 'var(--panel-bg)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    padding: 12,
-                  }}
-                >
-                  <div className="mutedtext" style={{ fontSize: 11, marginBottom: 4 }}>
-                    {m.role === 'user' ? '👤 나 (User)' : '🧭 기획 에이전트'}
-                  </div>
-                  {m.usedModules && m.usedModules.length > 0 && (
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                      <span className="mutedtext" style={{ fontSize: 11 }}>참조된 모듈:</span>
-                      {m.usedModules.map((mod) => (
-                        <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8' }}>{mod}</span>
-                      ))}
-                    </div>
-                  )}
-                  {m.boundModules && m.boundModules.length > 0 && (
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                      <span className="mutedtext" style={{ fontSize: 11 }}>이번에 바인딩된 모듈:</span>
-                      {m.boundModules.map((mod) => (
-                        <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(16, 185, 129, 0.2)', color: '#10b981' }}>🔗 {mod}</span>
-                      ))}
-                    </div>
-                  )}
-                  {m.contextFiles && m.contextFiles.length > 0 && (
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                      <span className="mutedtext" style={{ fontSize: 11 }}>내용 참조 파일:</span>
-                      {m.contextFiles.map((f) => (
-                        <span key={f} className="mono" style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(148, 163, 184, 0.2)' }}>{f}</span>
-                      ))}
-                    </div>
-                  )}
-                  <div style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{m.content}</div>
-                </div>
-              ))}
-            </div>
-
-            <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <input
-                className="mono"
-                placeholder="참조할 파일 경로들 (쉼표 구분, 선택)"
-                value={files}
-                onChange={(e) => setFiles(e.target.value)}
-              />
-              <div className="row">
-                <textarea
-                  style={{ flex: 1, minHeight: 70, fontFamily: 'inherit' }}
-                  placeholder={`${STAGES.find((s) => s.key === activeStage)?.label} 생성·수정을 요청하세요...`}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                />
-                <button type="submit" className="primary" disabled={busy || !input.trim()}>
-                  {busy ? '처리 중...' : '생성 요청'}
-                </button>
+          {/* 문서 단계(①~④) — 대화·산출물 편집 */}
+          {activeStage !== TASK_STEP && (
+            <div className="panel">
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                <h3 style={{ margin: 0 }}>
+                  {STAGES.find((s) => s.key === activeStage)?.label} 단계
+                  {isConfirmed(activeStage) && <span style={{ color: '#10b981', fontSize: 13 }}> · 확정됨 ({artifactOf(activeStage)?.commit_sha?.substring(0, 7)})</span>}
+                </h3>
+                <span className="mutedtext" style={{ fontSize: 12 }}>
+                  저장 경로 <span className="mono">{artifactOf(activeStage)?.repo_path}</span>
+                </span>
               </div>
-            </form>
 
-            {/* 확정용 산출물 편집기 */}
-            <div style={{ marginTop: 16 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
-                📄 산출물 (마크다운) — 검토·수정 후 확정하면 Gitea에 커밋됩니다. 생성 요청 시 이 내용이 수정 대상으로 함께 전달됩니다
-                {draftSource === 'repo' && (
-                  <span style={{ marginLeft: 6, fontWeight: 400, color: '#f59e0b' }}>
-                    · 리포에 이미 있는 문서를 불러왔습니다 (이 세션에서는 아직 미확정)
-                  </span>
-                )}
-              </div>
-              <textarea
-                className="mono"
-                style={{ width: '100%', minHeight: 220, fontSize: 12 }}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder="생성 요청 결과가 여기에 들어옵니다. 직접 편집해도 됩니다."
-              />
-              <div className="row" style={{ marginTop: 8 }}>
-                <button className="primary" onClick={confirm} disabled={busy || !draft.trim()}>
-                  ✅ 이 단계 확정 (Gitea 커밋)
-                </button>
-                {gitResult?.git_action && (
-                  <span className="mutedtext" style={{ fontSize: 12 }}>
-                    {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
-                    {gitResult.pull_request_url && (
-                      <> · <a href={gitResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, margin: '12px 0' }}>
+                {messages.map((m, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                      maxWidth: '90%',
+                      background: m.role === 'user' ? 'rgba(59, 130, 246, 0.15)' : 'var(--panel-bg)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 8,
+                      padding: 12,
+                    }}
+                  >
+                    <div className="mutedtext" style={{ fontSize: 11, marginBottom: 4 }}>
+                      {m.role === 'user' ? '👤 나 (User)' : '🧭 기획 에이전트'}
+                    </div>
+                    {m.usedModules && m.usedModules.length > 0 && (
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                        <span className="mutedtext" style={{ fontSize: 11 }}>참조된 모듈:</span>
+                        {m.usedModules.map((mod) => (
+                          <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8' }}>{mod}</span>
+                        ))}
+                      </div>
                     )}
-                    {gitResult.git_detail && <> · {gitResult.git_detail}</>}
-                  </span>
-                )}
+                    {m.boundModules && m.boundModules.length > 0 && (
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                        <span className="mutedtext" style={{ fontSize: 11 }}>이번에 바인딩된 모듈:</span>
+                        {m.boundModules.map((mod) => (
+                          <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(16, 185, 129, 0.2)', color: '#10b981' }}>🔗 {mod}</span>
+                        ))}
+                      </div>
+                    )}
+                    {m.contextFiles && m.contextFiles.length > 0 && (
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                        <span className="mutedtext" style={{ fontSize: 11 }}>내용 참조 파일:</span>
+                        {m.contextFiles.map((f) => (
+                          <span key={f} className="mono" style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(148, 163, 184, 0.2)' }}>{f}</span>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{m.content}</div>
+                  </div>
+                ))}
+              </div>
+
+              <form onSubmit={send} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <input
+                  className="mono"
+                  placeholder="참조할 파일 경로들 (쉼표 구분, 선택)"
+                  value={files}
+                  onChange={(e) => setFiles(e.target.value)}
+                />
+                <div className="row">
+                  <textarea
+                    style={{ flex: 1, minHeight: 70, fontFamily: 'inherit' }}
+                    placeholder={`${STAGES.find((s) => s.key === activeStage)?.label} 생성·수정을 요청하세요...`}
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                  />
+                  <button type="submit" className="primary" disabled={busy || !input.trim()}>
+                    {busy ? '처리 중...' : '생성 요청'}
+                  </button>
+                </div>
+              </form>
+
+              {/* 확정용 산출물 편집기 */}
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                  📄 산출물 (마크다운) — 검토·수정 후 확정하면 Gitea에 커밋됩니다. 생성 요청 시 이 내용이 수정 대상으로 함께 전달됩니다
+                  {draftSource === 'repo' && (
+                    <span style={{ marginLeft: 6, fontWeight: 400, color: '#f59e0b' }}>
+                      · 리포에 이미 있는 문서를 불러왔습니다 (이 세션에서는 아직 미확정)
+                    </span>
+                  )}
+                </div>
+                <textarea
+                  className="mono"
+                  style={{ width: '100%', minHeight: 220, fontSize: 12 }}
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="생성 요청 결과가 여기에 들어옵니다. 직접 편집해도 됩니다."
+                />
+                <div className="row" style={{ marginTop: 8 }}>
+                  <button className="primary" onClick={confirm} disabled={busy || !draft.trim()}>
+                    ✅ 이 단계 확정 (Gitea 커밋)
+                  </button>
+                  {gitResult?.git_action && (
+                    <span className="mutedtext" style={{ fontSize: 12 }}>
+                      {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
+                      {gitResult.pull_request_url && (
+                        <> · <a href={gitResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
+                      )}
+                      {gitResult.git_detail && <> · {gitResult.git_detail}</>}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
-          {/* 외주 빌드 작업 지시(work order) */}
-          <div className="panel">
+          {/* ⑤ 작업 지시 — 개발원칙 다음 단계. 여기서 브랜치를 마무리한다. */}
+          <div className="panel" style={{ display: activeStage === TASK_STEP ? undefined : 'none' }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={{ margin: 0 }}>📋 외주 빌드 작업 지시</h3>
-              <button className="secondary small" onClick={generateTasks} disabled={busy}>
-                확정 산출물에서 작업 지시 생성
-              </button>
+              <h3 style={{ margin: 0 }}>⑤ 외주 빌드 작업 지시</h3>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="secondary small" onClick={generateTasks} disabled={busy}>
+                  확정 산출물에서 작업 지시 생성
+                </button>
+                <button className="primary small" onClick={mergeSession} disabled={busy}>
+                  🔀 브랜치 머지 (세션 마무리)
+                </button>
+              </div>
             </div>
+            {mergeResult && (
+              <p style={{ fontSize: 12, marginTop: 6, color: mergeResult.action === 'merged' ? '#10b981' : '#f59e0b' }}>
+                {mergeResult.branch} → {GIT_ACTION_LABEL[mergeResult.action] ?? mergeResult.action}
+                {mergeResult.pull_request_url && (
+                  <> · <a href={mergeResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
+                )}
+                {mergeResult.detail && <> · {mergeResult.detail}</>}
+              </p>
+            )}
             <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
               외부 빌더가 MCP(<span className="mono">list_tasks·update_task·submit_build_result</span>)로
               집어가고 상태를 갱신합니다. 막히면 <span className="mono">request_clarification</span>으로
