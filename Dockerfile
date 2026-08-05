@@ -17,6 +17,10 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 
+# 산출물 경로·커밋 메시지에 한글이 들어간다. 로케일이 UTF-8이 아니면 git 인자
+# 인코딩과 출력 디코딩이 모두 깨지므로 인터프리터를 UTF-8 모드로 고정한다.
+ENV PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl gnupg git \
     && install -m 0755 -d /etc/apt/keyrings \

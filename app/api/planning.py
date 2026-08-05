@@ -265,11 +265,9 @@ async def post_plan_message(
         if not _is_confirmed(db, session_id, s):
             continue
         path = planning_service.stage_repo_path(s)
-        content = None
-        if workdir.exists():
-            content = workspace.read_file_at_ref(workdir, session.branch, path)
-            if content is None:
-                content = workspace.read_context_files(workdir, [path]).get(path)
+        # 세션 브랜치 → 원격 추적 → 기본 브랜치 → 워킹카피 순으로 찾는다(_artifact_content).
+        # 워킹카피가 다시 clone돼 로컬 세션 브랜치가 없어도 앞 단계 문서를 놓치지 않는다.
+        content = _artifact_content(db, project, session, s)
         if content:
             if body.compact:
                 content = planning_service.document_outline(
@@ -503,7 +501,8 @@ def _artifact_content(db: Session, project: Project, session: ChatSession,
         )
     ).scalar_one_or_none()
     path = artifact.repo_path if artifact else planning_service.stage_repo_path(stage)
-    for ref in (session.branch, project.branch):
+    for ref in (session.branch, f"origin/{session.branch}", project.branch,
+                f"origin/{project.branch}"):
         content = workspace.read_file_at_ref(workdir, ref, path)
         if content:
             return content

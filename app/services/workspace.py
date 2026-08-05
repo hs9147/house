@@ -5,12 +5,17 @@ write_and_commit. 구현 코드는 외부 빌더가 직접 커밋한다(플랫�
 """
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from ..config import get_settings
 from ..models import Project
 from .build import BuildError, checkout
 from .git_auth import auth_args
+
+# git 출력은 로케일이 아니라 UTF-8로 읽는다 — 한글 경로·문서가 섞이면
+# 로케일 인코딩(POSIX/cp949)에서 디코딩이 깨져 요청 전체가 실패한다.
+_TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
 
 MAX_CONTEXT_FILE_BYTES = 40_000
 CONTEXT_EXTENSIONS = {
@@ -36,7 +41,7 @@ def ensure_branch(project: Project, branch: str) -> Path:
         return workdir
     remote = subprocess.run(
         ["git", *auth_args(project.git_url), "fetch", "origin", branch],
-        cwd=workdir, capture_output=True, text=True,
+        cwd=workdir, capture_output=True, **_TEXT,
     )
     if remote.returncode == 0:
         _git(workdir, "checkout", "-B", branch, "FETCH_HEAD")  # 원격 상태에 맞춰 이어간다
@@ -50,14 +55,14 @@ def ensure_branch(project: Project, branch: str) -> Path:
 def _branch_exists(workdir: Path, branch: str) -> bool:
     out = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
-        cwd=workdir, capture_output=True, text=True,
+        cwd=workdir, capture_output=True, **_TEXT,
     )
     return out.returncode == 0
 
 
 def file_tree(workdir: Path, limit: int = 200) -> list[str]:
     out = subprocess.run(
-        ["git", "ls-files"], cwd=workdir, capture_output=True, text=True
+        ["git", "ls-files"], cwd=workdir, capture_output=True, **_TEXT
     )
     return out.stdout.splitlines()[:limit]
 
@@ -85,7 +90,7 @@ def read_file_at_ref(workdir: Path, ref: str, rel: str) -> str | None:
     (다른 세션이 체크아웃해 갔더라도) 커밋된 본문을 그대로 읽는다.
     """
     out = subprocess.run(
-        ["git", "show", f"{ref}:{rel}"], cwd=workdir, capture_output=True, text=True
+        ["git", "show", f"{ref}:{rel}"], cwd=workdir, capture_output=True, **_TEXT
     )
     if out.returncode != 0:
         return None
@@ -104,12 +109,32 @@ def read_file(workdir: Path, rel: str) -> str:
     return p.read_text(encoding="utf-8", errors="replace")
 
 
+def _require_fs_encodable(*values: str) -> None:
+    """프로세스의 파일시스템 인코딩으로 표현할 수 없는 문자열이면 미리 막는다.
+
+    산출물 경로·커밋 메시지에는 한글이 들어간다. POSIX/C 로케일로 뜬 프로세스는
+    파일시스템 인코딩이 ascii라 git 인자로 넘기는 순간 UnicodeEncodeError로 죽는데,
+    그 원인이 응답에 드러나지 않는다. 무엇을 고쳐야 하는지 알려주고 멈춘다.
+    """
+    fs = sys.getfilesystemencoding()
+    for value in values:
+        try:
+            value.encode(fs)
+        except UnicodeEncodeError:
+            raise BuildError(
+                f"현재 프로세스의 파일시스템 인코딩({fs})으로는 '{value[:60]}'을(를) "
+                "git에 넘길 수 없습니다. PYTHONUTF8=1 또는 UTF-8 로케일(LANG=C.UTF-8)로 "
+                "플랫폼을 실행하세요."
+            ) from None
+
+
 def write_and_commit(project: Project, branch: str, rel_path: str, content: str, message: str) -> str:
     """작업 브랜치에 파일 하나를 쓰고 커밋한 뒤 원격(Gitea)에 push, 커밋 SHA를 반환한다.
 
     에이전트 기획의 단계 산출물 확정 경로 — diff가 아니라 완성된 문서를 리포에 남긴다.
     경로 탈출을 막고, 인증(git_auth)은 push에서만 주입한다(git_url은 로그·원격 인자로만).
     """
+    _require_fs_encodable(rel_path, message)
     workdir = ensure_branch(project, branch)
     root = workdir.resolve()
     target = (root / rel_path).resolve()
@@ -125,7 +150,7 @@ def write_and_commit(project: Project, branch: str, rel_path: str, content: str,
     # 같은 내용을 다시 확정하면 바뀐 게 없다 — git commit은 이걸 오류로 내지만
     # 사용자에겐 "이미 그 상태"라 실패가 아니다. 커밋을 건너뛰고 현재 커밋을 돌려준다.
     staged = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=workdir, capture_output=True, text=True
+        ["git", "status", "--porcelain"], cwd=workdir, capture_output=True, **_TEXT
     )
     if staged.stdout.strip():
         _git(
@@ -136,7 +161,7 @@ def write_and_commit(project: Project, branch: str, rel_path: str, content: str,
         )
     _git(workdir, *auth_args(project.git_url), "push", "-u", "origin", branch)
     out = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, text=True, check=True
+        ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, **_TEXT, check=True
     )
     return out.stdout.strip()
 
@@ -153,18 +178,18 @@ def delete_branch(project: Project, branch: str) -> bool:
     if not workdir.exists():
         return False
     # 지우려는 브랜치에 체크아웃돼 있으면 삭제할 수 없다 — 기본 브랜치로 먼저 옮긴다.
-    subprocess.run(["git", "checkout", project.branch], cwd=workdir, capture_output=True, text=True)
-    subprocess.run(["git", "branch", "-D", branch], cwd=workdir, capture_output=True, text=True)
+    subprocess.run(["git", "checkout", project.branch], cwd=workdir, capture_output=True, **_TEXT)
+    subprocess.run(["git", "branch", "-D", branch], cwd=workdir, capture_output=True, **_TEXT)
     pushed = subprocess.run(
         ["git", *auth_args(project.git_url), "push", "origin", "--delete", branch],
-        cwd=workdir, capture_output=True, text=True,
+        cwd=workdir, capture_output=True, **_TEXT,
     )
     return pushed.returncode == 0
 
 
 def diff_between(workdir: Path, base_ref: str, head_ref: str = "HEAD") -> str:
     out = subprocess.run(
-        ["git", "diff", f"{base_ref}..{head_ref}"], cwd=workdir, capture_output=True, text=True
+        ["git", "diff", f"{base_ref}..{head_ref}"], cwd=workdir, capture_output=True, **_TEXT
     )
     if out.returncode != 0:
         raise BuildError(f"git diff failed: {out.stderr.strip()[:300]}")
@@ -172,7 +197,7 @@ def diff_between(workdir: Path, base_ref: str, head_ref: str = "HEAD") -> str:
 
 
 def _git(workdir: Path, *args: str) -> None:
-    proc = subprocess.run(["git", *args], cwd=workdir, capture_output=True, text=True)
+    proc = subprocess.run(["git", *args], cwd=workdir, capture_output=True, **_TEXT)
     if proc.returncode != 0:
         raise BuildError(f"git {args[0]} failed: {(proc.stderr or proc.stdout).strip()[:500]}")
 

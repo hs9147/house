@@ -22,6 +22,10 @@ from fastapi import UploadFile
 from ..config import get_settings
 from .git_auth import auth_args
 
+# git 출력은 로케일이 아니라 UTF-8로 읽는다 — 한글 경로·문서가 섞이면
+# 로케일 인코딩(POSIX/cp949)에서 디코딩이 깨져 요청 전체가 실패한다.
+_TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
 CHUNK = 1024 * 1024
 
 
@@ -134,13 +138,13 @@ def init_repo_and_push(workdir: Path, git_url: str, branch: str) -> str:
     _git(workdir, "remote", "add", "origin", git_url)
     _git(workdir, "push", "-q", "-u", "origin", branch, git_url=git_url)
     out = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, text=True, check=True
+        ["git", "rev-parse", "HEAD"], cwd=workdir, capture_output=True, **_TEXT, check=True
     )
     return out.stdout.strip()
 
 
 def _git(workdir: Path, *args: str, git_url: str | None = None) -> None:
     auth = auth_args(git_url) if git_url else []
-    proc = subprocess.run(["git", *auth, *args], cwd=workdir, capture_output=True, text=True)
+    proc = subprocess.run(["git", *auth, *args], cwd=workdir, capture_output=True, **_TEXT)
     if proc.returncode != 0:
         raise UploadError(f"git {args[0]} failed: {(proc.stderr or proc.stdout).strip()[:500]}")

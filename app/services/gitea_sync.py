@@ -34,6 +34,10 @@ from .build import COMPOSITE_COMPONENTS, detect_project_type
 from .git_auth import auth_args
 from .gitea import GiteaError
 
+# git 출력은 로케일이 아니라 UTF-8로 읽는다 — 한글 경로·문서가 섞이면
+# 로케일 인코딩(POSIX/cp949)에서 디코딩이 깨져 요청 전체가 실패한다.
+_TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 
 
@@ -181,7 +185,7 @@ def _shallow_clone(git_url: str, branch: str) -> Path:
     tmp = Path(tempfile.mkdtemp(prefix="gitea-sync-"))
     proc = subprocess.run(
         ["git", *auth_args(git_url), "clone", "--depth", "1", "--branch", branch, git_url, str(tmp)],
-        capture_output=True, text=True,
+        capture_output=True, **_TEXT,
     )
     if proc.returncode != 0:
         shutil.rmtree(tmp, ignore_errors=True)
