@@ -287,14 +287,16 @@ async def post_plan_message(
     messages.extend({"role": m.role, "content": m.content} for m in history)
     messages.append({"role": "user", "content": body.content})
 
-    # 솔루션 구성 단계에서만 모듈 바인딩 도구를 준다 — 쓰기로 결정한 모듈을 문서와 같은
-    # 자리에서 프로젝트에 붙여, 문서와 실제 주입 환경변수가 어긋나지 않게 한다.
+    # 솔루션 구성 단계에서만 도구를 준다 — 쓰기로 결정한 모듈을 문서와 같은 자리에서
+    # 프로젝트에 붙이고(bind_module), 바인딩된 MCP 서버의 도구로 실제 규격을 확인한다.
     bound_modules: list[str] = []
-    tools = tool_executor = None
+    tools: list[dict] = []
+    tool_executor = None
     if plan_stage == PlanStage.solution:
-        tools = planning_service.module_bind_tools(constraints.get("available_resources") or [])
-        if tools:
-            tool_executor = planning_service.make_bind_executor(db, project, key.name, bound_modules)
+        tools, tool_executor = await asyncio.to_thread(
+            planning_service.solution_tools,
+            db, project, constraints.get("available_resources") or [], key.name, bound_modules,
+        )
 
     try:
         reply = await asyncio.to_thread(

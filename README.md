@@ -203,7 +203,8 @@ GET  /paas/api/v1/plan/sessions?project_id=         # 세션 이력(최근 순) 
 GET  /paas/api/v1/plan/sessions/{id}/messages       # 재개용 대화 이력 복원
 DELETE /paas/api/v1/plan/sessions/{id}              # 세션·대화·산출물 포인터·작업 지시 삭제(커밋된 문서는 남음)
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/messages   # 단계 문서 초안 — git 파일 목록·앞 단계 확정본이 컨텍스트
-                                                # solution 단계에서는 bind_module 도구로 사용 결정 모듈을 즉시 바인딩
+                                                # solution 단계에서는 bind_module 도구로 사용 결정 모듈을 즉시 바인딩하고,
+                                                # 바인딩된 mcp 모듈의 도구({모듈명}__{도구명})로 실제 규격을 확인
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/confirm    # 확정 → Gitea 커밋 후 git 상태에 따라 PR·머지 자동
 POST /paas/api/v1/plan/sessions/{id}/tasks/generate # 확정 산출물 → 외주 빌드 작업 지시(work order)
 GET  /paas/api/v1/plan/sessions/{id}/tasks          # 작업 지시 목록·상태
@@ -272,9 +273,11 @@ DELETE /paas/api/v1/previews/{id}
   등록하면 다른 모듈처럼 배포 앱에 `{PREFIX}_URL`/`{PREFIX}_API_KEY`가 주입되고,
   가용 모듈 제약에 실려 외부 빌더가 게이트웨이 경유로 쓸 수 있게 됩니다.
   `services/mcp_client.py`(JSON-RPC 2.0 tools/list·tools/call, 단일 JSON 응답
-  트랜스포트만 지원 — SSE 스트리밍은 범위 밖)는 플랫폼이 MCP **클라이언트**로 붙을 때의
-  구현이며, 내부 에이전트 빌더 제거 이후 플랫폼 안에서 이 경로를 호출하는 곳은 없습니다
-  (반대 방향 — 외부 빌드 도구가 붙는 MCP **서버**는 `/plan/projects/{id}/mcp`).
+  트랜스포트만 지원 — SSE 스트리밍은 범위 밖)가 플랫폼이 MCP **클라이언트**로 붙는 경로이며,
+  **에이전트 기획의 솔루션 구성 단계**에서 바인딩된 MCP 서버의 도구를 모델에 넘겨
+  직접 호출하게 합니다(서버 간 이름 충돌은 `{모듈명}__{도구명}`으로 구분, 응답하지 않는
+  서버는 조용히 빠짐). 반대 방향 — 외부 빌드 도구가 붙는 MCP **서버**는
+  `/plan/projects/{id}/mcp`입니다.
 
 ## 콘솔 UI (`console/`)
 
