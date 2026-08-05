@@ -282,6 +282,40 @@ class PlanArtifact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class BuildTaskStatus(str, enum.Enum):
+    pending = "pending"  # 발주됨(대기)
+    in_progress = "in_progress"  # 외주 빌더가 착수
+    done = "done"  # 구현 완료 보고
+    blocked = "blocked"  # 질의·차단으로 진행 불가
+
+
+class BuildTask(Base):
+    """외주 빌드 작업 지시(work order).
+
+    확정된 기획 산출물에서 분해되어 나오고, 외부 빌더가 MCP로 조회·갱신한다.
+    산출물이 '무엇을 만들지'라면 이 표는 '어디까지 됐는지'다.
+    """
+
+    __tablename__ = "build_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("chat_sessions.id"), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    detail: Mapped[str] = mapped_column(Text, default="")
+    # 완료 판정 기준(기획서의 성공 기준을 작업 단위로 내린 것)
+    verify: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[BuildTaskStatus] = mapped_column(
+        Enum(BuildTaskStatus), default=BuildTaskStatus.pending
+    )
+    note: Mapped[str] = mapped_column(Text, default="")  # 빌더의 마지막 보고·질의
+    commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class ModuleType(str, enum.Enum):
     external_api = "external_api"
     internal_api = "internal_api"

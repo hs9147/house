@@ -17,6 +17,8 @@ from ..db import get_db
 from ..models import (
     ApiKey,
     AuditEvent,
+    BuildTask,
+    BuildTaskStatus,
     ChatMessage,
     ChatSession,
     LlmProvider,
@@ -25,6 +27,9 @@ from ..models import (
     Project,
 )
 from ..schemas import (
+    BuildTaskOut,
+    BuildTaskUpdate,
+    ComplianceOut,
     PlanArtifactOut,
     PlanConfirmIn,
     PlanMessageIn,
@@ -35,6 +40,7 @@ from ..schemas import (
 from ..security import require_api_key
 from ..services import a2a as a2a_service
 from ..services import codemap as codemap_service
+from ..services import compliance as compliance_service
 from ..services import llm as llm_service
 from ..services import modules as modules_service
 from ..services import planning as planning_service
@@ -304,6 +310,149 @@ def get_plan_repo(
     }
 
 
+# --- 작업 지시(work order) — 확정 산출물을 외주 빌더가 집어갈 단위로 쪼개 추적한다 ---
+
+
+def _task_out(t: BuildTask) -> BuildTaskOut:
+    return BuildTaskOut(
+        id=t.id, title=t.title, detail=t.detail, verify=t.verify,
+        status=t.status.value, note=t.note, commit_sha=t.commit_sha,
+    )
+
+
+def _session_tasks(db: Session, session_id: int) -> list[BuildTask]:
+    return db.execute(
+        select(BuildTask).where(BuildTask.session_id == session_id).order_by(BuildTask.id)
+    ).scalars().all()
+
+
+@router.post("/plan/sessions/{session_id}/tasks/generate", response_model=list[BuildTaskOut])
+async def generate_build_tasks(
+    session_id: int,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """확정된 기획 산출물에서 외주 빌드 작업 지시를 만든다.
+
+    아직 아무도 착수하지 않았을 때만 다시 만든다 — 진행 중인 지시를 덮어쓰면 외부
+    빌더가 보고 있던 작업이 말없이 사라진다.
+    """
+    session = db.get(ChatSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    project = db.get(Project, session.project_id)
+    provider = db.get(LlmProvider, session.provider_id)
+    llm_service.require_provider_access(provider, project, key)
+
+    existing = _session_tasks(db, session_id)
+    if any(t.status != BuildTaskStatus.pending for t in existing):
+        raise HTTPException(status_code=409, detail="이미 진행 중인 작업 지시가 있습니다.")
+
+    confirmed = [s for s in planning_service.STAGE_ORDER if _is_confirmed(db, session_id, s)]
+    if not confirmed:
+        raise HTTPException(status_code=409, detail="확정된 산출물이 없습니다. 단계를 먼저 확정하세요.")
+
+    workdir = workspace.workdir_for(project)
+    documents = []
+    for stage in confirmed:
+        path = planning_service.stage_repo_path(stage)
+        content = workspace.read_file_at_ref(workdir, session.branch, path) if workdir.exists() else None
+        if content:
+            documents.append(f"=== {planning_service.stage_title(stage)} ({path}) ===\n{content}")
+    if not documents:
+        raise HTTPException(status_code=409, detail="확정 산출물 본문을 리포에서 읽지 못했습니다.")
+
+    constraints = planning_service.build_constraints(db, project)
+    items = await asyncio.to_thread(
+        planning_service.decompose_tasks, provider, db, "\n\n".join(documents),
+        planning_service.render_constraints_doc(constraints),
+    )
+    if not items:
+        raise HTTPException(status_code=502, detail="작업 지시 생성에 실패했습니다.")
+
+    for t in existing:
+        db.delete(t)
+    for item in items:
+        db.add(BuildTask(
+            project_id=project.id, session_id=session_id,
+            title=item["title"], detail=item["detail"], verify=item["verify"],
+        ))
+    db.commit()
+    audit.record(db, key.name, "plan.tasks.generate", project.name, {"count": len(items)})
+    return [_task_out(t) for t in _session_tasks(db, session_id)]
+
+
+@router.get("/plan/sessions/{session_id}/tasks", response_model=list[BuildTaskOut])
+def list_build_tasks(
+    session_id: int,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    if db.get(ChatSession, session_id) is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return [_task_out(t) for t in _session_tasks(db, session_id)]
+
+
+@router.patch("/plan/tasks/{task_id}", response_model=BuildTaskOut)
+def update_build_task(
+    task_id: int,
+    body: BuildTaskUpdate,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    task = db.get(BuildTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    _apply_task_update(db, key.name, task, body.status, body.note, body.commit_sha)
+    return _task_out(task)
+
+
+def _apply_task_update(
+    db: Session, actor: str, task: BuildTask,
+    status: str | None, note: str | None, commit_sha: str | None,
+) -> None:
+    """작업 지시 갱신 — 콘솔(PATCH)과 외부 빌더(MCP)가 같은 경로를 쓴다."""
+    if status is not None:
+        try:
+            task.status = BuildTaskStatus(status)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"unknown status: {status}")
+    if note is not None:
+        task.note = note[:2000]
+    if commit_sha is not None:
+        task.commit_sha = commit_sha[:40]
+    db.commit()
+    project = db.get(Project, task.project_id)
+    audit.record(db, actor, "plan.task.update", project.name if project else str(task.project_id),
+                 {"task_id": task.id, "status": task.status.value})
+
+
+@router.get("/plan/projects/{project_id}/compliance", response_model=ComplianceOut)
+def get_plan_compliance(
+    project_id: int,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """외주 빌드 결과 검증 — LLM·모듈 사용이 제약을 지켰는지 보고, 위반 시 수정 지시 프롬프트를 만든다."""
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return _compliance_out(db, project)
+
+
+def _compliance_out(db: Session, project: Project) -> ComplianceOut:
+    constraints = planning_service.build_constraints(db, project)
+    findings = compliance_service.scan(workspace.workdir_for(project), constraints)
+    return ComplianceOut(
+        project=project.name,
+        findings=findings,
+        summary=compliance_service.summarize(findings),
+        builder_prompt=compliance_service.builder_prompt(
+            findings, planning_service.render_constraints_doc(constraints)
+        ),
+    )
+
+
 @router.get("/plan/projects/{project_id}/constraints")
 def get_plan_constraints(
     project_id: int,
@@ -372,6 +521,69 @@ _MCP_TOOLS = [
             "required": ["note"],
         },
     },
+    {
+        "name": "read_artifact",
+        "description": "확정된 기획 산출물 본문을 읽는다(clone 없이). stage: spec|architecture|solution|principles",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"stage": {"type": "string"}},
+            "required": ["stage"],
+        },
+    },
+    {
+        "name": "list_tasks",
+        "description": "이 프로젝트의 빌드 작업 지시(work order) 목록과 상태를 반환한다.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "update_task",
+        "description": "작업 지시 상태를 갱신한다. status: pending|in_progress|done|blocked",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "status": {"type": "string"},
+                "note": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "submit_build_result",
+        "description": "구현 결과(커밋 sha·요약)를 제출한다. task_id를 주면 그 작업을 완료 처리한다.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "commit_sha": {"type": "string"},
+                "summary": {"type": "string"},
+                "task_id": {"type": "integer"},
+            },
+            "required": ["commit_sha"],
+        },
+    },
+    {
+        "name": "request_clarification",
+        "description": (
+            "기획이 모호해 진행할 수 없을 때 질의한다. 질의는 기획 세션 대화에 남아 "
+            "다음 초안에 반영되고, task_id를 주면 그 작업은 blocked가 된다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "task_id": {"type": "integer"},
+            },
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "check_compliance",
+        "description": (
+            "커밋된 코드의 LLM·모듈 사용이 제약을 지켰는지 검사한다. "
+            "위반이 있으면 그대로 따를 수정 지시가 함께 온다."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -423,11 +635,110 @@ async def plan_mcp_server(
             note = str(args.get("note", ""))[:1000]
             audit.record(db, key.name, "plan.build.progress", project.name, {"note": note})
             return _ok(_mcp_text("recorded"))
+        if name == "read_artifact":
+            try:
+                stage = PlanStage(str(args.get("stage", "")))
+            except ValueError:
+                return _mcp_error(req_id, f"unknown stage: {args.get('stage')}")
+            content = _read_confirmed_artifact(db, project, stage)
+            if content is None:
+                return _mcp_error(req_id, f"확정된 산출물이 없습니다: {args.get('stage')}")
+            return _ok(_mcp_text(content))
+        if name == "list_tasks":
+            tasks = db.execute(
+                select(BuildTask).where(BuildTask.project_id == project.id).order_by(BuildTask.id)
+            ).scalars().all()
+            return _ok(_mcp_text(json.dumps(
+                [_task_out(t).model_dump() for t in tasks], ensure_ascii=False, indent=2)))
+        if name in ("update_task", "submit_build_result", "request_clarification"):
+            return _mcp_build_report(db, key.name, project, name, args, _ok, req_id)
+        if name == "check_compliance":
+            result = _compliance_out(db, project)
+            audit.record(db, key.name, "plan.build.compliance", project.name, result.summary)
+            if not result.findings:
+                return _ok(_mcp_text("위반 없음 — 제약을 지켰습니다."))
+            return _ok(_mcp_text(result.builder_prompt))
         return {"jsonrpc": "2.0", "id": req_id,
                 "error": {"code": -32601, "message": f"unknown tool: {name}"}}
 
     return {"jsonrpc": "2.0", "id": req_id,
             "error": {"code": -32601, "message": f"unknown method: {method}"}}
+
+
+def _mcp_error(req_id, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": message}}
+
+
+def _latest_session(db: Session, project_id: int) -> ChatSession | None:
+    return db.execute(
+        select(ChatSession).where(ChatSession.project_id == project_id)
+        .order_by(ChatSession.id.desc())
+    ).scalars().first()
+
+
+def _read_confirmed_artifact(db: Session, project: Project, stage: PlanStage) -> str | None:
+    """확정된 단계 산출물 본문 — 커밋된 세션 브랜치에서 읽는다(가장 최근 확정 우선)."""
+    row = db.execute(
+        select(PlanArtifact, ChatSession)
+        .join(ChatSession, PlanArtifact.session_id == ChatSession.id)
+        .where(
+            ChatSession.project_id == project.id,
+            PlanArtifact.stage == stage,
+            PlanArtifact.confirmed.is_(True),
+        )
+        .order_by(PlanArtifact.id.desc())
+    ).first()
+    if row is None:
+        return None
+    artifact, session = row
+    workdir = workspace.workdir_for(project)
+    if not workdir.exists():
+        return None
+    for ref in (session.branch, project.branch):
+        content = workspace.read_file_at_ref(workdir, ref, artifact.repo_path)
+        if content:
+            return content
+    return workspace.read_context_files(workdir, [artifact.repo_path]).get(artifact.repo_path)
+
+
+def _mcp_build_report(db: Session, actor: str, project: Project, tool: str, args: dict,
+                      ok, req_id) -> dict:
+    """외부 빌더의 쓰기 3종(작업 갱신·결과 제출·질의)을 한 자리에서 처리한다."""
+    task = None
+    task_id = args.get("task_id")
+    if task_id is not None:
+        task = db.get(BuildTask, int(task_id))
+        if task is None or task.project_id != project.id:
+            return _mcp_error(req_id, f"task not found: {task_id}")
+
+    if tool == "update_task":
+        if task is None:
+            return _mcp_error(req_id, "task_id가 필요합니다.")
+        _apply_task_update(db, actor, task, args.get("status"), args.get("note"), None)
+        return ok(_mcp_text(f"task {task.id} → {task.status.value}"))
+
+    if tool == "submit_build_result":
+        sha = str(args.get("commit_sha", ""))[:40]
+        summary = str(args.get("summary", ""))[:1000]
+        audit.record(db, actor, "plan.build.result", project.name,
+                     {"commit_sha": sha, "summary": summary})
+        if task is not None:
+            _apply_task_update(db, actor, task, BuildTaskStatus.done.value, summary, sha)
+        return ok(_mcp_text("recorded"))
+
+    # request_clarification — 질의를 기획 세션 대화에 남겨 다음 초안에 반영되게 한다.
+    question = str(args.get("question", "")).strip()[:2000]
+    if not question:
+        return _mcp_error(req_id, "question이 비어 있습니다.")
+    session = _latest_session(db, project.id)
+    if session is not None:
+        db.add(ChatMessage(session_id=session.id, role="user",
+                           content=f"[외주 빌더 질의] {question}"))
+        db.commit()
+    audit.record(db, actor, "plan.build.clarification", project.name, {"question": question})
+    if task is not None:
+        _apply_task_update(db, actor, task, BuildTaskStatus.blocked.value, question, None)
+    return ok(_mcp_text("질의를 기획 세션에 전달했습니다."))
 
 
 def _is_confirmed(db: Session, session_id: int, stage: PlanStage) -> bool:

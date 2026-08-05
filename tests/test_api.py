@@ -123,6 +123,38 @@ def test_webhook_signature_required():
     assert "skipped" in r.json()
 
 
+def _push(c: TestClient, payload: dict):
+    raw = json.dumps(payload).encode()
+    sig = hmac.new(b"test-webhook-secret", raw, hashlib.sha256).hexdigest()
+    return c.post("/paas/webhooks/git", content=raw,
+                  headers={"x-hub-signature-256": f"sha256={sig}",
+                           "content-type": "application/json"})
+
+
+def test_plan_artifact_only_push_does_not_deploy():
+    """기획 산출물만 바뀐 push는 배포 신호가 아니다 — 단계 확정 머지가 운영본을 재배포하면 안 된다."""
+    c = _client()
+    c.post("/paas/api/v1/projects", json={
+        "name": "hooked", "type": "react", "git_url": "https://git.example.com/o/hooked",
+    }, headers=ADMIN)
+    repo = {"clone_url": "https://git.example.com/o/hooked.git"}
+
+    docs_only = {"ref": "refs/heads/main", "repository": repo, "commits": [
+        {"modified": ["docs/agent-planning/01-기획서.md"], "added": [], "removed": []},
+    ]}
+    assert _push(c, docs_only).json() == {"skipped": "plan artifacts only"}
+
+    # 코드가 함께 바뀌면 평소대로 배포된다
+    mixed = {"ref": "refs/heads/main", "repository": repo, "commits": [
+        {"modified": ["docs/agent-planning/01-기획서.md"], "added": ["src/app.py"], "removed": []},
+    ]}
+    assert _push(c, mixed).json() == {"triggered": ["hooked"]}
+
+    # 변경 목록이 없는 payload는 판단하지 않고 기존대로 배포한다
+    unknown = {"ref": "refs/heads/main", "repository": repo}
+    assert _push(c, unknown).json() == {"triggered": ["hooked"]}
+
+
 def test_audit_trail_recorded():
     c = _client()
     c.post("/paas/api/v1/projects", json={

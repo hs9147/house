@@ -184,6 +184,35 @@ export interface PlanMessageReply {
   context_files?: string[]; // 본문까지 참조한 리포 파일
 }
 
+// 외주 빌드 작업 지시(work order)
+export type BuildTaskStatus = 'pending' | 'in_progress' | 'done' | 'blocked';
+
+export interface BuildTaskOut {
+  id: number;
+  title: string;
+  detail: string;
+  verify: string; // 완료 판정 기준
+  status: BuildTaskStatus;
+  note: string;
+  commit_sha: string | null;
+}
+
+// 외주 빌드 결과의 LLM·모듈 사용 검증
+export interface ComplianceFinding {
+  rule: string;
+  file: string;
+  line: number;
+  snippet: string;
+  detail: string;
+}
+
+export interface ComplianceOut {
+  project: string;
+  findings: ComplianceFinding[];
+  summary: Record<string, number>;
+  builder_prompt: string;
+}
+
 export interface PlanBuildEvent {
   actor: string;
   action: string;

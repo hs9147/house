@@ -166,6 +166,57 @@ def select_context_files(
     return selected
 
 
+# 작업 지시(work order) 분해 — 확정 산출물을 외주 빌더가 집어갈 단위로 쪼갠다.
+MAX_TASKS = 12
+
+_TASK_DECOMPOSE_PROMPT = (
+    "You turn confirmed planning documents into a build work order for an EXTERNAL builder "
+    "(VSCode/Claude/Antigravity) that will implement the code outside this platform.\n"
+    "Reply with ONLY a JSON array of at most {limit} objects:\n"
+    '[{{"title": "...", "detail": "...", "verify": "..."}}]\n'
+    "- title: 한 줄 작업명\n"
+    "- detail: 무엇을 어떻게 구현할지 (근거가 된 산출물 내용에 기반)\n"
+    "- verify: 완료 판정 기준 — 실행 가능한 확인 방법(테스트·명령·확인 절차)\n"
+    "Write the values in Korean. Ground every task in the given documents. "
+    "Never propose resources outside the given constraints, and route all resource access "
+    "through the central PaaS gateway."
+)
+
+
+def decompose_tasks(
+    provider: LlmProvider,
+    db: Session,
+    documents: str,
+    constraints_doc: str,
+    limit: int = MAX_TASKS,
+) -> list[dict]:
+    """확정 산출물 + 제약에서 작업 지시 목록을 만든다. 형식이 깨지면 빈 목록."""
+    messages = [
+        {"role": "system", "content": _TASK_DECOMPOSE_PROMPT.format(limit=limit)},
+        {"role": "user", "content": f"{documents}\n\n=== 가용 모듈 제약 ===\n{constraints_doc}"},
+    ]
+    try:
+        reply = llm_service.chat_completion(provider, messages, db)
+        items = json.loads(reply[reply.index("["): reply.rindex("]") + 1])
+    except Exception:  # noqa: BLE001
+        return []
+    tasks: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        if not title:
+            continue
+        tasks.append({
+            "title": title[:255],
+            "detail": str(item.get("detail", "")).strip(),
+            "verify": str(item.get("verify", "")).strip(),
+        })
+        if len(tasks) >= limit:
+            break
+    return tasks
+
+
 def auto_pull_request(project: Project, branch: str, title: str, body: str = "") -> dict:
     """커밋 후 git 상태에 따라 PR 생성·머지를 자동 수행하고 그 결과를 반환한다.
 
