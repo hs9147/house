@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { api } from '../lib/api';
 import { useApi } from '../lib/hooks';
-import type { PlanArtifactOut, PlanBuildEvent, PlanSessionOut, ProjectOut } from '../lib/types';
+import type {
+  BuildTaskOut, ComplianceOut, PlanArtifactOut, PlanBuildEvent, PlanSessionOut, ProjectOut,
+} from '../lib/types';
 import { CreateModal } from './Projects';
 
 interface Msg {
@@ -17,6 +19,20 @@ const GIT_ACTION_LABEL: Record<string, string> = {
   merged: 'PR 생성 후 자동 머지 완료',
   pr_opened: 'PR 생성됨 (자동 머지 불가 — 확인 필요)',
   skipped: 'PR 미수행',
+};
+
+// 작업 지시 상태 — 외부 빌더가 MCP로 갱신하고 콘솔에서도 바꿀 수 있다.
+const TASK_STATUS: { key: BuildTaskOut['status']; label: string; color: string }[] = [
+  { key: 'pending', label: '대기', color: '#94a3b8' },
+  { key: 'in_progress', label: '진행', color: '#38bdf8' },
+  { key: 'done', label: '완료', color: '#10b981' },
+  { key: 'blocked', label: '차단', color: '#f59e0b' },
+];
+
+const COMPLIANCE_RULE_LABEL: Record<string, string> = {
+  llm_direct: '외부 LLM 직접 호출',
+  hardcoded_secret: '코드에 박힌 자격증명',
+  unknown_module: '가용 목록 밖 모듈 호출',
 };
 
 // 에이전트 기획 4단계(진행단계 표시) — 순차 진행, 앞 단계 확정을 전제로 한다.
@@ -55,6 +71,8 @@ export default function AgentPlanning() {
   const [error, setError] = useState('');
   const [buildEvents, setBuildEvents] = useState<PlanBuildEvent[]>([]);
   const [gitResult, setGitResult] = useState<PlanArtifactOut | null>(null);
+  const [tasks, setTasks] = useState<BuildTaskOut[]>([]);
+  const [compliance, setCompliance] = useState<ComplianceOut | null>(null);
 
   // 프로젝트 페이지와 동일한 CreateModal(빈 프로젝트 옵션 포함)을 재사용한다.
   const [showCreate, setShowCreate] = useState(false);
@@ -154,10 +172,49 @@ export default function AgentPlanning() {
   const loadBuildStatus = async () => {
     if (!session) return;
     try {
-      const s = await api.planBuildStatus(session.id);
+      const [s, t] = await Promise.all([
+        api.planBuildStatus(session.id),
+        api.listPlanTasks(session.id),
+      ]);
       setBuildEvents(s.events);
+      setTasks(t);
     } catch (err) {
       setError((err as Error).message);
+    }
+  };
+
+  const generateTasks = async () => {
+    if (!session) return;
+    setBusy(true);
+    setError('');
+    try {
+      setTasks(await api.generatePlanTasks(session.id));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setTaskStatus = async (task: BuildTaskOut, status: string) => {
+    try {
+      const updated = await api.updatePlanTask(task.id, { status });
+      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const runCompliance = async () => {
+    if (!session) return;
+    setBusy(true);
+    setError('');
+    try {
+      setCompliance(await api.planCompliance(session.project_id));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -327,6 +384,98 @@ export default function AgentPlanning() {
                 )}
               </div>
             </div>
+          </div>
+
+          {/* 외주 빌드 작업 지시(work order) */}
+          <div className="panel">
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ margin: 0 }}>📋 외주 빌드 작업 지시</h3>
+              <button className="secondary small" onClick={generateTasks} disabled={busy}>
+                확정 산출물에서 작업 지시 생성
+              </button>
+            </div>
+            <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
+              외부 빌더가 MCP(<span className="mono">list_tasks·update_task·submit_build_result</span>)로
+              집어가고 상태를 갱신합니다. 막히면 <span className="mono">request_clarification</span>으로
+              질의가 이 기획 세션에 남습니다.
+            </p>
+            {tasks.length === 0 ? (
+              <p className="mutedtext" style={{ fontSize: 12 }}>작업 지시가 없습니다.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr><th>작업</th><th>완료 판정</th><th>상태</th><th>커밋</th></tr>
+                </thead>
+                <tbody>
+                  {tasks.map((t) => (
+                    <tr key={t.id}>
+                      <td>
+                        <div style={{ fontWeight: 600 }}>{t.title}</div>
+                        {t.detail && <div className="mutedtext" style={{ fontSize: 12 }}>{t.detail}</div>}
+                        {t.note && (
+                          <div style={{ fontSize: 12, color: '#f59e0b' }}>💬 {t.note}</div>
+                        )}
+                      </td>
+                      <td className="mutedtext" style={{ fontSize: 12 }}>{t.verify}</td>
+                      <td>
+                        <select
+                          value={t.status}
+                          onChange={(e) => setTaskStatus(t, e.target.value)}
+                          style={{ fontSize: 12, color: TASK_STATUS.find((s) => s.key === t.status)?.color }}
+                        >
+                          {TASK_STATUS.map((s) => (
+                            <option key={s.key} value={s.key}>{s.label}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="mono" style={{ fontSize: 12 }}>{t.commit_sha?.substring(0, 7) ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* 외주 결과 검증 — LLM·모듈 사용 */}
+          <div className="panel">
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ margin: 0 }}>🔍 LLM·모듈 사용 검증</h3>
+              <button className="secondary small" onClick={runCompliance} disabled={busy}>검사 실행</button>
+            </div>
+            <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
+              커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 모듈을 쓰는지 검사합니다.
+              위반이 있으면 아래 프롬프트를 외주 빌더에게 그대로 전달하세요.
+            </p>
+            {compliance && (compliance.findings.length === 0 ? (
+              <p style={{ fontSize: 13, color: '#10b981' }}>✅ 위반 없음 — 제약을 지켰습니다.</p>
+            ) : (
+              <>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                  {Object.entries(compliance.summary).map(([rule, count]) => (
+                    <span key={rule} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                      {COMPLIANCE_RULE_LABEL[rule] ?? rule} {count}건
+                    </span>
+                  ))}
+                </div>
+                <ul style={{ margin: '0 0 12px', paddingLeft: 16, fontSize: 12 }}>
+                  {compliance.findings.map((f, i) => (
+                    <li key={i}>
+                      <span className="mono">{f.file}:{f.line}</span> — {COMPLIANCE_RULE_LABEL[f.rule] ?? f.rule}
+                      {' '}(<span className="mono">{f.detail}</span>)
+                    </li>
+                  ))}
+                </ul>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                  📤 외주 빌더 전달용 수정 지시 프롬프트
+                </div>
+                <textarea
+                  className="mono"
+                  readOnly
+                  style={{ width: '100%', minHeight: 180, fontSize: 12 }}
+                  value={compliance.builder_prompt}
+                />
+              </>
+            ))}
           </div>
 
           {/* 외부 빌드 모니터링 */}

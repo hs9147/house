@@ -1,4 +1,5 @@
-"""에이전트 기획(Agent Planning) API — 단계 순차 진행·확정(커밋 목킹)·제약·MCP 서버."""
+"""에이전트 기획(Agent Planning) API — 단계 순차 진행·확정(커밋 목킹)·제약·작업 지시·MCP 서버."""
+import json
 import subprocess
 
 import pytest
@@ -318,6 +319,170 @@ def test_confirm_on_default_branch_skips_pull_request(monkeypatch):
     assert body["git_action"] == "committed"
 
 
+def _confirm_spec(c, monkeypatch, sid: int, repo, body: str = "# 기획서 확정본\n요구사항 A\n"):
+    """spec 단계를 확정하고, 확정본을 세션 브랜치에 실제로 커밋한다(커밋 자체는 목킹)."""
+    from app.services import workspace
+
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, br, path, content, message: "deadbeef")
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+               json={"content": body}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    _git(repo, "checkout", "-q", "-b", f"paas/plan-{sid}")
+    doc = repo / "docs" / "agent-planning" / "01-기획서.md"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(body, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "plan(spec)")
+    _git(repo, "checkout", "-q", "main")
+
+
+def _mcp(c, pid: int, tool: str, args: dict | None = None):
+    return c.post(f"/paas/api/v1/plan/projects/{pid}/mcp", headers=ADMIN, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": tool, "arguments": args or {}},
+    }).json()
+
+
+TASKS_JSON = ('[{"title": "결제 API 구현", "detail": "게이트웨이 경유로 호출", '
+              '"verify": "pytest tests/test_pay.py 통과"},'
+              ' {"title": "화면 연결", "detail": "목록 화면", "verify": "수동 확인"}]')
+
+
+def test_generate_build_tasks_from_confirmed_artifacts(monkeypatch, fresh_settings, tmp_path):
+    """확정 산출물에서 외주 빌더가 집어갈 작업 지시가 만들어진다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    tasks = r.json()
+    assert [t["title"] for t in tasks] == ["결제 API 구현", "화면 연결"]
+    assert tasks[0]["verify"] == "pytest tests/test_pay.py 통과"
+    assert all(t["status"] == "pending" for t in tasks)
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}/tasks", headers=ADMIN).json() == tasks
+
+
+def test_generate_tasks_refuses_to_overwrite_started_work(monkeypatch, fresh_settings, tmp_path):
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    task_id = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate",
+                     headers=ADMIN).json()[0]["id"]
+
+    c.patch(f"/paas/api/v1/plan/tasks/{task_id}", json={"status": "in_progress"}, headers=ADMIN)
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN)
+    assert r.status_code == 409
+
+    # 확정 산출물이 없으면 애초에 만들 수 없다
+    sid2 = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                  headers=ADMIN).json()["id"]
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid2}/tasks/generate",
+                  headers=ADMIN).status_code == 409
+
+
+def test_mcp_read_artifact_and_build_report_loop(monkeypatch, fresh_settings, tmp_path):
+    """외부 빌더가 MCP만으로 산출물 열람 → 작업 수행 → 결과 제출 → 질의까지 한다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+
+    # clone 없이 확정 산출물 본문을 읽는다
+    text = _mcp(c, pid, "read_artifact", {"stage": "spec"})["result"]["content"][0]["text"]
+    assert "요구사항 A" in text
+    assert "error" in _mcp(c, pid, "read_artifact", {"stage": "nope"})
+
+    # 작업 목록 조회 → 착수 → 결과 제출
+    listed = _mcp(c, pid, "list_tasks")["result"]["content"][0]["text"]
+    assert "결제 API 구현" in listed
+    _mcp(c, pid, "update_task", {"task_id": tasks[0]["id"], "status": "in_progress"})
+    _mcp(c, pid, "submit_build_result",
+         {"task_id": tasks[0]["id"], "commit_sha": "abc1234", "summary": "구현 완료"})
+    done = c.get(f"/paas/api/v1/plan/sessions/{sid}/tasks", headers=ADMIN).json()[0]
+    assert done["status"] == "done" and done["commit_sha"] == "abc1234"
+
+    # 막히면 질의 — 작업은 blocked가 되고 질의는 기획 세션 대화에 남는다
+    _mcp(c, pid, "request_clarification",
+         {"task_id": tasks[1]["id"], "question": "결제 수단 범위가 불명확합니다"})
+    blocked = c.get(f"/paas/api/v1/plan/sessions/{sid}/tasks", headers=ADMIN).json()[1]
+    assert blocked["status"] == "blocked"
+    events = c.get(f"/paas/api/v1/plan/sessions/{sid}/build-status", headers=ADMIN).json()["events"]
+    assert any(e["action"] == "plan.build.clarification" for e in events)
+
+    # 질의가 다음 초안 컨텍스트(대화 이력)에 실린다
+    calls = _mock_llm(monkeypatch)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/architecture/messages",
+           json={"content": "설계"}, headers=ADMIN)
+    payload = next(p for p in calls if _FILE_SELECT_MARK not in p["messages"][0]["content"])
+    assert any("결제 수단 범위가 불명확합니다" in m["content"] for m in payload["messages"])
+
+
+VIOLATING_CODE = '''import openai
+
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+KEY = "sk-abcdefghijklmnopqrstuvwxyz"
+
+
+def call_module():
+    return get("/paas/api/v1/proxy/modules/ghost-module/query")
+'''
+
+
+def test_compliance_detects_llm_and_module_violations(monkeypatch, fresh_settings, tmp_path):
+    """외주 결과의 LLM·모듈 사용을 검증하고, 위반 시 빌더에게 줄 수정 프롬프트를 만든다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    (repo / "agent.py").write_text(VIOLATING_CODE, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "build")
+
+    c = _client()
+    pid, _ = _project_and_provider(c)
+    r = c.get(f"/paas/api/v1/plan/projects/{pid}/compliance", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["summary"] == {"llm_direct": 2, "hardcoded_secret": 1, "unknown_module": 1}
+    assert {f["file"] for f in body["findings"]} == {"agent.py"}
+    # 키 값 자체는 결과에 남기지 않는다
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in json.dumps(body, ensure_ascii=False)
+
+    prompt = body["builder_prompt"]
+    assert "agent.py:3" in prompt  # 파일·줄이 근거로 남는다
+    assert "/paas/api/v1/proxy/llm" in prompt  # 어떻게 고칠지
+    assert "가용 모듈 제약" in prompt  # 제약 원문 동봉
+
+    # 외부 빌더는 같은 검사를 MCP로 직접 돌려 제출 전에 자기 점검한다
+    text = _mcp(c, pid, "check_compliance")["result"]["content"][0]["text"]
+    assert "agent.py:3" in text
+
+
+def test_compliance_clean_repo_has_nothing_to_send(monkeypatch, fresh_settings, tmp_path):
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, _ = _project_and_provider(c)
+    body = c.get(f"/paas/api/v1/plan/projects/{pid}/compliance", headers=ADMIN).json()
+    assert body["findings"] == [] and body["builder_prompt"] == ""
+    text = _mcp(c, pid, "check_compliance")["result"]["content"][0]["text"]
+    assert "위반 없음" in text
+
+
 def test_constraints_document_lists_rules():
     c = _client()
     pid, _ = _project_and_provider(c)
@@ -339,7 +504,12 @@ def test_mcp_server_tools_and_progress_report():
     r = c.post(base, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=ADMIN)
     assert r.status_code == 200
     names = [t["name"] for t in r.json()["result"]["tools"]]
-    assert names == ["get_constraints", "list_available_modules", "report_build_progress"]
+    # 조회(제약·모듈·산출물·작업)와 보고(진행·결과·질의·자기점검)가 모두 노출된다
+    assert names == [
+        "get_constraints", "list_available_modules", "report_build_progress",
+        "read_artifact", "list_tasks", "update_task", "submit_build_result",
+        "request_clarification", "check_compliance",
+    ]
 
     r = c.post(base, json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                            "params": {"name": "report_build_progress",

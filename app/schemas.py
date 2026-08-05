@@ -225,6 +225,32 @@ class PlanSessionOut(BaseModel):
     artifacts: list[PlanArtifactOut] = []
 
 
+class BuildTaskOut(BaseModel):
+    id: int
+    title: str
+    detail: str = ""
+    verify: str = ""  # 완료 판정 기준
+    status: str
+    note: str = ""
+    commit_sha: str | None = None
+
+
+class BuildTaskUpdate(BaseModel):
+    status: str | None = None  # pending | in_progress | done | blocked
+    note: str | None = None
+    commit_sha: str | None = None
+
+
+class ComplianceOut(BaseModel):
+    """외주 빌드 결과의 LLM·모듈 사용 검증 결과."""
+
+    project: str
+    findings: list[dict] = []
+    summary: dict[str, int] = {}
+    # 위반이 있을 때 외주 빌더에게 그대로 전달할 수정 지시 프롬프트(없으면 빈 문자열)
+    builder_prompt: str = ""
+
+
 class ModuleCreate(BaseModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,40}$")
     type: str = Field(pattern=r"^(external_api|internal_api|database|file_storage|mcp)$")

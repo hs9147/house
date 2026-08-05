@@ -4,7 +4,9 @@ import type {
   ApiSearchResult,
   AuditRow,
   BuildProfile,
+  BuildTaskOut,
   CodeMapOut,
+  ComplianceOut,
   GiteaSyncResult,
   HealthInfo,
   ChatReply,
@@ -363,6 +365,16 @@ export const api = {
     request<PlanBuildStatus>('GET', `/plan/sessions/${sessionId}/build-status`),
   planConstraints: (projectId: number) =>
     request<{ document: string }>('GET', `/plan/projects/${projectId}/constraints`),
+  // 외주 빌드 작업 지시(work order)
+  generatePlanTasks: (sessionId: number) =>
+    request<BuildTaskOut[]>('POST', `/plan/sessions/${sessionId}/tasks/generate`),
+  listPlanTasks: (sessionId: number) =>
+    request<BuildTaskOut[]>('GET', `/plan/sessions/${sessionId}/tasks`),
+  updatePlanTask: (taskId: number, body: { status?: string; note?: string }) =>
+    request<BuildTaskOut>('PATCH', `/plan/tasks/${taskId}`, body),
+  // 외주 결과의 LLM·모듈 사용 검증
+  planCompliance: (projectId: number) =>
+    request<ComplianceOut>('GET', `/plan/projects/${projectId}/compliance`),
 
   // 서버구성 (런타임/프록시 백엔드 시각화 + redirect/rewrite 규칙)
   serverConfig: () => request<ServerConfigOut>('GET', '/server-config'),

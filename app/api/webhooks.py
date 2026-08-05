@@ -10,6 +10,7 @@ from ..db import SessionLocal
 from ..models import Project, ProjectType
 from ..security import verify_webhook_signature
 from ..services import deployer
+from ..services import planning as planning_service
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -32,6 +33,11 @@ async def git_push(
     branch = (payload.get("ref") or "").removeprefix("refs/heads/")
     if not branch:
         return {"skipped": "no branch ref"}
+
+    # 기획 산출물만 바뀐 push는 배포 신호가 아니다 — 단계 확정 커밋이 기본 브랜치로
+    # 머지될 때마다 운영본이 재배포되는 것을 막는다(변경 경로를 모르면 기존대로 배포).
+    if _only_plan_artifacts(payload):
+        return {"skipped": "plan artifacts only"}
 
     with SessionLocal() as db:
         projects = db.execute(select(Project)).scalars().all()
@@ -62,6 +68,20 @@ def _deploy_task(project_id: int) -> None:
             pass
         except Exception as e:
             audit.record(db, "webhook", "deploy.failed", project.name, {"error": str(e)[:500]})
+
+
+def _only_plan_artifacts(payload: dict) -> bool:
+    """이번 push의 변경 경로가 전부 기획 산출물 디렉터리 안인지.
+
+    변경 목록이 없는 payload(형식이 다르거나 커밋이 생략된 경우)는 판단하지 않는다 —
+    배포를 놓치는 것보다 한 번 더 배포하는 편이 안전하다.
+    """
+    prefix = planning_service.ARTIFACT_DIR + "/"
+    paths: list[str] = []
+    for commit in payload.get("commits") or []:
+        for field in ("added", "removed", "modified"):
+            paths.extend(commit.get(field) or [])
+    return bool(paths) and all(p.startswith(prefix) for p in paths)
 
 
 def _repo_urls(payload: dict) -> set[str]:
