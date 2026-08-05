@@ -172,6 +172,7 @@ export interface PlanMessageReply {
   used_modules?: string[];
   context_files?: string[]; // 본문까지 참조한 리포 파일
   bound_modules?: string[]; // 솔루션 구성 단계에서 이번에 바인딩된 모듈
+  compacted?: boolean; // 압축된 컨텍스트로 생성됐는지
 }
 
 export interface PlanArtifactContent {

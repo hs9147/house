@@ -563,11 +563,13 @@ def test_session_merge_finishes_the_branch(monkeypatch, fresh_settings, tmp_path
     assert any(e["action"] == "plan.session.merge" for e in events)
 
 
-def test_empty_llm_reply_reports_instead_of_crashing(monkeypatch, fresh_settings, tmp_path):
+def test_empty_llm_reply_offers_compaction_instead_of_crashing(
+    monkeypatch, fresh_settings, tmp_path
+):
     """회귀: content=null 응답이 오면 reply.upper()에서 500으로 터졌다.
 
-    컨텍스트가 큰 뒤 단계(아키텍처 이후)에서 나기 쉬운데, 원인을 알 수 없는 500 대신
-    무엇을 해야 하는지 알려주는 502가 되어야 한다.
+    빈 응답은 대개 컨텍스트 한도 초과다 — 원인을 알 수 없는 500 대신 413으로 알려
+    "압축해서 다시 시도"로 이어져야 한다.
     """
     from app.services import llm as llm_service
 
@@ -582,15 +584,53 @@ def test_empty_llm_reply_reports_instead_of_crashing(monkeypatch, fresh_settings
     })
     r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
                json={"content": "기획서 써줘"}, headers=ADMIN)
-    assert r.status_code == 502, r.text
-    assert "빈 응답" in r.json()["detail"]
+    assert r.status_code == 413, r.text
+    assert "한도를 넘은 것 같습니다" in r.json()["detail"]
+
+    # 압축하고도 비면 더 줄일 것이 없다 — 502로 다른 방법을 안내한다
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+               json={"content": "기획서 써줘", "compact": True}, headers=ADMIN)
+    assert r.status_code == 502
+    assert "압축했는데도" in r.json()["detail"]
 
     # content 키 자체가 없는 응답도 같은 경로로 떨어진다
     monkeypatch.setattr(llm_service, "_post_chat", lambda url, headers, payload: {
         "choices": [{"message": {"role": "assistant"}}],
     })
     assert c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
-                  json={"content": "다시"}, headers=ADMIN).status_code == 502
+                  json={"content": "다시"}, headers=ADMIN).status_code == 413
+
+
+def test_compact_retry_shrinks_the_context(monkeypatch, fresh_settings, tmp_path):
+    """압축 재시도는 앞 단계 문서를 개요로 줄이고 코드 컨텍스트를 뺀다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo,
+                  body="# 기획서\n## 1. 목적\n아주 긴 본문 문장입니다\n## 2. 범위\n본문 또 하나\n")
+
+    # 압축 없이: 앞 단계 본문·코드 개요·선정 파일이 모두 실린다
+    calls = _mock_llm(monkeypatch, select_reply='["app.py"]')
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/architecture/messages",
+               json={"content": "설계"}, headers=ADMIN)
+    full = _draft_context(calls)
+    assert "아주 긴 본문 문장입니다" in full
+    assert "CODE STRUCTURE (OUTLINE)" in full and "--- app.py ---" in full
+    assert r.json()["compacted"] is False
+
+    # 압축: 본문은 제목만 남고 코드 컨텍스트는 빠진다
+    calls = _mock_llm(monkeypatch, select_reply='["app.py"]')
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/architecture/messages",
+               json={"content": "설계", "compact": True}, headers=ADMIN)
+    small = _draft_context(calls)
+    assert "## 1. 목적" in small and "아주 긴 본문 문장입니다" not in small
+    assert "CODE STRUCTURE (OUTLINE)" not in small and "--- app.py ---" not in small
+    assert "=== GIT 파일 목록" in small  # 목록 자체는 남는다(줄여서)
+    assert r.json()["compacted"] is True and r.json()["context_files"] == []
+    assert len(small) < len(full)
 
 
 def test_context_files_are_chosen_without_a_path_input(monkeypatch, fresh_settings, tmp_path):

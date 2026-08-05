@@ -114,12 +114,15 @@ def split_reply(reply: str) -> tuple[str, str]:
         summary, _, document = reply.partition(DOCUMENT_MARKER)
         summary, document = summary.strip(), document.strip()
         if document:
-            return summary or _outline(document), document
-    return _outline(reply), reply.strip()
+            return summary or document_outline(document), document
+    return document_outline(reply), reply.strip()
 
 
-def _outline(document: str, limit: int = 8) -> str:
-    """문서의 제목·소제목만 뽑은 개요(마커 없는 응답의 대화용 대체 요약)."""
+def document_outline(document: str, limit: int = 8) -> str:
+    """문서의 제목·소제목만 뽑은 개요.
+
+    대화용 대체 요약이자, 컨텍스트 압축 시 본문을 대신해 싣는 축약본이다.
+    """
     heads = [line.strip() for line in document.splitlines() if line.strip().startswith("#")]
     if not heads:
         return document.strip()[:300]
@@ -156,6 +159,12 @@ def prev_stages(stage: PlanStage) -> list[PlanStage]:
 # git 파일 목록은 항상 기본 참조하되, 내용까지 넣는 파일은 요청당 이만큼으로 제한한다.
 MAX_TREE_FILES = 400
 AUTO_CONTEXT_FILES = 6
+
+# 컨텍스트 압축 모드 — 모델이 한도를 넘어 빈 응답을 낸 뒤 재시도할 때 쓴다.
+# 앞 단계 문서는 개요만, 파일 목록은 줄이고, 코드 개요·파일 본문은 아예 뺀다.
+COMPACT_TREE_FILES = 60
+COMPACT_OUTLINE_HEADS = 40
+COMPACT_HISTORY_MESSAGES = 4
 
 _FILE_SELECT_PROMPT = (
     "You select which repository files must be read to answer a planning request.\n"

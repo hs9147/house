@@ -15,6 +15,7 @@ interface Msg {
   usedModules?: string[];
   contextFiles?: string[];
   boundModules?: string[];
+  compacted?: boolean;
 }
 
 // 확정 시 git 상태에 따라 자동 수행된 결과의 표시 문구
@@ -203,11 +204,28 @@ export default function AgentPlanning() {
     setError('');
     try {
       // 편집 중인 산출물을 함께 보낸다 — 새로 쓰지 않고 이것을 고치게 한다.
-      const res = await api.sendPlanMessage(session.id, activeStage, content, draft);
+      let res;
+      try {
+        res = await api.sendPlanMessage(session.id, activeStage, content, draft);
+      } catch (err) {
+        // 413 = 컨텍스트가 모델 한도를 넘었다 — 압축해서 다시 시도할지 묻는다.
+        if ((err as ApiError).status !== 413) throw err;
+        if (!window.confirm(
+          `${(err as Error).message}\n\n` +
+          '압축하면 앞 단계 문서는 제목만 싣고 코드 구조·참조 파일 본문은 빠집니다.\n' +
+          '컨텍스트를 압축해 다시 실행할까요?',
+        )) {
+          setMessages((prev) => prev.slice(0, -1)); // 보낸 요청을 되돌린다
+          setInput(content);
+          setBusy(false);
+          return;
+        }
+        res = await api.sendPlanMessage(session.id, activeStage, content, draft, true);
+      }
       setMessages((prev) => [...prev, {
         role: 'assistant', content: res.summary,
         usedModules: res.used_modules, contextFiles: res.context_files,
-        boundModules: res.bound_modules,
+        boundModules: res.bound_modules, compacted: res.compacted,
       }]);
       setDraft(res.document); // 문서 본문은 산출물 란으로
       setDraftSource('session');

@@ -355,9 +355,11 @@ export const api = {
   deletePlanSession: (sessionId: number) =>
     request<void>('DELETE', `/plan/sessions/${sessionId}`),
   // 참조 파일은 서버가 요청 문장을 보고 고른다 — 경로를 사람이 적지 않는다.
-  sendPlanMessage: (sessionId: number, stage: string, content: string, draft: string) =>
+  // compact=true는 컨텍스트 한도 초과(413) 후 재시도할 때만.
+  sendPlanMessage: (sessionId: number, stage: string, content: string, draft: string,
+                    compact = false) =>
     request<PlanMessageReply>('POST', `/plan/sessions/${sessionId}/stages/${stage}/messages`,
-      { content, draft }),
+      { content, draft, compact }),
   // 단계 산출물 본문 — 세션 재개·단계 이동 시 편집기를 채운다
   planArtifactContent: (sessionId: number, stage: string) =>
     request<PlanArtifactContent>('GET', `/plan/sessions/${sessionId}/stages/${stage}/artifact`),

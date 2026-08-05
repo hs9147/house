@@ -202,7 +202,8 @@ POST /paas/api/v1/plan/sessions                     # {project_id, provider_id, 
 GET  /paas/api/v1/plan/sessions?project_id=         # 세션 이력(최근 순) — 확정 단계·작업 수 요약
 GET  /paas/api/v1/plan/sessions/{id}/messages       # 재개용 대화 이력 복원
 DELETE /paas/api/v1/plan/sessions/{id}              # 세션·대화·산출물 포인터·작업 지시 + 작업 브랜치 삭제(머지된 문서는 남음)
-POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/messages   # 단계 문서 초안 — git 파일 목록·앞 단계 확정본이 컨텍스트
+POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/messages   # 단계 생성 요청 — git 파일 목록·앞 단계 확정본이 컨텍스트
+                                                # 빈 응답(컨텍스트 한도 초과)이면 413 — compact=true로 압축 재시도
                                                 # solution 단계에서는 bind_module 도구로 사용 결정 모듈을 즉시 바인딩하고,
                                                 # 바인딩된 mcp 모듈의 도구({모듈명}__{도구명})로 실제 규격을 확인
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/confirm    # 확정 → Gitea 커밋 후 git 상태에 따라 PR·머지 자동

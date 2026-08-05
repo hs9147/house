@@ -271,6 +271,9 @@ async def post_plan_message(
             if content is None:
                 content = workspace.read_context_files(workdir, [path]).get(path)
         if content:
+            if body.compact:
+                content = planning_service.document_outline(
+                    content, planning_service.COMPACT_OUTLINE_HEADS)
             context_parts.append(
                 f"=== 이전 단계 확정 산출물 {idx}. {planning_service.stage_title(s)} ({path}) ===\n{content}"
             )
@@ -278,6 +281,9 @@ async def post_plan_message(
     # 지금 편집 중인 산출물 — 있으면 새로 쓰지 않고 이것을 고치게 한다(수정 요청 문맥).
     # 편집기가 비어 있으면 확정본이나 리포에 이미 있는 이 단계 문서를 대신 싣는다.
     current = body.draft.strip() or (_artifact_content(db, project, session, plan_stage) or "")
+    if current and body.compact:
+        current = planning_service.document_outline(
+            current, planning_service.COMPACT_OUTLINE_HEADS)
     if current:
         context_parts.append(
             f"=== 현재 산출물 (수정 대상: {planning_service.stage_title(plan_stage)}) ===\n{current}"
@@ -286,27 +292,32 @@ async def post_plan_message(
     # git 파일 목록은 기본 참조, 내용 확인이 필요한 파일만 골라 본문을 덧붙인다.
     context_files: list[str] = []
     if workdir.exists():
-        tree = workspace.file_tree(workdir, limit=planning_service.MAX_TREE_FILES)
+        tree = workspace.file_tree(workdir, limit=(
+            planning_service.COMPACT_TREE_FILES if body.compact
+            else planning_service.MAX_TREE_FILES))
         if tree:
             context_parts.append("=== GIT 파일 목록 (리포 추적 파일) ===\n" + "\n".join(tree))
-        # 코드 구조 개요
-        try:
-            outline = codemap_service.render_outline(codemap_service.build_code_map(workdir))
-            context_parts.append("=== CODE STRUCTURE (OUTLINE) ===\n" + outline)
-        except Exception:  # noqa: BLE001
-            pass
-        selected = await asyncio.to_thread(
-            planning_service.select_context_files, provider, db, tree, body.content,
-        )
-        for path, content in workspace.read_context_files(workdir, selected).items():
-            context_parts.append(f"--- {path} ---\n{content}")
-            context_files.append(path)
+        # 압축 모드에서는 코드 개요·파일 본문을 싣지 않는다 — 컨텍스트에서 가장 큰 덩어리다.
+        if not body.compact:
+            try:
+                outline = codemap_service.render_outline(codemap_service.build_code_map(workdir))
+                context_parts.append("=== CODE STRUCTURE (OUTLINE) ===\n" + outline)
+            except Exception:  # noqa: BLE001
+                pass
+            selected = await asyncio.to_thread(
+                planning_service.select_context_files, provider, db, tree, body.content,
+            )
+            for path, content in workspace.read_context_files(workdir, selected).items():
+                context_parts.append(f"--- {path} ---\n{content}")
+                context_files.append(path)
 
     messages.append({"role": "system", "content": "\n\n".join(context_parts)})
 
-    history = db.execute(
+    history = list(db.execute(
         select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)
-    ).scalars()
+    ).scalars())
+    if body.compact:
+        history = history[-planning_service.COMPACT_HISTORY_MESSAGES:]
     messages.extend({"role": m.role, "content": m.content} for m in history)
     messages.append({"role": "user", "content": body.content})
 
@@ -329,11 +340,21 @@ async def post_plan_message(
         raise HTTPException(status_code=502, detail=f"llm call failed: {e}")
 
     if not reply.strip():
+        # 빈 응답은 대개 컨텍스트가 모델 한도를 넘었다는 신호다. 아직 압축하지 않았다면
+        # 413으로 알려 콘솔이 "압축해서 다시 시도할까요?"를 묻게 한다.
+        if not body.compact:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "컨텍스트가 모델의 한도를 넘은 것 같습니다(빈 응답). "
+                    "앞 단계 문서를 개요로 줄이고 코드 컨텍스트를 빼면 다시 시도할 수 있습니다."
+                ),
+            )
         raise HTTPException(
             status_code=502,
             detail=(
-                "LLM이 빈 응답을 반환했습니다. 컨텍스트가 모델의 한도를 넘었을 수 있습니다 — "
-                "요청을 더 좁게 나누거나 다른 프로바이더로 다시 시도하세요."
+                "컨텍스트를 압축했는데도 LLM이 빈 응답을 반환했습니다 — 요청을 더 좁게 "
+                "나누거나 더 큰 컨텍스트를 지원하는 프로바이더로 다시 시도하세요."
             ),
         )
 
@@ -351,7 +372,8 @@ async def post_plan_message(
     db.add(ChatMessage(session_id=session_id, role="assistant", content=summary))
     db.commit()
     return PlanMessageReply(summary=summary, document=document, used_modules=used_modules,
-                            context_files=context_files, bound_modules=bound_modules)
+                            context_files=context_files, bound_modules=bound_modules,
+                            compacted=body.compact)
 
 
 @router.post("/plan/sessions/{session_id}/stages/{stage}/confirm", response_model=PlanArtifactOut)
