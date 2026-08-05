@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import Async from '../components/Async';
 import { ApiError, api } from '../lib/api';
+import { getEmail } from '../lib/auth';
 import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
 import type {
@@ -94,6 +95,9 @@ export default function AgentPlanning() {
     projects.reload();
     if (created) setProjectId(String(created.id)); // 생성 즉시 선택
   };
+
+  // 대화에 찍히는 사용자 식별자 — 계정 로그인은 이메일, API 키는 키 이름이 곧 id다.
+  const userLabel = me.data?.name || getEmail() || '사용자';
 
   const artifactOf = (stage: string) => session?.artifacts.find((a) => a.stage === stage);
   const isConfirmed = (stage: string) => !!artifactOf(stage)?.confirmed;
@@ -491,7 +495,7 @@ export default function AgentPlanning() {
                     }}
                   >
                     <div className="mutedtext" style={{ fontSize: 11, marginBottom: 4 }}>
-                      {m.role === 'user' ? '👤 나 (User)' : '🧭 기획 에이전트'}
+                      {m.role === 'user' ? `👤 ${userLabel}` : '🧭 기획 에이전트'}
                     </div>
                     {m.usedModules && m.usedModules.length > 0 && (
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
