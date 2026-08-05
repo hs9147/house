@@ -5,8 +5,8 @@ import { getEmail } from '../lib/auth';
 import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
 import type {
-  BuildTaskOut, ComplianceOut, PlanArtifactContent, PlanArtifactOut, PlanBuildEvent,
-  PlanMergeOut, PlanSessionOut, PlanSessionSummary, ProjectOut,
+  BuildTaskOut, BuildTaskSync, ComplianceOut, PlanArtifactContent, PlanArtifactOut,
+  PlanBuildEvent, PlanMergeOut, PlanSessionOut, PlanSessionSummary, ProjectOut,
 } from '../lib/types';
 import { CreateModal } from './Projects';
 
@@ -81,6 +81,7 @@ export default function AgentPlanning() {
   const [buildEvents, setBuildEvents] = useState<PlanBuildEvent[]>([]);
   const [gitResult, setGitResult] = useState<PlanArtifactOut | null>(null);
   const [tasks, setTasks] = useState<BuildTaskOut[]>([]);
+  const [taskSync, setTaskSync] = useState<BuildTaskSync | null>(null);
   const [compliance, setCompliance] = useState<ComplianceOut | null>(null);
   const [mergeResult, setMergeResult] = useState<PlanMergeOut | null>(null);
   const [draftSource, setDraftSource] = useState<PlanArtifactContent['source']>('');
@@ -280,15 +281,18 @@ export default function AgentPlanning() {
     }
   };
 
+  // 진행 현황은 기본 브랜치(main) 기준으로 갱신한다 — 빌더의 보고가 아니라 거기에
+  // 반영된 커밋이 완료의 근거다.
   const loadBuildStatus = async () => {
     if (!session) return;
     try {
-      const [s, t] = await Promise.all([
+      const [s, sync] = await Promise.all([
         api.planBuildStatus(session.id),
-        api.listPlanTasks(session.id),
+        api.syncPlanTasks(session.id),
       ]);
       setBuildEvents(s.events);
-      setTasks(t);
+      setTasks(sync.tasks);
+      setTaskSync(sync);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -589,8 +593,25 @@ export default function AgentPlanning() {
                 <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
                   외부 빌더가 MCP(<span className="mono">list_tasks·update_task·submit_build_result</span>)로
                   집어가고 상태를 갱신합니다. 막히면 <span className="mono">request_clarification</span>으로
-                  질의가 이 기획 세션에 남습니다.
+                  질의가 이 기획 세션에 남습니다. 진행 현황은 빌더의 보고가 아니라
+                  <b> 기본 브랜치에 반영된 커밋</b>을 기준으로 갱신됩니다 — 빌더가 작업 브랜치를 push하면
+                  기본 브랜치로 가는 PR이 자동 생성되고, 그 PR이 머지되면 완료로 바뀝니다.
                 </p>
+                {taskSync && (
+                  <p style={{ fontSize: 12, marginTop: 6 }}>
+                    {taskSync.base_ref ? (
+                      <>
+                        <span className="mono">{taskSync.base_ref}</span> 기준 ·
+                        <span style={{ color: '#10b981' }}> 반영 {taskSync.merged}건</span> ·
+                        <span style={{ color: '#f59e0b' }}> 머지 대기 {taskSync.pending}건</span>
+                      </>
+                    ) : (
+                      <span className="mutedtext">
+                        기본 브랜치를 읽지 못해 진행 현황을 판정하지 못했습니다 (워킹카피 없음).
+                      </span>
+                    )}
+                  </p>
+                )}
                 {tasks.length === 0 ? (
                   <p className="mutedtext" style={{ fontSize: 12 }}>작업 지시가 없습니다.</p>
                 ) : (

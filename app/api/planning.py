@@ -30,6 +30,7 @@ from ..models import (
 )
 from ..schemas import (
     BuildTaskOut,
+    BuildTaskSyncOut,
     BuildTaskUpdate,
     ComplianceOut,
     PlanArtifactContentOut,
@@ -673,6 +674,60 @@ def list_build_tasks(
     if db.get(ChatSession, session_id) is None:
         raise HTTPException(status_code=404, detail="session not found")
     return [_task_out(t) for t in _session_tasks(db, session_id)]
+
+
+@router.post("/plan/sessions/{session_id}/tasks/sync", response_model=BuildTaskSyncOut)
+async def sync_build_tasks(
+    session_id: int,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """작업 지시 진행 현황을 기본 브랜치 기준으로 갱신한다.
+
+    빌더의 자기 보고(update_task·submit_build_result)는 신호일 뿐이다 — 실제로 반영된
+    것은 기본 브랜치에 올라간 커밋뿐이라, 보고된 커밋이 거기서 도달 가능할 때만 완료로
+    둔다. 아직 PR이 머지되지 않았으면 완료를 진행 중으로 되돌린다.
+
+    빌더가 남긴 note(구현 요약·질의)는 건드리지 않는다 — 상태를 고치자고 근거 기록을
+    지우면 왜 그 상태인지 알 수 없게 된다. 질의로 막힌(blocked) 작업도 그대로 둔다.
+    """
+    session = db.get(ChatSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    project = db.get(Project, session.project_id)
+    try:
+        await asyncio.to_thread(checkout, project)  # 기본 브랜치 최신화(실패해도 있는 것으로 판정)
+    except Exception:  # noqa: BLE001
+        pass
+
+    tasks = _session_tasks(db, session_id)
+    workdir = workspace.workdir_for(project)
+    base_ref = workspace.default_branch_ref(workdir, project.branch) if workdir.exists() else None
+    if base_ref is None:
+        return BuildTaskSyncOut(base_ref="", merged=0, pending=0,
+                                tasks=[_task_out(t) for t in tasks])
+
+    merged = pending = 0
+    changed: list[int] = []
+    for task in tasks:
+        if not task.commit_sha or task.status == BuildTaskStatus.blocked:
+            continue
+        if await asyncio.to_thread(workspace.is_merged, workdir, base_ref, task.commit_sha):
+            merged += 1
+            if task.status != BuildTaskStatus.done:
+                task.status = BuildTaskStatus.done
+                changed.append(task.id)
+        else:
+            pending += 1
+            if task.status == BuildTaskStatus.done:
+                task.status = BuildTaskStatus.in_progress
+                changed.append(task.id)
+    db.commit()
+    audit.record(db, key.name, "plan.tasks.sync", project.name,
+                 {"base_ref": base_ref, "merged": merged, "pending": pending,
+                  "changed": changed})
+    return BuildTaskSyncOut(base_ref=base_ref, merged=merged, pending=pending,
+                            tasks=[_task_out(t) for t in tasks])
 
 
 @router.patch("/plan/tasks/{task_id}", response_model=BuildTaskOut)

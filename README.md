@@ -213,6 +213,8 @@ POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/confirm    # 확정 → Gite
 POST /paas/api/v1/plan/sessions/{id}/tasks/generate # 확정 산출물 → 외주 빌드 작업 지시(work order)
                                                 # ⑤ tasks 단계 산출물(05-작업지시.md)은 이 목록을 렌더한 문서
 GET  /paas/api/v1/plan/sessions/{id}/tasks          # 작업 지시 목록·상태
+POST /paas/api/v1/plan/sessions/{id}/tasks/sync     # 진행 현황을 기본 브랜치 기준으로 갱신
+                                                # 보고된 커밋이 기본 브랜치에 도달 가능할 때만 완료
 PATCH /paas/api/v1/plan/tasks/{id}                  # {status?, note?, commit_sha?}
 POST /paas/api/v1/plan/sessions/{id}/merge          # 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영
 GET  /paas/api/v1/plan/projects/{id}/constraints    # 가용 모듈 제약(외부 빌드 guardrail)

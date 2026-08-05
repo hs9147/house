@@ -224,6 +224,14 @@ export interface BuildTaskOut {
   commit_sha: string | null;
 }
 
+// 진행 현황을 기본 브랜치 기준으로 맞춘 결과 — 보고가 아니라 반영된 커밋이 기준이다
+export interface BuildTaskSync {
+  base_ref: string; // 판정 기준 ref(예: origin/main) — 비어 있으면 판정하지 못함
+  merged: number; // 기본 브랜치에 반영된 작업 수
+  pending: number; // 커밋은 보고됐지만 아직 반영되지 않은 작업 수
+  tasks: BuildTaskOut[];
+}
+
 // 외주 빌드 결과의 LLM·모듈 사용 검증
 export interface ComplianceFinding {
   rule: string;
