@@ -77,7 +77,8 @@ def create_app() -> FastAPI:
     if console_dist.is_dir():
         app.mount("/console", StaticFiles(directory=console_dist, html=True), name="console")
 
-    # 상주 PowerShell 데몬을 프로세스 종료 시 정리한다.
+    # 이 프로세스의 PowerShell 브로커 연결을 종료 시 닫는다 — 브로커·그 안의 세션
+    # 자체는 건드리지 않는다(paas가 죽어도 살아있어야 하므로). services/ps_broker.py 참고.
     import atexit  # noqa: PLC0415
 
     from .services.powershell_daemon import shutdown_shared  # noqa: PLC0415

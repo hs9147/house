@@ -1,8 +1,13 @@
 """상주 PowerShell 데몬 — 세션 유지·종료코드 캡처, /exec 호출 간 세션 유지.
 
-powershell.exe가 있는 환경(주로 Windows)에서만 실제 실행을 검증한다.
+powershell.exe가 있는 환경(주로 Windows)에서만 실제 실행을 검증한다. 브로커
+중계·재연결 로직(paas 재시작 생존)은 가짜 REPL로 비-Windows에서도 검증한다.
 """
 import shutil
+import socket as _socket_module
+import sys
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -42,10 +47,13 @@ def test_returncode_captured():
 
 
 @skip_no_ps
-def test_exec_endpoint_shares_session(monkeypatch):
+def test_exec_endpoint_shares_session(monkeypatch, fresh_settings):
+    from app.config import get_settings
     from app.services import powershell_daemon
 
     monkeypatch.setattr(powershell_daemon, "_shared", None)
+    monkeypatch.setenv("PAAS_PS_BROKER_PORT", str(_free_port()))
+    get_settings.cache_clear()
     c = TestClient(create_app())
     try:
         r1 = c.post("/paas/api/v1/system/powershell/exec",
@@ -57,6 +65,7 @@ def test_exec_endpoint_shares_session(monkeypatch):
         assert "hello-daemon" in r2.json()["output"]  # 호출 간 세션 유지
     finally:
         powershell_daemon.shutdown_shared()
+        powershell_daemon.kill_broker(get_settings().ps_broker_port)  # 테스트가 띄운 브로커 정리
 
 
 def test_exec_requires_command_field():
@@ -64,3 +73,276 @@ def test_exec_requires_command_field():
     c = TestClient(create_app())
     r = c.post("/paas/api/v1/system/powershell/exec", json={"command": "   "}, headers=ADMIN)
     assert r.status_code == 400
+
+
+# --- run_detached_script — "paas가 stop돼도 동작해야 한다"의 실제 근거 ---
+#
+# 실제 Job Object 강제(Windows 전용)는 이 샌드박스에서 실행해 확인할 수 없다. 대신
+# subprocess.Popen에 넘기는 인자 자체를 검증한다 — 이게 맞아야 실제 Windows에서도
+# 살아남는다는 전제가 성립한다. 두 가지가 그 전제다:
+#   1. CREATE_BREAKAWAY_FROM_JOB이 실제로 요청된다(그래야 nssm의 Job이 paas를 죽여도
+#      같이 죽지 않는다) — Job이 breakaway를 불허하면 플래그 없이 재시도.
+#   2. stdin/stdout/stderr를 paas에 물리지 않는다(파이프를 물리면 paas가 죽는 순간
+#      그 파이프가 닫혀 자식도 따라 끝난다 — breakaway와 무관하게 죽는 경로).
+
+
+def test_creation_flags_windows_requests_breakaway_and_detached(monkeypatch):
+    from app.services import powershell_daemon as psd
+
+    monkeypatch.setattr(psd.sys, "platform", "win32")
+    flags = psd._creation_flags(detached=True, breakaway=True)
+    assert flags & psd._CREATE_BREAKAWAY_FROM_JOB
+    assert flags & psd._DETACHED_PROCESS
+    assert flags & psd._CREATE_NEW_PROCESS_GROUP
+
+
+def test_creation_flags_windows_fallback_omits_breakaway(monkeypatch):
+    from app.services import powershell_daemon as psd
+
+    monkeypatch.setattr(psd.sys, "platform", "win32")
+    flags = psd._creation_flags(detached=True, breakaway=False)
+    assert not (flags & psd._CREATE_BREAKAWAY_FROM_JOB)
+
+
+def test_creation_flags_non_windows_is_always_zero(monkeypatch):
+    """비-Windows에는 Job Object가 없어 이 보호 자체가 성립하지 않는다 — 항상 0."""
+    from app.services import powershell_daemon as psd
+
+    monkeypatch.setattr(psd.sys, "platform", "linux")
+    assert psd._creation_flags(detached=True, breakaway=True) == 0
+    assert psd._creation_flags(detached=False, breakaway=False) == 0
+
+
+def test_run_detached_script_requests_breakaway_first(monkeypatch):
+    from app.services import powershell_daemon as psd
+
+    monkeypatch.setattr(psd.sys, "platform", "win32")
+    calls = []
+
+    class _FakeProc:
+        pass
+
+    def fake_popen(args, **kwargs):
+        calls.append(kwargs)
+        return _FakeProc()
+    monkeypatch.setattr(psd.subprocess, "Popen", fake_popen)
+
+    psd.run_detached_script("Write-Host hi", cwd="/tmp/x")
+
+    assert len(calls) == 1
+    assert calls[0]["creationflags"] & psd._CREATE_BREAKAWAY_FROM_JOB
+    # stdin/stdout/stderr를 paas와 공유하지 않는다 — paas가 죽어도 이 프로세스의
+    # 표준 입출력은 끊기지 않는다(파이프 EOF로 인한 자기 종료가 없다).
+    assert "stdin" not in calls[0] and "stdout" not in calls[0] and "stderr" not in calls[0]
+
+
+def test_run_detached_script_falls_back_when_breakaway_rejected(monkeypatch):
+    """Job이 breakaway를 불허하면(OSError) 플래그 없이 한 번 더 시도한다 — 완전히
+    실패 처리하지 않는다(스크립트 자체는 여전히 실행돼야 한다)."""
+    from app.services import powershell_daemon as psd
+
+    monkeypatch.setattr(psd.sys, "platform", "win32")
+    calls = []
+
+    class _FakeProc:
+        pass
+
+    def fake_popen(args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise OSError("Access is denied (breakaway not permitted by Job)")
+        return _FakeProc()
+    monkeypatch.setattr(psd.subprocess, "Popen", fake_popen)
+
+    psd.run_detached_script("Write-Host hi")
+
+    assert len(calls) == 2
+    assert calls[0]["creationflags"] & psd._CREATE_BREAKAWAY_FROM_JOB
+    assert not (calls[1]["creationflags"] & psd._CREATE_BREAKAWAY_FROM_JOB)
+
+
+# --- /exec 상주 데몬도 이제 브로커를 거쳐 paas 재시작을 넘어 살아남는다 ---
+#
+# 예전에는 PowerShellDaemon이 stdin/stdout을 paas가 직접 PIPE로 물었다 — 그 파이프의
+# 쓰기측을 paas가 들고 있어, paas가 죽으면(정상 종료든 강제 종료든) OS가 핸들을 닫고
+# 데몬이 표준입력 EOF로 스스로 끝났다. breakaway는 강제 종료 캐스케이드만 막을 뿐 이
+# 경로에는 무관했고, main.py의 atexit(shutdown_shared)도 정상 종료 때마다 데몬을
+# 직접 정리했다.
+#
+# 이제 실제 powershell.exe는 독립 브로커 프로세스(ps_broker.py)가 소유한다. paas는
+# BrokeredPowerShellDaemon(로컬 TCP 클라이언트)로 그 브로커에 붙을 뿐이다. paas가
+# 죽어도 브로커는 살아남고, shutdown_shared()도 이제 "이 연결만 끊기"로 의미가
+# 바뀌어 브로커·powershell.exe는 건드리지 않는다 — 다음(재시작된) paas가 같은 포트로
+# 다시 붙으면 세션(cd·변수)이 그대로 이어진다. 아래는 real powershell.exe 없이도
+# 이 관계 자체를 검증하는 테스트라 비-Windows에서도 실행된다(가짜 REPL로 브로커의
+# 중계·재연결 로직을 그대로 돈다) — run_detached_script 검증과 같은 원리다.
+
+# 마커 프로토콜(Write-Output "<marker> $LASTEXITCODE")만 이해하면 되는 최소 가짜 REPL.
+# PS 프롬프트 에코는 흉내내지 않는다 — 브로커는 프로토콜을 모르는 순수 중계이고, 에코
+# 필터링(_ECHO_RE)은 클라이언트 쪽 로직이라 실제 powershell.exe 없이는 검증 대상이 아니다.
+_FAKE_SHELL_SRC = r"""
+import re, sys
+variables = {}
+last_exit = 0
+for raw in sys.stdin:
+    line = raw.rstrip("\n")
+    if line.strip() == "exit":
+        break
+    m = re.match(r"^cmd /c exit (-?\d+)$", line.strip())
+    if m:
+        last_exit = int(m.group(1))
+        continue
+    m = re.match(r"^\$(\w+)\s*=\s*(.*)$", line.strip())
+    if m:
+        name, val = m.group(1), m.group(2).strip()
+        if val.startswith("'") and val.endswith("'"):
+            val = val[1:-1]
+        variables[name] = val
+        continue
+    m = re.match(r'^Write-Output "(.*)"$', line.strip())
+    if m:
+        text = m.group(1).replace("$LASTEXITCODE", str(last_exit))
+        text = re.sub(r"\$(\w+)", lambda mo: variables.get(mo.group(1), ""), text)
+        print(text)
+        sys.stdout.flush()
+        continue
+    m = re.match(r"^Write-Output \$(\w+)$", line.strip())
+    if m:
+        print(variables.get(m.group(1), ""))
+        sys.stdout.flush()
+"""
+_FAKE_SHELL_ARGS = [sys.executable, "-u", "-c", _FAKE_SHELL_SRC]
+
+
+def _free_port() -> int:
+    with _socket_module.socket(_socket_module.AF_INET, _socket_module.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _start_fake_broker(port: int, idle_timeout: float = 5) -> threading.Thread:
+    from app.services import ps_broker
+
+    t = threading.Thread(
+        target=ps_broker.run_broker,
+        kwargs=dict(port=port, exe_args=_FAKE_SHELL_ARGS, idle_timeout=idle_timeout),
+        daemon=True,
+    )
+    t.start()
+    time.sleep(0.3)  # 브로커가 리슨을 시작할 시간
+    return t
+
+
+def test_broker_relay_preserves_session_across_client_reconnect():
+    """클라이언트 A가 세션에 변수를 심고 연결을 끊은 뒤(paas 재시작을 흉내낸다),
+    새 클라이언트 B가 같은 포트에 다시 붙으면 그 변수를 그대로 본다."""
+    from app.services.powershell_daemon import BrokeredPowerShellDaemon, kill_broker
+
+    port = _free_port()
+    t = _start_fake_broker(port)
+    try:
+        client_a = BrokeredPowerShellDaemon(port=port)
+        client_a.run("$paas_test = 'hello'")
+        client_a.stop()  # 연결만 끊는다 — powershell(가짜 셸)은 브로커가 계속 물고 있다
+
+        client_b = BrokeredPowerShellDaemon(port=port)  # "재시작된 paas"의 새 클라이언트
+        res = client_b.run('Write-Output "$paas_test"')
+        assert "hello" in res.output
+        client_b.stop()
+    finally:
+        kill_broker(port)
+        t.join(timeout=3)
+
+
+def test_connected_socket_has_no_lingering_recv_timeout():
+    """회귀: create_connection(timeout=3)이 연결 후에도 소켓 기본 타임아웃으로 남으면,
+    출력이 3초보다 느린 정상 명령이 스스로 EOF로 오해받아 세션이 끊긴다. 연결 후에는
+    블로킹 모드로 되돌려야 한다(연결을 끊을 때는 shutdown()으로 즉시 깨운다)."""
+    from app.services.powershell_daemon import BrokeredPowerShellDaemon, kill_broker
+
+    port = _free_port()
+    t = _start_fake_broker(port)
+    try:
+        client = BrokeredPowerShellDaemon(port=port)
+        client.run('Write-Output "warm-up"')
+        assert client._sock.gettimeout() is None
+        client.stop()
+    finally:
+        kill_broker(port)
+        t.join(timeout=3)
+
+
+def test_shutdown_shared_disconnects_but_leaves_broker_running():
+    """main.py의 atexit이 부르는 shutdown_shared()는 이제 이 프로세스의 연결만 끊는다 —
+    브로커·세션은 죽지 않는다(paas가 죽어도 파워셀 데몬은 동작해야 한다는 요구사항)."""
+    from app.services import powershell_daemon as psd
+
+    port = _free_port()
+    t = _start_fake_broker(port)
+    try:
+        d = psd.BrokeredPowerShellDaemon(port=port)
+        d.run("$paas_survive = 'yes'")
+        psd._shared = d
+        try:
+            psd.shutdown_shared()  # "paas 종료"를 흉내낸다
+        finally:
+            psd._shared = None
+
+        # 새 클라이언트("재시작된 paas")가 같은 브로커에 다시 붙어 세션을 그대로 본다
+        d2 = psd.BrokeredPowerShellDaemon(port=port)
+        res = d2.run('Write-Output "$paas_survive"')
+        assert "yes" in res.output
+        d2.stop()
+    finally:
+        psd.kill_broker(port)
+        t.join(timeout=3)
+
+
+def test_client_spawns_broker_when_none_running(monkeypatch):
+    """붙을 브로커가 아직 없으면(첫 실행, 또는 idle timeout으로 이미 정리됨) 새로
+    띄우고 재시도해서 붙는다."""
+    from app.services import powershell_daemon as psd
+
+    port = _free_port()
+    spawned = []
+
+    def fake_spawn(p, cwd):
+        spawned.append(p)
+        _start_fake_broker(p)
+    monkeypatch.setattr(psd, "_spawn_broker", fake_spawn)
+
+    try:
+        client = psd.BrokeredPowerShellDaemon(port=port)
+        res = client.run('Write-Output "spawned-ok"')
+        assert "spawned-ok" in res.output
+        assert spawned == [port]
+        client.stop()
+    finally:
+        psd.kill_broker(port)
+
+
+def test_spawn_broker_requests_breakaway_and_no_shared_io(monkeypatch):
+    """_spawn_broker도 run_detached_script와 같은 방식으로 뜬다 — 브로커가 paas의
+    Job에서 벗어나고, stdin/stdout/stderr를 paas와 공유하지 않는다(둘을 통일하라는
+    요구사항)."""
+    from app.services import powershell_daemon as psd
+
+    monkeypatch.setattr(psd.sys, "platform", "win32")
+    calls = []
+
+    class _FakeProc:
+        pass
+
+    def fake_popen(args, **kwargs):
+        calls.append((args, kwargs))
+        return _FakeProc()
+    monkeypatch.setattr(psd.subprocess, "Popen", fake_popen)
+
+    psd._spawn_broker(47231, "/tmp/x")
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[:3] == [psd.sys.executable, "-m", "app.services.ps_broker"]
+    assert "--port" in args and "47231" in args
+    assert kwargs["creationflags"] & psd._CREATE_BREAKAWAY_FROM_JOB
+    assert "stdin" not in kwargs and "stdout" not in kwargs and "stderr" not in kwargs

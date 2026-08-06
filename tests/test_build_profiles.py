@@ -129,14 +129,17 @@ def _fake_run_ok(monkeypatch, calls: list):
 
 
 def test_install_dependencies_runs_npm_ci_when_lockfile_present(monkeypatch, tmp_path):
+    """npm은 shutil.which로 실제 경로(Windows의 npm.cmd 포함)를 찾아 그 경로로 실행한다 —
+    subprocess가 shell 없이 "npm"을 그대로 넘기면 Windows의 npm.cmd를 못 찾는다."""
     (tmp_path / "package.json").write_text("{}", encoding="utf-8")
     (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
     calls: list = []
     _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     install_dependencies(tmp_path, tmp_path / "env.log")
 
-    assert calls == [["npm", "ci"]]
+    assert calls == [["/usr/bin/npm", "ci"]]
     assert "npm ci" in (tmp_path / "env.log").read_text(encoding="utf-8")
 
 
@@ -144,10 +147,23 @@ def test_install_dependencies_runs_npm_install_without_lockfile(monkeypatch, tmp
     (tmp_path / "package.json").write_text("{}", encoding="utf-8")
     calls: list = []
     _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     install_dependencies(tmp_path, tmp_path / "env.log")
 
-    assert calls == [["npm", "install"]]
+    assert calls == [["/usr/bin/npm", "install"]]
+
+
+def test_install_dependencies_raises_clear_error_when_npm_not_on_path(monkeypatch, tmp_path):
+    """회귀: npm이 PATH에 있어도(사용자 셸 기준) subprocess가 shell 없이 "npm"을 그대로
+    넘기면 Windows에서 npm.cmd를 못 찾아 FileNotFoundError로 실패했다 — "npm 설치·PATH는
+    문제없다"는 사용자 보고와 실제 원인(CreateProcess가 PATHEXT를 안 본다)이 어긋나던
+    지점. shutil.which가 못 찾으면(진짜로 PATH에 없음) 그 자리에서 분명한 에러를 낸다."""
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: None)
+
+    with pytest.raises(BuildError, match="npm 실행 파일을 PATH에서 찾을 수 없습니다"):
+        install_dependencies(tmp_path, tmp_path / "env.log")
 
 
 def test_install_dependencies_creates_venv_and_installs_requirements(monkeypatch, tmp_path):

@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     build_log_dir: Path = Path("./data/build-logs")
     storage_root: str = "./data/storage"
     powershell_start_dir: str = ""
+    # /exec가 쓰는 상주 PowerShell 세션의 로컬 TCP 브로커 포트. paas 프로세스가 재시작돼도
+    # 이 고정 포트로 다시 붙어 같은 세션(cd·변수 등 상태)을 잇는다 — services/ps_broker.py.
+    ps_broker_port: int = 47231
 
     # 플랫폼(paas) 리포지토리 루트. 비우면 소스 트리에서 자동 계산한다.
     # SW 업데이트의 git pull 위치로 쓰인다. (환경변수: PAAS_REPO_ROOT)
