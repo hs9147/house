@@ -86,7 +86,7 @@ export default function OverviewTab() {
                       <td><StatusPill value={profile} /></td>
                       <td><StatusPill value={status[profile] ?? 'unknown'} /></td>
                       <td className="mono">
-                        {health.data ? (
+                        {health.data && status[profile] === 'running' ? (
                           <a href={fullUrl} target="_blank" rel="noreferrer">{fullUrl}</a>
                         ) : (
                           fullUrl
