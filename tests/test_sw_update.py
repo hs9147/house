@@ -33,5 +33,8 @@ def test_sw_update_schedules_git_pull_and_restart():
             assert "git pull" in script
             assert "Restart-Service -Name 'paas'" in script
             assert "Restart-Service -Name 'paas-console'" in script
+            # 환경설정은 sw-update의 책임이 아니다(프로젝트 배포 파이프라인에서 처리)
+            assert "pip install" not in script
+            assert "npm install" not in script
     finally:
         app.dependency_overrides.clear()

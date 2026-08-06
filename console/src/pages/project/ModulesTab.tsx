@@ -4,6 +4,7 @@ import Async from '../../components/Async';
 import StatusPill from '../../components/StatusPill';
 import { api } from '../../lib/api';
 import { useApi } from '../../lib/hooks';
+import type { ModuleSummary } from '../../lib/types';
 import type { ProjectContext } from '../ProjectDetail';
 
 export default function ModulesTab() {
@@ -32,6 +33,17 @@ export default function ModulesTab() {
     }
   };
 
+  const unbind = async (m: ModuleSummary) => {
+    if (!window.confirm(`'${m.agent_name}' 바인딩(${m.env_prefix})을 해제하시겠습니까?\n다음 배포부터 이 환경변수가 주입되지 않습니다.`)) return;
+    setError('');
+    try {
+      await api.unbindModule(project.id, m.binding_id);
+      bound.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
   return (
     <div className="panel">
       <h2>바인딩된 모듈</h2>
@@ -48,15 +60,19 @@ export default function ModulesTab() {
                 <th>타입</th>
                 <th>env 접두사</th>
                 <th>능력</th>
+                <th />
               </tr>
             </thead>
             <tbody>
               {rows.map((m) => (
-                <tr key={m.agent_name}>
+                <tr key={m.binding_id}>
                   <td>{m.agent_name}</td>
                   <td><StatusPill value={m.type} /></td>
                   <td className="mono">{m.env_prefix}</td>
                   <td className="mono">{m.skills.join(', ')}</td>
+                  <td>
+                    <button className="small danger" onClick={() => unbind(m)}>해제</button>
+                  </td>
                 </tr>
               ))}
             </tbody>

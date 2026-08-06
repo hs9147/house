@@ -17,6 +17,7 @@ SKILLS_BY_TYPE = {
     "file_storage": ["read_file", "write_file", "list_dir"],
     "database": ["execute_query", "inspect_schema"],
     "external_api": ["invoke_api", "fetch_data"],
+    "llm": ["chat_completion"],
 }
 
 
@@ -59,7 +60,11 @@ def list_project_a2a_cards(db: Session, project: Project) -> list[dict[str, Any]
 
     cards = []
     for binding, module in rows:
-        cards.append(build_agent_card(module, binding.env_prefix))
+        card = build_agent_card(module, binding.env_prefix)
+        # 이 프로젝트에서 이 바인딩만 골라 해제(unbind)할 수 있어야 한다 — env_prefix로도
+        # 유일하지만(프로젝트 내 unique), 콘솔이 바로 쓸 수 있는 행 식별자로 DB PK를 싣는다.
+        card["binding_id"] = binding.id
+        cards.append(card)
     return cards
 
 

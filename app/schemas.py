@@ -82,7 +82,8 @@ class ProjectOut(BaseModel):
     type: ProjectType
     organization_id: int | None
     org_name: str | None = None
-    # 비관리자 응답에서는 마스킹된다 (api/projects.py `_serialize_project`)
+    # 관리자와 그 프로젝트 조직 소속(전역 프로젝트는 누구나) 외에는 마스킹된다
+    # (api/projects.py `_serialize_project`, security.py `can_view_git_url`)
     git_url: str
     branch: str
     source_subdir: str | None
@@ -295,7 +296,7 @@ class ComplianceOut(BaseModel):
 
 class ModuleCreate(BaseModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,40}$")
-    type: str = Field(pattern=r"^(external_api|internal_api|database|file_storage|mcp)$")
+    type: str = Field(pattern=r"^(external_api|internal_api|database|file_storage|mcp|llm)$")
     # 카테고리별 API 리스팅용(예: "news", "llm") — 대화식 편집 화면의 자원 목록에서 그룹핑
     category: str | None = None
     # 지정 시 해당 조직 소속 프로젝트에만 노출("조직별 db" 등). 미지정=전역

@@ -118,6 +118,7 @@ export interface ModuleSummary {
   description: string;
   skills: string[];
   env_prefix: string;
+  binding_id: number; // 이 프로젝트에서의 바인딩 식별자 — 해제(unbind) 시 사용
 }
 
 // 대화식 편집 화면 자원 리스팅 — 바인딩 여부와 무관하게 사용 가능한 모듈을 아이템화
@@ -410,6 +411,7 @@ export interface HealthInfo {
   host_os: string;
   features: string[];
   gitea_url: string | null;
+  base_domain: string;
 }
 
 export interface ApiKeyIssued {

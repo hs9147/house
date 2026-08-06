@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .db import get_db
-from .models import ApiKey, UserSession, utcnow
+from .models import ApiKey, Project, UserAccount, UserSession, utcnow
 
 _fernet: Fernet | None = None
 
@@ -225,3 +225,20 @@ def require_admin(key: ApiKey = Depends(require_api_key)) -> ApiKey:
     if not key.is_admin:
         raise HTTPException(status_code=403, detail="admin key required")
     return key
+
+
+def viewer_org_ids(db: Session, key: ApiKey) -> set[int]:
+    """git_url 등 리포 위치 정보의 노출 범위를 정하기 위한 사용자 소속 조직 id 집합.
+
+    UserAccount 기반 로그인(계정)에만 의미가 있다 — 순수 발급 API 키(name이 계정
+    이메일과 무관한 서비스 키)는 조직 개념이 없어 빈 집합(= 전역 프로젝트만 조회
+    가능)으로 떨어진다.
+    """
+    user = db.execute(select(UserAccount).where(UserAccount.email == key.name)).scalar_one_or_none()
+    return {o.id for o in user.organizations} if user else set()
+
+
+def can_view_git_url(project: Project, key: ApiKey, org_ids: set[int]) -> bool:
+    """git_url(리포 위치)을 볼 수 있는지 — 관리자, 전역 프로젝트(조직 미지정),
+    또는 그 프로젝트 조직 소속 사용자만. 나머지에는 마스킹한다."""
+    return key.is_admin or project.organization_id is None or project.organization_id in org_ids

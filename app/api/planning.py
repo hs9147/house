@@ -44,7 +44,7 @@ from ..schemas import (
     PlanSessionOut,
     PlanSessionSummary,
 )
-from ..security import require_api_key
+from ..security import can_view_git_url, require_api_key, viewer_org_ids
 from ..services import a2a as a2a_service
 from ..services import codemap as codemap_service
 from ..services import compliance as compliance_service
@@ -578,13 +578,17 @@ def get_plan_repo(
     db: Session = Depends(get_db),
     key: ApiKey = Depends(require_api_key),
 ):
-    """개발도구(VSCode·Claude·Antigravity) 연동용 리포 정보. git_url은 admin에만 노출."""
+    """개발도구(VSCode·Claude·Antigravity) 연동용 리포 정보.
+
+    clone_url은 관리자, 또는 그 프로젝트 조직 소속(전역 프로젝트는 누구나) 사용자에게만
+    노출한다 — 기획을 진행하는 사용자가 정작 리포를 못 열면 화면의 존재 의미가 없다.
+    """
     session = db.get(ChatSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
     project = db.get(Project, session.project_id)
     return {
-        "clone_url": project.git_url if key.is_admin else None,
+        "clone_url": project.git_url if can_view_git_url(project, key, viewer_org_ids(db, key)) else None,
         "branch": session.branch,
         "artifact_dir": planning_service.ARTIFACT_DIR,
         "artifacts": [a.model_dump() for a in _artifacts_out(db, session_id)],

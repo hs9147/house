@@ -196,3 +196,56 @@ def test_module_bind_and_llm_context():
     assert card["paas_a2a_endpoint"] == "/paas/api/v1/a2a/agents/mail/task"
     # 비밀값은 카드에 실리지 않는다
     assert "mk-1" not in json.dumps(card)
+
+
+def test_llm_module_type_can_be_created_and_bound():
+    """llm 타입 모듈 — 배포 앱이 직접 쓸 LLM 엔드포인트(URL/API_KEY/MODEL 주입)."""
+    c = _client()
+    pid = _create_project(c)
+    r = c.post("/paas/api/v1/modules", json={
+        "name": "shop-llm", "type": "llm",
+        "config": {"url": "https://api.example.com/v1", "api_key": "sk-1", "model": "gpt-4o"},
+    }, headers=ADMIN)
+    assert r.status_code == 201, r.text
+    mid = r.json()["id"]
+
+    r = c.post(f"/paas/api/v1/projects/{pid}/modules/{mid}/bind", json={"env_prefix": "LLM"}, headers=ADMIN)
+    assert r.status_code == 201, r.text
+    assert r.json()["injected_env"] == ["LLM_API_KEY", "LLM_MODEL", "LLM_URL"]
+
+    card = c.get(f"/paas/api/v1/projects/{pid}/modules", headers=ADMIN).json()[0]
+    assert card["type"] == "llm"
+    assert card["skills"] == ["chat_completion"]
+    assert "sk-1" not in json.dumps(card)
+
+
+def test_unbind_module_removes_only_that_binding():
+    """모듈 바인딩 해제는 이 바인딩만 지운다 — 모듈 정의나 다른 바인딩은 남는다."""
+    c = _client()
+    pid = _create_project(c)
+    other_pid = _create_project(c, name="other-target")
+    mid = c.post("/paas/api/v1/modules", json={
+        "name": "mail2", "type": "external_api",
+        "config": {"url": "https://svc.example.com", "api_key": "mk-2"},
+    }, headers=ADMIN).json()["id"]
+
+    c.post(f"/paas/api/v1/projects/{pid}/modules/{mid}/bind", json={"env_prefix": "MAIL"}, headers=ADMIN)
+    c.post(f"/paas/api/v1/projects/{other_pid}/modules/{mid}/bind", json={"env_prefix": "MAIL"}, headers=ADMIN)
+    binding_id = c.get(f"/paas/api/v1/projects/{pid}/modules", headers=ADMIN).json()[0]["binding_id"]
+    other_binding_id = c.get(f"/paas/api/v1/projects/{other_pid}/modules", headers=ADMIN).json()[0]["binding_id"]
+
+    # 다른 프로젝트의 바인딩 id로 해제 시도 → 404 (프로젝트 소속 검증)
+    assert c.delete(f"/paas/api/v1/projects/{pid}/modules/bindings/{other_binding_id}",
+                    headers=ADMIN).status_code == 404
+
+    r = c.delete(f"/paas/api/v1/projects/{pid}/modules/bindings/{binding_id}", headers=ADMIN)
+    assert r.status_code == 204
+    assert c.get(f"/paas/api/v1/projects/{pid}/modules", headers=ADMIN).json() == []
+
+    # 다른 프로젝트의 바인딩과 모듈 정의는 그대로
+    assert len(c.get(f"/paas/api/v1/projects/{other_pid}/modules", headers=ADMIN).json()) == 1
+    assert c.get("/paas/api/v1/modules", headers=ADMIN).json()
+
+    # 이미 지운 바인딩을 다시 지우면 404
+    assert c.delete(f"/paas/api/v1/projects/{pid}/modules/bindings/{binding_id}",
+                    headers=ADMIN).status_code == 404

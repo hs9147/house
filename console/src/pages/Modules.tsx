@@ -14,6 +14,7 @@ const TYPE_HINTS: Record<string, string> = {
   database: '{"dsn": "postgresql://user:pw@host/db"}',
   file_storage: '{"endpoint": "http://...", "bucket": "..."}',
   mcp: '{"url": "https://mcp.example.com", "api_key": "..."}',
+  llm: '{"url": "https://api.example.com/v1", "api_key": "...", "model": "gpt-4o"}',
 };
 
 export default function Modules() {
@@ -760,6 +761,7 @@ function CreateModuleModal({
             <option value="internal_api">internal_api — 플랫폼 내 프로젝트</option>
             <option value="database">database — DB 연결</option>
             <option value="mcp">mcp — 외부 MCP 서버</option>
+            <option value="llm">llm — 배포 앱이 쓸 LLM 엔드포인트</option>
           </select>
         </label>
 

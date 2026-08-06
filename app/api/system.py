@@ -70,6 +70,7 @@ def health():
         "host_os": get_host_caps().os,
         "features": sorted(enabled_features()),
         "gitea_url": settings.gitea_url or None,
+        "base_domain": settings.base_domain,
     }
 
 
@@ -569,6 +570,11 @@ def sw_update(
     admin: ApiKey = Depends(require_admin),
 ):
     """SW 업데이트: 프로젝트 폴더에서 git pull 후 paas·console Windows 서비스를 재시작한다.
+
+    환경설정(pip/npm install)은 여기서 하지 않는다 — 그건 프로젝트 배포 파이프라인의
+    책임이다(windows_service 런타임의 start.cmd, 또는 Docker 런타임의 이미지 빌드가
+    배포마다 이미 수행한다). sw-update는 플랫폼 자신(paas·콘솔) 코드를 최신화하고
+    이미 구성된 서비스를 재시작하는 것으로 끝난다.
 
     Restart-Service가 paas 서비스(현재 프로세스)를 stop→start 하므로, paas의 Job에서 분리된
     독립 PowerShell 프로세스(run_detached_script)로 띄워 백엔드가 내려가도 업데이트가 끝까지

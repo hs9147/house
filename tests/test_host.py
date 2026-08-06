@@ -71,3 +71,14 @@ def test_health_exposes_gitea_url_when_configured(monkeypatch, fresh_settings):
 
     body = TestClient(create_app()).get("/paas/health").json()
     assert body["gitea_url"] == "https://git.example.com"
+
+
+def test_health_exposes_base_domain(monkeypatch, fresh_settings):
+    """콘솔이 배포 도메인을 base url 포함 full url로 보여주려면 base_domain이 필요하다."""
+    monkeypatch.setenv("PAAS_BASE_DOMAIN", "deploy.example.com")
+    get_settings.cache_clear()
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+
+    body = TestClient(create_app()).get("/paas/health").json()
+    assert body["base_domain"] == "deploy.example.com"

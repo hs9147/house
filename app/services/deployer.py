@@ -23,6 +23,7 @@ from .build import (
     build_image,
     checkout,
     detect_composite_components,
+    install_dependencies,
     internal_port,
     write_start_script,
 )
@@ -152,6 +153,16 @@ def deploy_sync(
                 # (image_tag는 이 런타임이 사용하지 않는다). start.cmd를 조건 없이
                 # 자동 생성한다(dockerfile_for와 대칭 — 매 배포 시 갱신).
                 write_start_script(workdir)
+                # npm/pip install을 여기서 먼저 끝낸다(build_image의 docker build와 대응
+                # 되는 명시적 build 단계) — runtime.start()의 헬스체크 창 안에서 설치까지
+                # 겸하면, 설치가 느릴 때 원인이 "헬스체크 실패"로만 보이고 배포 상태도
+                # 실패로 남지 않는다(install_dependencies 참고).
+                log_path = get_settings().build_log_dir / (
+                    f"{project.name}-{sha[:12]}{PROFILES[profile].tag_suffix}-env.log"
+                )
+                install_dependencies(workdir, log_path)
+                record.build_log_path = str(log_path)
+                db.commit()
                 image_tag = ""
             else:
                 result = build_image(project, workdir, sha, profile)

@@ -308,6 +308,10 @@ class ModuleType(str, enum.Enum):
     # 않고 구조적으로 찾을 수 있다(services/mcp_client.py가 tools/list·tools/call로
     # 실제 도구를 호출).
     mcp = "mcp"
+    # LLM 프로바이더(에이전트 기획의 LlmProvider와 별개) — 배포된 프로젝트 코드가 직접
+    # 쓸 수 있는 LLM 엔드포인트를 자원으로 등록·바인딩한다. env 주입은 URL/API_KEY에
+    # MODEL이 더해진 모양(services/modules.binding_env 참고).
+    llm = "llm"
 
 
 class Module(Base):

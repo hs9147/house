@@ -11,8 +11,10 @@
 없으면 templates/dockerfiles/{type}.{profile}.Dockerfile 템플릿을 사용한다.
 """
 import json
+import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -167,6 +169,56 @@ def write_start_script(workdir: Path) -> Path:
     path = workdir / START_SCRIPT_NAME
     path.write_text(_START_SCRIPT, encoding="utf-8")
     return path
+
+
+def install_dependencies(workdir: Path, log_path: Path) -> None:
+    """windows_service 런타임의 명시적 환경설정 단계 — npm/pip install을 배포의 build
+    단계로 끝내고, 실패하면 배포 자체를 실패로 남긴다(Docker의 build_image와 대응).
+
+    지금까지는 설치가 start.cmd 안에서 앱 기동과 한 프로세스로 묶여 있었다 — 설치가
+    오래 걸리면 헬스체크 타임아웃으로만 보였고("의존성 설치가 헬스 타임아웃을 넘기지
+    않는지 확인하세요" 라는 힌트가 남던 이유), 실패해도 배포 상태는 실패로 남지 않았다
+    (start.cmd는 설치 실패 후에도 다음 줄로 계속 진행한다). 여기서 헬스체크 창 밖에서
+    먼저 끝내면 그 모호함이 없어진다. start.cmd는 계속 조건부로(이미 설치돼 있으면
+    빠르게 통과) 같은 설치를 한 번 더 하지만, 이 단계가 실제 게이트다.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as log:
+        if (workdir / "package.json").exists():
+            npm_cmd = ["npm", "ci"] if (workdir / "package-lock.json").exists() else ["npm", "install"]
+            log.write(f"[env-setup] {' '.join(npm_cmd)} (cwd={workdir})\n")
+            log.flush()
+            try:
+                proc = subprocess.run(npm_cmd, cwd=workdir, stdout=log, stderr=subprocess.STDOUT)
+            except FileNotFoundError as e:
+                raise BuildError(f"npm 실행 파일을 찾을 수 없습니다: {e}", log_path) from e
+            if proc.returncode != 0:
+                raise BuildError(f"npm install 실패 (exit {proc.returncode})", log_path)
+
+        if (workdir / "requirements.txt").exists():
+            venv_dir = workdir / ".venv"
+            if not venv_dir.exists():
+                log.write("[env-setup] python -m venv .venv\n")
+                log.flush()
+                proc = subprocess.run(
+                    [sys.executable, "-m", "venv", str(venv_dir)],
+                    cwd=workdir, stdout=log, stderr=subprocess.STDOUT,
+                )
+                if proc.returncode != 0:
+                    raise BuildError(f"venv 생성 실패 (exit {proc.returncode})", log_path)
+            venv_python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            log.write("[env-setup] pip install -r requirements.txt\n")
+            log.flush()
+            try:
+                proc = subprocess.run(
+                    [str(venv_python), "-m", "pip", "install", "--disable-pip-version-check",
+                     "-r", "requirements.txt"],
+                    cwd=workdir, stdout=log, stderr=subprocess.STDOUT,
+                )
+            except FileNotFoundError as e:
+                raise BuildError(f"venv python을 찾을 수 없습니다: {e}", log_path) from e
+            if proc.returncode != 0:
+                raise BuildError(f"pip install 실패 (exit {proc.returncode})", log_path)
 
 
 def internal_port(project_type: ProjectType, profile: BuildProfile) -> int:

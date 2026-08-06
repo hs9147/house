@@ -38,7 +38,7 @@ from ..schemas import (
     ProjectOut,
     ProjectUploadForm,
 )
-from ..security import encrypt_value, require_admin, require_api_key
+from ..security import can_view_git_url, encrypt_value, require_admin, require_api_key, viewer_org_ids
 from ..services import deployer, gitea, upload
 from ..services.build import COMPOSITE_COMPONENTS
 from ..services.deployer import DeployInProgress, NoRollbackTarget
@@ -50,12 +50,13 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 GIT_URL_MASK = "(내부 관리 — 관리자만 조회 가능)"
 
 
-def _serialize_project(project: Project, key: ApiKey) -> ProjectOut:
-    """비관리자에게는 git_url(리포 위치) 등 메타 정보를 노출하지 않는다."""
+def _serialize_project(project: Project, key: ApiKey, org_ids: set[int]) -> ProjectOut:
+    """git_url(리포 위치)은 관리자, 또는 그 프로젝트 조직 소속(전역 프로젝트는 누구나)
+    사용자에게만 노출한다. 그 외에는 마스킹한다."""
     out = ProjectOut.model_validate(project)
     if project.organization:
         out.org_name = project.organization.name
-    if not key.is_admin:
+    if not can_view_git_url(project, key, org_ids):
         out.git_url = GIT_URL_MASK
     return out
 
@@ -70,7 +71,8 @@ def _get_project(db: Session, project_id: int) -> Project:
 @router.get("", response_model=list[ProjectOut])
 def list_projects(db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
     rows = db.execute(select(Project).order_by(Project.id)).scalars()
-    return [_serialize_project(p, key) for p in rows]
+    org_ids = viewer_org_ids(db, key)
+    return [_serialize_project(p, key, org_ids) for p in rows]
 
 
 @router.post("", response_model=ProjectOut, status_code=201)
@@ -109,7 +111,7 @@ def create_project(
     db.add(project)
     db.commit()
     audit.record(db, key.name, "project.create", project.name)
-    return _serialize_project(project, key)
+    return _serialize_project(project, key, viewer_org_ids(db, key))
 
 
 @router.post("/upload", response_model=ProjectOut, status_code=201)
@@ -212,7 +214,7 @@ async def upload_project(
         else:
             deployer.deploy_queued(db, project, form.default_profile, git_sha)
 
-    return _serialize_project(project, key)
+    return _serialize_project(project, key, viewer_org_ids(db, key))
 
 
 @router.delete("/{project_id}", status_code=204)
