@@ -77,6 +77,55 @@ def test_windows_service_deploy_skips_build_and_generates_start_script(
         db.close()
 
 
+def test_windows_service_deploy_commits_build_log_path_before_install_starts(
+    monkeypatch, fresh_settings, tmp_path,
+):
+    """build_log_path는 install_dependencies가 끝난 뒤가 아니라 부르기 *전*에 커밋돼야
+    한다 — 그래야 설치가 오래 걸리거나 멈춰 있는 동안에도(아직 install_dependencies가
+    반환하지 않은 시점에) 다른 세션이 그 경로로 진행 중 로그를 조회할 수 있다."""
+    monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "windows_service")
+    get_settings.cache_clear()
+
+    workdir = tmp_path / "chatbot-order"
+    workdir.mkdir()
+    (workdir / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None: (workdir, "d" * 40))
+    monkeypatch.setattr(deployer, "build_image", lambda *a, **kw: pytest.fail("build 금지"))
+    monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
+    monkeypatch.setattr(deployer.proxy, "configure", lambda *a, **kw: None)
+
+    db = SessionLocal()
+    try:
+        project = Project(name="chatbot-order", type=ProjectType.python, git_url="https://git.example.com/x")
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+        project_id = project.id
+
+        observed = {}
+
+        def _observe_during_install(wd, log_path):
+            # install_dependencies가 아직 반환하기 전에 "다른 세션"으로 같은 레코드를
+            # 읽어, 그 시점에 이미 build_log_path가 커밋돼 있는지 확인한다.
+            reader = SessionLocal()
+            try:
+                from app.models import Deployment
+                rec = reader.query(Deployment).filter_by(project_id=project_id).one()
+                observed["build_log_path"] = rec.build_log_path
+                observed["status"] = rec.status
+            finally:
+                reader.close()
+        monkeypatch.setattr(deployer, "install_dependencies", _observe_during_install)
+
+        record = deployer.deploy_sync(db, project, BuildProfile.release)
+
+        assert observed["status"] == DeploymentStatus.building  # 그 시점엔 아직 진행 중
+        assert observed["build_log_path"] == record.build_log_path
+        assert observed["build_log_path"] is not None
+    finally:
+        db.close()
+
+
 def test_windows_service_deploy_fails_when_dependency_install_fails(
     monkeypatch, fresh_settings, tmp_path,
 ):

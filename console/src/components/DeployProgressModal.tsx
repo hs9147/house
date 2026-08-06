@@ -21,6 +21,9 @@ export default function DeployProgressModal({
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState(false);
   const [failed, setFailed] = useState(false);
+  // 진행 중(building)인 레코드의 현재 빌드/설치 로그 tail — "지금 실행 중인 명령/출력"을
+  // 보여준다. record id별로 보관해 composite(backend/frontend 등) 배포도 구분해 표시한다.
+  const [liveLogs, setLiveLogs] = useState<Record<number, { label: string; content: string }>>({});
   const logRef = useRef<HTMLPreElement | null>(null);
   // 폴링을 딱 한 번만 시작하기 위한 ref들 — StrictMode의 이중 마운트(마운트→cleanup→
   // 재마운트)에서도 루프가 하나만 돌아 로그가 중복 출력되지 않게 한다.
@@ -53,6 +56,32 @@ export default function DeployProgressModal({
             if (r.error) append(r.error.slice(0, 4000)); // 실패 사유(로그 tail 포함) 전체 표시
           }
         }
+        // 아직 진행 중(building)인 레코드의 로그 tail을 함께 가져온다 — build_log_path는
+        // 실제 빌드/설치를 시작하기 전에 이미 레코드에 커밋돼 있으므로, 오래 걸리거나
+        // 멈춰 있어도 그 시점까지 실행된 명령과 출력을 볼 수 있다.
+        const building = mine.filter((r) => !TERMINAL.includes(r.status));
+        if (building.length && !cancelledRef.current) {
+          const fetched = await Promise.all(
+            building.map(async (r) => {
+              try {
+                const res = await api.deploymentBuildLog(projectId, r.id, 200);
+                return { id: r.id, label: r.component ? `${r.component} #${r.id}` : `#${r.id}`, content: res.content };
+              } catch {
+                return null;
+              }
+            }),
+          );
+          if (!cancelledRef.current) {
+            setLiveLogs((prev) => {
+              const next = { ...prev };
+              for (const entry of fetched) {
+                if (entry) next[entry.id] = { label: entry.label, content: entry.content };
+              }
+              return next;
+            });
+          }
+        }
+
         const allTerminal =
           mine.length === deploymentIds.length && mine.every((r) => TERMINAL.includes(r.status));
         if (allTerminal) {
@@ -71,6 +100,7 @@ export default function DeployProgressModal({
           if (!cancelledRef.current) {
             setFailed(anyFail);
             setDone(true);
+            setLiveLogs({}); // 완료 후에는 진행 중 로그 블록을 치운다(위 최종 로그로 대체됨)
           }
           return;
         }
@@ -112,6 +142,27 @@ export default function DeployProgressModal({
         {lines.join('\n')}
         {!done ? '\n▍진행 중…' : ''}
       </pre>
+      {!done && Object.values(liveLogs).map((lg) => (
+        <div key={lg.label} style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>실행 중 — {lg.label}</div>
+          <pre
+            className="mono"
+            style={{
+              background: '#0d0d0d',
+              color: '#8fd18f',
+              padding: 12,
+              borderRadius: 6,
+              maxHeight: 200,
+              overflow: 'auto',
+              whiteSpace: 'pre-wrap',
+              fontSize: 12,
+              margin: 0,
+            }}
+          >
+            {lg.content || '(대기 중…)'}
+          </pre>
+        </div>
+      ))}
       <div className="row" style={{ justifyContent: 'flex-end', marginTop: 16 }}>
         <button className={failed ? 'danger' : ''} onClick={onClose} disabled={!done}>
           {done ? '확인' : '진행 중…'}
