@@ -7,7 +7,7 @@ from sqlalchemy import select
 from .. import audit
 from ..config import get_settings
 from ..db import SessionLocal
-from ..models import Project, ProjectType
+from ..models import Deployment, DeploymentStatus, Project, ProjectType
 from ..security import verify_webhook_signature
 from ..services import compliance as compliance_service
 from ..services import deployer
@@ -57,12 +57,42 @@ async def git_push(
         if _only_plan_artifacts(payload):
             return {"skipped": "plan artifacts only", "pull_requests": pulls}
 
+        # Gitea가 같은 push를 재전달하면(네트워크 재시도, 관리자의 수동 "Redeliver" 등)
+        # 이 커밋이 이미 배포 완료(running) 또는 배포 중(building)인지 확인해 중복
+        # 빌드·재기동을 건너뛴다 — after(결과 커밋 SHA)가 없는 payload는 판단하지
+        # 않고 그대로 트리거한다(배포를 놓치는 것보다 한 번 더 하는 편이 안전).
+        after_sha = payload.get("after") or ""
         matched = [p for p in known if p.branch == branch]
+        triggered = []
+        skipped_duplicate = []
         for project in matched:
+            if after_sha and _already_deployed(db, project, after_sha):
+                skipped_duplicate.append(project.name)
+                continue
             audit.record(db, "webhook", "deploy.trigger", project.name, {"branch": branch})
             background.add_task(_deploy_task, project.id)
             background.add_task(_compliance_task, project.id)
-    return {"triggered": [p.name for p in matched], "pull_requests": pulls}
+            triggered.append(project.name)
+    return {"triggered": triggered, "pull_requests": pulls, "skipped_duplicate": skipped_duplicate}
+
+
+def _already_deployed(db, project: Project, sha: str) -> bool:
+    """이 커밋으로 이미 배포 완료(running)됐거나 지금 배포 중(building)이면 True.
+
+    최신 배포 레코드 하나만 보면 충분하다 — 다음 커밋이 오면 자연히 최신이 그걸로
+    바뀌므로, 과거에 이 sha로 배포했던 적이 있다는 사실만으로는(예: 되돌린 커밋을
+    다시 push) 건너뛰지 않는다. composite 프로젝트도 두 컴포넌트 레코드가 같은
+    sha로 한꺼번에 커밋되므로 가장 최근 레코드 하나로 충분하다."""
+    latest = db.execute(
+        select(Deployment)
+        .where(Deployment.project_id == project.id)
+        .order_by(Deployment.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return bool(
+        latest and latest.git_sha == sha
+        and latest.status in (DeploymentStatus.running, DeploymentStatus.building)
+    )
 
 
 def _pull_request_task(project_id: int, branch: str) -> None:
