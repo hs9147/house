@@ -70,6 +70,7 @@ def health():
         "host_os": get_host_caps().os,
         "features": sorted(enabled_features()),
         "gitea_url": settings.gitea_url or None,
+        "base_domain": settings.base_domain,
     }
 
 

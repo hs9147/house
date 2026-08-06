@@ -411,6 +411,7 @@ export interface HealthInfo {
   host_os: string;
   features: string[];
   gitea_url: string | null;
+  base_domain: string;
 }
 
 export interface ApiKeyIssued {

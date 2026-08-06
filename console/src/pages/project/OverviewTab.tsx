@@ -13,6 +13,7 @@ type Action = { kind: 'deploy' | 'rollback' | 'stop'; profile: BuildProfile } | 
 export default function OverviewTab() {
   const { project } = useOutletContext<ProjectContext>();
   const state = useApi(() => api.projectStatus(project.id), [project.id]);
+  const health = useApi(() => api.health());
   const [gitSha, setGitSha] = useState('');
   const [action, setAction] = useState<Action>(null);
   const [busy, setBusy] = useState(false);
@@ -72,11 +73,20 @@ export default function OverviewTab() {
                   const pathUrl = profile === 'release'
                     ? `/apps/${orgSegment}/${project.name}/`
                     : `/apps/${orgSegment}/${project.name}/dev/`;
+                  // base_domain을 아직 못 불러왔으면(로딩 중) 경로만 보여준다 —
+                  // 잘못된 호스트로 링크를 만드는 것보다 안전하다.
+                  const fullUrl = health.data ? `https://${health.data.base_domain}${pathUrl}` : pathUrl;
                   return (
                     <tr key={profile}>
                       <td><StatusPill value={profile} /></td>
                       <td><StatusPill value={status[profile] ?? 'unknown'} /></td>
-                      <td className="mono">{pathUrl}</td>
+                      <td className="mono">
+                        {health.data ? (
+                          <a href={fullUrl} target="_blank" rel="noreferrer">{fullUrl}</a>
+                        ) : (
+                          fullUrl
+                        )}
+                      </td>
                       <td>
                         <div className="row">
                           <button
