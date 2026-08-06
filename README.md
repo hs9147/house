@@ -143,7 +143,8 @@ POST /paas/api/v1/orgs/sync                # {on_missing_repo?: create(기본)|d
                                       #   Gitea에만 있는 조직/리포는 가져오고(type은 시그니처 파일로 추론),
                                       #   플랫폼에만 있는(조직 소속) 프로젝트는 on_missing_repo대로 리포 재생성/프로젝트 삭제
 
-GET  /paas/api/v1/projects                 # git_url은 organization_id 소속이면 비관리자에게 마스킹
+GET  /paas/api/v1/projects                 # git_url은 관리자·그 프로젝트 조직 소속 계정에게만 노출
+                                      #   (전역 프로젝트는 누구나) — 그 외 응답에는 마스킹
 POST /paas/api/v1/projects                 # {name, type, branch, domain?, ...}
                                       #   + organization_id(내부 리포 자동 생성) 또는 git_url(직접 지정) 중 하나
 POST /paas/api/v1/projects/upload          # multipart: zip_file 또는 files[](폴더) 중 하나 + organization_id 필수

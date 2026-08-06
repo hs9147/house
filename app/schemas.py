@@ -82,7 +82,8 @@ class ProjectOut(BaseModel):
     type: ProjectType
     organization_id: int | None
     org_name: str | None = None
-    # 비관리자 응답에서는 마스킹된다 (api/projects.py `_serialize_project`)
+    # 관리자와 그 프로젝트 조직 소속(전역 프로젝트는 누구나) 외에는 마스킹된다
+    # (api/projects.py `_serialize_project`, security.py `can_view_git_url`)
     git_url: str
     branch: str
     source_subdir: str | None

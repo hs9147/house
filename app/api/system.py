@@ -568,12 +568,20 @@ def sw_update(
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
-    """SW 업데이트: 프로젝트 폴더에서 git pull 후 paas·console Windows 서비스를 재시작한다.
+    """SW 업데이트: 프로젝트 폴더에서 git pull → 환경설정(pip/npm install) → paas·console
+    Windows 서비스 재시작.
+
+    git pull만 하고 곧바로 재시작하면, pull로 requirements.txt/package.json이 바뀌었을 때
+    서비스가 예전 의존성으로 뜬다(백엔드는 깨지거나, 콘솔은 새 빌드가 반영되지 않는다).
+    그래서 재시작 전에 백엔드 venv에 `pip install -r requirements.txt`, 콘솔 디렉터리에
+    `npm install && npm run build`를 먼저 돌린다(해당 파일이 있을 때만, 없으면 건너뜀).
 
     Restart-Service가 paas 서비스(현재 프로세스)를 stop→start 하므로, paas의 Job에서 분리된
     독립 PowerShell 프로세스(run_detached_script)로 띄워 백엔드가 내려가도 업데이트가 끝까지
     진행되게 한다(self-kill 방지).
     """
+    import sys  # noqa: PLC0415
+
     from ..services import powershell_daemon  # noqa: PLC0415
 
     settings = get_settings()
@@ -583,9 +591,29 @@ def sw_update(
         raise HTTPException(status_code=400, detail="PAAS_SW_UPDATE_SERVICES가 비어 있습니다.")
 
     escaped_repo = repo_dir.replace("'", "''")
+    escaped_py_exe = sys.executable.replace("'", "''")
     restart_lines = "".join(
         f"Restart-Service -Name '{s.replace(chr(39), chr(39) * 2)}' -Force -ErrorAction SilentlyContinue; "
         for s in services
+    )
+    # /system/restart와 같은 기준: venv가 있으면 그 python을, 없으면 지금 실행 중인
+    # 인터프리터를 쓴다. venv 자체를 새로 만들지는 않는다 — 없다면 nssm 서비스도 애초에
+    # 그 경로의 python으로 등록돼 있지 않았을 것이므로 여기서 손대지 않는다.
+    setup_script = (
+        "Write-Host '[SW Update] Setting up environment...'; "
+        "if (Test-Path 'requirements.txt') { "
+        "  if (Test-Path '.venv\\Scripts\\python.exe') { "
+        "    & '.venv\\Scripts\\python.exe' -m pip install --disable-pip-version-check -r requirements.txt "
+        "  } else { "
+        f"    & '{escaped_py_exe}' -m pip install --disable-pip-version-check -r requirements.txt "
+        "  } "
+        "}; "
+        "if (Test-Path 'console\\package.json') { "
+        "  Push-Location 'console'; "
+        "  npm install; "
+        "  npm run build --if-present; "
+        "  Pop-Location "
+        "}; "
     )
     update_script = (
         "$ErrorActionPreference = 'Continue'; "
@@ -593,7 +621,8 @@ def sw_update(
         "Write-Host '[SW Update] git pull...'; "
         "git pull; "
         "Start-Sleep -Seconds 1; "
-        "Write-Host '[SW Update] Restarting services...'; "
+        + setup_script
+        + "Write-Host '[SW Update] Restarting services...'; "
         + restart_lines
     )
 
