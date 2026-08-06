@@ -185,13 +185,29 @@ def install_dependencies(workdir: Path, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as log:
         if (workdir / "package.json").exists():
-            npm_cmd = ["npm", "ci"] if (workdir / "package-lock.json").exists() else ["npm", "install"]
+            # Windows에서 npm은 npm.cmd(배치 스크립트)다 — shell=False로 CreateProcess를
+            # 직접 부르면(subprocess 기본값) PATHEXT의 .cmd 확장자를 찾아주지 않아 PATH에
+            # npm이 있어도 "파일을 찾을 수 없다"고 실패한다(cmd.exe·PowerShell에서 직접
+            # 치면 되는 이유는 셸이 PATHEXT를 뒤져서다). shutil.which로 먼저 실제
+            # 경로(npm.cmd 포함)를 찾아 그 경로로 실행한다 — POSIX에서는 원래도 동작하던
+            # 그대로다.
+            npm_exe = shutil.which("npm")
+            if npm_exe is None:
+                raise BuildError(
+                    "npm 실행 파일을 PATH에서 찾을 수 없습니다. paas를 nssm 등 Windows "
+                    "서비스로 띄웠다면, 그 서비스 계정의 PATH는 로그인해서 쓰는 사용자의 "
+                    "PATH와 다를 수 있습니다 — 서비스가 보는 PATH(nssm set paas "
+                    "AppEnvironmentExtra 또는 시스템 환경변수)에 Node.js 설치 경로가 있는지 "
+                    "확인하세요.",
+                    log_path,
+                )
+            npm_cmd = [npm_exe, "ci"] if (workdir / "package-lock.json").exists() else [npm_exe, "install"]
             log.write(f"[env-setup] {' '.join(npm_cmd)} (cwd={workdir})\n")
             log.flush()
             try:
                 proc = subprocess.run(npm_cmd, cwd=workdir, stdout=log, stderr=subprocess.STDOUT)
-            except FileNotFoundError as e:
-                raise BuildError(f"npm 실행 파일을 찾을 수 없습니다: {e}", log_path) from e
+            except OSError as e:
+                raise BuildError(f"npm 실행 실패: {e}", log_path) from e
             if proc.returncode != 0:
                 raise BuildError(f"npm install 실패 (exit {proc.returncode})", log_path)
 
