@@ -9,8 +9,10 @@ from app.services.build import (
     PROFILES,
     START_SCRIPT_NAME,
     TEMPLATE_DIR,
+    BuildError,
     build_image,
     dockerfile_for,
+    install_dependencies,
     internal_port,
     write_start_script,
 )
@@ -114,6 +116,86 @@ def test_build_image_uses_source_subdir_as_context(monkeypatch, tmp_path):
 
     assert captured["cmd"][-1] == str(tmp_path / "platform" / "console")
     assert result.internal_port == 80  # react release — internal_port(project.type, profile)
+
+
+def _fake_run_ok(monkeypatch, calls: list):
+    class _FakeProc:
+        returncode = 0
+
+    def fake_run(cmd, cwd=None, stdout=None, stderr=None):
+        calls.append(cmd)
+        return _FakeProc()
+    monkeypatch.setattr(build_service.subprocess, "run", fake_run)
+
+
+def test_install_dependencies_runs_npm_ci_when_lockfile_present(monkeypatch, tmp_path):
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+
+    install_dependencies(tmp_path, tmp_path / "env.log")
+
+    assert calls == [["npm", "ci"]]
+    assert "npm ci" in (tmp_path / "env.log").read_text(encoding="utf-8")
+
+
+def test_install_dependencies_runs_npm_install_without_lockfile(monkeypatch, tmp_path):
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+
+    install_dependencies(tmp_path, tmp_path / "env.log")
+
+    assert calls == [["npm", "install"]]
+
+
+def test_install_dependencies_creates_venv_and_installs_requirements(monkeypatch, tmp_path):
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+
+    install_dependencies(tmp_path, tmp_path / "env.log")
+
+    assert calls[0][:3] == [build_service.sys.executable, "-m", "venv"]  # venv 생성
+    assert calls[1][1:4] == ["-m", "pip", "install"]
+    assert calls[1][-2:] == ["-r", "requirements.txt"]
+
+
+def test_install_dependencies_skips_venv_creation_when_it_exists(monkeypatch, tmp_path):
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (tmp_path / ".venv").mkdir()
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+
+    install_dependencies(tmp_path, tmp_path / "env.log")
+
+    assert len(calls) == 1  # venv 생성 없이 pip install만
+    assert calls[0][1:3] == ["-m", "pip"]
+
+
+def test_install_dependencies_raises_build_error_with_log_on_npm_failure(monkeypatch, tmp_path):
+    """실패해도 start.cmd처럼 조용히 다음 줄로 넘어가지 않는다 — 배포가 실패로 남아야 한다."""
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+
+    class _FakeProc:
+        returncode = 1
+
+    monkeypatch.setattr(build_service.subprocess, "run", lambda *a, **kw: _FakeProc())
+
+    log_path = tmp_path / "env.log"
+    with pytest.raises(BuildError) as exc:
+        install_dependencies(tmp_path, log_path)
+    assert exc.value.log_path == log_path
+
+
+def test_install_dependencies_does_nothing_without_manifest_files(monkeypatch, tmp_path):
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+
+    install_dependencies(tmp_path, tmp_path / "env.log")
+
+    assert calls == []
 
 
 def test_streamlit_runs_via_streamlit_cli_port_8501():
