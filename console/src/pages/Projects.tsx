@@ -6,6 +6,7 @@ import StatusPill from '../components/StatusPill';
 import { api } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
+import { resolveTargetOrgId } from '../lib/projectOrg';
 import type { BuildProfile, ProjectCreate, ProjectOut, ProjectType } from '../lib/types';
 
 export default function Projects() {
@@ -102,7 +103,6 @@ export default function Projects() {
 
 export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (created?: ProjectOut) => void }) {
   const me = useApi(() => api.me());
-  const orgs = useApi(() => api.listOrgs());
   const health = useApi(() => api.health());
   const [form, setForm] = useState({
     name: '',
@@ -131,11 +131,12 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
     ? me.data.organizations
     : (me.data?.organization_id && me.data?.organization_name ? [{ id: me.data.organization_id, name: me.data.organization_name }] : []);
 
-  const [selectedOrgId, setSelectedOrgId] = useState<string>(() => {
-    return userOrgs.length > 0 ? String(userOrgs[0].id) : (orgs.data && orgs.data.length > 0 ? String(orgs.data[0].id) : '1');
-  });
+  // 빈 값 = 아직 직접 고르지 않음. 실제 조직 결정은 resolveTargetOrgId가 매 렌더마다
+  // 최신 userOrgs로 다시 계산한다(projectOrg.ts 주석 참고 — 왜 useState 초기값으로
+  // 한 번만 계산하면 안 되는지).
+  const [selectedOrgId, setSelectedOrgId] = useState('');
 
-  const targetOrgId = selectedOrgId || (userOrgs.length > 0 ? String(userOrgs[0].id) : '1');
+  const targetOrgId = resolveTargetOrgId(selectedOrgId, userOrgs);
 
   // Git 주소 예시는 설정된 사내 Gitea URL(PAAS_GITEA_URL)을 반영한다. 미설정 시 일반 예시.
   const giteaBase = (health.data?.gitea_url || '').replace(/\/+$/, '');
@@ -150,6 +151,14 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    // git 모드는 조직 없이도 만들 수 있다(레거시 직접 지정 경로) — 그 외는 조직이
+    // 반드시 필요하다. 아직 확인되지 않았는데 그냥 제출하면 엉뚱한 조직으로 만들어질
+    // 수 있으므로, 확정되기 전에는 막는다.
+    if (sourceMode !== 'git' && !targetOrgId) {
+      setError('소속 조직 정보를 아직 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.');
+      return;
+    }
 
     if (sourceMode === 'upload') {
       let source: { kind: 'zip'; file: File } | { kind: 'folder'; files: FileList } | null = null;
@@ -258,7 +267,11 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
           </label>
         ) : (
           <div style={{ fontSize: 12, padding: '6px 10px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
-            🏢 소속 조직: <strong>{userOrgs[0]?.name || me.data?.organization_name || '기본 조직'}</strong> (사용자의 소속 조직으로 등록됩니다)
+            {userOrgs[0]?.name || me.data?.organization_name ? (
+              <>🏢 소속 조직: <strong>{userOrgs[0]?.name || me.data?.organization_name}</strong> (사용자의 소속 조직으로 등록됩니다)</>
+            ) : (
+              <>⚠️ 소속 조직 정보를 아직 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.</>
+            )}
           </div>
         )}
         <label className="field">

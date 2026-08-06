@@ -329,6 +329,8 @@ export const api = {
     request<{ injected_env: string[] }>(
       'POST', `/projects/${projectId}/modules/${moduleId}/bind`, { env_prefix },
     ),
+  unbindModule: (projectId: number, bindingId: number) =>
+    request<void>('DELETE', `/projects/${projectId}/modules/bindings/${bindingId}`),
 
   // LLM
   listProviders: () => request<LlmProviderOut[]>('GET', '/llm/providers'),

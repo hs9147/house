@@ -9,6 +9,8 @@
   file_storage : PAY_URL (플랫폼 /storage/{모듈} 창구 — 로컬 경로는 노출하지 않는다), PAY_BUCKET
   mcp          : PAY_URL, PAY_API_KEY (배포된 앱 코드가 직접 쓸 수도 있고, 플랫폼
                  채팅이 services/mcp_client.py로 같은 서버의 도구를 호출하기도 함)
+  llm          : PAY_URL, PAY_API_KEY, PAY_MODEL (배포된 앱 코드가 직접 호출할 LLM
+                 엔드포인트 — 에이전트 기획/빌더가 쓰는 LlmProvider와는 별개 레지스트리)
 """
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -97,6 +99,14 @@ def binding_env(
         env = {f"{p}_URL": cfg.get("url", "")}
         if cfg.get("api_key"):
             env[f"{p}_API_KEY"] = cfg["api_key"]
+        return env
+
+    if t == ModuleType.llm:
+        env = {f"{p}_URL": cfg.get("url", "")}
+        if cfg.get("api_key"):
+            env[f"{p}_API_KEY"] = cfg["api_key"]
+        if cfg.get("model"):
+            env[f"{p}_MODEL"] = cfg["model"]
         return env
     return {}
 

@@ -196,6 +196,28 @@ def bind_module(
     return {"injected_env": sorted(svc.binding_env(module, body.env_prefix, db=db).keys())}
 
 
+@router.delete("/projects/{project_id}/modules/bindings/{binding_id}", status_code=204)
+def unbind_module(
+    project_id: int,
+    binding_id: int,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """프로젝트에서 모듈 바인딩을 해제한다. 모듈 정의 자체는 남고, 다음 배포부터
+    이 바인딩의 환경변수만 더는 주입되지 않는다."""
+    binding = db.get(ModuleBinding, binding_id)
+    if binding is None or binding.project_id != project_id:
+        raise HTTPException(status_code=404, detail="binding not found")
+    project = db.get(Project, project_id)
+    module = db.get(Module, binding.module_id)
+    db.delete(binding)
+    db.commit()
+    audit.record(db, key.name, "module.unbind", project.name if project else str(project_id),
+                 {"module": module.name if module else str(binding.module_id),
+                  "prefix": binding.env_prefix})
+    return None
+
+
 @router.get("/modules/search")
 def search_external_apis(
     keyword: str,
