@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     # Git 작업 디렉토리 / 빌드 로그 저장소 / 파일 저장소 Root (환경변수: PAAS_STORAGE_ROOT)
     work_dir: Path = Path("./data/workspaces")
     build_log_dir: Path = Path("./data/build-logs")
+    # 빌드 단계(docker build, npm/pip install 등) subprocess 하나에 허용하는 최대 시간.
+    # 없으면 응답 없는 명령(네트워크 문제로 멈춘 npm install 등)이 배포를 "진행중"에
+    # 영원히 묶어 둔다 — 초과 시 그 단계를 실패로 끝낸다.
+    build_timeout_seconds: int = 600
     storage_root: str = "./data/storage"
     powershell_start_dir: str = ""
     # /exec가 쓰는 상주 PowerShell 세션의 로컬 TCP 브로커 포트. paas 프로세스가 재시작돼도

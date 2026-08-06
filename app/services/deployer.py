@@ -23,6 +23,8 @@ from .build import (
     build_image,
     checkout,
     detect_composite_components,
+    docker_build_log_path,
+    env_setup_log_path,
     install_dependencies,
     internal_port,
     write_start_script,
@@ -157,18 +159,20 @@ def deploy_sync(
                 # 되는 명시적 build 단계) — runtime.start()의 헬스체크 창 안에서 설치까지
                 # 겸하면, 설치가 느릴 때 원인이 "헬스체크 실패"로만 보이고 배포 상태도
                 # 실패로 남지 않는다(install_dependencies 참고).
-                log_path = get_settings().build_log_dir / (
-                    f"{project.name}-{sha[:12]}{PROFILES[profile].tag_suffix}-env.log"
-                )
-                install_dependencies(workdir, log_path)
+                # build_log_path는 install_dependencies를 부르기 전에 커밋한다 — 진행
+                # 중(아직 building 상태)에도 GET .../build-log로 지금까지의 로그를 볼 수
+                # 있어야 한다(끝난 뒤에야 경로를 알면 그 전엔 조회할 방법이 없다).
+                log_path = env_setup_log_path(project.name, sha, profile)
                 record.build_log_path = str(log_path)
                 db.commit()
+                install_dependencies(workdir, log_path)
                 image_tag = ""
             else:
+                log_path = docker_build_log_path(project.name, sha, profile)
+                record.build_log_path = str(log_path)
+                db.commit()
                 result = build_image(project, workdir, sha, profile)
                 record.image_tag = result.image_tag
-                record.build_log_path = str(result.log_path)
-                db.commit()
                 image_tag = result.image_tag
 
             spec = make_spec(db, project, image_tag, profile)
@@ -412,13 +416,16 @@ def deploy_composite_sync(
         failure: Exception | None = None
         for name, comp_type in components.items():
             rec = records[name]
+            # 이 컴포넌트의 빌드를 시작하기 전에 로그 경로를 커밋한다 — build_image 호출이
+            # 오래 걸리거나 멈춰도 그 시점까지의 진행 상황을 조회할 수 있어야 한다.
+            rec.build_log_path = str(docker_build_log_path(project.name, sha, profile, name))
+            db.commit()
             try:
                 result = build_image(
                     project, workdir, sha, profile, component=name, component_type=comp_type,
                 )
                 rec.image_tag = result.image_tag
                 rec.internal_port = result.internal_port
-                rec.build_log_path = str(result.log_path)
                 db.commit()
 
                 spec = make_spec(

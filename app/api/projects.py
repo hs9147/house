@@ -1,4 +1,5 @@
 import shutil
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from sqlalchemy import delete as sa_delete
@@ -17,6 +18,7 @@ from ..models import (
     ChatMessage,
     ChatSession,
     Deployment,
+    DeploymentStatus,
     EnvVar,
     Module,
     ModuleBinding,
@@ -375,6 +377,32 @@ def list_deployments(
         .scalars()
         .all()
     )
+
+
+@router.get("/{project_id}/deployments/{deployment_id}/build-log",
+            dependencies=[Depends(require_feature("deploy"))])
+def deployment_build_log(
+    project_id: int,
+    deployment_id: int,
+    tail: int = 200,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """이 배포 레코드의 빌드/설치 로그 tail. build_log_path는 실제 빌드를 시작하기
+    전에 미리 레코드에 커밋되므로(deployer.py 참고), 배포가 아직 진행 중(building)
+    이거나 멈춰 있을 때도 그 시점까지의 로그와 "지금 실행 중인 명령"을 볼 수 있다."""
+    _get_project(db, project_id)
+    record = db.get(Deployment, deployment_id)
+    if record is None or record.project_id != project_id:
+        raise HTTPException(status_code=404, detail="deployment not found")
+    done = record.status != DeploymentStatus.building
+    if not record.build_log_path:
+        return {"content": "", "done": done}
+    path = Path(record.build_log_path)
+    if not path.is_file():
+        return {"content": "", "done": done}
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return {"content": "\n".join(lines[-tail:]), "done": done}
 
 
 @router.get("/{project_id}/logs", dependencies=[Depends(require_feature("deploy"))])

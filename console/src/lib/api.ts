@@ -240,6 +240,12 @@ export const api = {
   stop: (id: number, profile: BuildProfile) =>
     request<void>('POST', `/projects/${id}/stop`, undefined, { profile }),
   deployments: (id: number) => request<DeploymentOut[]>('GET', `/projects/${id}/deployments`),
+  // 진행 중(building)인 배포의 현재 로그 tail — 빌드/설치가 오래 걸리거나 멈춰 있어도
+  // 지금까지 실행된 명령과 출력을 볼 수 있다(DeployProgressModal이 폴링).
+  deploymentBuildLog: (projectId: number, deploymentId: number, tail = 200) =>
+    request<{ content: string; done: boolean }>(
+      'GET', `/projects/${projectId}/deployments/${deploymentId}/build-log`, undefined, { tail },
+    ),
   logs: (id: number, profile: BuildProfile, tail: number) =>
     request<{ logs: string }>('GET', `/projects/${id}/logs`, undefined, { profile, tail }),
   projectStatus: (id: number) =>

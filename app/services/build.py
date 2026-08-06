@@ -171,6 +171,14 @@ def write_start_script(workdir: Path) -> Path:
     return path
 
 
+def env_setup_log_path(project_name: str, git_sha: str, profile: BuildProfile) -> Path:
+    """windows_service 런타임의 환경설정(npm/pip install) 로그 파일 경로 — git_sha/profile만
+    으로 결정되므로 install_dependencies를 부르기 전에도 미리 계산할 수 있다. docker_build_log_path
+    와 같은 이유로 존재한다: deployer.py가 실행 전에 Deployment.build_log_path에 심어 둬야
+    설치가 오래 걸리거나 멈춰 있어도 진행 중 로그를 조회할 수 있다."""
+    return get_settings().build_log_dir / f"{project_name}-{git_sha[:12]}{PROFILES[profile].tag_suffix}-env.log"
+
+
 def install_dependencies(workdir: Path, log_path: Path) -> None:
     """windows_service 런타임의 명시적 환경설정 단계 — npm/pip install을 배포의 build
     단계로 끝내고, 실패하면 배포 자체를 실패로 남긴다(Docker의 build_image와 대응).
@@ -182,6 +190,7 @@ def install_dependencies(workdir: Path, log_path: Path) -> None:
     먼저 끝내면 그 모호함이 없어진다. start.cmd는 계속 조건부로(이미 설치돼 있으면
     빠르게 통과) 같은 설치를 한 번 더 하지만, 이 단계가 실제 게이트다.
     """
+    timeout_seconds = get_settings().build_timeout_seconds
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as log:
         if (workdir / "package.json").exists():
@@ -205,9 +214,16 @@ def install_dependencies(workdir: Path, log_path: Path) -> None:
             log.write(f"[env-setup] {' '.join(npm_cmd)} (cwd={workdir})\n")
             log.flush()
             try:
-                proc = subprocess.run(npm_cmd, cwd=workdir, stdout=log, stderr=subprocess.STDOUT)
+                proc = subprocess.run(
+                    npm_cmd, cwd=workdir, stdout=log, stderr=subprocess.STDOUT, timeout=timeout_seconds,
+                )
             except OSError as e:
                 raise BuildError(f"npm 실행 실패: {e}", log_path) from e
+            except subprocess.TimeoutExpired as e:
+                raise BuildError(
+                    f"npm install이 {timeout_seconds}초 내에 끝나지 않아 중단했습니다 "
+                    "(PAAS_BUILD_TIMEOUT_SECONDS로 늘릴 수 있습니다).", log_path,
+                ) from e
             if proc.returncode != 0:
                 raise BuildError(f"npm install 실패 (exit {proc.returncode})", log_path)
 
@@ -216,10 +232,15 @@ def install_dependencies(workdir: Path, log_path: Path) -> None:
             if not venv_dir.exists():
                 log.write("[env-setup] python -m venv .venv\n")
                 log.flush()
-                proc = subprocess.run(
-                    [sys.executable, "-m", "venv", str(venv_dir)],
-                    cwd=workdir, stdout=log, stderr=subprocess.STDOUT,
-                )
+                try:
+                    proc = subprocess.run(
+                        [sys.executable, "-m", "venv", str(venv_dir)],
+                        cwd=workdir, stdout=log, stderr=subprocess.STDOUT, timeout=timeout_seconds,
+                    )
+                except subprocess.TimeoutExpired as e:
+                    raise BuildError(
+                        f"venv 생성이 {timeout_seconds}초 내에 끝나지 않아 중단했습니다.", log_path,
+                    ) from e
                 if proc.returncode != 0:
                     raise BuildError(f"venv 생성 실패 (exit {proc.returncode})", log_path)
             venv_python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -229,16 +250,33 @@ def install_dependencies(workdir: Path, log_path: Path) -> None:
                 proc = subprocess.run(
                     [str(venv_python), "-m", "pip", "install", "--disable-pip-version-check",
                      "-r", "requirements.txt"],
-                    cwd=workdir, stdout=log, stderr=subprocess.STDOUT,
+                    cwd=workdir, stdout=log, stderr=subprocess.STDOUT, timeout=timeout_seconds,
                 )
             except FileNotFoundError as e:
                 raise BuildError(f"venv python을 찾을 수 없습니다: {e}", log_path) from e
+            except subprocess.TimeoutExpired as e:
+                raise BuildError(
+                    f"pip install이 {timeout_seconds}초 내에 끝나지 않아 중단했습니다 "
+                    "(PAAS_BUILD_TIMEOUT_SECONDS로 늘릴 수 있습니다).", log_path,
+                ) from e
             if proc.returncode != 0:
                 raise BuildError(f"pip install 실패 (exit {proc.returncode})", log_path)
 
 
 def internal_port(project_type: ProjectType, profile: BuildProfile) -> int:
     return INTERNAL_PORTS[(project_type, profile)]
+
+
+def docker_build_log_path(
+    project_name: str, git_sha: str, profile: BuildProfile, component: str | None = None,
+) -> Path:
+    """docker build 로그 파일 경로 — git_sha/profile/component만으로 결정되므로 빌드를
+    시작하기 전에도 미리 계산할 수 있다. deployer.py가 이 값을 Deployment.build_log_path에
+    빌드 시작 전에 심어 둬야, 진행 중에도(빌드가 오래 걸리거나 멈춰 있어도) 그 시점까지의
+    로그를 조회할 수 있다."""
+    spec = PROFILES[profile]
+    log_name = f"{project_name}{f'-{component}' if component else ''}-{git_sha[:12]}{spec.tag_suffix}.log"
+    return get_settings().build_log_dir / log_name
 
 
 def build_image(
@@ -267,8 +305,7 @@ def build_image(
     tag = spec.image_tag(project.name, git_sha, component=component)
     dockerfile = dockerfile_for(build_type, profile, context_dir)
 
-    log_name = f"{project.name}{f'-{component}' if component else ''}-{git_sha[:12]}{spec.tag_suffix}.log"
-    log_path = settings.build_log_dir / log_name
+    log_path = docker_build_log_path(project.name, git_sha, profile, component)
     cmd = [
         "docker", "build",
         "-f", str(dockerfile),
@@ -278,9 +315,16 @@ def build_image(
     ]
     with open(log_path, "w", encoding="utf-8") as log:
         try:
-            proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
+            proc = subprocess.run(
+                cmd, stdout=log, stderr=subprocess.STDOUT, timeout=settings.build_timeout_seconds,
+            )
         except FileNotFoundError as e:
             raise BuildError(f"[WinError 2] docker CLI 실행 파일을 찾을 수 없습니다: {e}", log_path) from e
+        except subprocess.TimeoutExpired as e:
+            raise BuildError(
+                f"docker build가 {settings.build_timeout_seconds}초 내에 끝나지 않아 중단했습니다 "
+                "(PAAS_BUILD_TIMEOUT_SECONDS로 늘릴 수 있습니다).", log_path,
+            ) from e
     if proc.returncode != 0:
         raise BuildError(f"docker build failed (exit {proc.returncode})", log_path)
 

@@ -11,7 +11,9 @@ from app.services.build import (
     TEMPLATE_DIR,
     BuildError,
     build_image,
+    docker_build_log_path,
     dockerfile_for,
+    env_setup_log_path,
     install_dependencies,
     internal_port,
     write_start_script,
@@ -106,7 +108,7 @@ def test_build_image_uses_source_subdir_as_context(monkeypatch, tmp_path):
     class _FakeProc:
         returncode = 0
 
-    def fake_run(cmd, stdout, stderr):
+    def fake_run(cmd, stdout, stderr, timeout=None):
         captured["cmd"] = cmd
         return _FakeProc()
 
@@ -122,7 +124,7 @@ def _fake_run_ok(monkeypatch, calls: list):
     class _FakeProc:
         returncode = 0
 
-    def fake_run(cmd, cwd=None, stdout=None, stderr=None):
+    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None):
         calls.append(cmd)
         return _FakeProc()
     monkeypatch.setattr(build_service.subprocess, "run", fake_run)
@@ -222,3 +224,64 @@ def test_streamlit_runs_via_streamlit_cli_port_8501():
     assert "streamlit" in dev and "--server.runOnSave=true" in dev
     assert "streamlit" in rel and "--server.runOnSave=true" not in rel
     assert "--server.port=8501" in dev and "--server.port=8501" in rel
+
+
+def test_log_path_helpers_are_deterministic_before_the_build_starts():
+    """deployer.py는 실제 빌드/설치를 부르기 전에 이 값을 Deployment.build_log_path에
+    커밋해야 한다 — git_sha/profile(/component)만으로 값이 정해지므로 그게 가능하다."""
+    sha = "abcdef1234567890"
+    assert env_setup_log_path("chatbot", sha, BuildProfile.release).name == "chatbot-abcdef123456-env.log"
+    assert env_setup_log_path("chatbot", sha, BuildProfile.development).name == "chatbot-abcdef123456-dev-env.log"
+    assert docker_build_log_path("myapp", sha, BuildProfile.release).name == "myapp-abcdef123456.log"
+    assert docker_build_log_path("myapp", sha, BuildProfile.release, "backend").name == "myapp-backend-abcdef123456.log"
+
+
+def test_install_dependencies_raises_clear_error_on_npm_timeout(monkeypatch, tmp_path):
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None):
+        raise build_service.subprocess.TimeoutExpired(cmd, timeout)
+    monkeypatch.setattr(build_service.subprocess, "run", fake_run)
+
+    log_path = tmp_path / "env.log"
+    with pytest.raises(BuildError, match="npm install이 .*초 내에 끝나지 않아") as exc:
+        install_dependencies(tmp_path, log_path)
+    assert exc.value.log_path == log_path
+
+
+def test_install_dependencies_raises_clear_error_on_venv_timeout(monkeypatch, tmp_path):
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+
+    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None):
+        raise build_service.subprocess.TimeoutExpired(cmd, timeout)
+    monkeypatch.setattr(build_service.subprocess, "run", fake_run)
+
+    with pytest.raises(BuildError, match="venv 생성이 .*초 내에 끝나지 않아"):
+        install_dependencies(tmp_path, tmp_path / "env.log")
+
+
+def test_install_dependencies_raises_clear_error_on_pip_timeout(monkeypatch, tmp_path):
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (tmp_path / ".venv").mkdir()  # venv 생성을 건너뛰어 pip install 호출만 남긴다
+
+    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None):
+        raise build_service.subprocess.TimeoutExpired(cmd, timeout)
+    monkeypatch.setattr(build_service.subprocess, "run", fake_run)
+
+    with pytest.raises(BuildError, match="pip install이 .*초 내에 끝나지 않아"):
+        install_dependencies(tmp_path, tmp_path / "env.log")
+
+
+def test_build_image_raises_clear_error_on_docker_timeout(monkeypatch, tmp_path):
+    project = Project(name="timeoutapp", type=ProjectType.python, git_url="https://git.example.com/x")
+
+    def fake_run(cmd, stdout=None, stderr=None, timeout=None):
+        raise build_service.subprocess.TimeoutExpired(cmd, timeout)
+    monkeypatch.setattr(build_service.subprocess, "run", fake_run)
+
+    with pytest.raises(BuildError, match="docker build가 .*초 내에 끝나지 않아") as exc:
+        build_image(project, tmp_path, "a" * 40, BuildProfile.release)
+    assert exc.value.log_path == docker_build_log_path(
+        project.name, "a" * 40, BuildProfile.release,
+    )

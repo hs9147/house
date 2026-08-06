@@ -130,6 +130,53 @@ def test_composite_deploy_both_succeed_configures_proxy_once(monkeypatch, tmp_pa
         db.close()
 
 
+def test_composite_deploy_commits_build_log_path_before_each_component_build(monkeypatch, tmp_path):
+    """각 컴포넌트의 build_log_path는 build_image를 부르기 *전*에 커밋돼야 한다 —
+    그래야 빌드가 오래 걸리거나 멈춰 있는 동안에도 다른 세션이 진행 중 로그를
+    조회할 수 있다(deploy_sync의 windows_service/docker 분기와 같은 이유)."""
+    from app.services.build import docker_build_log_path
+
+    db = SessionLocal()
+    try:
+        project = _make_project(db, "shop3", tmp_path)
+        _mock_checkout(monkeypatch, tmp_path)
+        monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
+        monkeypatch.setattr(deployer.proxy, "configure_paths", lambda *a, **kw: None)
+
+        observed: dict[str, str | None] = {}
+
+        def fake_build(project, workdir, sha, profile, *, component=None, component_type=None):
+            # build_image가 아직 반환하기 전에 "다른 세션"으로 같은 레코드를 읽어,
+            # 그 시점에 이미 build_log_path가 커밋돼 있는지 확인한다.
+            reader = SessionLocal()
+            try:
+                rec = (
+                    reader.execute(
+                        select(Deployment).where(
+                            Deployment.project_id == project.id, Deployment.component == component,
+                        )
+                    ).scalar_one()
+                )
+                observed[component] = rec.build_log_path
+            finally:
+                reader.close()
+            return BuildResult(
+                image_tag=f"{project.name}-{component}:{sha[:12]}",
+                internal_port=8000 if component == "backend" else 80,
+                log_path=Path("/tmp/fake.log"), profile=profile,
+            )
+        monkeypatch.setattr(deployer, "build_image", fake_build)
+
+        records = deployer.deploy_composite_sync(db, project, BuildProfile.release)
+
+        for name, rec in records.items():
+            expected = str(docker_build_log_path(project.name, rec.git_sha, BuildProfile.release, name))
+            assert observed[name] == expected
+            assert rec.build_log_path == expected
+    finally:
+        db.close()
+
+
 def test_composite_deploy_frontend_fails_backend_restored_from_previous(monkeypatch, tmp_path):
     """이전에 성공 배포가 있는 상태에서 frontend 빌드가 실패하면, backend는 새 버전으로
     가되 frontend는 직전 정상 이미지로 복구되고 프록시는 정확히 한 번만 갱신된다 —
