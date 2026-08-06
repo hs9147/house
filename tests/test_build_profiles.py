@@ -86,6 +86,23 @@ def test_write_start_script_overwrites_unconditionally(tmp_path):
     assert (tmp_path / START_SCRIPT_NAME).read_text(encoding="utf-8") != "@echo custom\n"
 
 
+def test_write_start_script_falls_back_to_vite_preview_when_no_start_script(tmp_path):
+    """npm create vite@latest로 만든 프로젝트의 package.json에는 "start" 스크립트가
+    없다(dev/build/preview만 있음) — 무조건 "npm start"를 부르면 "Missing script:
+    start"로 즉시 죽는다. vite가 설치돼 있으면(devDependency라 npm ci/install이
+    항상 함께 설치) 이미 빌드된 산출물을 "vite preview"로 서빙해야 한다.
+
+    (회귀 방지: _START_SCRIPT는 raw 문자열이 아니라서 "\\v"·"\\a" 같은 시퀀스가
+    Python 이스케이프로 해석돼 "\\vite.cmd"가 "ite.cmd"로 깨지는 식의 실수가
+    나기 쉽다 — 정확한 경로 문자열을 그대로 검증한다.)"""
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    assert r"\<start\>" in content  # findstr 워드바운더리 — "prestart" 등 오탐 방지
+    assert r"node_modules\.bin\vite.cmd preview --host %HOST% --port %PORT%" in content
+    assert r"exist node_modules\.bin\vite.cmd" in content
+    # "start" 스크립트가 있는 일반적인 경우(Express, Next.js 등)는 그대로 npm start.
+    assert "if %errorlevel%==0 (\n    npm start\n  )" in content
+
+
 def test_html_serves_static_files_port_80():
     assert internal_port(ProjectType.html, BuildProfile.release) == 80
     assert internal_port(ProjectType.html, BuildProfile.development) == 80

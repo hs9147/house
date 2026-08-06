@@ -48,7 +48,20 @@ if exist package.json (
     call npm ci --if-present
   )
   call npm run build --if-present
-  npm start
+  REM Vite로 스캐폴딩된 프로젝트(npm create vite@latest)는 package.json에 "start"
+  REM 스크립트가 없다 — dev/build/preview만 있고, 그대로 "npm start"를 부르면
+  REM "Missing script: start"로 즉시 죽는다. "start"가 없고 vite가 설치돼 있으면
+  REM (npm ci/install이 devDependencies도 함께 설치하므로 vite도 이미 있다) 이미
+  REM 빌드된(위 npm run build) 산출물을 "vite preview"로 그대로 서빙한다.
+  findstr /R /C:"\\<start\\>" package.json >nul 2>&1
+  if %errorlevel%==0 (
+    npm start
+  ) else if exist node_modules\\.bin\\vite.cmd (
+    echo [PaaS Auto-Provisioning] No "start" script in package.json — serving the Vite build via "vite preview".
+    node_modules\\.bin\\vite.cmd preview --host %HOST% --port %PORT%
+  ) else (
+    npm start
+  )
 ) else if exist requirements.txt (
   if not exist .venv (
     echo [PaaS Auto-Provisioning] Python venv missing. Creating .venv...
