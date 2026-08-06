@@ -155,6 +155,92 @@ def test_plan_artifact_only_push_does_not_deploy():
     assert _push(c, unknown).json()["triggered"] == ["hooked"]
 
 
+def _set_latest_deployment(project_name: str, sha: str, status: str):
+    """이 프로젝트의 "최신" 배포 레코드를 직접 심어(웹훅 재전달 중복 스킵 검증용)."""
+    from sqlalchemy import select as sa_select
+
+    from app.db import SessionLocal
+    from app.models import Deployment, DeploymentStatus, Project
+
+    with SessionLocal() as db:
+        project = db.execute(
+            sa_select(Project).where(Project.name == project_name)
+        ).scalar_one()
+        db.add(Deployment(
+            project_id=project.id, git_sha=sha, image_tag="", profile="release",
+            status=DeploymentStatus(status),
+        ))
+        db.commit()
+
+
+def test_webhook_redelivery_of_already_running_commit_is_skipped():
+    """Gitea가 같은 push를 재전달하면(네트워크 재시도, 관리자의 수동 Redeliver 등)
+    이미 그 커밋으로 배포 완료된 상태라 또 빌드·재기동할 필요가 없다."""
+    c = _client()
+    c.post("/paas/api/v1/projects", json={
+        "name": "redelivered", "type": "react", "git_url": "https://git.example.com/o/redelivered",
+    }, headers=ADMIN)
+    _set_latest_deployment("redelivered", "a" * 40, "running")
+
+    repo = {"clone_url": "https://git.example.com/o/redelivered.git"}
+    push = {"ref": "refs/heads/main", "repository": repo, "after": "a" * 40,
+            "commits": [{"modified": ["src/app.py"], "added": [], "removed": []}]}
+    body = _push(c, push).json()
+    assert body["triggered"] == []
+    assert body["skipped_duplicate"] == ["redelivered"]
+
+
+def test_webhook_redelivery_while_still_building_is_skipped():
+    """첫 배포가 아직 진행 중(building)인 시점에 같은 커밋의 재전달이 와도 또 트리거하지
+    않는다 — 진행 중인 배포가 그 커밋을 그대로 이어서 처리한다."""
+    c = _client()
+    c.post("/paas/api/v1/projects", json={
+        "name": "still-building", "type": "react", "git_url": "https://git.example.com/o/still-building",
+    }, headers=ADMIN)
+    _set_latest_deployment("still-building", "b" * 40, "building")
+
+    repo = {"clone_url": "https://git.example.com/o/still-building.git"}
+    push = {"ref": "refs/heads/main", "repository": repo, "after": "b" * 40,
+            "commits": [{"modified": ["src/app.py"], "added": [], "removed": []}]}
+    body = _push(c, push).json()
+    assert body["triggered"] == []
+    assert body["skipped_duplicate"] == ["still-building"]
+
+
+def test_webhook_still_triggers_for_a_new_commit():
+    """최신 배포와 다른 커밋이면(정상적인 새 push) 중복 판정 없이 그대로 배포한다."""
+    c = _client()
+    c.post("/paas/api/v1/projects", json={
+        "name": "new-commit", "type": "react", "git_url": "https://git.example.com/o/new-commit",
+    }, headers=ADMIN)
+    _set_latest_deployment("new-commit", "c" * 40, "running")
+
+    repo = {"clone_url": "https://git.example.com/o/new-commit.git"}
+    push = {"ref": "refs/heads/main", "repository": repo, "after": "d" * 40,
+            "commits": [{"modified": ["src/app.py"], "added": [], "removed": []}]}
+    body = _push(c, push).json()
+    assert body["triggered"] == ["new-commit"]
+    assert body["skipped_duplicate"] == []
+
+
+def test_webhook_retriggers_for_the_same_commit_after_a_failed_deploy():
+    """직전 배포가 실패(failed)로 끝났다면, 같은 커밋을 다시 push해도(예: 원인 조치 없이
+    재시도) 중복으로 보지 않고 다시 트리거한다 — failed는 "이미 배포됨"이 아니다."""
+    c = _client()
+    c.post("/paas/api/v1/projects", json={
+        "name": "retry-after-fail", "type": "react",
+        "git_url": "https://git.example.com/o/retry-after-fail",
+    }, headers=ADMIN)
+    _set_latest_deployment("retry-after-fail", "e" * 40, "failed")
+
+    repo = {"clone_url": "https://git.example.com/o/retry-after-fail.git"}
+    push = {"ref": "refs/heads/main", "repository": repo, "after": "e" * 40,
+            "commits": [{"modified": ["src/app.py"], "added": [], "removed": []}]}
+    body = _push(c, push).json()
+    assert body["triggered"] == ["retry-after-fail"]
+    assert body["skipped_duplicate"] == []
+
+
 def test_audit_trail_recorded():
     c = _client()
     c.post("/paas/api/v1/projects", json={
