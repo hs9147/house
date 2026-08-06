@@ -225,13 +225,10 @@ export const api = {
   createOrg: (name: string) => request<OrgOut>('POST', '/orgs', { name }),
   syncOrgsFromGitea: (onMissingRepo: 'create' | 'delete' = 'create') =>
     request<GiteaSyncResult>('POST', '/orgs/sync', undefined, { on_missing_repo: onMissingRepo }),
-  deploy: (id: number, profile?: BuildProfile, git_sha?: string) =>
-    request<DeploymentOut>('POST', `/projects/${id}/deploy`, {
-      profile: profile ?? null,
-      git_sha: git_sha || null,
-    }),
   // 비블로킹 배포 — 즉시 building 레코드(들)를 받아 진행 상황을 폴링으로 추적한다.
-  // composite 프로젝트는 backend/frontend 두 레코드를 배열로 돌려준다.
+  // composite 프로젝트는 backend/frontend 두 레코드를 배열로 돌려준다. 콘솔의 모든
+  // 배포 진입점(서버구성·프로젝트 개요)이 이 경로로 통일돼 DeployProgressModal로
+  // 같은 진행 팝업을 보여준다.
   deployQueued: (id: number, profile?: BuildProfile, git_sha?: string) =>
     request<DeploymentOut | DeploymentOut[]>('POST', `/projects/${id}/deploy`, {
       profile: profile ?? null,

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import Async from '../../components/Async';
+import DeployProgressModal from '../../components/DeployProgressModal';
 import { Confirm } from '../../components/Modal';
 import StatusPill from '../../components/StatusPill';
 import { api, ApiError } from '../../lib/api';
@@ -19,6 +20,9 @@ export default function OverviewTab() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  // 배포는 서버구성 화면과 동일하게 큐(비블로킹)로 요청하고, 받은 레코드 id를
+  // 진행 로그 모달에 넘겨 폴링으로 보여준다(DeployProgressModal).
+  const [deployFor, setDeployFor] = useState<{ ids: number[]; profile: BuildProfile } | null>(null);
 
   const run = async () => {
     if (!action) return;
@@ -27,17 +31,18 @@ export default function OverviewTab() {
     setMessage('');
     try {
       if (action.kind === 'deploy') {
-        setMessage(`${action.profile} 배포 중... (빌드에 수 분 걸릴 수 있습니다)`);
-        const d = await api.deploy(project.id, action.profile, gitSha.trim() || undefined);
-        setMessage(`배포 완료 — ${d.image_tag} (${d.status})`);
+        const result = await api.deployQueued(project.id, action.profile, gitSha.trim() || undefined);
+        const records = Array.isArray(result) ? result : [result];
+        setDeployFor({ ids: records.map((r) => r.id), profile: action.profile });
       } else if (action.kind === 'rollback') {
         const d = await api.rollback(project.id, action.profile);
         setMessage(`롤백 완료 — ${d.image_tag}`);
+        state.reload();
       } else {
         await api.stop(project.id, action.profile);
         setMessage(`${action.profile} 중지됨`);
+        state.reload();
       }
-      state.reload();
     } catch (e) {
       const err = e as ApiError;
       setMessage('');
@@ -143,6 +148,18 @@ export default function OverviewTab() {
           busy={busy}
           onConfirm={run}
           onClose={() => !busy && setAction(null)}
+        />
+      )}
+      {deployFor && (
+        <DeployProgressModal
+          projectId={project.id}
+          projectName={project.name}
+          profile={deployFor.profile}
+          deploymentIds={deployFor.ids}
+          onClose={() => {
+            setDeployFor(null);
+            state.reload();
+          }}
         />
       )}
     </>
