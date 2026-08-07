@@ -54,7 +54,7 @@ def ensure_repo(org_name: str, repo_name: str, auto_init: bool = True) -> str:
     base, headers = _base_and_headers()
     res = httpx.post(
         f"{base}/api/v1/orgs/{org_name}/repos", headers=headers,
-        json={"name": repo_name, "private": True, "auto_init": auto_init}, timeout=15,
+        json={"name": repo_name, "private": False, "auto_init": auto_init}, timeout=15,
     )
     if res.status_code == 201:
         return res.json()["clone_url"]
