@@ -306,10 +306,11 @@ git_url을 직접 지정하는 레거시 경로는 하위 호환을 위해 유�
 바이트 수**로 강제하는 총량 상한(zip bomb 방어의 핵심 — 헤더는 위조 가능하므로 신뢰하지
 않는다), (3) 엔트리 수 상한, (4) 파일별 압축비 사전 점검, (5) 절대경로·상위 디렉토리
 탈출(zip slip)·심볼릭 링크 엔트리 거부로 구성했다. 조직/업로드로 만든 리포는 Gitea에
-`private:true`로 생성되므로, 플랫폼이 clone/fetch/push할 때도 `services/git_auth.py`가
-`PAAS_GITEA_API_TOKEN`을 git 프로세스에 `http.extraHeader`로 주입해 인증한다(git_url 자체엔
-토큰을 심지 않음) — 이는 앞서 구현된 조직별 작업공간의 잠재 버그(비공개 리포를 플랫폼이
-스스로 clone하지 못하던 문제)를 함께 고친 것이기도 하다. 코드 **수정**은 여전히 12절 원칙대로
+생성된다(현재 public — `services/gitea.py`). push는 가시성과 무관하게 항상 인증이
+필요하므로 `services/git_auth.py`가 `PAAS_GITEA_API_TOKEN`을 git 프로세스에
+`http.extraHeader`로 주입해 인증한다(git_url 자체엔 토큰을 심지 않음) — 이는 앞서
+구현된 조직별 작업공간의 잠재 버그(당시 private 리포를 플랫폼이 스스로 clone하지
+못하던 문제)를 함께 고친 것이기도 하다. 코드 **수정**은 여전히 12절 원칙대로
 LLM 채팅 → diff 제안 → 승인(`POST /changes/{id}/apply`)으로만 가능하지만, 코드 **확인**을
 위한 읽기 전용 파일 트리·내용 조회 API(`GET /projects/{id}/files`, `/files/content`)와
 콘솔 코드 탭을 추가해 저장/수정 엔드포인트 없이도 현재 코드를 볼 수 있게 했다. 마지막으로
@@ -471,8 +472,8 @@ POST /projects/{id}/preview        DELETE /previews/{id}
   TTL PreviewSession(CPU 50%·GPU 금지·동시 5개 제한·lazy 회수)
 - **zip/폴더 업로드 등록 + 코드 확인 화면 + 웹훅 자동 등록 구현 완료**(10.2절):
   `POST /projects/upload`(zip bomb/zip slip 방어), 읽기 전용 파일 트리·내용 조회 API +
-  콘솔 코드 탭(수정은 여전히 채팅/diff 승인으로만), 사내 Gitea private 리포 clone/fetch/push
-  인증(`services/git_auth.py`), `PAAS_PLATFORM_PUBLIC_URL` 설정 시 웹훅 자동 등록
+  콘솔 코드 탭(수정은 여전히 채팅/diff 승인으로만), 사내 Gitea 리포 push 인증
+  (`services/git_auth.py`, 리포 자체는 public), `PAAS_PLATFORM_PUBLIC_URL` 설정 시 웹훅 자동 등록
 - **자원 아이템화 리스팅 + 콘솔 좌측 사이드바 전환 구현 완료**(12.2절): Module에
   `category`/`organization_id` 추가, `GET /projects/{id}/resources`로 대화식 편집 화면에
   API(카테고리별)·공유 파일·조직별 DB를 아이템화해 표시. 콘솔 상단 수평 메뉴를 왼쪽 고정

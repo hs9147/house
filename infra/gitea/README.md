@@ -148,21 +148,83 @@ DB를 Postgres로 교체하려면 deployment.yaml 주석의 `GITEA__database__*`
 비밀번호는 플랫폼의 시크릿 관행과 동일하게 `envFrom: secretRef`로 주입할 것
 (평문 env 금지 — [15절](../../../docs/cloud-platform-paas-design-review.md) 참고).
 
+## 서브패스(단일 포트)로 노출하는 경우
+
+외부에 도메인을 추가로 못 받아서 Gitea를 플랫폼과 **같은 도메인의 서브패스**로
+내보내야 할 때(예: `https://paas.example.com/gitea/`, 위 기본 절차의 별도 도메인
+`git.example.com` 대신)는 아래 두 가지를 반드시 함께 맞춰야 한다 — Gitea 공식
+문서도 서브패스 배포는 "권장하지 않지만" 이 두 조건을 맞추면 동작한다고 명시한다
+([Gitea Reverse Proxies 문서](https://docs.gitea.com/administration/reverse-proxies/)).
+
+1. **`ROOT_URL`에 서브패스까지 포함** — Gitea 자신이 로그인 리다이렉트·정적 자산·
+   OAuth2 콜백 URL을 이 값 기준으로 만든다. 도메인만 넣고 서브패스를 빼면(기존
+   기본 절차처럼 `https://paas.example.com/`만 넣으면) 로그인 후 리다이렉트가
+   서브패스를 잃어버려 깨진다 — "gitea 자체 로그인 인증 이슈"의 실제 원인이 대부분 이것이다.
+   ```
+   GITEA__server__ROOT_URL=https://paas.example.com/gitea/
+   ```
+2. **리버스 프록시가 `/gitea` 접두어를 벗기지 않고 그대로 전달** — Gitea는 요청
+   경로에 `/gitea`가 이미 붙어 있는 채로 와야 한다(1의 ROOT_URL과 대응). Caddy는
+   `handle_path`(접두어를 벗김)가 아니라 `handle`(벗기지 않고 그대로 전달)을 써야 한다:
+   ```caddy
+   paas.example.com {
+       handle /gitea/* {
+           reverse_proxy 127.0.0.1:3000
+       }
+       # ... 플랫폼 자신의 handle 블록들(콘솔·/apps/... 등)은 그대로 유지
+   }
+   ```
+   IIS/ARR(`PAAS_PROXY_BACKEND=iis`)를 쓴다면 URL Rewrite 규칙에서도 경로를
+   재작성(rewrite)만 하고 **벗겨내지(strip) 않아야** 동일한 효과를 낸다 —
+   [deployment-guide.md 3.6절](../../../docs/deployment-guide.md)의 ARR 설정 참고.
+
+   네이티브 Windows(위 B절)라면 nssm에 ROOT_URL만 서브패스 버전으로 바꿔 넣는다:
+   ```powershell
+   nssm set gitea AppEnvironmentExtra "GITEA__server__DOMAIN=paas.example.com`nGITEA__server__ROOT_URL=https://paas.example.com/gitea/`nGITEA__server__SSH_LISTEN_PORT=2222`nGITEA__server__SSH_PORT=2222`nGITEA__service__DISABLE_REGISTRATION=true`nGITEA__database__DB_TYPE=sqlite3"
+   nssm restart gitea
+   ```
+
 ## 최초 설정 (공통)
 
-1. `https://git.example.com` 접속 → 설치 마법사에서 관리자 계정 생성
+1. `https://git.example.com`(또는 위 서브패스 주소) 접속 → 설치 마법사에서 관리자 계정 생성
 2. Site Administration → Configuration → **"Enable registration"이 꺼져 있는지 확인**
    (compose/K8s 모두 `DISABLE_REGISTRATION=true` 기본값 — 계정은 관리자가 초대)
-3. (선택) Keycloak SSO 연동 — 플랫폼의 `PAAS_OIDC_ISSUER`와 동일 Realm을 재사용해
-   콘솔·Gitea 로그인을 통일:
+3. **Keycloak SSO 연동** — 플랫폼의 `PAAS_OIDC_ISSUER`와 동일 Realm을 재사용해
+   Gitea 로그인을 그 Realm의 계정("paas ID")으로 통일한다. Keycloak이 이미 떠 있다는
+   전제(이 문서는 Keycloak 자체 설치를 다루지 않는다 — 플랫폼의 `PAAS_OIDC_ISSUER`가
+   가리키는 그 인스턴스를 그대로 쓴다).
+
+   **a) Keycloak 쪽에 Gitea용 클라이언트 등록** (Keycloak 콘솔 → 해당 Realm → Clients → Create):
+   - Client ID: `gitea` (아래 `--key`와 일치시킬 것)
+   - Valid redirect URI: `https://<gitea 외부 주소>/user/oauth2/keycloak/callback`
+     (서브패스라면 `https://paas.example.com/gitea/user/oauth2/keycloak/callback` —
+     `--name keycloak`으로 등록할 것이므로 콜백 경로의 `keycloak` 부분은 `--name`과
+     반드시 일치해야 한다)
+   - Client authentication: On (confidential client) → 생성 후 Credentials 탭에서 secret 확인
+
+   **b) Gitea에 OAuth2 소스 등록**:
    ```bash
    gitea admin auth add-oauth \
      --name keycloak --provider openidConnect \
-     --key <gitea client id> --secret <gitea client secret> \
+     --key <위에서 만든 client id> --secret <client secret> \
      --auto-discover-url "${PAAS_OIDC_ISSUER}/.well-known/openid-configuration"
    ```
-   (Keycloak 쪽에 `gitea`용 OIDC 클라이언트를 먼저 등록해야 한다 — Keycloak 자체 배포는
-   이 문서의 범위 밖.)
+
+   **c) 새 사용자를 관리자가 매번 미리 만들지 않도록 자동 계정 생성 허용** — 그래야
+   Keycloak(=paas ID)으로 처음 로그인하는 사람도 Gitea 쪽 계정을 관리자가 미리
+   만들어 둘 필요가 없다(`DISABLE_REGISTRATION=true`는 **로컬** 가입 폼만 막고
+   이 값에는 영향을 주지 않는다):
+   ```
+   GITEA__oauth2_client__ENABLE_AUTO_REGISTRATION=true
+   GITEA__oauth2_client__USERNAME=email
+   GITEA__oauth2_client__ACCOUNT_LINKING=auto
+   ```
+   (docker-compose는 `environment:` 블록에, 네이티브 Windows는 nssm
+   `AppEnvironmentExtra`에 위 서브패스 예시처럼 이어붙여 추가하고 `nssm restart gitea`.)
+
+   콘솔(paas 자체 로그인)은 아직 이 Realm으로 전환되지 않았다 — 현재는 API를 Bearer
+   JWT로 호출할 때만(`PAAS_OIDC_ISSUER` 검증, `app/security.py`) 같은 Realm을 인식한다.
+   콘솔 로그인 화면 자체를 Keycloak 리다이렉트로 바꾸는 것은 별도 작업이다.
 
 ## 플랫폼과 연결
 

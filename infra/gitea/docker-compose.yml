@@ -27,6 +27,14 @@ services:
       #   GITEA__database__NAME=gitea
       #   GITEA__database__USER=... / PASSWD=...
       - GITEA__database__DB_TYPE=sqlite3
+      # 도메인을 따로 못 받아 플랫폼과 같은 도메인의 서브패스(예: /gitea/)로 내보낼 때는
+      # ROOT_URL에 그 서브패스까지 포함해야 한다(README.md "서브패스로 노출하는 경우" 참고):
+      #   GITEA__server__ROOT_URL=https://paas.example.com/gitea/
+      # Keycloak SSO 연동 시(README.md "최초 설정" 3번 — gitea admin auth add-oauth로
+      # 소스를 등록한 뒤) 관리자가 계정을 미리 안 만들어도 되게 하려면:
+      #   GITEA__oauth2_client__ENABLE_AUTO_REGISTRATION=true
+      #   GITEA__oauth2_client__USERNAME=email
+      #   GITEA__oauth2_client__ACCOUNT_LINKING=auto
     volumes:
       - gitea-data:/data
     ports:
