@@ -1,8 +1,9 @@
 """사내 Gitea에 대한 git 명령 인증 주입.
 
-조직 소속/업로드로 생성된 프로젝트 리포는 Gitea에 private:true로 생성되므로
-플랫폼이 clone/fetch/push할 때도 인증이 필요하다. git_url 자체에는 토큰을
-심지 않고(DB·로그 노출 방지) git 프로세스 인자로만 주입한다.
+프로젝트 리포는 public으로 생성되지만(services/gitea.py의 ensure_repo), push는
+public 리포에서도 인증이 필요하다 — 그래서 플랫폼이 push할 때는 여전히 토큰을
+넣어야 한다. git_url 자체에는 토큰을 심지 않고(DB·로그 노출 방지) git 프로세스
+인자로만 주입한다.
 """
 from urllib.parse import urlsplit
 

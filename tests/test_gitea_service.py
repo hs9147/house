@@ -54,6 +54,16 @@ def test_ensure_repo_created_returns_clone_url(monkeypatch):
     assert url == "https://git.example.com/shop-team/api.git"
 
 
+def test_ensure_repo_created_as_public(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        gitea.httpx, "post",
+        lambda url, **kw: (calls.append(kw), _Res(201, {"clone_url": "https://git.example.com/x/y.git"}))[1],
+    )
+    gitea.ensure_repo("x", "y")
+    assert calls[0]["json"]["private"] is False
+
+
 def test_ensure_repo_conflict_reuses_existing(monkeypatch):
     monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(409))
     monkeypatch.setattr(
