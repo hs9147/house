@@ -826,10 +826,10 @@ function PlatformReportModal({ onClose }: { onClose: () => void }) {
   const reportState = useApi(() => api.getPlatformModuleReport());
 
   return (
-    <Modal title="📊 PaaS 플랫폼 전역 모듈 사용이력 통합 리포트" onClose={onClose}>
+    <Modal title="📊 house 플랫폼 전역 모듈 사용이력 통합 리포트" onClose={onClose}>
       <div style={{ minWidth: 680, display: 'flex', flexDirection: 'column', gap: 16 }}>
         <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
-          PaaS 플랫폼에 등록된 모든 모듈과 이를 바인딩하여 사용 중인 프로젝트 목록, 그리고 최근 모듈 관련 변경 이력을 종합 리포팅합니다.
+          house 플랫폼에 등록된 모든 모듈과 이를 바인딩하여 사용 중인 프로젝트 목록, 그리고 최근 모듈 관련 변경 이력을 종합 리포팅합니다.
         </p>
 
         <Async state={reportState}>

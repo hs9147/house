@@ -15,7 +15,7 @@ export default function Layout() {
   const me = useApi(() => api.me());
   const features = health.data?.features ?? [];
   const has = (f: string) => features.includes(f);
-  const systemName = health.data?.platform_name || (import.meta as any).env?.VITE_SYSTEM_NAME || 'PaaS';
+  const systemName = health.data?.platform_name || (import.meta as any).env?.VITE_SYSTEM_NAME || 'house';
 
   return (
     <div className="app-shell">

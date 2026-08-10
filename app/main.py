@@ -6,7 +6,8 @@ from fastapi import FastAPI
 from starlette.staticfiles import StaticFiles
 
 from .api import (
-    a2a_gateway, llm, modules, orgs, planning, previews, projects, proxy_gateway, server, storage, system, webhooks,
+    a2a_gateway, llm, modules, oidc_provider, orgs, planning, previews, projects, proxy_gateway, server, storage,
+    system, webhooks,
 )
 from .config import get_settings
 from .db import Base, engine
@@ -32,7 +33,7 @@ def create_app() -> FastAPI:
         print(f"[paas] bootstrap admin key (set PAAS_ADMIN_API_KEY to pin): {settings.admin_api_key}")
 
     app = FastAPI(
-        title="chofam cloud platform",
+        title="house",
         description=(
             "내부 PaaS 컨트롤 플레인. "
             f"tier={settings.tier} (small=Docker, enterprise=Kubernetes), "
@@ -51,6 +52,8 @@ def create_app() -> FastAPI:
     app.include_router(proxy_gateway.router, prefix=API_PREFIX)
     app.include_router(a2a_gateway.router, prefix=API_PREFIX)
     app.include_router(storage.router, prefix=API_PREFIX)
+    if settings.oidc_provider_enabled:  # /paas/.well-known/openid-configuration, /paas/oauth2/*
+        app.include_router(oidc_provider.router, prefix=PAAS_PREFIX)
 
     # 1일 1회 외부 API 수집 루트 백그라운드 탐색 및 갱신 스케줄러 시동
     from .services.apisearch import start_daily_api_directory_scheduler  # noqa: PLC0415

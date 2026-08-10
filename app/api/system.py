@@ -1,7 +1,7 @@
 import hmac
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, Header, HTTPException, WebSocket
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, WebSocket
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -150,6 +150,7 @@ def register_user_account(
 @router.post("/auth/login", response_model=UserLoginOut)
 def login_user_account(
     body: UserLoginRequest,
+    response: Response,
     db: Session = Depends(get_db),
 ):
     settings = get_settings()
@@ -179,10 +180,24 @@ def login_user_account(
     if not user.is_approved:
         raise HTTPException(status_code=403, detail="관리자 승인 대기 중인 계정입니다.")
 
+    token = _start_session(db, user.email, user.is_admin)
+    # 콘솔(SPA)은 이 토큰을 응답 본문의 key로 받아 x-api-key 헤더로 계속 쓴다. 쿠키로도
+    # 같은 값을 심어 두는 건 OIDC Provider의 authorize 엔드포인트(services/oidc_provider.py)
+    # 때문이다 — 그 엔드포인트는 Gitea 같은 외부 서비스의 리다이렉트로 열리는 일반 브라우저
+    # 내비게이션이라 fetch 헤더가 아니라 쿠키로만 "이미 로그인돼 있음"을 알 수 있다.
+    # samesite=lax여야 한다 — Gitea에서 시작한 SSO는 다른 사이트에서 이 도메인으로 오는
+    # 최상위 GET 이동이라 strict면 쿠키가 안 실려 authorize가 매번 미로그인으로 보인다.
+    # secure는 이 배포의 공개 주소가 https일 때만 — 로컬 http 개발에서 켜면 쿠키가 아예
+    # 저장되지 않는다.
+    response.set_cookie(
+        "paas_session", token, httponly=True, samesite="lax",
+        secure=settings.platform_public_url.startswith("https://"),
+        max_age=int(SESSION_TTL.total_seconds()),
+    )
     return UserLoginOut(
         name=user.name or user.email,
         email=user.email,
-        key=_start_session(db, user.email, user.is_admin),
+        key=token,
         is_admin=user.is_admin,
         organization_id=user.organization_id,
         organization_name=user.organization.name if user.organization else None,
@@ -191,6 +206,7 @@ def login_user_account(
 
 @router.post("/auth/logout", status_code=204)
 def logout_user_session(
+    response: Response,
     x_api_key: str = Header(default=""),
     db: Session = Depends(get_db),
 ):
@@ -202,6 +218,7 @@ def logout_user_session(
         if session is not None:
             db.delete(session)
             db.commit()
+    response.delete_cookie("paas_session")
     return None
 
 

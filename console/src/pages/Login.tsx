@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { loginWithAccount } from '../lib/auth';
+import { safeNextUrl } from '../lib/ssoReturn';
 
 export default function Login() {
   const [mode, setMode] = useState<'login' | 'register'>('login');
@@ -10,12 +11,14 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [key, setKey] = useState('');
   const [allowedDomain, setAllowedDomain] = useState<string>('');
-  const [platformName, setPlatformName] = useState<string>('PaaS');
+  const [platformName, setPlatformName] = useState<string>('house');
   const [useApiKeyOnly, setUseApiKeyOnly] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const nextUrl = safeNextUrl(searchParams.get('next'));
 
   useEffect(() => {
     fetch('/paas/health')
@@ -85,6 +88,12 @@ export default function Login() {
 
     try {
       const { admin } = await loginWithAccount(cleanEmail, cleanKey);
+      if (nextUrl) {
+        // SSO 복귀 — react-router가 아니라 백엔드 경로(/paas/oauth2/authorize?...)이므로
+        // 전체 페이지 이동이어야 한다. 세션 쿠키가 이미 심겼으니 이번엔 통과한다.
+        window.location.href = nextUrl;
+        return;
+      }
       navigate(admin ? '/' : '/projects');
     } catch (err) {
       setError((err as Error).message);
