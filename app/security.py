@@ -138,20 +138,34 @@ def _get_jwk_client():
     return _jwk_client
 
 
-def _issued_by_our_own_provider() -> bool:
-    """oidc_issuer가 이 프로세스의 내장 OIDC Provider를 가리키는지."""
+def _issued_by_our_own_provider(token: str) -> bool:
+    """이 토큰이 내장 OIDC Provider가 서명한 것인지 — 토큰 헤더의 kid로 판별한다.
+
+    주소(issuer 설정값)로 비교하지 않는다. oidc_issuer는 "우리가 신뢰하는 발급자"고
+    내장 Provider의 주소와는 별개라, 외부 Keycloak을 쓰면서 Provider도 켜 둔 구성에서
+    둘을 같다고 보면 Keycloak 토큰을 우리 키로 검증하려 들어 전부 실패한다.
+
+    헤더는 서명 검증 전 값이라 위조할 수 있지만, 여기서는 **어느 키로 검증할지 고르는
+    데만** 쓴다 — kid를 우리 것으로 위조해도 이어지는 서명 검증에서 떨어진다(실패 방향).
+    """
     settings = get_settings()
-    if not settings.oidc_provider_enabled or not settings.oidc_issuer:
+    if not settings.oidc_provider_enabled:
         return False
+    import jwt  # noqa: PLC0415
+
     from .services import oidc_provider  # noqa: PLC0415 — 순환 import 회피
 
-    return settings.oidc_issuer.rstrip("/") == oidc_provider.issuer().rstrip("/")
+    try:
+        kid = jwt.get_unverified_header(token).get("kid")
+    except jwt.PyJWTError:
+        return False
+    return bool(kid) and kid == oidc_provider.key_id()
 
 
 def _verification_key(token: str):
     """토큰 서명을 검증할 키.
 
-    발급자가 우리 자신이면 개인키가 이미 디스크에 있으므로 그 공개키를 바로 쓴다 —
+    우리가 서명한 토큰이면 개인키가 이미 디스크에 있으므로 그 공개키를 바로 쓴다 —
     JWKS를 HTTP로 가져오지 않는다. 자기 자신을 공개 주소로 다시 호출하면:
       - 그 주소의 서버 인증서가 안 맞으면(사설 CA·자체 서명·내부 DNS로 다른 호스트에
         연결) TLS 검증에서 실패한다 — "인증서가 일치하지 않는다"는 그 오류다.
@@ -160,7 +174,7 @@ def _verification_key(token: str):
       - 워커가 자기 요청을 처리하는 도중 자기에게 동기 HTTP 호출을 건다.
     외부 발급자(Keycloak 등)일 때만 기존대로 JWKS를 조회한다.
     """
-    if _issued_by_our_own_provider():
+    if _issued_by_our_own_provider(token):
         from .services import oidc_provider  # noqa: PLC0415
 
         return oidc_provider.public_key_pem()

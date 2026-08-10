@@ -91,10 +91,31 @@ def jwks() -> dict:
 
 
 def issuer() -> str:
+    """이 발급자의 절대 주소.
+
+    반드시 절대 URL이어야 한다 — 클라이언트(Gitea 등)는 디스커버리 문서의 issuer가
+    자기가 조회한 URL과 정확히 같은지 확인하고, 다르면 연동을 거부한다. 그리고 이
+    호스트명은 **서버 인증서(CN/SAN)에 실제로 들어 있는 이름**이어야 한다. IP나 내부
+    호스트명을 넣으면 클라이언트가 TLS 검증에서
+    "certificate is valid for A, not B"로 실패한다.
+    """
     settings = get_settings()
-    if settings.oidc_issuer:
-        return settings.oidc_issuer.rstrip("/")
-    return f"{settings.platform_public_url.rstrip('/')}/paas"
+    base = (
+        settings.oidc_issuer.rstrip("/")
+        if settings.oidc_issuer
+        else f"{settings.platform_public_url.rstrip('/')}/paas"
+        if settings.platform_public_url
+        else ""
+    )
+    if not base.startswith(("http://", "https://")):
+        raise OidcProviderError(
+            "OIDC Provider의 발급자 주소를 정할 수 없습니다 — PAAS_OIDC_ISSUER 또는 "
+            "PAAS_PLATFORM_PUBLIC_URL에 http(s)로 시작하는 절대 주소를 설정하세요 "
+            f"(현재: PAAS_OIDC_ISSUER={settings.oidc_issuer!r}, "
+            f"PAAS_PLATFORM_PUBLIC_URL={settings.platform_public_url!r}). "
+            "이 호스트명은 서버 인증서에 들어 있는 이름과 같아야 합니다."
+        )
+    return base
 
 
 def discovery_document() -> dict:

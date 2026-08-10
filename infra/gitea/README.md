@@ -253,11 +253,41 @@ curl -v https://paas.example.com/paas/.well-known/openid-configuration 2>&1 | gr
 | 증상 | 원인 | 조치 |
 | --- | --- | --- |
 | `certificate signed by unknown authority` | 사설 CA·자체 서명 인증서 | 그 CA 인증서를 **Gitea가 도는 호스트**의 신뢰 저장소에 넣는다. Linux: `/usr/local/share/ca-certificates/`에 복사 후 `update-ca-certificates`. Docker: 호스트의 CA 파일을 컨테이너 `/etc/ssl/certs/`에 마운트. Windows: 로컬 컴퓨터 → 신뢰할 수 있는 루트 인증 기관에 가져오기 |
-| hostname mismatch (`certificate is valid for A, not B`) | 디스커버리 URL의 호스트명이 인증서의 CN/SAN과 다름 | `PAAS_PLATFORM_PUBLIC_URL`·`PAAS_OIDC_ISSUER`를 **인증서에 실제로 들어 있는 이름**으로 맞춘다. IP 주소나 내부 호스트명(`paas-internal`)으로 적어두고 인증서는 공개 도메인용인 경우가 대부분이다 |
+| hostname mismatch (`certificate is valid for A, not B`) | 디스커버리 URL의 호스트명(B)이 인증서의 CN/SAN(A)에 없음 | 아래 "hostname mismatch 풀기" 참고 |
 | 위 둘 다 아닌데 실패 | 내부 DNS가 그 호스트명을 다른 서버로 보냄 | Gitea 호스트에서 `getent hosts paas.example.com`으로 확인. 필요하면 `/etc/hosts`(또는 Windows `hosts`)에 올바른 IP를 고정 |
 
-주소를 바꿨다면 양쪽을 다시 맞춰야 한다 — `PAAS_OIDC_PROVIDER_CLIENTS`의
-`redirect_uris`와 Gitea 인증 소스의 디스커버리 URL 모두.
+##### hostname mismatch 풀기 (`certificate is valid for A, not B`)
+
+**B(디스커버리 URL에 쓴 이름)를 A(인증서에 있는 이름)로 바꾸는 것이 정답이다.** 반대로
+"연결이 되니까" IP나 내부 호스트명을 그대로 두고 인증서 검증만 우회하려는 시도는
+Gitea에 그런 옵션이 없어서 통하지 않는다.
+
+주의할 점: **URL을 바꾸면 세 곳이 동시에 같아야 한다.** Gitea(엄밀히는 go-oidc)는
+디스커버리 문서의 `issuer` 값이 자기가 조회한 URL과 정확히 일치하는지도 확인하기
+때문에, 하나만 바꾸면 이번엔 issuer 불일치로 실패한다.
+
+1. 플랫폼 `.env`의 `PAAS_OIDC_ISSUER`(없으면 `PAAS_PLATFORM_PUBLIC_URL`)
+2. Gitea 인증 소스의 `--auto-discover-url`
+3. `PAAS_OIDC_PROVIDER_CLIENTS`의 `redirect_uris`(이건 Gitea 쪽 주소라 별개지만,
+   주소 체계를 바꿨다면 같이 점검할 것)
+
+플랫폼이 지금 자기 발급자를 뭐라고 알고 있는지는 기동 로그(`[paas] OIDC Provider
+활성화 — issuer=...`)나 디스커버리 문서로 확인한다:
+```bash
+curl -s https://<공개도메인>/paas/.well-known/openid-configuration | grep -o '"issuer":"[^"]*"'
+```
+
+**공개 도메인으로 바꿨더니 이번엔 연결이 안 되는 경우**(사내망에서 자기 공개 주소로
+못 돌아오는 hairpin NAT 등): 이름은 그대로 두고 **경로만** 고친다 — Gitea가 도는
+호스트의 hosts 파일에 그 도메인을 내부 IP로 고정한다. 이름이 안 바뀌므로 인증서는
+계속 유효하다(IP로 바꿔 적으면 다시 mismatch가 난다).
+```
+# Linux: /etc/hosts   |   Windows: C:\Windows\System32\drivers\etc\hosts
+10.0.0.5   paas.example.com
+```
+
+인증서에 이름을 추가할 수 있는 상황이면(사내 CA 등) 반대로 B를 SAN에 넣어 재발급해도
+된다 — 그 경우 위 1·2의 URL은 B로 통일한다.
 
 > 플랫폼 **자신**은 이 문제를 겪지 않는다. 자기가 발급한 토큰은 로컬 개인키로 바로
 > 검증하고 JWKS를 HTTP로 가져오지 않는다(`app/security.py`의 `_verification_key`) —

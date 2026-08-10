@@ -4,6 +4,7 @@
 import json
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import security
@@ -209,6 +210,97 @@ def test_userinfo_reflects_id_token_claims(provider_client):
 
 def test_userinfo_rejects_missing_bearer(provider_client):
     assert provider_client.get("/paas/oauth2/userinfo").status_code == 401
+
+
+def test_issuer_requires_an_absolute_url(monkeypatch, fresh_settings):
+    """발급자 주소가 없으면 상대 경로("/paas")가 섞인 잘못된 디스커버리 문서를 내주는
+    대신 분명히 실패해야 한다 — 그걸 받은 Gitea 쪽 오류는 원인 파악이 훨씬 어렵다."""
+    monkeypatch.delenv("PAAS_OIDC_ISSUER", raising=False)
+    monkeypatch.delenv("PAAS_PLATFORM_PUBLIC_URL", raising=False)
+    get_settings.cache_clear()
+    with pytest.raises(oidc_provider.OidcProviderError, match="절대 주소"):
+        oidc_provider.issuer()
+
+
+def test_discovery_fails_loudly_when_issuer_is_unset(monkeypatch, fresh_settings, tmp_path):
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_ENABLED", "true")
+    monkeypatch.delenv("PAAS_OIDC_ISSUER", raising=False)
+    monkeypatch.delenv("PAAS_PLATFORM_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH", str(tmp_path / "k.pem"))
+    get_settings.cache_clear()
+    r = TestClient(create_app()).get("/paas/.well-known/openid-configuration")
+    assert r.status_code == 500
+    assert "PAAS_OIDC_ISSUER" in r.json()["detail"]
+
+
+def test_external_token_is_not_mistaken_for_ours_when_provider_is_also_enabled(
+    monkeypatch, fresh_settings, tmp_path,
+):
+    """회귀: 내장 Provider를 켜 둔 채로 외부 Keycloak을 신뢰 발급자로 쓰는 구성.
+
+    "우리 토큰인가"를 주소(oidc_issuer)로 판별하면, oidc_issuer가 설정돼 있기만 하면
+    항상 참이 돼(자기 자신과 비교하는 꼴) Keycloak 토큰까지 우리 키로 검증하려 든다 —
+    유효한 Keycloak 토큰이 전부 401이 된다. 판별 기준은 토큰이 실제로 우리 키로
+    서명됐는지(kid)여야 한다.
+    """
+    import time
+
+    import jwt as pyjwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "https://paas.test")
+    monkeypatch.setenv("PAAS_OIDC_ISSUER", "https://sso.external.test/realms/x")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH", str(tmp_path / "k.pem"))
+    get_settings.cache_clear()
+
+    external_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    token = pyjwt.encode({
+        "iss": "https://sso.external.test/realms/x", "sub": "u1",
+        "preferred_username": "hong", "exp": int(time.time()) + 3600,
+        "realm_access": {"roles": ["paas-admin"]},
+    }, external_key, algorithm="RS256", headers={"kid": "keycloak-key-1"})
+
+    assert security._issued_by_our_own_provider(token) is False
+
+    called = []
+
+    class _FakeJwkClient:
+        def get_signing_key_from_jwt(self, tok):
+            called.append(tok)
+            return type("K", (), {"key": external_key.public_key()})()
+
+    monkeypatch.setattr(security, "_get_jwk_client", lambda: _FakeJwkClient())
+    key = security.authenticate_bearer(token)
+    assert key.name == "hong" and key.is_admin is True
+    assert called, "외부 발급자 토큰인데 JWKS를 조회하지 않았다"
+
+
+def test_forged_kid_does_not_bypass_signature_check(monkeypatch, fresh_settings, tmp_path):
+    """kid는 서명 전 헤더라 위조할 수 있다 — 우리 kid를 달고 와도 서명이 우리 키가
+    아니면 반드시 떨어져야 한다(키 선택에만 쓰고 신뢰하지는 않는다)."""
+    import time
+
+    import jwt as pyjwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "https://paas.test")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH", str(tmp_path / "k.pem"))
+    get_settings.cache_clear()
+    monkeypatch.setenv("PAAS_OIDC_ISSUER", oidc_provider.issuer())
+    get_settings.cache_clear()
+
+    attacker_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    forged = pyjwt.encode({
+        "iss": oidc_provider.issuer(), "sub": "evil@cho-fam.com",
+        "preferred_username": "evil@cho-fam.com", "exp": int(time.time()) + 3600,
+        "realm_access": {"roles": ["paas-admin"]},
+    }, attacker_key, algorithm="RS256", headers={"kid": oidc_provider.key_id()})
+
+    with pytest.raises(HTTPException) as exc:
+        security.authenticate_bearer(forged)
+    assert exc.value.status_code == 401
 
 
 def test_provider_disabled_by_default(fresh_settings):
