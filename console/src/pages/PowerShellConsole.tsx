@@ -90,7 +90,7 @@ export default function PowerShellConsole() {
     setLogs([
       'Windows PowerShell Admin Interactive Console [Version 10.0.19045]',
       'Copyright (C) Microsoft Corporation. All rights reserved.',
-      'Administrator privileges verified via PaaS Control Plane.',
+      'Administrator privileges verified via house Control Plane.',
       'Console session active (Standalone Mode Enabled).\n',
     ]);
     setTimeout(() => inputRef.current?.focus(), 50);

@@ -15,8 +15,10 @@ Tier = Literal["small", "enterprise"]
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PAAS_", env_file=".env", extra="ignore")
 
-    # PaaS 명칭 (환경변수: PAAS_PLATFORM_NAME)
-    platform_name: str = "chofam cloud platform"
+    # 플랫폼 명칭 — 콘솔 헤더·로그인 화면·API 문서 제목에 그대로 노출된다.
+    # (환경변수: PAAS_PLATFORM_NAME. URL prefix(/paas)와 환경변수 접두사(PAAS_)는
+    #  배포된 리버스프록시 설정·등록된 웹훅 주소가 걸려 있어 명칭과 별개로 유지한다.)
+    platform_name: str = "house"
 
     # 허용할 계정 이메일 도메인 (환경변수: PAAS_ALLOWED_EMAIL_DOMAIN, 기본값: cho-fam.com)
     allowed_email_domain: str = "cho-fam.com"
@@ -37,6 +39,25 @@ class Settings(BaseSettings):
     oidc_audience: str = ""  # 비우면 audience 검증 생략
     oidc_jwks_url: str = ""  # 비우면 {issuer}/protocol/openid-connect/certs (Keycloak 규약)
     oidc_admin_role: str = "paas-admin"  # realm_access.roles에 이 롤이 있으면 admin
+
+    # --- OIDC Provider (paas 자신이 발급자가 되는 경량 SSO — Keycloak 없이 직접 구현) ---
+    # true면 paas가 /paas/.well-known/openid-configuration 등 OIDC Provider 엔드포인트를
+    # 노출한다(services/oidc_provider.py). Gitea 등 외부 서비스가 이 엔드포인트로 SSO를
+    # 걸면 paas의 UserAccount 계정 그 자체가 로그인 ID가 된다 — 별도 IdP(Keycloak 등)
+    # 없이도 SSO가 성립한다. 켤 때는 oidc_issuer도 paas 자신의 주소로 맞출 것(예:
+    # https://paas.example.com/paas) — 그러면 위 authenticate_bearer 검증 로직이
+    # 우리가 발급한 토큰을 그대로 검증한다(코드 변경 없음).
+    oidc_provider_enabled: bool = False
+    # RSA 서명 키(PEM) 경로 — 없으면 최초 기동 시 새로 만들어 저장한다. 재시작 후에도
+    # 같은 키를 써야 이미 나눠준 JWKS 공개키를 신뢰하는 클라이언트(Gitea 등)가 계속
+    # 동작한다 — 지우거나 옮기면 그 순간부터 기존 토큰 검증이 깨진다.
+    oidc_provider_signing_key_path: Path = Path("./data/oidc-signing-key.pem")
+    # 등록된 클라이언트(JSON 객체): {"gitea": {"secret": "...", "redirect_uris": ["https://.../callback"]}}
+    # Keycloak처럼 클라이언트를 UI로 동적 등록하는 기능은 없다 — 이 값에 직접 추가한다.
+    oidc_provider_clients: str = "{}"
+    # 미로그인 사용자를 이 URL로 보낸다(콘솔 로그인 화면). 비우면 platform_public_url
+    # 기준으로 자동 계산(/console/#/login).
+    oidc_provider_login_url: str = ""
 
     # --- 배포 작업 큐 ---
     deploy_workers: int = 2

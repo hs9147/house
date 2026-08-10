@@ -187,6 +187,22 @@ class UserSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class OidcAuthCode(Base):
+    """paas 자체 OIDC Provider(services/oidc_provider.py)의 인증 코드 — 1회용, 60초만
+    산다. UserSession과 같은 이유로 코드 원문 대신 해시만 저장한다."""
+
+    __tablename__ = "oidc_auth_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sha256 hex
+    client_id: Mapped[str] = mapped_column(String(128))
+    email: Mapped[str] = mapped_column(String(255))
+    redirect_uri: Mapped[str] = mapped_column(String(512))
+    nonce: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class LlmProviderKind(str, enum.Enum):
     openai = "openai"        # OpenAI Official API (GPT-4o, o1 등)
     anthropic = "anthropic"  # Anthropic Official API (Claude 3.5 Sonnet 등)

@@ -396,6 +396,16 @@ npm run build        # tsc 타입체크 + vite build → dist/
   이어지지 않는다(`app/services/deployer.py`의 `deploy_composite_sync` 참고).
 - **OIDC/RBAC (Keycloak 호환)**: `PAAS_OIDC_ISSUER` 설정 시 `Authorization: Bearer <JWT>`
   인증 병행. `realm_access.roles`에 `PAAS_OIDC_ADMIN_ROLE`(기본 paas-admin)이 있으면 admin.
+- **내장 OIDC Provider (SSO 허브 — 별도 IdP 불필요)**: `PAAS_OIDC_PROVIDER_ENABLED=true`면
+  플랫폼 자신이 OIDC 발급자가 된다(`app/services/oidc_provider.py`, Authorization Code
+  플로우). 플랫폼의 **로그인 계정 그 자체**가 SSO ID이므로 Gitea 등 사내 서비스에 계정을
+  이중으로 두지 않아도 되고, Keycloak 같은 서버를 따로 세울 필요도 없다 — 콘솔에 로그인해
+  둔 브라우저로 Gitea를 열면 로그인 화면 없이 통과한다(연동 절차는
+  [infra/gitea/README.md](infra/gitea/README.md)). 발급하는 토큰의 클레임 모양이 위
+  Keycloak 경로와 같아서, `PAAS_OIDC_ISSUER`를 자기 자신으로 두면 같은 검증 코드가
+  그대로 쓰인다. 옵트인이며(기본 꺼짐) 서명 키는
+  `PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH`(기본 `./data/oidc-signing-key.pem`)에 자동
+  생성·재사용된다 — **이 파일은 백업 대상**(지우면 기존 토큰이 전부 무효).
 - **계정 비밀번호와 세션**: 사람 계정(`user_accounts`)의 비밀번호는 **솔트 + scrypt**로만
   저장한다(표준 라이브러리라 폐쇄망에 의존성을 늘리지 않는다). 기계용 API 키(`api_keys`)는
   `issue_key()`가 만드는 256비트 난수라 sha256으로 충분해 그대로 둔다 — 추측 가능한

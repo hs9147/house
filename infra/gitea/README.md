@@ -189,42 +189,76 @@ DB를 Postgres로 교체하려면 deployment.yaml 주석의 `GITEA__database__*`
 1. `https://git.example.com`(또는 위 서브패스 주소) 접속 → 설치 마법사에서 관리자 계정 생성
 2. Site Administration → Configuration → **"Enable registration"이 꺼져 있는지 확인**
    (compose/K8s 모두 `DISABLE_REGISTRATION=true` 기본값 — 계정은 관리자가 초대)
-3. **Keycloak SSO 연동** — 플랫폼의 `PAAS_OIDC_ISSUER`와 동일 Realm을 재사용해
-   Gitea 로그인을 그 Realm의 계정("paas ID")으로 통일한다. Keycloak이 이미 떠 있다는
-   전제(이 문서는 Keycloak 자체 설치를 다루지 않는다 — 플랫폼의 `PAAS_OIDC_ISSUER`가
-   가리키는 그 인스턴스를 그대로 쓴다).
+3. **SSO 연동 — 플랫폼 계정으로 Gitea 로그인** (아래 A 권장)
 
-   **a) Keycloak 쪽에 Gitea용 클라이언트 등록** (Keycloak 콘솔 → 해당 Realm → Clients → Create):
-   - Client ID: `gitea` (아래 `--key`와 일치시킬 것)
-   - Valid redirect URI: `https://<gitea 외부 주소>/user/oauth2/keycloak/callback`
-     (서브패스라면 `https://paas.example.com/gitea/user/oauth2/keycloak/callback` —
-     `--name keycloak`으로 등록할 것이므로 콜백 경로의 `keycloak` 부분은 `--name`과
-     반드시 일치해야 한다)
-   - Client authentication: On (confidential client) → 생성 후 Credentials 탭에서 secret 확인
+### A. 플랫폼 자신을 IdP로 (권장 — 별도 SSO 서버 불필요)
 
-   **b) Gitea에 OAuth2 소스 등록**:
-   ```bash
-   gitea admin auth add-oauth \
-     --name keycloak --provider openidConnect \
-     --key <위에서 만든 client id> --secret <client secret> \
-     --auto-discover-url "${PAAS_OIDC_ISSUER}/.well-known/openid-configuration"
-   ```
+플랫폼이 최소 OIDC Provider를 내장하고 있다(`app/services/oidc_provider.py`). 켜면
+플랫폼의 **로그인 계정(UserAccount) 그 자체**가 Gitea 로그인 ID가 된다 — Keycloak 같은
+별도 IdP를 세우고 계정을 두 곳에 유지할 필요가 없다. 콘솔에 로그인해 둔 브라우저로
+Gitea를 열면 로그인 화면 없이 그대로 통과한다(세션 쿠키를 재사용).
 
-   **c) 새 사용자를 관리자가 매번 미리 만들지 않도록 자동 계정 생성 허용** — 그래야
-   Keycloak(=paas ID)으로 처음 로그인하는 사람도 Gitea 쪽 계정을 관리자가 미리
-   만들어 둘 필요가 없다(`DISABLE_REGISTRATION=true`는 **로컬** 가입 폼만 막고
-   이 값에는 영향을 주지 않는다):
-   ```
-   GITEA__oauth2_client__ENABLE_AUTO_REGISTRATION=true
-   GITEA__oauth2_client__USERNAME=email
-   GITEA__oauth2_client__ACCOUNT_LINKING=auto
-   ```
-   (docker-compose는 `environment:` 블록에, 네이티브 Windows는 nssm
-   `AppEnvironmentExtra`에 위 서브패스 예시처럼 이어붙여 추가하고 `nssm restart gitea`.)
+**a) 클라이언트 시크릿을 하나 만든다** (아무 난수나 — 이 값을 양쪽에 똑같이 넣는다):
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
 
-   콘솔(paas 자체 로그인)은 아직 이 Realm으로 전환되지 않았다 — 현재는 API를 Bearer
-   JWT로 호출할 때만(`PAAS_OIDC_ISSUER` 검증, `app/security.py`) 같은 Realm을 인식한다.
-   콘솔 로그인 화면 자체를 Keycloak 리다이렉트로 바꾸는 것은 별도 작업이다.
+**b) 플랫폼 `.env`에 Provider를 켠다**:
+```bash
+PAAS_OIDC_PROVIDER_ENABLED=true
+# 플랫폼 자신의 공개 주소 — 발급하는 토큰의 iss와 디스커버리 문서의 기준이 된다.
+PAAS_PLATFORM_PUBLIC_URL=https://paas.example.com
+# redirect_uris는 Gitea의 콜백 주소. 경로 끝의 "paas"는 아래 --name과 반드시 일치해야 한다.
+PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<a에서 만든 값>","redirect_uris":["https://git.example.com/user/oauth2/paas/callback"]}}
+# 플랫폼 자신이 발급한 토큰을 플랫폼 API에서도 받으려면(선택) issuer를 자기 자신으로:
+PAAS_OIDC_ISSUER=https://paas.example.com/paas
+```
+> Gitea를 서브패스로 뒀다면 redirect_uris도 그 주소로:
+> `https://paas.example.com/gitea/user/oauth2/paas/callback`
+
+**c) Gitea에 OAuth2 소스로 등록** — 디스커버리 URL이 플랫폼 자신을 가리킨다:
+```bash
+gitea admin auth add-oauth \
+  --name paas --provider openidConnect \
+  --key gitea --secret "<a에서 만든 값>" \
+  --auto-discover-url "https://paas.example.com/paas/.well-known/openid-configuration"
+```
+(`--name paas`의 값이 b)의 redirect_uris 경로 `/user/oauth2/<name>/callback`과 같아야 한다.)
+
+**d) 자동 계정 생성 허용** — 아래 [공통 설정](#c-공통-자동-계정-생성-설정) 참고.
+
+플랫폼이 노출하는 엔드포인트(설정 확인용):
+`/paas/.well-known/openid-configuration`, `/paas/oauth2/authorize`,
+`/paas/oauth2/token`, `/paas/oauth2/jwks`, `/paas/oauth2/userinfo`.
+
+> 서명 키는 `PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH`(기본 `./data/oidc-signing-key.pem`)에
+> 최초 기동 시 자동 생성돼 계속 재사용된다. **이 파일을 지우거나 옮기면 그 순간부터
+> 기존에 발급된 토큰이 전부 검증에 실패한다** — 백업 대상에 포함할 것.
+
+### B. 외부 Keycloak을 쓰는 경우 (대안)
+
+이미 사내에 Keycloak이 있고 그쪽을 SSO 허브로 삼는다면, 위와 형태는 같고 발급자만
+Keycloak이다. Keycloak 콘솔 → 해당 Realm → Clients → Create로 `gitea` 클라이언트를
+만들고(Client authentication: On, Valid redirect URI는 위와 같은 콜백 주소), 그 secret으로:
+```bash
+gitea admin auth add-oauth \
+  --name keycloak --provider openidConnect \
+  --key <gitea client id> --secret <client secret> \
+  --auto-discover-url "${PAAS_OIDC_ISSUER}/.well-known/openid-configuration"
+```
+(Keycloak 자체 설치는 이 문서의 범위 밖.)
+
+### C. 공통 — 자동 계정 생성 설정
+
+새로 SSO로 들어오는 사람의 Gitea 계정을 관리자가 매번 미리 만들지 않아도 되게 한다
+(`DISABLE_REGISTRATION=true`는 **로컬** 가입 폼만 막고 이 값에는 영향을 주지 않는다):
+```
+GITEA__oauth2_client__ENABLE_AUTO_REGISTRATION=true
+GITEA__oauth2_client__USERNAME=email
+GITEA__oauth2_client__ACCOUNT_LINKING=auto
+```
+(docker-compose는 `environment:` 블록에, 네이티브 Windows는 nssm `AppEnvironmentExtra`에
+위 서브패스 예시처럼 이어붙여 추가하고 `nssm restart gitea`.)
 
 ## 플랫폼과 연결
 
