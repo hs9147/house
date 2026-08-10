@@ -212,6 +212,63 @@ def test_userinfo_rejects_missing_bearer(provider_client):
     assert provider_client.get("/paas/oauth2/userinfo").status_code == 401
 
 
+@pytest.fixture
+def split_channel_client(monkeypatch, fresh_settings, tmp_path):
+    """공개 도메인의 binding이 이 플랫폼을 안 가리켜 https://공개도메인/paas 로는 못
+    들어오는 구성 — 백채널만 사내 주소(평문 http)로 뺀다."""
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "https://public.example.com")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "http://10.0.0.5:7000/paas")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH", str(tmp_path / "k.pem"))
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_CLIENTS", json.dumps({
+        CLIENT_ID: {"secret": CLIENT_SECRET, "redirect_uris": [REDIRECT_URI]},
+    }))
+    get_settings.cache_clear()
+    return TestClient(create_app())
+
+
+def test_backchannel_url_splits_server_calls_from_browser_calls(split_channel_client):
+    """issuer·token·jwks는 사내 주소(클라이언트가 서버에서 부름 — TLS 자체를 안 탄다),
+    authorization_endpoint는 공개 주소(브라우저가 연다). 클라이언트(go-oidc 등)는
+    discovery URL과 issuer가 같은지만 확인하므로 이 분리가 규약상 문제없다."""
+    body = split_channel_client.get("/paas/.well-known/openid-configuration").json()
+    assert body["issuer"] == "http://10.0.0.5:7000/paas"
+    assert body["token_endpoint"] == "http://10.0.0.5:7000/paas/oauth2/token"
+    assert body["jwks_uri"] == "http://10.0.0.5:7000/paas/oauth2/jwks"
+    # 브라우저가 가는 곳만 공개 주소여야 한다 — 사내 주소로 보내면 사용자가 못 연다.
+    assert body["authorization_endpoint"] == "https://public.example.com/paas/oauth2/authorize"
+
+
+def test_split_channel_tokens_carry_the_backchannel_issuer(split_channel_client):
+    """발급 토큰의 iss는 백채널 issuer여야 한다 — 클라이언트는 자기가 아는 provider
+    issuer와 토큰의 iss가 같은지 확인하므로, 여기가 어긋나면 로그인이 거부된다."""
+    # platform_public_url이 https라 로그인 쿠키가 secure로 발급된다(운영에서 옳은 동작).
+    # TestClient는 http로 요청하므로 그 쿠키를 자동 보관하지 않는다 — 값을 직접 심는다.
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        db.add(UserAccount(
+            email="alice@cho-fam.com", name="Alice",
+            password_hash=hash_password("hunter22"), is_approved=True, is_admin=False,
+        ))
+        db.commit()
+    finally:
+        db.close()
+    session_token = split_channel_client.post(
+        "/paas/api/v1/auth/login",
+        json={"email": "alice@cho-fam.com", "password": "hunter22"},
+    ).json()["key"]
+    split_channel_client.cookies.set("paas_session", session_token)
+
+    code = _get_code(split_channel_client)
+    token = split_channel_client.post("/paas/oauth2/token", data={
+        "grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT_URI,
+        "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
+    }).json()["id_token"]
+    assert oidc_provider.decode_id_token(token)["iss"] == "http://10.0.0.5:7000/paas"
+
+
 def test_issuer_requires_an_absolute_url(monkeypatch, fresh_settings):
     """발급자 주소가 없으면 상대 경로("/paas")가 섞인 잘못된 디스커버리 문서를 내주는
     대신 분명히 실패해야 한다 — 그걸 받은 Gitea 쪽 오류는 원인 파악이 훨씬 어렵다."""

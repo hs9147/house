@@ -59,6 +59,17 @@ class Settings(BaseSettings):
     # 미로그인 사용자를 이 URL로 보낸다(콘솔 로그인 화면). 비우면 platform_public_url
     # 기준으로 자동 계산(/console/#/login).
     oidc_provider_login_url: str = ""
+    # 백채널(서버→서버) 전용 주소. Gitea 같은 클라이언트가 discovery·token·jwks를
+    # 부를 때 쓰는 주소로, 브라우저가 가는 주소와 달라도 된다.
+    #
+    # 공개 도메인의 binding이 이 플랫폼을 가리키지 않아 https://공개도메인/paas 로는
+    # 들어올 수 없는 구성에서 쓴다 — 클라이언트가 사내에서 직접 닿는 주소(예:
+    # http://10.0.0.5:7000/paas)를 넣으면 TLS 자체를 안 타므로 인증서 불일치가 사라진다.
+    # 이 값이 issuer가 되고(클라이언트는 discovery URL과 issuer가 같은지만 확인한다),
+    # 브라우저가 가는 authorization_endpoint·로그인 화면은 계속 platform_public_url을
+    # 쓴다 — 이 둘이 달라도 되는 건 OIDC 규약이 보장한다.
+    # 비우면(기본) 백채널도 브라우저와 같은 주소를 쓴다.
+    oidc_provider_backchannel_url: str = ""
 
     # --- 배포 작업 큐 ---
     deploy_workers: int = 2

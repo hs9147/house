@@ -101,7 +101,9 @@ def issuer() -> str:
     """
     settings = get_settings()
     base = (
-        settings.oidc_issuer.rstrip("/")
+        settings.oidc_provider_backchannel_url.rstrip("/")
+        if settings.oidc_provider_backchannel_url
+        else settings.oidc_issuer.rstrip("/")
         if settings.oidc_issuer
         else f"{settings.platform_public_url.rstrip('/')}/paas"
         if settings.platform_public_url
@@ -118,11 +120,28 @@ def issuer() -> str:
     return base
 
 
+def browser_base() -> str:
+    """브라우저가 실제로 가는 주소의 베이스.
+
+    백채널(discovery·token·jwks)과 달라도 된다 — 클라이언트(go-oidc 등)는 discovery
+    문서의 issuer가 자기가 조회한 URL과 같은지만 확인하고, authorization_endpoint가
+    같은 호스트인지는 보지 않는다. 공개 도메인으로 /paas가 안 들어오는 구성에서
+    백채널만 사내 주소로 빼는 것이 이 분리의 목적이다(oidc_provider_backchannel_url).
+    """
+    settings = get_settings()
+    if settings.oidc_provider_backchannel_url and settings.platform_public_url:
+        return f"{settings.platform_public_url.rstrip('/')}/paas"
+    return issuer()
+
+
 def discovery_document() -> dict:
     iss = issuer()
+    # authorization_endpoint만 브라우저가 직접 연다 — 나머지(token·jwks·userinfo)는
+    # 클라이언트가 서버에서 부르는 백채널이라 issuer와 같은 주소를 쓴다.
+    browser = browser_base()
     return {
         "issuer": iss,
-        "authorization_endpoint": f"{iss}/oauth2/authorize",
+        "authorization_endpoint": f"{browser}/oauth2/authorize",
         "token_endpoint": f"{iss}/oauth2/token",
         "userinfo_endpoint": f"{iss}/oauth2/userinfo",
         "jwks_uri": f"{iss}/oauth2/jwks",

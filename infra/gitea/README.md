@@ -289,6 +289,44 @@ curl -s https://<공개도메인>/paas/.well-known/openid-configuration | grep -
 인증서에 이름을 추가할 수 있는 상황이면(사내 CA 등) 반대로 B를 SAN에 넣어 재발급해도
 된다 — 그 경우 위 1·2의 URL은 B로 통일한다.
 
+##### 공개 도메인으로 아예 `/paas`가 안 들어오는 경우
+
+공개 도메인의 binding이 이 플랫폼을 가리키지 않아(다른 사이트가 물고 있거나 그 경로
+규칙이 없어) `https://<공개도메인>/paas`로 애초에 도달할 수 없다면, 위 방법들은 쓸 수
+없다. **원칙적인 해법은 그 도메인에 `/paas` 라우팅을 추가하는 것**이고(아래 참고),
+그게 불가능하면 백채널만 분리한다.
+
+Gitea가 서버에서 부르는 호출(discovery·token·jwks)과 브라우저가 여는 화면
+(authorization_endpoint)은 **같은 주소일 필요가 없다** — 클라이언트(go-oidc)는
+디스커버리 문서의 `issuer`가 자기가 조회한 URL과 같은지만 확인하고,
+`authorization_endpoint`가 같은 호스트인지는 보지 않는다
+([go-oidc#159](https://github.com/coreos/go-oidc/issues/159)). 그래서 서버 호출만
+사내 주소(평문 http)로 빼면 **TLS 자체를 안 타므로 인증서 문제가 사라진다**:
+
+```bash
+# 플랫폼 .env
+PAAS_PLATFORM_PUBLIC_URL=https://public.example.com        # 브라우저가 가는 주소(그대로)
+PAAS_OIDC_PROVIDER_BACKCHANNEL_URL=http://10.0.0.5:7000/paas   # Gitea가 서버에서 닿는 주소
+```
+```bash
+# Gitea 인증 소스도 그 사내 주소로 등록한다(issuer와 같아야 하므로)
+gitea admin auth add-oauth \
+  --name paas --provider openidConnect \
+  --key gitea --secret "<시크릿>" \
+  --auto-discover-url "http://10.0.0.5:7000/paas/.well-known/openid-configuration"
+```
+결과: `issuer`·`token_endpoint`·`jwks_uri`는 사내 주소, `authorization_endpoint`만
+공개 주소가 된다. 사용자는 평소처럼 공개 도메인에서 로그인하고, Gitea는 인증서 없이
+사내로 토큰을 받아 간다.
+
+> 평문 http를 쓰므로 **그 구간이 신뢰할 수 있는 사내망이어야 한다**(같은 호스트나 같은
+> 서브넷). 인터넷을 지나는 경로라면 쓰지 말 것 — 이 구간에는 인가 코드와 토큰이 흐른다.
+
+**참고 — 라우팅을 추가하는 쪽(권장).** 공개 도메인 사이트에 `/paas` 경로 규칙 하나를
+더하면 위 우회가 필요 없다. Caddy는 [서브패스 절](#서브패스단일-포트로-노출하는-경우)의
+`handle`과 같은 방식이고, IIS/ARR이면 그 사이트의 URL Rewrite에 `/paas/*`를
+`http://127.0.0.1:7000/paas/{R:1}`로 보내는 규칙을 추가한다(경로를 벗기지 말 것).
+
 > 플랫폼 **자신**은 이 문제를 겪지 않는다. 자기가 발급한 토큰은 로컬 개인키로 바로
 > 검증하고 JWKS를 HTTP로 가져오지 않는다(`app/security.py`의 `_verification_key`) —
 > `PAAS_OIDC_JWKS_URL`을 따로 설정할 필요도 없다.
