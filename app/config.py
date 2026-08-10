@@ -44,9 +44,10 @@ class Settings(BaseSettings):
     # true면 paas가 /paas/.well-known/openid-configuration 등 OIDC Provider 엔드포인트를
     # 노출한다(services/oidc_provider.py). Gitea 등 외부 서비스가 이 엔드포인트로 SSO를
     # 걸면 paas의 UserAccount 계정 그 자체가 로그인 ID가 된다 — 별도 IdP(Keycloak 등)
-    # 없이도 SSO가 성립한다. 켤 때는 oidc_issuer도 paas 자신의 주소로 맞출 것(예:
-    # https://paas.example.com/paas) — 그러면 위 authenticate_bearer 검증 로직이
-    # 우리가 발급한 토큰을 그대로 검증한다(코드 변경 없음).
+    # 없이도 SSO가 성립한다. 켤 때는 oidc_issuer도 이 플랫폼 자신의 주소로 맞출 것(예:
+    # https://paas.example.com/paas) — 그러면 위 authenticate_bearer가 우리 토큰도
+    # 받는다. 이때 JWKS는 HTTP로 가져오지 않고 로컬 개인키로 바로 검증하므로
+    # oidc_jwks_url을 따로 설정할 필요가 없다(security._verification_key 참고).
     oidc_provider_enabled: bool = False
     # RSA 서명 키(PEM) 경로 — 없으면 최초 기동 시 새로 만들어 저장한다. 재시작 후에도
     # 같은 키를 써야 이미 나눠준 JWKS 공개키를 신뢰하는 클라이언트(Gitea 등)가 계속

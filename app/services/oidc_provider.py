@@ -230,13 +230,22 @@ def exchange_client_credentials(client_id: str, client_secret: str) -> None:
         raise OidcProviderError("invalid client credentials")
 
 
-def decode_id_token(token: str) -> dict:
-    """우리가 발급한 토큰 검증(userinfo 등에서 씀) — 외부 issuer용인 authenticate_bearer와
-    달리 JWKS를 네트워크로 가져올 필요 없이 우리 공개키로 바로 검증한다."""
-    pub_pem = _get_signing_key().public_key().public_bytes(
+def public_key_pem() -> bytes:
+    """서명 공개키(PEM) — 우리가 발급한 토큰을 검증할 때 쓴다.
+
+    이게 있으면 JWKS를 HTTP로 가져올 필요가 없다. 자기 자신에게 HTTPS로 붙는 경로는
+    공개 호스트명과 서버 인증서가 어긋나거나(사설 CA·자체 서명·내부 DNS) 워커가
+    자기 요청 처리 중에 자기를 다시 호출하게 되는 문제가 있어 애초에 피한다."""
+    return _get_signing_key().public_key().public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
+
+
+def decode_id_token(token: str) -> dict:
+    """우리가 발급한 토큰 검증(userinfo 등에서 씀) — 외부 issuer용인 authenticate_bearer와
+    달리 JWKS를 네트워크로 가져올 필요 없이 우리 공개키로 바로 검증한다."""
+    pub_pem = public_key_pem()
     try:
         return jwt.decode(
             token, pub_pem, algorithms=["RS256"], issuer=issuer(),

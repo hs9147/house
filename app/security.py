@@ -138,6 +138,35 @@ def _get_jwk_client():
     return _jwk_client
 
 
+def _issued_by_our_own_provider() -> bool:
+    """oidc_issuer가 이 프로세스의 내장 OIDC Provider를 가리키는지."""
+    settings = get_settings()
+    if not settings.oidc_provider_enabled or not settings.oidc_issuer:
+        return False
+    from .services import oidc_provider  # noqa: PLC0415 — 순환 import 회피
+
+    return settings.oidc_issuer.rstrip("/") == oidc_provider.issuer().rstrip("/")
+
+
+def _verification_key(token: str):
+    """토큰 서명을 검증할 키.
+
+    발급자가 우리 자신이면 개인키가 이미 디스크에 있으므로 그 공개키를 바로 쓴다 —
+    JWKS를 HTTP로 가져오지 않는다. 자기 자신을 공개 주소로 다시 호출하면:
+      - 그 주소의 서버 인증서가 안 맞으면(사설 CA·자체 서명·내부 DNS로 다른 호스트에
+        연결) TLS 검증에서 실패한다 — "인증서가 일치하지 않는다"는 그 오류다.
+      - 기본 JWKS 경로가 Keycloak 규약(/protocol/openid-connect/certs)이라 우리
+        엔드포인트(/oauth2/jwks)와 달라 404가 난다.
+      - 워커가 자기 요청을 처리하는 도중 자기에게 동기 HTTP 호출을 건다.
+    외부 발급자(Keycloak 등)일 때만 기존대로 JWKS를 조회한다.
+    """
+    if _issued_by_our_own_provider():
+        from .services import oidc_provider  # noqa: PLC0415
+
+        return oidc_provider.public_key_pem()
+    return _get_jwk_client().get_signing_key_from_jwt(token).key
+
+
 def validate_email_domain(email: str) -> bool:
     """PAAS_ALLOWED_EMAIL_DOMAIN 환경변수(기본값: cho-fam.com) 기준 이메일 도메인 검증."""
     allowed = get_settings().allowed_email_domain.strip().lower().lstrip("@")
@@ -157,11 +186,11 @@ def authenticate_bearer(token: str) -> ApiKey:
     if not settings.oidc_issuer:
         raise HTTPException(status_code=401, detail="OIDC not configured")
     try:
-        signing_key = _get_jwk_client().get_signing_key_from_jwt(token)
+        key = _verification_key(token)
         options = {"verify_aud": bool(settings.oidc_audience)}
         payload = jwt.decode(
             token,
-            signing_key.key,
+            key,
             algorithms=["RS256"],
             issuer=settings.oidc_issuer,
             audience=settings.oidc_audience or None,

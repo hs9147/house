@@ -219,9 +219,15 @@ def test_provider_disabled_by_default(fresh_settings):
     assert c.get("/paas/.well-known/openid-configuration").status_code == 404
 
 
-def test_self_issued_token_is_accepted_by_authenticate_bearer(provider_client, monkeypatch):
-    """핵심 통합 지점 — oidc_issuer를 paas 자신으로 맞추면, 기존(Keycloak용) 검증
-    코드가 우리가 발급한 토큰을 코드 변경 없이 그대로 받아들여야 한다."""
+def test_self_issued_token_is_verified_locally_without_fetching_jwks(provider_client, monkeypatch):
+    """핵심 통합 지점 — oidc_issuer를 플랫폼 자신으로 맞추면 기존(Keycloak용) 검증
+    코드가 우리 토큰을 그대로 받아들여야 하고, 그때 JWKS를 **네트워크로 가져오면 안 된다**.
+
+    회귀: 자기 자신을 공개 주소로 다시 호출하면 (1) 그 주소의 서버 인증서가 안 맞을 때
+    TLS 검증에서 실패하고("oidc url과 서버 인증서가 일치하지 않는 오류"), (2) 기본 JWKS
+    경로가 Keycloak 규약이라 우리 엔드포인트와 달라 404가 나며, (3) 워커가 자기 요청
+    처리 도중 자기를 동기 호출하게 된다. 개인키가 이미 로컬에 있으니 그럴 이유가 없다.
+    """
     _register_and_login(provider_client, is_admin=True)
     code = _get_code(provider_client)
     id_token = provider_client.post("/paas/oauth2/token", data={
@@ -232,14 +238,43 @@ def test_self_issued_token_is_accepted_by_authenticate_bearer(provider_client, m
     monkeypatch.setenv("PAAS_OIDC_ISSUER", oidc_provider.issuer())
     get_settings.cache_clear()
 
-    class _FakeSigningKey:
-        key = oidc_provider._get_signing_key().public_key()
+    # JWKS 조회를 시도하기만 해도 실패하게 만든다 — 로컬 키로만 검증해야 통과한다.
+    def _must_not_fetch():
+        raise AssertionError("자체 발급 토큰인데 JWKS를 네트워크로 가져오려 했다")
+    monkeypatch.setattr(security, "_get_jwk_client", _must_not_fetch)
 
-    class _FakeJwkClient:
-        def get_signing_key_from_jwt(self, token):
-            return _FakeSigningKey()
-
-    monkeypatch.setattr(security, "_jwk_client", _FakeJwkClient())
     key = security.authenticate_bearer(id_token)
     assert key.name == "alice@cho-fam.com"
     assert key.is_admin is True
+
+
+def test_external_issuer_still_uses_jwks(monkeypatch, fresh_settings):
+    """반대편 — 발급자가 외부(Keycloak 등)면 예전처럼 JWKS를 조회해야 한다.
+    위 최적화가 외부 IdP 경로까지 잘라먹지 않았는지 확인한다."""
+    import time
+
+    import jwt as pyjwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    external_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    issuer = "https://sso.external.test/realms/company"
+    monkeypatch.setenv("PAAS_OIDC_ISSUER", issuer)
+    monkeypatch.delenv("PAAS_OIDC_PROVIDER_ENABLED", raising=False)
+    get_settings.cache_clear()
+
+    token = pyjwt.encode({
+        "iss": issuer, "sub": "u1", "preferred_username": "hong",
+        "exp": int(time.time()) + 3600, "realm_access": {"roles": ["paas-admin"]},
+    }, external_key, algorithm="RS256")
+
+    called = []
+
+    class _FakeJwkClient:
+        def get_signing_key_from_jwt(self, tok):
+            called.append(tok)
+            return type("K", (), {"key": external_key.public_key()})()
+
+    monkeypatch.setattr(security, "_get_jwk_client", lambda: _FakeJwkClient())
+    key = security.authenticate_bearer(token)
+    assert key.name == "hong" and key.is_admin is True
+    assert called, "외부 발급자인데 JWKS를 조회하지 않았다"

@@ -210,7 +210,8 @@ PAAS_OIDC_PROVIDER_ENABLED=true
 PAAS_PLATFORM_PUBLIC_URL=https://paas.example.com
 # redirect_uris는 Gitea의 콜백 주소. 경로 끝의 "paas"는 아래 --name과 반드시 일치해야 한다.
 PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<a에서 만든 값>","redirect_uris":["https://git.example.com/user/oauth2/paas/callback"]}}
-# 플랫폼 자신이 발급한 토큰을 플랫폼 API에서도 받으려면(선택) issuer를 자기 자신으로:
+# 플랫폼 자신이 발급한 토큰을 플랫폼 API에서도 받으려면(선택) issuer를 자기 자신으로.
+# 이 경우 JWKS는 로컬 개인키로 바로 검증하므로 PAAS_OIDC_JWKS_URL은 설정하지 않는다.
 PAAS_OIDC_ISSUER=https://paas.example.com/paas
 ```
 > Gitea를 서브패스로 뒀다면 redirect_uris도 그 주소로:
@@ -234,6 +235,33 @@ gitea admin auth add-oauth \
 > 서명 키는 `PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH`(기본 `./data/oidc-signing-key.pem`)에
 > 최초 기동 시 자동 생성돼 계속 재사용된다. **이 파일을 지우거나 옮기면 그 순간부터
 > 기존에 발급된 토큰이 전부 검증에 실패한다** — 백업 대상에 포함할 것.
+
+#### "인증서가 일치하지 않는다" 오류가 날 때
+
+Gitea는 `add-oauth`로 인증 소스를 **만드는 시점에** 디스커버리 URL의 TLS 인증서를
+검증하고, 실패하면 소스 자체가 만들어지지 않는다(`x509: certificate signed by unknown
+authority` / hostname mismatch). Gitea에는 이 검증을 끄는 옵션이 없다
+([go-gitea#17867](https://github.com/go-gitea/gitea/issues/17867)) — 인증서 쪽을 맞춰야 한다.
+
+먼저 어느 이름이 안 맞는지부터 확인한다(Gitea가 도는 호스트에서 실행):
+```bash
+curl -v https://paas.example.com/paas/.well-known/openid-configuration 2>&1 | grep -Ei "subject|issuer|SAN|CN|verify"
+```
+
+원인별 조치:
+
+| 증상 | 원인 | 조치 |
+| --- | --- | --- |
+| `certificate signed by unknown authority` | 사설 CA·자체 서명 인증서 | 그 CA 인증서를 **Gitea가 도는 호스트**의 신뢰 저장소에 넣는다. Linux: `/usr/local/share/ca-certificates/`에 복사 후 `update-ca-certificates`. Docker: 호스트의 CA 파일을 컨테이너 `/etc/ssl/certs/`에 마운트. Windows: 로컬 컴퓨터 → 신뢰할 수 있는 루트 인증 기관에 가져오기 |
+| hostname mismatch (`certificate is valid for A, not B`) | 디스커버리 URL의 호스트명이 인증서의 CN/SAN과 다름 | `PAAS_PLATFORM_PUBLIC_URL`·`PAAS_OIDC_ISSUER`를 **인증서에 실제로 들어 있는 이름**으로 맞춘다. IP 주소나 내부 호스트명(`paas-internal`)으로 적어두고 인증서는 공개 도메인용인 경우가 대부분이다 |
+| 위 둘 다 아닌데 실패 | 내부 DNS가 그 호스트명을 다른 서버로 보냄 | Gitea 호스트에서 `getent hosts paas.example.com`으로 확인. 필요하면 `/etc/hosts`(또는 Windows `hosts`)에 올바른 IP를 고정 |
+
+주소를 바꿨다면 양쪽을 다시 맞춰야 한다 — `PAAS_OIDC_PROVIDER_CLIENTS`의
+`redirect_uris`와 Gitea 인증 소스의 디스커버리 URL 모두.
+
+> 플랫폼 **자신**은 이 문제를 겪지 않는다. 자기가 발급한 토큰은 로컬 개인키로 바로
+> 검증하고 JWKS를 HTTP로 가져오지 않는다(`app/security.py`의 `_verification_key`) —
+> `PAAS_OIDC_JWKS_URL`을 따로 설정할 필요도 없다.
 
 ### B. 외부 Keycloak을 쓰는 경우 (대안)
 
