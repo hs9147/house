@@ -185,8 +185,12 @@ DB를 Postgres로 교체하려면 deployment.yaml 주석의 `GITEA__database__*`
    }
    ```
    IIS/ARR(`PAAS_PROXY_BACKEND=iis`)를 쓴다면 URL Rewrite 규칙에서도 경로를
-   재작성(rewrite)만 하고 **벗겨내지(strip) 않아야** 동일한 효과를 낸다 —
-   [deployment-guide.md 3.6절](../../../docs/deployment-guide.md)의 ARR 설정 참고.
+   재작성(rewrite)만 하고 **벗겨내지(strip) 않아야** 동일한 효과를 낸다 — 즉 타겟
+   URL에 `/gitea`를 다시 붙인다. 통째로 쓸 수 있는 예시가
+   [`web.config.example`](web.config.example)에 있다(`/gitea`·`/paas`·`/console`
+   규칙 + git push 크기 제한 + 플랫폼 자동 생성과 공존하는 마커 위치).
+   ARR 서버 설정은 web.config가 아니라 appcmd로 켠다 — 그 파일 머리말과
+   [deployment-guide.md 3.6절](../../../docs/deployment-guide.md) 참고.
 
    네이티브 Windows(위 B절)라면 nssm에 ROOT_URL만 서브패스 버전으로 바꿔 넣는다:
    ```powershell
@@ -270,6 +274,79 @@ git config --global credential.https://host.example.com.oauthRedirectUri      ht
 > `oauthRedirectUri`는 `127.0.0.1`을 쓴다(`localhost` 아님). Gitea는 루프백 주소에 한해
 > 포트를 가리지 않는데, 그 처리가 `127.0.0.1`에만 적용된다 — GCM은 매번 임의 포트로
 > 대기하므로 이게 맞아야 콜백이 돌아온다.
+
+#### 승인했는데 `127.0.0.1`로 넘어가지 않는다 (code·state까지만 가고 끊김)
+
+이 흐름에는 `code`·`state`를 나르는 구간이 **두 개** 있다. 어디서 끊겼는지는
+**브라우저가 멈춘 주소**에 그대로 드러나므로 그것부터 본다.
+
+```
+① 플랫폼(IdP) ──code,state──▶ Gitea 콜백        (Gitea에 로그인하는 단계)
+② Gitea(IdP)  ──code,state──▶ 127.0.0.1 (개발자 PC)  (git 자격 증명을 받는 단계)
+```
+
+| 멈춘 주소 | 끊긴 구간 | 원인 |
+| --- | --- | --- |
+| `…/gitea/user/oauth2/paas/callback?code=…&state=…` | ① 끝 | Gitea가 그 code를 플랫폼에 교환하러 갔다가 실패 — **백채널** |
+| 공개 도메인인데 `?code=…&state=…`가 붙어 있음 | ② 중간 | 리버스 프록시가 응답의 `Location`을 고쳐 씀 — **ARR** |
+| Gitea 화면에 오류(`unregistered redirect uri` 등) | ② 시작 전 | redirect URI 불일치 (`localhost` 사용 등) |
+| `http://127.0.0.1:<포트>/…`까지 갔는데 연결 거부 | ② 도착 후 | 브라우저와 GCM이 서로 다른 머신 |
+
+**① 백채널** — 플랫폼 콘솔 로그에 두 줄이 한 쌍으로 찍힌다.
+```
+[paas] OIDC authorize → code 발급: client=gitea user=... redirect_uri=...
+[paas] OIDC token 교환 성공: client=gitea user=...
+```
+앞줄만 있고 뒷줄이 없으면 **Gitea가 플랫폼 토큰 엔드포인트에 아예 닿지 못한 것**이다.
+Gitea가 도는 머신에서 직접 찔러 본다(405/400이면 닿는 것, 연결 거부·타임아웃이면 아니다):
+```powershell
+curl.exe -s -o NUL -w "%{http_code}`n" -X POST http://localhost:7000/paas/oauth2/token
+```
+닿지 않으면 `PAAS_OIDC_PROVIDER_BACKCHANNEL_URL`이 **Gitea 머신 기준** 주소가 아니다 —
+Gitea가 컨테이너면 그 안의 `localhost`는 컨테이너 자신이다(`host.docker.internal` 등).
+`교환 실패` 줄이 찍혔다면 사유가 그 줄에 함께 나온다.
+
+**② ARR의 `Location` 재작성** — "127.0.0.1로 안 넘어간다"의 가장 흔한 원인이다.
+Gitea는 `302 Location: http://127.0.0.1:<포트>/?code=…&state=…`를 **응답으로만** 내려보내는데,
+ARR의 *Reverse rewrite host in response headers*가 켜져 있으면 백엔드 호스트와 같은 이름을
+공개 도메인으로 바꿔치기한다. **백엔드를 `127.0.0.1:3000`으로 잡아 두면 GCM의 콜백 호스트와
+이름이 겹쳐서**, 개발자 PC로 가야 할 리다이렉트가 서버로 되돌아온다 — code·state는 그대로
+붙어 있으니 "전달은 됐는데 목적지가 다르다"로 보인다.
+
+확인 — 프록시를 통과한 것과 Gitea를 직접 부른 것의 `Location`을 비교한다:
+```powershell
+$q = "client_id=e90ee53c-94e2-48ac-9358-a874fb9e0662&redirect_uri=http://127.0.0.1:5000/&response_type=code&state=t"
+curl.exe -s -D - -o NUL "https://paas.example.com/gitea/login/oauth/authorize?$q"   # 프록시 통과
+curl.exe -s -D - -o NUL "http://localhost:3000/login/oauth/authorize?$q"            # Gitea 직접
+```
+직접 호출의 `Location`에는 `127.0.0.1`이 남아 있는데 프록시 쪽만 공개 도메인으로 바뀌었다면
+확정이다. 둘 중 하나로 푼다:
+
+1. **web.config에서 백엔드 주소를 `127.0.0.1` 대신 `localhost`(또는 머신 이름)로 바꾼다** —
+   이름이 안 겹치니 콜백은 건드려지지 않는다. 영향 범위가 가장 좁다.
+   ```xml
+   <action type="Rewrite" url="http://localhost:3000/gitea/{R:1}" />
+   ```
+   단, Windows에서 `localhost`는 `::1`로 먼저 풀린다 — Gitea가 `HTTP_ADDR = 127.0.0.1`로만
+   듣고 있으면 이번엔 502가 난다. 그때는 `HTTP_ADDR`을 비우거나 머신 이름을 쓴다.
+2. 역방향 재작성을 끈다 — Gitea는 이미 `ROOT_URL` 기준의 공개 주소를 스스로 만들어 내보내므로
+   이 기능이 할 일이 없다. **이건 web.config에 못 넣는다** — 서버 레벨
+   (applicationHost.config) 설정이라 사이트 web.config에 적으면 500.19가 난다:
+   ```powershell
+   %windir%\system32\inetsrv\appcmd.exe set config -section:system.webServer/proxy `
+     /reverseRewriteHostInResponseHeaders:"False" /commit:apphost
+   ```
+URL Rewrite의 **아웃바운드 규칙**에서 `Location`을 손대고 있다면 거기에도 루프백 제외 조건을
+넣는다(`{RESPONSE_Location}`이 `^http://127\.0\.0\.1`이면 건너뛰기). Caddy는 `Location`을
+고치지 않으므로 이 문제가 없다.
+
+**③ redirect URI 불일치** — 위 [redirect URI 정하기](#redirect-uri-정하기)의 2번. `localhost`가
+아니라 `127.0.0.1`이어야 한다.
+
+**④ 브라우저와 GCM이 다른 머신** — `127.0.0.1`은 **브라우저가 도는 PC**를 가리킨다. SSH 원격
+개발·WSL·컨테이너 안에서 `git push`를 하면 GCM은 그쪽에서 대기하는데 브라우저는 내 PC에서
+열려, 리다이렉트가 엉뚱한 곳의 루프백으로 간다. 같은 머신에서 하거나
+[액세스 토큰 방식](#대안--액세스-토큰-gcm을-못-쓰는-환경)을 쓴다.
 
 #### 브라우저 승인까지 됐는데 push가 멈춘다
 
@@ -355,14 +432,12 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 PAAS_OIDC_PROVIDER_ENABLED=true
 # 플랫폼 자신의 공개 주소 — 발급하는 토큰의 iss와 디스커버리 문서의 기준이 된다.
 PAAS_PLATFORM_PUBLIC_URL=https://paas.example.com
-# redirect_uris는 Gitea의 콜백 주소. 경로 끝의 "paas"는 아래 --name과 반드시 일치해야 한다.
-PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<a에서 만든 값>","redirect_uris":["https://git.example.com/user/oauth2/paas/callback"]}}
+# redirect_uris는 Gitea의 콜백 주소 — 아래 "redirect URI 정하기" 참고.
+PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<a에서 만든 값>","redirect_uris":["https://paas.example.com/gitea/user/oauth2/paas/callback"]}}
 # 플랫폼 자신이 발급한 토큰을 플랫폼 API에서도 받으려면(선택) issuer를 자기 자신으로.
 # 이 경우 JWKS는 로컬 개인키로 바로 검증하므로 PAAS_OIDC_JWKS_URL은 설정하지 않는다.
 PAAS_OIDC_ISSUER=https://paas.example.com/paas
 ```
-> Gitea를 서브패스로 뒀다면 redirect_uris도 그 주소로:
-> `https://paas.example.com/gitea/user/oauth2/paas/callback`
 
 **c) Gitea에 OAuth2 소스로 등록** — 디스커버리 URL이 플랫폼 자신을 가리킨다:
 ```bash
@@ -371,7 +446,81 @@ gitea admin auth add-oauth \
   --key gitea --secret "<a에서 만든 값>" \
   --auto-discover-url "https://paas.example.com/paas/.well-known/openid-configuration"
 ```
-(`--name paas`의 값이 b)의 redirect_uris 경로 `/user/oauth2/<name>/callback`과 같아야 한다.)
+
+##### redirect URI 정하기
+
+이 연동에는 **서로 다른 redirect URI가 두 개** 나온다. 이름이 같아 헷갈리기 쉬운데
+쓰이는 곳도 값도 다르다.
+
+| # | 어디에 적나 | 무엇의 콜백인가 | 값 |
+| --- | --- | --- | --- |
+| 1 | 플랫폼 `.env`의 `PAAS_OIDC_PROVIDER_CLIENTS` → `redirect_uris` | 플랫폼(IdP) → **Gitea**로 돌아가는 주소 | `<Gitea 외부주소>/user/oauth2/<이름>/callback` |
+| 2 | (건드릴 일 없음) Gitea의 OAuth2 **애플리케이션** | Gitea(IdP) → **git 클라이언트**로 돌아가는 주소 | `http://127.0.0.1` — **개발자 PC**의 루프백. Gitea가 미리 등록해 둔다 |
+
+**1번 만드는 법.** 세 조각을 이어 붙인다:
+
+```
+  https://paas.example.com/gitea      ← Gitea의 app.ini [server] ROOT_URL (끝 슬래시 빼고)
++ /user/oauth2/                       ← Gitea 고정 경로
++ paas                                ← gitea admin auth add-oauth 의 --name 값
++ /callback
+────────────────────────────────────────────────────────────────────────
+= https://paas.example.com/gitea/user/oauth2/paas/callback
+```
+
+- **`--name`과 경로의 이름이 반드시 같아야 한다.** `--name keycloak`으로 등록했으면
+  경로도 `/user/oauth2/keycloak/callback`이다. 이름을 바꾸면 이 URI도 같이 바꿔야 한다.
+- **`ROOT_URL`과 스킴·호스트·서브패스가 모두 같아야 한다.** 서브패스 배포인데
+  `https://paas.example.com/user/oauth2/paas/callback`처럼 `/gitea`를 빠뜨리는 실수가 잦다.
+- 플랫폼은 **등록된 값과 정확히 일치할 때만** 리다이렉트한다(부분 일치·와일드카드 없음).
+  일치하지 않으면 로그인 화면으로 가기 전에 `redirect_uri not registered`로 끝난다 —
+  신뢰하지 않은 주소로 사용자를 보내지 않기 위해서다.
+
+**2번은 손대지 않는다.** Git Credential Manager가 브라우저 로그인을 할 때 쓰는
+콜백으로, Gitea 1.21+가 `[oauth2] DEFAULT_APPLICATIONS`로 미리 등록해 둔다
+(`http://127.0.0.1`, 포트는 루프백이라 가리지 않는다). GCM 쪽 설정을 직접 적을 때만
+같은 값(`http://127.0.0.1`)을 `oauthRedirectUri`로 넣는다 — `localhost`는 안 된다.
+
+> **이 `127.0.0.1`은 Gitea 서버가 아니라 개발자 PC다.** GCM이 `git push` 때
+> 개발자 PC에 임의 포트로 로컬 리스너를 띄우고, 승인이 끝나면 Gitea는 브라우저에
+> `Location: http://127.0.0.1:<임의포트>/?code=...` 리다이렉트를 **응답으로만** 내려준다.
+> 그 주소로 실제 접속하는 건 같은 PC의 브라우저이고, 인가 코드는 PC 안에서 GCM에게
+> 전달된다 — Gitea 서버가 `127.0.0.1`로 접속하는 일은 없다. 그래서 서버 방화벽과는
+> 무관하고, 반대로 **브라우저가 없는 환경(헤드리스 서버·CI 러너)에서는 이 방식이
+> 성립하지 않는다**(→ [액세스 토큰 방식](#대안--액세스-토큰-gcm을-못-쓰는-환경)).
+
+**포트는 그대로 전달된다.** 등록값에 포트가 없는 건 GCM이 실행 시점에 빈 포트를 잡기
+때문이지, 포트가 빠진 채 리다이렉트된다는 뜻이 아니다. Gitea는 **비교할 때만** 포트를
+떼고, 리다이렉트는 클라이언트가 보낸 URI를 그대로 쓴다.
+
+| | 값 |
+| --- | --- |
+| 등록된 redirect URI (Gitea DB) | `http://127.0.0.1` |
+| GCM이 authorize에 보내는 `redirect_uri` | `http://127.0.0.1:49xxx/` |
+| Gitea가 내려주는 `Location` | `http://127.0.0.1:49xxx/?code=…&state=…` |
+
+그래서 정상이라면 `Location`에 `127.0.0.1:<포트>`가 통째로 들어 있다 — 위
+[승인했는데 127.0.0.1로 넘어가지 않는다](#승인했는데-127001로-넘어가지-않는다-codestate까지만-가고-끊김)의
+판별 기준이 이것이다.
+
+포트를 떼는 처리에는 조건이 둘 붙는다. 어느 쪽이든 어긋나면 매칭 자체가 실패한다.
+
+- **`http`만** 해당된다. `https://127.0.0.1:<포트>`는 `https://127.0.0.1`이 등록돼 있어도
+  포트가 안 떨어져 안 맞는다.
+- **공개(non-confidential) 클라이언트만** 해당된다. Gitea UI에서 앱을 직접 만들며
+  confidential로 두면 이 처리가 통째로 빠진다(내장 GCM 앱은 공개 클라이언트다).
+- `localhost`가 안 되는 이유도 같다 — 조건이 "호스트명이 루프백 **IP**인가"라서
+  `localhost`는 IP 파싱이 안 돼 포트 제거가 일어나지 않는다.
+
+**바꿨을 때 같이 고쳐야 하는 것**
+
+| 바뀐 것 | 함께 고칠 곳 |
+| --- | --- |
+| Gitea `ROOT_URL`(도메인·서브패스·스킴) | 1번 `redirect_uris` |
+| `add-auth --name` | 1번 `redirect_uris`의 경로 이름 |
+| 플랫폼 공개 주소 | `PAAS_PLATFORM_PUBLIC_URL`, Gitea의 `--auto-discover-url` |
+
+값을 고쳤으면 플랫폼을 재시작해야 반영된다(`.env`는 기동 시 읽는다).
 
 **d) 자동 계정 생성 허용** — 아래 [공통 설정](#c-공통-자동-계정-생성-설정) 참고.
 
@@ -445,7 +594,7 @@ curl -s https://<공개도메인>/paas/.well-known/openid-configuration | grep -
 # 플랫폼 .env — https가 아니라 http로 적는 것이 핵심
 PAAS_PLATFORM_PUBLIC_URL=http://paas.example.com
 PAAS_OIDC_ISSUER=http://paas.example.com/paas
-PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<시크릿>","redirect_uris":["http://git.example.com/user/oauth2/paas/callback"]}}
+PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<시크릿>","redirect_uris":["http://paas.example.com/gitea/user/oauth2/paas/callback"]}}
 ```
 ```bash
 gitea admin auth add-oauth --name paas --provider openidConnect \

@@ -59,6 +59,12 @@ def authorize(
         return RedirectResponse(oidc_provider.login_redirect_url(next_url))
 
     code = oidc_provider.issue_auth_code(db, client_id, email, redirect_uri, nonce)
+    # 이 줄과 아래 token 로그가 한 쌍이다 — code는 나갔는데 token 줄이 안 찍히면
+    # 클라이언트(Gitea)가 백채널로 돌아오지 못한 것이다. 그 구분이 안 되면 브라우저에
+    # 보이는 증상("리다이렉트가 멈췄다")만으로는 우리 쪽인지 네트워크인지 알 수 없다.
+    # code 자체는 남기지 않는다 — 로그를 본 사람이 그대로 교환할 수 있는 값이다.
+    print(f"[paas] OIDC authorize → code 발급: client={client_id} user={email} "
+          f"redirect_uri={redirect_uri}")
     sep = "&" if "?" in redirect_uri else "?"
     redirect_to = f"{redirect_uri}{sep}code={quote(code)}"
     if state:
@@ -92,8 +98,12 @@ def token(
         oidc_provider.exchange_client_credentials(cid, secret)
         email, nonce = oidc_provider.consume_auth_code(db, code, cid, redirect_uri)
     except oidc_provider.OidcProviderError as e:
+        # 실패 사유는 400 본문으로도 나가지만, 그건 Gitea 서버가 받아 삼킨다 —
+        # 사용자가 보는 건 깨진 리다이렉트뿐이라 여기 남겨야 원인을 찾을 수 있다.
+        print(f"[paas] OIDC token 교환 실패: client={cid} redirect_uri={redirect_uri} — {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
+    print(f"[paas] OIDC token 교환 성공: client={cid} user={email}")
     id_token = oidc_provider.issue_id_token(email, cid, nonce)
     return {
         "access_token": id_token,

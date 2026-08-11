@@ -518,3 +518,41 @@ def test_external_issuer_still_uses_jwks(monkeypatch, fresh_settings):
     key = security.authenticate_bearer(token)
     assert key.name == "hong" and key.is_admin is True
     assert called, "외부 발급자인데 JWKS를 조회하지 않았다"
+
+
+def test_flow_logs_pair_code_issue_with_token_exchange(provider_client, capsys):
+    """authorize/token 두 줄이 한 쌍으로 찍힌다 — README의 진단 절차가 이 문구를 그대로
+    찾으라고 안내하므로(둘 중 앞만 있으면 클라이언트가 백채널로 못 돌아온 것), 문구가
+    바뀌면 그 문서가 조용히 쓸모없어진다."""
+    _register_and_login(provider_client)
+    code = _get_code(provider_client)
+    assert "[paas] OIDC authorize → code 발급:" in capsys.readouterr().out
+
+    r = provider_client.post("/paas/oauth2/token", data={
+        "grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT_URI,
+        "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
+    })
+    assert r.status_code == 200
+    assert "[paas] OIDC token 교환 성공:" in capsys.readouterr().out
+
+
+def test_token_failure_is_logged_with_reason(provider_client, capsys):
+    """실패 사유는 400 본문으로 Gitea에게만 가고 사용자는 못 본다 — 서버 로그에 남아야 한다."""
+    _register_and_login(provider_client)
+    code = _get_code(provider_client)
+    capsys.readouterr()
+    r = provider_client.post("/paas/oauth2/token", data={
+        "grant_type": "authorization_code", "code": code,
+        "redirect_uri": "https://git.example.com/wrong/callback",
+        "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
+    })
+    assert r.status_code == 400
+    out = capsys.readouterr().out
+    assert "[paas] OIDC token 교환 실패:" in out and "mismatch" in out
+
+
+def test_issued_code_is_not_written_to_the_log(provider_client, capsys):
+    """로그를 본 사람이 그대로 교환할 수 있으면 안 된다."""
+    _register_and_login(provider_client)
+    code = _get_code(provider_client)
+    assert code not in capsys.readouterr().out

@@ -573,3 +573,31 @@ class _Fail:
     returncode = 1
     stdout = ""
     stderr = "boom"
+
+
+def test_iis_example_web_config_survives_platform_splice():
+    """infra/gitea/web.config.example의 수동 규칙(/gitea·/paas)이 플랫폼 배포 후에도
+    남아 있어야 한다 — 그 파일이 "마커 밖은 안 건드린다"를 전제로 안내하고 있고,
+    실제로 깨지면 서브패스 라우팅이 통째로 사라져 원인 찾기가 매우 어렵다."""
+    import xml.dom.minidom
+    from pathlib import Path
+
+    from app.services.proxy.iis_proxy import MANAGED_BEGIN, MANAGED_END, _splice_managed_rules
+
+    example = Path(__file__).resolve().parent.parent / "infra" / "gitea" / "web.config.example"
+    original = example.read_text(encoding="utf-8")
+    xml.dom.minidom.parseString(original)  # 예시 자체가 유효한 XML이어야 한다
+
+    spliced = _splice_managed_rules(original, '        <rule name="app-path-0" />\n')
+    xml.dom.minidom.parseString(spliced)
+
+    for rule in ('name="gitea"', 'name="paas"', 'name="paas-console"', 'name="gitea-root-slash"'):
+        assert rule in spliced, f"수동 규칙 {rule}이 사라졌다"
+    assert 'maxAllowedContentLength' in spliced  # git push 크기 제한도 마커 밖이다
+    assert spliced.count(MANAGED_BEGIN) == 1 and spliced.count(MANAGED_END) == 1
+    assert 'name="app-path-0"' in spliced.split(MANAGED_BEGIN)[1].split(MANAGED_END)[0]
+
+    # 두 번째 배포가 첫 번째 블록을 갈아끼우고 수동 규칙은 그대로 둔다.
+    again = _splice_managed_rules(spliced, '        <rule name="app-path-1" />\n')
+    assert 'name="app-path-0"' not in again and 'name="app-path-1"' in again
+    assert 'name="gitea"' in again and 'name="paas"' in again
