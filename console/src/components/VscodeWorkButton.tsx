@@ -1,4 +1,4 @@
-import { canOpenInVscode, vscodeCloneUri } from '../lib/vscode';
+import { hasUsableGitUrl, vscodeCloneUri } from '../lib/vscode';
 import type { ProjectOut } from '../lib/types';
 
 /**
@@ -11,7 +11,7 @@ import type { ProjectOut } from '../lib/types';
  * 실제 주소일 때만 활성화한다 — 마스킹 문구를 clone에 넘기면 VS Code만 열리고 실패한다.
  */
 export default function VscodeWorkButton({ project }: { project: ProjectOut | null | undefined }) {
-  const ready = canOpenInVscode(project?.git_url);
+  const ready = hasUsableGitUrl(project?.git_url);
   return (
     <button
       className="small secondary"
