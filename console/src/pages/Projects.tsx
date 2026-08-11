@@ -20,14 +20,6 @@ export default function Projects() {
   const userOrgIds = userOrgs.map((o) => o.id);
   const canDelete = !!me.data?.is_admin;
 
-  // 사용자가 소속 조직을 가지고 있으면 그 조직들의 프로젝트만 보인다. 목록과 "VS Code로
-  // 작업" 선택지가 같은 기준을 써야 하므로 규칙을 한 곳에 둔다.
-  const visibleFor = (projects: ProjectOut[]) =>
-    (userOrgIds.length > 0 && !me.data?.is_admin)
-      ? projects.filter((p) => p.organization_id !== null && p.organization_id !== undefined
-          && userOrgIds.includes(p.organization_id))
-      : projects;
-
   const remove = async (p: ProjectOut) => {
     const ok = confirm(
       `정말로 프로젝트 '${p.name}'을(를) 삭제하시겠습니까?\n` +
@@ -48,12 +40,14 @@ export default function Projects() {
       <div className="row" style={{ marginBottom: 12, alignItems: 'center', gap: 12 }}>
         <h2 style={{ margin: 0 }}>프로젝트</h2>
         <div className="spacer" />
-        <VscodeWorkButton projects={visibleFor(state.data ?? [])} />
         <button onClick={() => setShowCreate(true)}>+ 새 프로젝트</button>
       </div>
       <Async state={state} empty="프로젝트가 없습니다.">
         {(projects) => {
-          const filtered = visibleFor(projects);
+          // 사용자가 소속 조직을 가지고 있는 경우, 속해 있는 모든 조직의 프로젝트들을 노출
+          const filtered = (userOrgIds.length > 0 && !me.data?.is_admin)
+            ? projects.filter((p) => p.organization_id !== null && p.organization_id !== undefined && userOrgIds.includes(p.organization_id))
+            : projects;
 
           return (
             <table>
@@ -73,7 +67,12 @@ export default function Projects() {
                   <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
                     <td>{p.name}</td>
                     <td><StatusPill value={p.type} /></td>
-                    <td className="mono">{p.git_url}</td>
+                    <td className="mono">
+                      <span className="row" style={{ alignItems: 'center', gap: 8 }}>
+                        {p.git_url}
+                        <VscodeWorkButton project={p} />
+                      </span>
+                    </td>
                     <td className="mono">{p.branch}</td>
                     <td><StatusPill value={p.default_profile} /></td>
                     <td className="mono">{fmtDate(p.created_at)}</td>
