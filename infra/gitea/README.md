@@ -100,6 +100,11 @@ nssm set gitea AppEnvironmentExtra "GITEA__server__DOMAIN=git.example.com`nGITEA
 nssm start gitea
 ```
 
+> 설정 항목이 늘어나면 위 `AppEnvironmentExtra` 한 줄은 관리하기 어렵다(백틱 `n`으로
+> 구분되는 데다 값 하나 고치려면 전체를 다시 써야 한다). **`C:\gitea\custom\conf\app.ini`에
+> 직접 적는 편이 낫다** — [`app.ini.example`](app.ini.example)에 이 플랫폼과 붙이는 데
+> 필요한 항목이 주석과 함께 모여 있다. 파일을 고친 뒤 `nssm restart gitea`.
+
 Caddy(리버스프록시, TLS 자동 발급)도 같은 방식으로 설치·등록한다:
 
 ```powershell
@@ -122,6 +127,11 @@ DB를 SQLite에서 Postgres로 바꾸거나 백업하는 절차는 이후 [최�
 | 파일 | `docker-compose.yml` + `Caddyfile.example` | `k8s/*.yaml` |
 | 대상 | 플랫폼과 같은 서버 또는 전용 서버(위 0절) | 플랫폼 K8s 클러스터(6.2절 ingress·cert-manager 재사용) |
 | DB | 내장 SQLite | 내장 SQLite → 팀 규모가 크면 Postgres로 교체(주석 참고) |
+
+> **설정값은 [`app.ini.example`](app.ini.example)에 한 번에 모아 뒀다.** 이 문서 곳곳에
+> `GITEA__섹션__KEY=값` 형태로 나오는 것들과 같은 내용이고, 이름이 1:1로 대응한다
+> (`[server] ROOT_URL` ↔ `GITEA__server__ROOT_URL`). 컨테이너면 compose의 환경변수로,
+> 네이티브 설치(nssm 등)면 app.ini에 직접 적는 편이 다루기 쉽다 — 어느 쪽이든 결과는 같다.
 
 ## 1차 배포 (Docker Compose)
 
