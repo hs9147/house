@@ -483,6 +483,11 @@ gitea admin auth add-oauth \
   경로도 `/user/oauth2/keycloak/callback`이다. 이름을 바꾸면 이 URI도 같이 바꿔야 한다.
 - **`ROOT_URL`과 스킴·호스트·서브패스가 모두 같아야 한다.** 서브패스 배포인데
   `https://paas.example.com/user/oauth2/paas/callback`처럼 `/gitea`를 빠뜨리는 실수가 잦다.
+- **브라우저가 가는 공개 주소를 적는다 — Gitea가 내부에서 보는 경로가 아니다.**
+  프록시가 `/gitea`를 벗기므로 Gitea 프로세스에는 `/user/oauth2/paas/callback`으로
+  도착하지만, 등록할 값은 벗기기 **전**의 `https://.../gitea/user/oauth2/paas/callback`이다.
+  플랫폼은 이 값을 브라우저에게 리다이렉트 주소로 돌려주는 것이지, Gitea에 직접
+  연결하는 데 쓰지 않는다.
 - 플랫폼은 **등록된 값과 정확히 일치할 때만** 리다이렉트한다(부분 일치·와일드카드 없음).
   일치하지 않으면 로그인 화면으로 가기 전에 `redirect_uri not registered`로 끝난다 —
   신뢰하지 않은 주소로 사용자를 보내지 않기 위해서다.
