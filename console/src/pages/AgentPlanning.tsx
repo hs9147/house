@@ -441,11 +441,6 @@ export default function AgentPlanning() {
                         <div className="row" style={{ gap: 6 }}>
                           <button className="small" onClick={() => resume(r)}>재개</button>
                           <button className="small danger" onClick={() => removeSession(r)}>삭제</button>
-                          {/* 이 세션의 프로젝트 리포를 VS Code로 clone — 세션 행에는
-                              project_id만 있으므로 목록에서 프로젝트를 찾아 넘긴다. */}
-                          <VscodeWorkButton
-                            project={availableProjects.find((p) => p.id === r.project_id)}
-                          />
                         </div>
                       </td>
                     </tr>
@@ -568,6 +563,12 @@ export default function AgentPlanning() {
                   >
                     {tasks.length === 0 ? '확정 산출물에서 작업 지시 생성' : '작업 지시 재생성'}
                   </button>
+                  {/* 작업 지시까지 나오면 다음은 실제 구현이다 — 이 세션의 프로젝트
+                      리포를 바로 VS Code로 받게 한다. 세션에는 project_id만 있으므로
+                      목록에서 프로젝트를 찾아 넘긴다. */}
+                  <VscodeWorkButton
+                    project={availableProjects.find((p) => p.id === session?.project_id)}
+                  />
                   {isConfirmed(TASK_STAGE) && (
                     <button
                       className={taskStep === 'merge' ? 'primary small' : 'secondary small'}
