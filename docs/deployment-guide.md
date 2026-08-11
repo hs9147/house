@@ -657,3 +657,50 @@ llm-main  (vLLM)    → 자체 PaaS GPU      → project://llm-main (내부 전�
 | URL 접속 불가 | base_domain DNS 전파 확인 → Caddyfile `import` 라인 확인(공유 사이트는 `caddy-sites/_base.caddy`가 `handles/*.caddy`를 import) → `caddy reload` |
 | 웹훅이 401 | 리포 웹훅 Secret과 `PAAS_WEBHOOK_SECRET` 불일치 |
 | 콘솔 로그인 실패 | admin 키는 200, 일반 키는 403이 정상 프로브 — 401이면 키 자체가 잘못됨 |
+| **502 Bad Gateway** | 발생 지점이 둘이라 먼저 구분해야 한다 — 아래 5.1절 |
+
+### 5.1 502 Bad Gateway — 먼저 어디서 난 502인지 가른다
+
+502는 **리버스프록시가 내는 것**과 **플랫폼 API가 내는 것** 두 종류이고 원인이 전혀
+다르다. 응답 본문으로 즉시 구분된다:
+
+```bash
+curl -i https://<주소>/paas/...   # 실제로 502가 나는 그 URL
+```
+
+- 본문이 `{"detail": "..."}` **JSON** → **플랫폼이 낸 502**. 프록시는 정상이고, 플랫폼이
+  외부(주로 Gitea·LLM)를 호출하다 실패한 것이다. `detail`에 원인이 그대로 적혀 있다.
+- 본문이 IIS/Caddy의 **HTML 오류 페이지** → **프록시가 플랫폼에 못 닿은 것**. 플랫폼은
+  요청을 받지도 못했다.
+
+**A. JSON detail이 있는 경우 (플랫폼이 낸 502)**
+
+가장 흔한 것은 Gitea API 호출 실패다(조직·리포 생성, `services/gitea.py` → 502).
+플랫폼 서버에서 Gitea에 실제로 닿는지부터 확인한다:
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: token $PAAS_GITEA_API_TOKEN" \
+  "$PAAS_GITEA_URL/api/v1/user"
+```
+- 연결 자체가 안 되면 `PAAS_GITEA_URL`이 플랫폼 서버 기준으로 닿는 주소인지 확인
+  (사내 DNS·방화벽. 같은 서버라면 `http://localhost:3000`이 가장 확실하다).
+- 401/403이면 `PAAS_GITEA_API_TOKEN`이 만료됐거나 조직 생성 권한이 없는 토큰이다.
+
+**B. HTML 오류 페이지인 경우 (프록시가 못 닿음)**
+
+플랫폼이 살아 있는지를 **서버 안에서** 먼저 본다:
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7000/paas/health   # 200이어야 정상
+```
+- 200이 아니면 플랫폼이 안 떠 있거나 다른 포트다 — 서비스 상태와 기동 로그를 본다
+  (nssm이면 `nssm status paas`, systemd면 `journalctl -u paas -n 50`).
+- 200인데 프록시만 502면 프록시 쪽 문제다:
+  - **IIS**: ARR이 설치돼 있고 프록시가 켜져 있어야 한다(3.6절) — URL Rewrite만으로는
+    다른 포트로 전달이 안 되고, 이 상태가 정확히 502로 나타난다.
+    `appcmd set config -section:system.webServer/proxy /enabled:True`
+  - rewrite 대상 포트가 실제 기동 포트와 같은지 확인한다.
+  - 플랫폼을 `--host 127.0.0.1`로 띄웠는데 프록시가 다른 IP로 접속하려 하면 못 닿는다
+    (같은 서버면 rewrite 대상도 `127.0.0.1`로 맞출 것).
+
+**특정 경로에서만 502라면**(예: `/paas/oauth2/...`만), 그 경로가 rewrite 규칙 범위에
+안 들어간 것이다 — 규칙이 `/paas/*` 전체를 받는지, 그리고 **경로를 벗기지 않는지**
+확인한다(3.6절·`infra/gitea/README.md`의 서브패스 절).
