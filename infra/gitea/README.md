@@ -289,6 +289,32 @@ curl -s https://<공개도메인>/paas/.well-known/openid-configuration | grep -
 인증서에 이름을 추가할 수 있는 상황이면(사내 CA 등) 반대로 B를 SAN에 넣어 재발급해도
 된다 — 그 경우 위 1·2의 URL은 B로 통일한다.
 
+##### 80 포트(평문 http)만 쓸 수 있는 경우
+
+443을 못 열어 전 구간을 http로만 운영한다면 **인증서가 개입할 여지가 없으므로 이 절의
+문제 자체가 발생하지 않는다.** 주소를 `http://`로 통일하기만 하면 된다:
+
+```bash
+# 플랫폼 .env — https가 아니라 http로 적는 것이 핵심
+PAAS_PLATFORM_PUBLIC_URL=http://paas.example.com
+PAAS_OIDC_ISSUER=http://paas.example.com/paas
+PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<시크릿>","redirect_uris":["http://git.example.com/user/oauth2/paas/callback"]}}
+```
+```bash
+gitea admin auth add-oauth --name paas --provider openidConnect \
+  --key gitea --secret "<시크릿>" \
+  --auto-discover-url "http://paas.example.com/paas/.well-known/openid-configuration"
+```
+
+`PAAS_PLATFORM_PUBLIC_URL`을 **반드시 `http://`로** 둘 것. 이 값이 `https://`면 로그인
+세션 쿠키에 `secure`가 붙어 브라우저가 저장을 거부하고, 그러면 로그인은 성공한 것처럼
+보이는데 authorize는 계속 미로그인으로 판단해 로그인 화면으로 되돌린다(무한 루프).
+
+> 평문 http라 **로그인 비밀번호·세션 쿠키·인가 코드·토큰이 모두 암호화되지 않는다.**
+> 사내망 전용이라는 전제에서만 쓸 것이고, 가능해지면 https로 올리는 것이 맞다.
+> (TLS를 상단 게이트웨이에서 종료하고 이 서버는 80으로만 받는 구성이라면, 사용자가
+> 실제로 보는 주소가 https이므로 `PAAS_PLATFORM_PUBLIC_URL`은 그 https 주소로 적는다.)
+
 ##### 공개 도메인으로 아예 `/paas`가 안 들어오는 경우
 
 공개 도메인의 binding이 이 플랫폼을 가리키지 않아(다른 사이트가 물고 있거나 그 경로

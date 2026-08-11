@@ -269,6 +269,44 @@ def test_split_channel_tokens_carry_the_backchannel_issuer(split_channel_client)
     assert oidc_provider.decode_id_token(token)["iss"] == "http://10.0.0.5:7000/paas"
 
 
+def _login_cookie_flags(client: TestClient) -> str:
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        db.add(UserAccount(
+            email="alice@cho-fam.com", name="A", password_hash=hash_password("hunter22"),
+            is_approved=True, is_admin=False,
+        ))
+        db.commit()
+    finally:
+        db.close()
+    r = client.post("/paas/api/v1/auth/login",
+                    json={"email": "alice@cho-fam.com", "password": "hunter22"})
+    assert r.status_code == 200, r.text
+    return r.headers["set-cookie"]
+
+
+def test_session_cookie_is_not_secure_on_a_plain_http_deployment(monkeypatch, fresh_settings):
+    """443을 못 써서 전 구간 http(80)로만 운영하는 구성 — 세션 쿠키에 secure가 붙으면
+    브라우저가 저장 자체를 안 한다. 그러면 로그인은 성공한 것처럼 보이는데 authorize는
+    계속 미로그인으로 판단해 로그인 화면으로 되돌리는 무한 루프가 된다."""
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "http://paas.example.com")
+    get_settings.cache_clear()
+    cookie = _login_cookie_flags(TestClient(create_app()))
+    assert "paas_session=" in cookie
+    assert "secure" not in cookie.lower()
+    assert "httponly" in cookie.lower()
+    assert "samesite=lax" in cookie.lower()  # strict면 Gitea발 이동에 안 실린다
+
+
+def test_session_cookie_is_secure_on_an_https_deployment(monkeypatch, fresh_settings):
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "https://paas.example.com")
+    get_settings.cache_clear()
+    cookie = _login_cookie_flags(TestClient(create_app()))
+    assert "secure" in cookie.lower()
+
+
 def test_issuer_requires_an_absolute_url(monkeypatch, fresh_settings):
     """발급자 주소가 없으면 상대 경로("/paas")가 섞인 잘못된 디스커버리 문서를 내주는
     대신 분명히 실패해야 한다 — 그걸 받은 Gitea 쪽 오류는 원인 파악이 훨씬 어렵다."""
