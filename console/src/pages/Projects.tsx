@@ -4,6 +4,7 @@ import Async from '../components/Async';
 import Modal from '../components/Modal';
 import StatusPill from '../components/StatusPill';
 import VscodeWorkButton from '../components/VscodeWorkButton';
+import ZipDownloadButton from '../components/ZipDownloadButton';
 import { api } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
@@ -71,6 +72,7 @@ export default function Projects() {
                       <span className="row" style={{ alignItems: 'center', gap: 8 }}>
                         {p.git_url}
                         <VscodeWorkButton project={p} />
+                        <ZipDownloadButton project={p} />
                       </span>
                     </td>
                     <td className="mono">{p.branch}</td>
