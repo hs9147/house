@@ -23,7 +23,32 @@ PAAS_PREFIX = "/paas"
 API_PREFIX = f"{PAAS_PREFIX}/api/v1"
 
 
+def _make_console_output_safe() -> None:
+    """기동 로그·트레이스백이 콘솔 인코딩 때문에 죽지 않게 한다.
+
+    Windows의 기본 출력 인코딩(한국어판은 cp949, nssm이 로그로 리다이렉트하면 cp1252나
+    ascii가 되기도 한다)에서는 한글은 물론 em dash("—") 하나도 UnicodeEncodeError를
+    낸다. 그게 기동 경로에서 터지면 create_app이 예외로 끝나 **플랫폼 전체가 안 뜨고**,
+    리버스프록시 쪽에서는 전 경로 502로만 보인다 — 로그 한 줄 때문에 서비스가 죽는
+    셈이다. 게다가 설정 오류 메시지(config.SettingsError)도 한글이라, 진짜 원인이
+    트레이스백 출력 도중 또 다른 인코딩 오류에 가려진다.
+
+    errors="replace"가 핵심이다(인코딩을 못 하면 죽는 대신 대체 문자로 흘린다).
+    utf-8로 맞추는 것은 nssm 로그 파일을 나중에 열었을 때 한글이 그대로 읽히게 하기
+    위함이다. 캡처된 스트림(pytest 등) 등 reconfigure를 지원하지 않으면 그냥 넘어간다.
+    """
+    import sys  # noqa: PLC0415
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — 출력 보호가 기동을 막으면 본말전도다
+            pass
+
+
 def create_app() -> FastAPI:
+    # get_settings()보다 먼저 — 설정 오류 메시지도 한글이라 여기서 보호돼야 한다.
+    _make_console_output_safe()
     settings = get_settings()
     Base.metadata.create_all(engine)
 
