@@ -249,9 +249,45 @@ git clone https://git.example.com/org/repo.git
 ```bash
 git config --global credential.https://host.example.com.oauthClientId e90ee53c-94e2-48ac-9358-a874fb9e0662
 git config --global credential.https://host.example.com.oauthAuthorizeEndpoint /gitea/login/oauth/authorize
-git config --global credential.https://host.example.com.oauthTokenEndpoint    /gitea/login/oauth/token
+git config --global credential.https://host.example.com.oauthTokenEndpoint    /gitea/login/oauth/access_token
 git config --global credential.https://host.example.com.oauthRedirectUri      http://127.0.0.1
 ```
+> 토큰 엔드포인트는 `/login/oauth/token`이 **아니라** `/login/oauth/access_token`이다.
+> 여기를 틀리면 증상이 헷갈린다 — authorize는 맞는 주소라 **로그인·승인까지 정상으로
+> 보이고**, 그 뒤 GCM이 토큰을 받으러 갈 때 404가 나면서 `git push`가 응답을 기다리며
+> 멈춘다. 아래 "브라우저 승인까지 됐는데 push가 멈춘다" 참고.
+>
+> `oauthRedirectUri`는 `127.0.0.1`을 쓴다(`localhost` 아님). Gitea는 루프백 주소에 한해
+> 포트를 가리지 않는데, 그 처리가 `127.0.0.1`에만 적용된다 — GCM은 매번 임의 포트로
+> 대기하므로 이게 맞아야 콜백이 돌아온다.
+
+#### 브라우저 승인까지 됐는데 push가 멈춘다
+
+로그인·승인이 끝났는데 VS Code/터미널이 계속 대기한다면, 인가 코드를 토큰으로
+바꾸는 마지막 단계에서 막힌 것이다. 승인 화면이 떴다는 건 authorize 주소는 맞다는
+뜻이므로 **토큰 엔드포인트와 콜백**부터 본다.
+
+1. **토큰 엔드포인트 오타** — 위에서 말한 `access_token`. 지금 값부터 확인한다:
+   ```bash
+   git config --global --get-regexp 'credential\..*oauth'
+   ```
+2. **직접 눌러 본다** — 404면 경로가 틀린 것이다(405 Method Not Allowed면 경로는 맞다):
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://host.example.com/gitea/login/oauth/access_token
+   ```
+3. **GCM 로그로 확인** — 어느 URL에서 멈추는지 그대로 찍힌다:
+   ```bash
+   GCM_TRACE=1 git push        # Windows PowerShell: $env:GCM_TRACE=1; git push
+   ```
+4. 그래도 안 되면 위 `credential.*oauth*` 값을 모두 지우고
+   [액세스 토큰 방식](#대안--액세스-토큰-gcm을-못-쓰는-환경)으로 돌아간다 — 서브패스
+   자동 인식은 GCM의 미해결 이슈라 환경에 따라 걸릴 수 있다.
+   ```bash
+   git config --global --unset-all credential.https://host.example.com.oauthClientId
+   git config --global --unset-all credential.https://host.example.com.oauthAuthorizeEndpoint
+   git config --global --unset-all credential.https://host.example.com.oauthTokenEndpoint
+   git config --global --unset-all credential.https://host.example.com.oauthRedirectUri
+   ```
 
 #### 대안 — 액세스 토큰 (GCM을 못 쓰는 환경)
 
