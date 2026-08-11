@@ -54,6 +54,26 @@ def test_ensure_repo_created_returns_clone_url(monkeypatch):
     assert url == "https://git.example.com/shop-team/api.git"
 
 
+def test_ensure_repo_uses_http_clone_url_not_ssh(monkeypatch):
+    """Gitea 응답에는 clone_url(http)과 ssh_url이 함께 온다 — 반드시 http 쪽을 써야 한다.
+
+    SSH 포트를 못 여는 환경(80만 허용 등)에서도 플랫폼의 clone/fetch/push가 그대로
+    동작해야 하기 때문이다. 인증도 SSH 키가 아니라 토큰을 http 헤더로 넣어 처리한다
+    (services/git_auth.py).
+    """
+    body = {
+        "clone_url": "https://git.example.com/shop-team/api.git",
+        "ssh_url": "git@git.example.com:shop-team/api.git",
+    }
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(201, body))
+    assert gitea.ensure_repo("shop-team", "api") == body["clone_url"]
+
+    # 이미 있는 리포를 재사용하는 경로(409 → 조회)도 마찬가지다.
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(409))
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: _Res(200, body))
+    assert gitea.ensure_repo("shop-team", "api") == body["clone_url"]
+
+
 def test_ensure_repo_created_as_public(monkeypatch):
     calls = []
     monkeypatch.setattr(

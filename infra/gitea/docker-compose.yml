@@ -19,6 +19,10 @@ services:
       - GITEA__server__DOMAIN=${GITEA_DOMAIN:-git.example.com}
       - GITEA__server__ROOT_URL=https://${GITEA_DOMAIN:-git.example.com}/
       - GITEA__server__SSH_PORT=2222
+      # SSH 포트를 못 여는 환경(80만 허용 등)이라면 SSH를 아예 끈다. 안 끄면 Gitea UI가
+      # 계속 SSH clone 주소를 함께 보여줘서, 사용자가 그걸 복사해 쓰다 실패한다.
+      # (플랫폼 자신은 SSH를 쓰지 않는다 — clone/fetch/push 모두 http + 토큰 헤더다.)
+      #   GITEA__server__DISABLE_SSH=true
       # 사내 전용 — 초대 없이 가입 금지 (관리자가 계정 생성)
       - GITEA__service__DISABLE_REGISTRATION=true
       # 소규모는 내장 SQLite로 충분. 규모가 커지면 Postgres로 교체:
@@ -39,8 +43,10 @@ services:
       - gitea-data:/data
     ports:
       # 컨테이너 자체에는 공인 포트를 열지 않고 Caddy가 리버스 프록시
-      # (Caddyfile.example 참고). SSH clone/push는 2222를 직접 열어도 되고 막아도 됨.
+      # (Caddyfile.example 참고).
       - "127.0.0.1:3000:3000"
+      # SSH clone/push용. 쓰지 않는다면(위 DISABLE_SSH=true) 이 줄을 지운다 —
+      # 플랫폼 동작에는 영향이 없다(git은 http + 토큰 헤더로만 오간다).
       - "127.0.0.1:2222:22"
 
 volumes:

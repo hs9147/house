@@ -26,7 +26,7 @@ Docker·Caddy가 이미 설치됐을 테니 아래 1)·2)는 건너뛰고 3)부�
 # 실행 위치: 새로 준비한 서버 셸 (sudo 권한)
 sudo ufw allow 22/tcp      # 관리자 SSH 접속
 sudo ufw allow 80,443/tcp  # Caddy(HTTP→HTTPS 자동 리다이렉트, TLS 자동 발급)
-sudo ufw allow 2222/tcp    # git SSH clone/push (docker-compose.yml이 컨테이너의 22를 여기로 매핑)
+sudo ufw allow 2222/tcp    # git SSH clone/push — 안 쓸 거면 생략 (아래 "SSH를 못 쓰는 경우")
 sudo ufw enable
 ```
 
@@ -183,6 +183,34 @@ DB를 Postgres로 교체하려면 deployment.yaml 주석의 `GITEA__database__*`
    nssm set gitea AppEnvironmentExtra "GITEA__server__DOMAIN=paas.example.com`nGITEA__server__ROOT_URL=https://paas.example.com/gitea/`nGITEA__server__SSH_LISTEN_PORT=2222`nGITEA__server__SSH_PORT=2222`nGITEA__service__DISABLE_REGISTRATION=true`nGITEA__database__DB_TYPE=sqlite3"
    nssm restart gitea
    ```
+
+## SSH를 못 쓰는 경우 (git은 http로만)
+
+git SSH 포트(22/2222)를 열 수 없는 환경이라도 **플랫폼 동작에는 아무 영향이 없다.**
+플랫폼은 clone/fetch/push를 전부 http로 하고 인증은 토큰을 헤더로 넣어 처리한다
+(`services/git_auth.py`가 `http.extraHeader`로 주입 — git_url 자체엔 토큰을 심지 않는다).
+조직·업로드로 만드는 리포의 주소도 Gitea API가 주는 **http clone_url**을 쓴다(ssh_url이 아니다).
+
+사람이 직접 쓰는 경로만 정리해 주면 된다:
+
+```
+GITEA__server__DISABLE_SSH=true
+```
+
+이걸 켜야 Gitea UI가 SSH clone 주소를 **안 보여준다.** 안 끄면 리포 화면에 SSH 주소가
+계속 함께 뜨고, 사용자가 그걸 복사해 쓰다 연결이 안 돼서 헤맨다.
+
+- docker-compose: `environment:`에 위 줄을 추가하고 `ports:`의 `2222:22` 줄을 지운다.
+- 네이티브 Windows(nssm): `AppEnvironmentExtra`에 `GITEA__server__DISABLE_SSH=true`를
+  이어붙이고 `nssm restart gitea`. 방화벽의 2222 규칙도 지운다.
+- K8s: `k8s/service.yaml`의 ssh 포트 항목과 `deployment.yaml`의 `GITEA__server__SSH_PORT`를 지운다.
+
+개인 개발자는 http clone에 Gitea 계정 토큰(Settings → Applications → Generate Token)을
+쓰면 된다:
+```bash
+git clone http://<사용자>:<토큰>@git.example.com/org/repo.git
+# 또는 git credential helper에 저장해 두고 평소처럼 clone
+```
 
 ## 최초 설정 (공통)
 
