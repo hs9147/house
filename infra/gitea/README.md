@@ -355,14 +355,12 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 PAAS_OIDC_PROVIDER_ENABLED=true
 # 플랫폼 자신의 공개 주소 — 발급하는 토큰의 iss와 디스커버리 문서의 기준이 된다.
 PAAS_PLATFORM_PUBLIC_URL=https://paas.example.com
-# redirect_uris는 Gitea의 콜백 주소. 경로 끝의 "paas"는 아래 --name과 반드시 일치해야 한다.
-PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<a에서 만든 값>","redirect_uris":["https://git.example.com/user/oauth2/paas/callback"]}}
+# redirect_uris는 Gitea의 콜백 주소 — 아래 "redirect URI 정하기" 참고.
+PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<a에서 만든 값>","redirect_uris":["https://paas.example.com/gitea/user/oauth2/paas/callback"]}}
 # 플랫폼 자신이 발급한 토큰을 플랫폼 API에서도 받으려면(선택) issuer를 자기 자신으로.
 # 이 경우 JWKS는 로컬 개인키로 바로 검증하므로 PAAS_OIDC_JWKS_URL은 설정하지 않는다.
 PAAS_OIDC_ISSUER=https://paas.example.com/paas
 ```
-> Gitea를 서브패스로 뒀다면 redirect_uris도 그 주소로:
-> `https://paas.example.com/gitea/user/oauth2/paas/callback`
 
 **c) Gitea에 OAuth2 소스로 등록** — 디스커버리 URL이 플랫폼 자신을 가리킨다:
 ```bash
@@ -371,7 +369,50 @@ gitea admin auth add-oauth \
   --key gitea --secret "<a에서 만든 값>" \
   --auto-discover-url "https://paas.example.com/paas/.well-known/openid-configuration"
 ```
-(`--name paas`의 값이 b)의 redirect_uris 경로 `/user/oauth2/<name>/callback`과 같아야 한다.)
+
+##### redirect URI 정하기
+
+이 연동에는 **서로 다른 redirect URI가 두 개** 나온다. 이름이 같아 헷갈리기 쉬운데
+쓰이는 곳도 값도 다르다.
+
+| # | 어디에 적나 | 무엇의 콜백인가 | 값 |
+| --- | --- | --- | --- |
+| 1 | 플랫폼 `.env`의 `PAAS_OIDC_PROVIDER_CLIENTS` → `redirect_uris` | 플랫폼(IdP) → **Gitea**로 돌아가는 주소 | `<Gitea 외부주소>/user/oauth2/<이름>/callback` |
+| 2 | (건드릴 일 없음) Gitea의 OAuth2 **애플리케이션** | Gitea(IdP) → **git 클라이언트**로 돌아가는 주소 | `http://127.0.0.1` — Gitea가 미리 등록해 둔다 |
+
+**1번 만드는 법.** 세 조각을 이어 붙인다:
+
+```
+  https://paas.example.com/gitea      ← Gitea의 app.ini [server] ROOT_URL (끝 슬래시 빼고)
++ /user/oauth2/                       ← Gitea 고정 경로
++ paas                                ← gitea admin auth add-oauth 의 --name 값
++ /callback
+────────────────────────────────────────────────────────────────────────
+= https://paas.example.com/gitea/user/oauth2/paas/callback
+```
+
+- **`--name`과 경로의 이름이 반드시 같아야 한다.** `--name keycloak`으로 등록했으면
+  경로도 `/user/oauth2/keycloak/callback`이다. 이름을 바꾸면 이 URI도 같이 바꿔야 한다.
+- **`ROOT_URL`과 스킴·호스트·서브패스가 모두 같아야 한다.** 서브패스 배포인데
+  `https://paas.example.com/user/oauth2/paas/callback`처럼 `/gitea`를 빠뜨리는 실수가 잦다.
+- 플랫폼은 **등록된 값과 정확히 일치할 때만** 리다이렉트한다(부분 일치·와일드카드 없음).
+  일치하지 않으면 로그인 화면으로 가기 전에 `redirect_uri not registered`로 끝난다 —
+  신뢰하지 않은 주소로 사용자를 보내지 않기 위해서다.
+
+**2번은 손대지 않는다.** Git Credential Manager가 브라우저 로그인을 할 때 쓰는
+콜백으로, Gitea 1.21+가 `[oauth2] DEFAULT_APPLICATIONS`로 미리 등록해 둔다
+(`http://127.0.0.1`, 포트는 루프백이라 가리지 않는다). GCM 쪽 설정을 직접 적을 때만
+같은 값(`http://127.0.0.1`)을 `oauthRedirectUri`로 넣는다 — `localhost`는 안 된다.
+
+**바꿨을 때 같이 고쳐야 하는 것**
+
+| 바뀐 것 | 함께 고칠 곳 |
+| --- | --- |
+| Gitea `ROOT_URL`(도메인·서브패스·스킴) | 1번 `redirect_uris` |
+| `add-auth --name` | 1번 `redirect_uris`의 경로 이름 |
+| 플랫폼 공개 주소 | `PAAS_PLATFORM_PUBLIC_URL`, Gitea의 `--auto-discover-url` |
+
+값을 고쳤으면 플랫폼을 재시작해야 반영된다(`.env`는 기동 시 읽는다).
 
 **d) 자동 계정 생성 허용** — 아래 [공통 설정](#c-공통-자동-계정-생성-설정) 참고.
 
@@ -445,7 +486,7 @@ curl -s https://<공개도메인>/paas/.well-known/openid-configuration | grep -
 # 플랫폼 .env — https가 아니라 http로 적는 것이 핵심
 PAAS_PLATFORM_PUBLIC_URL=http://paas.example.com
 PAAS_OIDC_ISSUER=http://paas.example.com/paas
-PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<시크릿>","redirect_uris":["http://git.example.com/user/oauth2/paas/callback"]}}
+PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<시크릿>","redirect_uris":["http://paas.example.com/gitea/user/oauth2/paas/callback"]}}
 ```
 ```bash
 gitea admin auth add-oauth --name paas --provider openidConnect \
