@@ -594,6 +594,19 @@ def test_iis_example_web_config_survives_platform_splice():
     for rule in ('name="gitea"', 'name="paas"', 'name="paas-console"', 'name="gitea-root-slash"'):
         assert rule in spliced, f"수동 규칙 {rule}이 사라졌다"
     assert 'maxAllowedContentLength' in spliced  # git push 크기 제한도 마커 밖이다
+
+    # Gitea는 서브패스를 스스로 벗기지 않으므로 프록시가 벗겨야 한다 — 타겟에 /gitea를
+    # 다시 붙이면 Gitea가 모르는 경로가 돼 전부 404다. 반대로 플랫폼은 라우터를 /paas
+    # 아래에 등록하므로(main.PAAS_PREFIX) 벗기면 안 된다. 한 파일에 규칙이 반대로 들어
+    # 있어 "통일"하고 싶어지는 자리라 여기서 고정한다.
+    assert 'url="http://localhost:3000/{R:1}"' in original
+    assert "3000/gitea/" not in original
+    assert 'url="http://localhost:7000/paas/{R:1}"' in original
+
+    # preConditions는 outboundRules 안에서만 유효하다 — <rewrite> 바로 아래 두면
+    # 설정 파싱이 통째로 실패해 사이트 전 경로가 500.19가 된다.
+    assert original.count("<preConditions>") == 1
+    assert original.index("<outboundRules>") < original.index("<preConditions>")
     assert spliced.count(MANAGED_BEGIN) == 1 and spliced.count(MANAGED_END) == 1
     assert 'name="app-path-0"' in spliced.split(MANAGED_BEGIN)[1].split(MANAGED_END)[0]
 

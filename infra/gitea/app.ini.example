@@ -26,9 +26,11 @@ ROOT_URL = https://paas.example.com/gitea/
 ; 호스트명만 적는다(경로 없이). ROOT_URL의 호스트와 같아야 한다.
 DOMAIN = paas.example.com
 ;
-; 리버스프록시는 이 접두어를 **벗기지 않고 그대로** 넘겨야 한다 — Gitea는 요청 경로에
-; /gitea가 붙어 있는 채로 와야 위 ROOT_URL과 아귀가 맞는다. Caddy는 handle_path가
-; 아니라 handle, IIS는 rewrite만 하고 strip하지 않기(README "서브패스" 절 참고).
+; 리버스프록시는 이 접두어를 **벗기고** 넘겨야 한다 — Gitea는 모든 라우트를 "/"에
+; 마운트하고 서브패스를 벗기지 않으므로, /gitea가 붙은 채로 오면 전부 404다. 이 값은
+; Gitea가 **링크를 만들 때** 쓰는 접두어다. Caddy는 handle이 아니라 handle_path,
+; IIS는 rewrite 타겟에 /gitea를 다시 붙이지 않기(README "서브패스" 절 참고).
+; 반대로 USE_SUB_URL_PATH = true 로 두면 Gitea가 서브패스를 직접 처리한다(기본 false).
 ;
 ; 별도 도메인을 쓴다면 대신 이렇게 둔다:
 ;   ROOT_URL = https://git.example.com/

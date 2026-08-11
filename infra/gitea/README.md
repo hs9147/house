@@ -173,24 +173,35 @@ DB를 Postgres로 교체하려면 deployment.yaml 주석의 `GITEA__database__*`
    ```
    GITEA__server__ROOT_URL=https://paas.example.com/gitea/
    ```
-2. **리버스 프록시가 `/gitea` 접두어를 벗기지 않고 그대로 전달** — Gitea는 요청
-   경로에 `/gitea`가 이미 붙어 있는 채로 와야 한다(1의 ROOT_URL과 대응). Caddy는
-   `handle_path`(접두어를 벗김)가 아니라 `handle`(벗기지 않고 그대로 전달)을 써야 한다:
+2. **리버스 프록시가 `/gitea` 접두어를 벗기고 전달** — Gitea는 모든 라우트를 `/`에
+   마운트하고 서브패스를 벗기는 미들웨어가 없다(`routers/init.go`의 `NormalRoutes`).
+   서브패스는 `ROOT_URL`이 **링크를 만들 때만** 쓰고, 실제 요청에서 벗기는 일은
+   프록시 몫이다. 벗기지 않으면 Gitea가 `/gitea/...` 라우트를 몰라 전부 404다.
+   Caddy는 `handle`이 아니라 `handle_path`(접두어를 벗김)를 쓴다:
    ```caddy
    paas.example.com {
-       handle /gitea/* {
+       handle_path /gitea/* {
            reverse_proxy 127.0.0.1:3000
        }
        # ... 플랫폼 자신의 handle 블록들(콘솔·/apps/... 등)은 그대로 유지
    }
    ```
-   IIS/ARR(`PAAS_PROXY_BACKEND=iis`)를 쓴다면 URL Rewrite 규칙에서도 경로를
-   재작성(rewrite)만 하고 **벗겨내지(strip) 않아야** 동일한 효과를 낸다 — 즉 타겟
-   URL에 `/gitea`를 다시 붙인다. 통째로 쓸 수 있는 예시가
-   [`web.config.example`](web.config.example)에 있다(`/gitea`·`/paas`·`/console`
-   규칙 + git push 크기 제한 + 플랫폼 자동 생성과 공존하는 마커 위치).
-   ARR 서버 설정은 web.config가 아니라 appcmd로 켠다 — 그 파일 머리말과
-   [deployment-guide.md 3.6절](../../../docs/deployment-guide.md) 참고.
+   IIS/ARR(`PAAS_PROXY_BACKEND=iis`)이면 타겟 URL에 `/gitea`를 다시 붙이지 않는다:
+   ```xml
+   <match url="^gitea/(.*)" />
+   <action type="Rewrite" url="http://localhost:3000/{R:1}" />
+   ```
+   통째로 쓸 수 있는 예시가 [`web.config.example`](web.config.example)에 있다
+   (`/gitea`·`/paas`·`/console` 규칙 + git push 크기 제한 + 플랫폼 자동 생성과
+   공존하는 마커 위치). ARR 서버 설정은 web.config가 아니라 appcmd로 켠다 — 그 파일
+   머리말과 [deployment-guide.md 3.6절](../../../docs/deployment-guide.md) 참고.
+
+   > **`/paas`는 반대다.** 플랫폼은 라우터를 `/paas` 아래에 직접 등록하므로
+   > (`app/main.py`의 `PAAS_PREFIX`) 접두어를 **벗기면 안 된다**. 두 규칙이 달라
+   > 보이는 건 오타가 아니다.
+
+   > Gitea 쪽만 예외를 두고 싶다면 `[server] USE_SUB_URL_PATH = true`로 Gitea가
+   > 서브패스를 직접 처리하게 할 수 있다(기본값 false). 이때는 벗기지 않는다.
 
    네이티브 Windows(위 B절)라면 nssm에 ROOT_URL만 서브패스 버전으로 바꿔 넣는다:
    ```powershell
@@ -325,7 +336,7 @@ curl.exe -s -D - -o NUL "http://localhost:3000/login/oauth/authorize?$q"        
 1. **web.config에서 백엔드 주소를 `127.0.0.1` 대신 `localhost`(또는 머신 이름)로 바꾼다** —
    이름이 안 겹치니 콜백은 건드려지지 않는다. 영향 범위가 가장 좁다.
    ```xml
-   <action type="Rewrite" url="http://localhost:3000/gitea/{R:1}" />
+   <action type="Rewrite" url="http://localhost:3000/{R:1}" />
    ```
    단, Windows에서 `localhost`는 `::1`로 먼저 풀린다 — Gitea가 `HTTP_ADDR = 127.0.0.1`로만
    듣고 있으면 이번엔 502가 난다. 그때는 `HTTP_ADDR`을 비우거나 머신 이름을 쓴다.
