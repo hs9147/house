@@ -1,5 +1,9 @@
 ; 이 플랫폼과 붙이는 데 필요한 Gitea 설정만 모은 예시.
 ;
+; 적어 둔 값은 **서브패스 배포 + SSH 미사용** 구성 기준이다(플랫폼과 같은 도메인의
+; /gitea 아래로 내보내고, git은 http로만 쓰는 경우). 다른 구성이라면 각 항목 주석에
+; 적어 둔 대안으로 바꾼다.
+;
 ; Gitea 전체 설정이 아니라 **연동에 관여하는 항목만** 담았다. 나머지는 Gitea 기본값과
 ; 설치 마법사가 채운 값을 그대로 두면 된다. 기존 app.ini가 있다면 아래 항목만 해당
 ; 섹션에 옮겨 적고 Gitea를 재시작한다(같은 섹션이 두 번 나오면 안 된다).
@@ -14,20 +18,29 @@
 ; 아래 값들의 배경과 함께 봐야 할 절차는 README.md에 있다.
 
 [server]
-; 외부에서 실제로 접속하는 주소. 서브패스로 내보낸다면 **그 경로까지** 포함해야 한다 —
+; 외부에서 실제로 접속하는 주소. **서브패스로 내보낸다면 그 경로까지 포함**해야 한다 —
 ; Gitea가 로그인 리다이렉트·정적 자산·OAuth 콜백 URL을 전부 이 값 기준으로 만들기
 ; 때문에, 경로가 빠지면 로그인 후 리다이렉트가 서브패스를 잃어버려 깨진다.
-;   별도 도메인:  https://git.example.com/
-;   서브패스:     https://paas.example.com/gitea/
-ROOT_URL = https://git.example.com/
-DOMAIN = git.example.com
+; 끝의 슬래시도 빼지 말 것.
+ROOT_URL = https://paas.example.com/gitea/
+; 호스트명만 적는다(경로 없이). ROOT_URL의 호스트와 같아야 한다.
+DOMAIN = paas.example.com
+;
+; 리버스프록시는 이 접두어를 **벗기지 않고 그대로** 넘겨야 한다 — Gitea는 요청 경로에
+; /gitea가 붙어 있는 채로 와야 위 ROOT_URL과 아귀가 맞는다. Caddy는 handle_path가
+; 아니라 handle, IIS는 rewrite만 하고 strip하지 않기(README "서브패스" 절 참고).
+;
+; 별도 도메인을 쓴다면 대신 이렇게 둔다:
+;   ROOT_URL = https://git.example.com/
+;   DOMAIN = git.example.com
 
-; SSH 포트(22/2222)를 열 수 없는 환경이면 true로 둔다. 플랫폼은 SSH를 쓰지 않으므로
-; (clone/fetch/push 모두 http + 토큰 헤더) 동작에는 영향이 없다. 이 값을 켜야 Gitea UI가
-; SSH clone 주소를 감춘다 — 안 끄면 사용자가 그 주소를 복사해 쓰다 연결이 안 돼 헤맨다.
-DISABLE_SSH = false
-; DISABLE_SSH = false 일 때만 의미가 있다.
-SSH_PORT = 2222
+; SSH 포트(22/2222)를 열 수 없는 환경이라 끈다. 플랫폼 동작에는 영향이 없다 —
+; clone/fetch/push를 전부 http + 토큰 헤더로 하기 때문이다. 이 값을 켜야 Gitea UI가
+; SSH clone 주소를 **감춘다**. 끄지 않으면 리포 화면에 쓸 수 없는 SSH 주소가 계속 함께
+; 떠서, 사용자가 그걸 복사해 쓰다 연결이 안 돼 헤맨다.
+DISABLE_SSH = true
+; DISABLE_SSH = true 면 SSH_PORT는 의미가 없다. SSH를 쓰는 구성에서만 지정한다:
+;   SSH_PORT = 2222
 
 [service]
 ; 사내 전용 — 초대 없이 가입 금지(계정은 관리자가 만들거나 아래 SSO 자동 등록으로 생긴다).
