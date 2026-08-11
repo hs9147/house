@@ -694,9 +694,20 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7000/paas/health   # 2
 - 200이 아니면 플랫폼이 안 떠 있거나 다른 포트다 — 서비스 상태와 기동 로그를 본다
   (nssm이면 `nssm status paas`, systemd면 `journalctl -u paas -n 50`).
 - 200인데 프록시만 502면 프록시 쪽 문제다:
-  - **IIS**: ARR이 설치돼 있고 프록시가 켜져 있어야 한다(3.6절) — URL Rewrite만으로는
-    다른 포트로 전달이 안 되고, 이 상태가 정확히 502로 나타난다.
-    `appcmd set config -section:system.webServer/proxy /enabled:True`
+  - **IIS — 가장 흔한 원인.** URL Rewrite 규칙의 절대 URL(`http://127.0.0.1:7000/...`)은
+    URL Rewrite 모듈이 아니라 **ARR(Application Request Routing)**이 실제로 전달한다.
+    ARR이 없거나 프록시 기능이 꺼져 있으면 **규칙은 매칭되는데 전달이 안 돼 정확히
+    502가 난다**(`services/proxy/iis_proxy.py`의 `_ensure_arr_proxy_enabled` 주석 참고).
+    서버 레벨 설정이라 한 번만 켜면 모든 사이트에 적용된다:
+    ```powershell
+    %windir%\system32\inetsrv\appcmd set config -section:system.webServer/proxy /enabled:True /commit:apphost
+    # 이어서 반드시 — 안 켜면 ARR이 Authorization 헤더를 떼어내 Bearer/OIDC 인증이 깨진다
+    %windir%\system32\inetsrv\appcmd set config -section:system.webServer/proxy /passThroughAuthorizationHeader:True /commit:apphost
+    ```
+    ARR 자체가 없으면 먼저 설치한다([다운로드](https://www.iis.net/downloads/microsoft/application-request-routing)).
+    > 플랫폼이 만드는 사이트에는 이 두 설정이 자동 적용되지만(`_ensure_arr_proxy_enabled`),
+    > `/paas`처럼 **사람이 직접 만든 규칙**에는 아무도 적용해 주지 않는다 — 플랫폼으로
+    > 프로젝트를 한 번도 배포한 적 없는 서버라면 꺼져 있을 가능성이 높다.
   - rewrite 대상 포트가 실제 기동 포트와 같은지 확인한다.
   - 플랫폼을 `--host 127.0.0.1`로 띄웠는데 프록시가 다른 IP로 접속하려 하면 못 닿는다
     (같은 서버면 rewrite 대상도 `127.0.0.1`로 맞출 것).

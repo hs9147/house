@@ -407,6 +407,17 @@ gitea admin auth add-oauth --name paas --provider openidConnect \
 `handle`과 같은 방식이고, IIS/ARR이면 그 사이트의 URL Rewrite에 `/paas/*`를
 `http://127.0.0.1:7000/paas/{R:1}`로 보내는 규칙을 추가한다(경로를 벗기지 말 것).
 
+> **IIS는 규칙만으로는 부족하다.** 절대 URL로 보내는 rewrite는 ARR이 실제 전달을
+> 담당하므로, 서버 레벨에서 아래 두 개를 켜야 한다. 안 켜면 `/paas` 전 경로가
+> (`/paas/health`까지) **502**로 떨어지고, 첫 번째만 켜면 Authorization 헤더가 떨어져
+> Bearer/OIDC 인증이 깨진다:
+> ```powershell
+> %windir%\system32\inetsrv\appcmd set config -section:system.webServer/proxy /enabled:True /commit:apphost
+> %windir%\system32\inetsrv\appcmd set config -section:system.webServer/proxy /passThroughAuthorizationHeader:True /commit:apphost
+> ```
+> 플랫폼이 만드는 사이트에는 이 둘이 자동 적용되지만(`services/proxy/iis_proxy.py`의
+> `_ensure_arr_proxy_enabled`), 사람이 직접 만든 `/paas` 규칙에는 적용되지 않는다.
+
 > 플랫폼 **자신**은 이 문제를 겪지 않는다. 자기가 발급한 토큰은 로컬 개인키로 바로
 > 검증하고 JWKS를 HTTP로 가져오지 않는다(`app/security.py`의 `_verification_key`) —
 > `PAAS_OIDC_JWKS_URL`을 따로 설정할 필요도 없다.
