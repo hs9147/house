@@ -361,6 +361,9 @@ Gitea가 서버에서 부르는 호출(discovery·token·jwks)과 브라우저�
 # 플랫폼 .env
 PAAS_PLATFORM_PUBLIC_URL=https://public.example.com        # 브라우저가 가는 주소(그대로)
 PAAS_OIDC_PROVIDER_BACKCHANNEL_URL=http://10.0.0.5:7000/paas   # Gitea가 서버에서 닿는 주소
+# PAAS_OIDC_ISSUER는 설정하지 않는다 — 내장 Provider만 쓸 때 발급·검증 모두 위
+# 백채널 주소로 닫힌다. 여기에 다른 값을 넣으면 발급값과 검증값이 어긋나 우리 토큰이
+# 401이 된다(외부 Keycloak을 함께 신뢰할 때만 그 주소를 넣을 것).
 ```
 ```bash
 # Gitea 인증 소스도 그 사내 주소로 등록한다(issuer와 같아야 하므로)
