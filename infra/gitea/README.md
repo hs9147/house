@@ -185,8 +185,12 @@ DB를 Postgres로 교체하려면 deployment.yaml 주석의 `GITEA__database__*`
    }
    ```
    IIS/ARR(`PAAS_PROXY_BACKEND=iis`)를 쓴다면 URL Rewrite 규칙에서도 경로를
-   재작성(rewrite)만 하고 **벗겨내지(strip) 않아야** 동일한 효과를 낸다 —
-   [deployment-guide.md 3.6절](../../../docs/deployment-guide.md)의 ARR 설정 참고.
+   재작성(rewrite)만 하고 **벗겨내지(strip) 않아야** 동일한 효과를 낸다 — 즉 타겟
+   URL에 `/gitea`를 다시 붙인다. 통째로 쓸 수 있는 예시가
+   [`web.config.example`](web.config.example)에 있다(`/gitea`·`/paas`·`/console`
+   규칙 + git push 크기 제한 + 플랫폼 자동 생성과 공존하는 마커 위치).
+   ARR 서버 설정은 web.config가 아니라 appcmd로 켠다 — 그 파일 머리말과
+   [deployment-guide.md 3.6절](../../../docs/deployment-guide.md) 참고.
 
    네이티브 Windows(위 B절)라면 nssm에 ROOT_URL만 서브패스 버전으로 바꿔 넣는다:
    ```powershell
@@ -318,10 +322,16 @@ curl.exe -s -D - -o NUL "http://localhost:3000/login/oauth/authorize?$q"        
 직접 호출의 `Location`에는 `127.0.0.1`이 남아 있는데 프록시 쪽만 공개 도메인으로 바뀌었다면
 확정이다. 둘 중 하나로 푼다:
 
-1. **백엔드 주소를 `127.0.0.1` 대신 `localhost`(또는 머신 이름)로 바꾼다** — 이름이 안 겹치니
-   콜백은 건드려지지 않는다. 영향 범위가 가장 좁다.
+1. **web.config에서 백엔드 주소를 `127.0.0.1` 대신 `localhost`(또는 머신 이름)로 바꾼다** —
+   이름이 안 겹치니 콜백은 건드려지지 않는다. 영향 범위가 가장 좁다.
+   ```xml
+   <action type="Rewrite" url="http://localhost:3000/gitea/{R:1}" />
+   ```
+   단, Windows에서 `localhost`는 `::1`로 먼저 풀린다 — Gitea가 `HTTP_ADDR = 127.0.0.1`로만
+   듣고 있으면 이번엔 502가 난다. 그때는 `HTTP_ADDR`을 비우거나 머신 이름을 쓴다.
 2. 역방향 재작성을 끈다 — Gitea는 이미 `ROOT_URL` 기준의 공개 주소를 스스로 만들어 내보내므로
-   이 기능이 할 일이 없다(서버 단위 설정이다):
+   이 기능이 할 일이 없다. **이건 web.config에 못 넣는다** — 서버 레벨
+   (applicationHost.config) 설정이라 사이트 web.config에 적으면 500.19가 난다:
    ```powershell
    %windir%\system32\inetsrv\appcmd.exe set config -section:system.webServer/proxy `
      /reverseRewriteHostInResponseHeaders:"False" /commit:apphost
