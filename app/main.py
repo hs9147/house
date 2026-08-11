@@ -65,8 +65,22 @@ def create_app() -> FastAPI:
         try:
             # 브라우저용 주소도 함께 확인한다 — 백채널만 설정하고 공개 주소를 빠뜨리면
             # 로그인 화면 주소가 내부 주소로 나가 사용자가 열 수 없다.
-            print(f"[paas] OIDC Provider 활성화 — issuer={_oidc_issuer()} "
+            resolved_issuer = _oidc_issuer()
+            print(f"[paas] OIDC Provider 활성화 — issuer={resolved_issuer} "
                   f"authorize={_oidc_browser()}/oauth2/authorize")
+            # 백채널이 설정되면 발급자 주소는 그 값이 되고 PAAS_OIDC_ISSUER는 내장
+            # Provider에 관여하지 않는다(외부 발급자 신뢰용으로만 남는다). 이걸 모르고
+            # 둘을 다르게 두면, 클라이언트에는 PAAS_OIDC_ISSUER 주소로 등록해 놓고 실제
+            # 문서에는 백채널 주소가 실려 나가 "issuer did not match"로 거부된다.
+            if (settings.oidc_provider_backchannel_url and settings.oidc_issuer
+                    and settings.oidc_issuer.rstrip("/") != resolved_issuer):
+                print(
+                    "[paas] 주의: PAAS_OIDC_ISSUER"
+                    f"({settings.oidc_issuer})는 내장 Provider의 발급자 주소로 쓰이지 "
+                    "않습니다 — 백채널 주소가 우선합니다. 클라이언트(Gitea 등)에는 위 "
+                    "issuer 주소로 등록하세요(다르면 issuer 불일치로 거부됩니다). "
+                    "이 값은 외부 발급자를 함께 신뢰할 때만 의미가 있습니다."
+                )
         except OidcProviderError as e:
             print(f"[paas] OIDC Provider 설정 오류: {e}")
 
