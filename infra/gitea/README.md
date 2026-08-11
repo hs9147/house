@@ -205,12 +205,85 @@ GITEA__server__DISABLE_SSH=true
   이어붙이고 `nssm restart gitea`. 방화벽의 2222 규칙도 지운다.
 - K8s: `k8s/service.yaml`의 ssh 포트 항목과 `deployment.yaml`의 `GITEA__server__SSH_PORT`를 지운다.
 
-개인 개발자는 http clone에 Gitea 계정 토큰(Settings → Applications → Generate Token)을
-쓰면 된다:
+### 개발자 PC에서 clone/push (VS Code 포함)
+
+**http git에는 "로그인 세션"이 없다.** 브라우저로 Gitea(또는 SSO)에 로그인해 둬도 git은
+그 세션을 쓰지 않는다 — push할 때마다 자격 증명을 다시 보낸다. 그래서 매번 물어보는
+것처럼 보인다. 저장은 git credential helper가 담당한다.
+
+**SSO로 만들어진 계정은 비밀번호가 아예 없다.** OIDC 자동 등록(`ENABLE_AUTO_REGISTRATION`)
+으로 생긴 계정에는 로컬 비밀번호가 설정돼 있지 않다. 그래서 git이 물어볼 때 평소 쓰는
+**SSO 비밀번호를 넣으면 반드시 실패한다** — 이게 "로그인이 유지되지 않는다"로 보이는
+가장 흔한 원인이다.
+
+#### 권장 — 브라우저 SSO로 인증 (토큰 수동 발급 없음)
+
+Git Credential Manager(GCM)는 Gitea를 자동 인식해 **브라우저 OAuth 로그인**으로 처리한다.
+`git push` 시 브라우저가 열리고, 이미 SSO 세션이 있으면 클릭 한 번으로 끝난다 — 사용자가
+토큰을 만들 필요도, 어디에 붙여넣을지 고민할 필요도 없다. 발급된 토큰은 GCM이 OS 자격
+증명 저장소에 넣어 두므로 다음 push부터는 아무것도 묻지 않는다.
+
+서버 쪽에 등록할 것이 없다. Gitea 1.21+는 GCM용 OAuth 애플리케이션을 **기본으로 미리
+등록해 둔다**(`[oauth2] DEFAULT_APPLICATIONS`의 `git-credential-manager`, 이 리포의
+compose는 1.22를 쓴다). `[oauth2] ENABLED`도 기본값이 true여야 한다 — 끄면 GCM이
+OAuth를 못 찾고 비밀번호를 묻는 방식으로 되돌아간다.
+
+개발자 PC에서 한 번만:
 ```bash
-git clone http://<사용자>:<토큰>@git.example.com/org/repo.git
-# 또는 git credential helper에 저장해 두고 평소처럼 clone
+git config --global credential.helper manager     # 구버전 Git이면 manager-core
+# Windows: Git for Windows에 GCM이 함께 설치돼 있다
+# Linux/macOS: 별도 설치 필요 (https://github.com/git-ecosystem/git-credential-manager)
 ```
+이후 평소처럼 clone/push하면 브라우저가 뜬다:
+```bash
+git clone https://git.example.com/org/repo.git
+```
+
+> 콘솔의 **프로젝트**·**에이전트 기획** 화면에 있는 `VS Code` 버튼을 쓰면 주소를 직접
+> 복사하지 않아도 된다 — VS Code가 열리며 clone 위치를 묻는다.
+
+**Gitea를 서브패스로 뒀다면 자동 인식이 안 된다.** GCM이 쓰는 Gitea 기본 엔드포인트는
+도메인 루트 기준(`/login/oauth/authorize`)이라, `https://host/gitea/`처럼 하위 경로에
+있으면 엉뚱한 주소를 부른다([GCM #1650](https://github.com/git-ecosystem/git-credential-manager/issues/1650)).
+이 경우 엔드포인트를 직접 지정한다(클라이언트 시크릿은 없다 — 공개 클라이언트다):
+```bash
+git config --global credential.https://host.example.com.oauthClientId e90ee53c-94e2-48ac-9358-a874fb9e0662
+git config --global credential.https://host.example.com.oauthAuthorizeEndpoint /gitea/login/oauth/authorize
+git config --global credential.https://host.example.com.oauthTokenEndpoint    /gitea/login/oauth/token
+git config --global credential.https://host.example.com.oauthRedirectUri      http://127.0.0.1
+```
+
+#### 대안 — 액세스 토큰 (GCM을 못 쓰는 환경)
+
+CI 러너나 GCM 설치가 불가능한 PC에서는 개인 액세스 토큰을 쓴다. 프로필 → Settings →
+Applications → Generate New Token, 스코프는 최소 `write:repository`.
+```bash
+git clone https://git.example.com/org/repo.git
+#   Username: <Gitea 사용자명>
+#   Password: <발급한 토큰>   ← SSO 비밀번호가 아니다
+```
+
+> **토큰을 URL에 넣지 말 것.** `https://user:token@host/...` 형태로 clone하면 토큰이
+> `.git/config`에 평문으로 남아 리포를 압축해 보내거나 백업할 때 그대로 새어 나간다.
+> 이미 그렇게 받았다면 `git remote set-url origin https://git.example.com/org/repo.git`로
+> 정리한 뒤 위 방식으로 다시 인증한다.
+
+**이미 틀린 자격 증명이 캐시된 경우** — 한 번 잘못 입력하면 helper가 그걸 저장해 두고
+계속 재사용하므로, 토큰을 새로 발급해도 계속 실패한다. 저장된 항목을 먼저 지운다:
+```powershell
+# Windows: 제어판 → 자격 증명 관리자 → Windows 자격 증명 →
+#          "git:http://git.example.com" 항목 제거
+# 또는 명령으로:
+cmdkey /list | findstr git
+```
+```bash
+# 공통 — helper에게 직접 지우게 한다
+printf 'protocol=http\nhost=git.example.com\n\n' | git credential reject
+```
+
+> VS Code는 자체 자격 증명 저장소를 쓰지 않고 위 git credential helper를 그대로
+> 사용한다. 그래서 터미널에서 `git push`가 되면 VS Code에서도 된다 — 문제가 생기면
+> **터미널에서 먼저 확인**하는 편이 원인을 가리기 쉽다.
 
 ## 최초 설정 (공통)
 

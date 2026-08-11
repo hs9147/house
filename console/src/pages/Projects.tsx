@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
 import Modal from '../components/Modal';
 import StatusPill from '../components/StatusPill';
+import VscodeWorkButton from '../components/VscodeWorkButton';
 import { api } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
@@ -66,7 +67,12 @@ export default function Projects() {
                   <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
                     <td>{p.name}</td>
                     <td><StatusPill value={p.type} /></td>
-                    <td className="mono">{p.git_url}</td>
+                    <td className="mono">
+                      <span className="row" style={{ alignItems: 'center', gap: 8 }}>
+                        {p.git_url}
+                        <VscodeWorkButton project={p} />
+                      </span>
+                    </td>
                     <td className="mono">{p.branch}</td>
                     <td><StatusPill value={p.default_profile} /></td>
                     <td className="mono">{fmtDate(p.created_at)}</td>
