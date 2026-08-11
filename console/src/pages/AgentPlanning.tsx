@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import Async from '../components/Async';
+import VscodeWorkButton from '../components/VscodeWorkButton';
 import { ApiError, api } from '../lib/api';
 import { getEmail } from '../lib/auth';
 import { fmtDate } from '../lib/format';
@@ -359,6 +360,12 @@ export default function AgentPlanning() {
             기획 단계 순차 수행 · 산출물 Gitea 저장
           </span>
           <div className="spacer" />
+          {/* 아래 드롭다운에서 고른 프로젝트를 그대로 연다 — 이 화면에는 이미 선택
+              개념이 있으므로 목록을 다시 묻지 않는다. */}
+          <VscodeWorkButton
+            project={availableProjects.find((p) => String(p.id) === projectId) ?? null}
+            disabledHint="아래에서 프로젝트를 먼저 선택하세요"
+          />
           <button onClick={() => setShowCreate(true)}>+ 새 프로젝트</button>
         </div>
         <p className="mutedtext" style={{ fontSize: 12, marginTop: 6, marginBottom: 12 }}>

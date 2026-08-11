@@ -231,6 +231,10 @@ git config --global credential.helper store      # 파일에 평문 저장(사�
 ```
 
 **3) 평소처럼 clone하고, 물어보면 토큰을 넣는다**
+
+> 콘솔의 **프로젝트**·**에이전트 기획** 화면에 있는 `VS Code로 작업` 버튼을 쓰면
+> 주소를 직접 복사하지 않아도 된다 — VS Code가 열리며 clone 위치를 묻는다. 그 다음
+> 첫 push에서 아래와 같이 토큰을 요구하는 것은 동일하다.
 ```bash
 git clone http://git.example.com/org/repo.git
 #   Username: <Gitea 사용자명>
