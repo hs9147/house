@@ -129,9 +129,19 @@ def browser_base() -> str:
     백채널만 사내 주소로 빼는 것이 이 분리의 목적이다(oidc_provider_backchannel_url).
     """
     settings = get_settings()
-    if settings.oidc_provider_backchannel_url and settings.platform_public_url:
-        return f"{settings.platform_public_url.rstrip('/')}/paas"
-    return issuer()
+    if not settings.oidc_provider_backchannel_url:
+        return issuer()
+    if not settings.platform_public_url:
+        # 이 분리의 전제는 "브라우저는 공개 주소, 서버 호출은 내부 주소"다. 공개 주소가
+        # 없으면 브라우저까지 내부 주소로 보내게 되는데, 백채널이 localhost면 그건 사용자
+        # 자기 PC를 가리켜 로그인 화면이 아예 안 열린다 — 증상만 봐선 원인을 찾기 어렵다.
+        raise OidcProviderError(
+            "PAAS_OIDC_PROVIDER_BACKCHANNEL_URL을 쓰려면 PAAS_PLATFORM_PUBLIC_URL도 "
+            "설정해야 합니다 — 브라우저가 갈 공개 주소가 없으면 로그인 화면 주소까지 "
+            f"내부 주소({settings.oidc_provider_backchannel_url})로 나갑니다. "
+            "백채널이 localhost라면 사용자 자기 PC를 가리키게 됩니다."
+        )
+    return f"{settings.platform_public_url.rstrip('/')}/paas"
 
 
 def discovery_document() -> dict:

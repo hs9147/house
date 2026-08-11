@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Tier = Literal["small", "enterprise"]
@@ -218,9 +219,33 @@ class Settings(BaseSettings):
         return Path(__file__).resolve().parent.parent
 
 
+class SettingsError(RuntimeError):
+    """설정값이 잘못돼 기동할 수 없음 — 어떤 환경변수가 문제인지 이름과 값으로 알려준다."""
+
+
+def _describe_validation_error(exc: "ValidationError") -> str:
+    """pydantic 오류를 '어떤 PAAS_ 환경변수가 왜 틀렸는지'로 바꾼다.
+
+    값 하나만 잘못돼도 Settings() 생성이 실패해 **플랫폼 전체가 기동하지 못한다**(콘솔
+    로그인부터 모든 API까지). 그런데 기본 오류는 pydantic 내부 필드명과 트레이스백이라,
+    서비스로 띄운 경우(nssm 등) 로그를 열어봐도 원인을 바로 알기 어렵다 — 프록시 쪽에서는
+    그냥 전 경로 502로만 보인다. 그래서 환경변수 이름 그대로 되짚어 준다.
+    """
+    lines = ["설정값이 잘못돼 기동할 수 없습니다:"]
+    for err in exc.errors():
+        field = ".".join(str(p) for p in err["loc"]) or "(알 수 없음)"
+        env_name = f"PAAS_{field.upper()}"
+        lines.append(f"  - {env_name}: {err['msg']} (현재 값: {err.get('input')!r})")
+    lines.append("  .env 또는 환경변수를 고친 뒤 다시 기동하세요.")
+    return "\n".join(lines)
+
+
 @lru_cache
 def get_settings() -> Settings:
-    s = Settings()
+    try:
+        s = Settings()
+    except ValidationError as e:
+        raise SettingsError(_describe_validation_error(e)) from e
     for d in (
         s.work_dir, s.build_log_dir, s.caddy_sites_dir, s.k8s_manifest_dir,
         s.iis_sites_root, s.apache_sites_dir,

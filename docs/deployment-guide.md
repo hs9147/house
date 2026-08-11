@@ -657,3 +657,75 @@ llm-main  (vLLM)    → 자체 PaaS GPU      → project://llm-main (내부 전�
 | URL 접속 불가 | base_domain DNS 전파 확인 → Caddyfile `import` 라인 확인(공유 사이트는 `caddy-sites/_base.caddy`가 `handles/*.caddy`를 import) → `caddy reload` |
 | 웹훅이 401 | 리포 웹훅 Secret과 `PAAS_WEBHOOK_SECRET` 불일치 |
 | 콘솔 로그인 실패 | admin 키는 200, 일반 키는 403이 정상 프로브 — 401이면 키 자체가 잘못됨 |
+| **502 Bad Gateway** | 발생 지점이 둘이라 먼저 구분해야 한다 — 아래 5.1절 |
+
+### 5.1 502 Bad Gateway — 먼저 어디서 난 502인지 가른다
+
+502는 **리버스프록시가 내는 것**과 **플랫폼 API가 내는 것** 두 종류이고 원인이 전혀
+다르다. 응답 본문으로 즉시 구분된다:
+
+```bash
+curl -i https://<주소>/paas/...   # 실제로 502가 나는 그 URL
+```
+
+- 본문이 `{"detail": "..."}` **JSON** → **플랫폼이 낸 502**. 프록시는 정상이고, 플랫폼이
+  외부(주로 Gitea·LLM)를 호출하다 실패한 것이다. `detail`에 원인이 그대로 적혀 있다.
+- 본문이 IIS/Caddy의 **HTML 오류 페이지** → **프록시가 플랫폼에 못 닿은 것**. 플랫폼은
+  요청을 받지도 못했다.
+
+**A. JSON detail이 있는 경우 (플랫폼이 낸 502)**
+
+가장 흔한 것은 Gitea API 호출 실패다(조직·리포 생성, `services/gitea.py` → 502).
+플랫폼 서버에서 Gitea에 실제로 닿는지부터 확인한다:
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: token $PAAS_GITEA_API_TOKEN" \
+  "$PAAS_GITEA_URL/api/v1/user"
+```
+- 연결 자체가 안 되면 `PAAS_GITEA_URL`이 플랫폼 서버 기준으로 닿는 주소인지 확인
+  (사내 DNS·방화벽. 같은 서버라면 `http://localhost:3000`이 가장 확실하다).
+- 401/403이면 `PAAS_GITEA_API_TOKEN`이 만료됐거나 조직 생성 권한이 없는 토큰이다.
+
+**B. HTML 오류 페이지인 경우 (프록시가 못 닿음)**
+
+플랫폼이 살아 있는지를 **서버 안에서** 먼저 본다:
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7000/paas/health   # 200이어야 정상
+```
+- 200이 아니면 플랫폼이 안 떠 있거나 다른 포트다 — 서비스 상태와 기동 로그를 본다
+  (nssm이면 `nssm status paas`, systemd면 `journalctl -u paas -n 50`).
+
+  > **`.env`를 고친 직후라면 설정값 오류를 먼저 의심한다.** `PAAS_*` 값이 **하나라도**
+  > 형식에 안 맞으면(예: `PAAS_OIDC_PROVIDER_ENABLED=truee`) 플랫폼이 아예 기동하지
+  > 못하고, 그러면 콘솔 로그인부터 모든 API까지 전부 502로 보인다 — 방금 만진 설정과
+  > 무관해 보이는 기능까지 같이 죽어서 원인을 엉뚱한 데서 찾기 쉽다.
+  > 기동 로그 마지막 줄에 어떤 환경변수가 문제인지 그대로 찍힌다:
+  > ```
+  > 설정값이 잘못돼 기동할 수 없습니다:
+  >   - PAAS_OIDC_PROVIDER_ENABLED: Input should be a valid boolean (현재 값: 'truee')
+  > ```
+  > 로그를 못 보는 상황이면 서버에서 아래로 같은 검사를 바로 할 수 있다:
+  > ```bash
+  > python -c "from app.config import get_settings; get_settings(); print('설정 OK')"
+  > ```
+- 200인데 프록시만 502면 프록시 쪽 문제다:
+  - **IIS — 가장 흔한 원인.** URL Rewrite 규칙의 절대 URL(`http://127.0.0.1:7000/...`)은
+    URL Rewrite 모듈이 아니라 **ARR(Application Request Routing)**이 실제로 전달한다.
+    ARR이 없거나 프록시 기능이 꺼져 있으면 **규칙은 매칭되는데 전달이 안 돼 정확히
+    502가 난다**(`services/proxy/iis_proxy.py`의 `_ensure_arr_proxy_enabled` 주석 참고).
+    서버 레벨 설정이라 한 번만 켜면 모든 사이트에 적용된다:
+    ```powershell
+    %windir%\system32\inetsrv\appcmd set config -section:system.webServer/proxy /enabled:True /commit:apphost
+    # 이어서 반드시 — 안 켜면 ARR이 Authorization 헤더를 떼어내 Bearer/OIDC 인증이 깨진다
+    %windir%\system32\inetsrv\appcmd set config -section:system.webServer/proxy /passThroughAuthorizationHeader:True /commit:apphost
+    ```
+    ARR 자체가 없으면 먼저 설치한다([다운로드](https://www.iis.net/downloads/microsoft/application-request-routing)).
+    > 플랫폼이 만드는 사이트에는 이 두 설정이 자동 적용되지만(`_ensure_arr_proxy_enabled`),
+    > `/paas`처럼 **사람이 직접 만든 규칙**에는 아무도 적용해 주지 않는다 — 플랫폼으로
+    > 프로젝트를 한 번도 배포한 적 없는 서버라면 꺼져 있을 가능성이 높다.
+  - rewrite 대상 포트가 실제 기동 포트와 같은지 확인한다.
+  - 플랫폼을 `--host 127.0.0.1`로 띄웠는데 프록시가 다른 IP로 접속하려 하면 못 닿는다
+    (같은 서버면 rewrite 대상도 `127.0.0.1`로 맞출 것).
+
+**특정 경로에서만 502라면**(예: `/paas/oauth2/...`만), 그 경로가 rewrite 규칙 범위에
+안 들어간 것이다 — 규칙이 `/paas/*` 전체를 받는지, 그리고 **경로를 벗기지 않는지**
+확인한다(3.6절·`infra/gitea/README.md`의 서브패스 절).

@@ -162,8 +162,8 @@ def _issued_by_our_own_provider(token: str) -> bool:
     return bool(kid) and kid == oidc_provider.key_id()
 
 
-def _verification_key(token: str):
-    """토큰 서명을 검증할 키.
+def _verification_key_and_issuer(token: str) -> tuple[object, str]:
+    """이 토큰을 검증할 (키, 기대 발급자).
 
     우리가 서명한 토큰이면 개인키가 이미 디스크에 있으므로 그 공개키를 바로 쓴다 —
     JWKS를 HTTP로 가져오지 않는다. 자기 자신을 공개 주소로 다시 호출하면:
@@ -172,13 +172,21 @@ def _verification_key(token: str):
       - 기본 JWKS 경로가 Keycloak 규약(/protocol/openid-connect/certs)이라 우리
         엔드포인트(/oauth2/jwks)와 달라 404가 난다.
       - 워커가 자기 요청을 처리하는 도중 자기에게 동기 HTTP 호출을 건다.
-    외부 발급자(Keycloak 등)일 때만 기존대로 JWKS를 조회한다.
-    """
-    if _issued_by_our_own_provider(token):
-        from .services import oidc_provider  # noqa: PLC0415
 
-        return oidc_provider.public_key_pem()
-    return _get_jwk_client().get_signing_key_from_jwt(token).key
+    기대 발급자도 함께 정한다. 우리 토큰은 **우리가 발급에 쓴 값**(oidc_provider.issuer())
+    으로 검증해야 한다 — oidc_issuer로 검증하면, 백채널 분리처럼 발급 주소가 따로 정해지는
+    구성에서 발급값과 검증값이 조용히 어긋나 우리 토큰이 전부 401이 된다.
+    외부 발급자(Keycloak 등)일 때만 JWKS를 조회하고 oidc_issuer로 검증한다.
+    """
+    from .services import oidc_provider  # noqa: PLC0415
+
+    if _issued_by_our_own_provider(token):
+        return oidc_provider.public_key_pem(), oidc_provider.issuer()
+
+    settings = get_settings()
+    if not settings.oidc_issuer:
+        raise HTTPException(status_code=401, detail="OIDC not configured")
+    return _get_jwk_client().get_signing_key_from_jwt(token).key, settings.oidc_issuer
 
 
 def validate_email_domain(email: str) -> bool:
@@ -197,16 +205,16 @@ def authenticate_bearer(token: str) -> ApiKey:
     import jwt  # noqa: PLC0415
 
     settings = get_settings()
-    if not settings.oidc_issuer:
-        raise HTTPException(status_code=401, detail="OIDC not configured")
+    # 내장 Provider가 켜져 있으면 우리 토큰은 oidc_issuer 설정 없이도 받는다 —
+    # 발급·검증 모두 oidc_provider.issuer()라는 한 값으로 닫힌다.
+    key, expected_issuer = _verification_key_and_issuer(token)
     try:
-        key = _verification_key(token)
         options = {"verify_aud": bool(settings.oidc_audience)}
         payload = jwt.decode(
             token,
             key,
             algorithms=["RS256"],
-            issuer=settings.oidc_issuer,
+            issuer=expected_issuer,
             audience=settings.oidc_audience or None,
             options=options,
         )

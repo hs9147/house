@@ -239,6 +239,42 @@ def test_backchannel_url_splits_server_calls_from_browser_calls(split_channel_cl
     assert body["authorization_endpoint"] == "https://public.example.com/paas/oauth2/authorize"
 
 
+def test_split_channel_token_passes_bearer_auth_without_oidc_issuer_set(split_channel_client):
+    """회귀: 백채널 분리 구성(사이트=https, 내부 인증=http)에서 우리 토큰이 401이 됐다.
+
+    토큰은 issuer()(=백채널 주소)로 발급되는데 검증은 oidc_issuer 설정값으로 하고 있어
+    두 값이 조용히 어긋났다. 우리 토큰은 우리가 발급에 쓴 값으로 검증해야 하고, 그러면
+    내장 Provider만 쓰는 구성에서는 PAAS_OIDC_ISSUER를 설정할 필요가 아예 없다.
+    """
+    assert not get_settings().oidc_issuer  # 이 fixture는 oidc_issuer를 설정하지 않는다
+
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        db.add(UserAccount(
+            email="alice@cho-fam.com", name="A", password_hash=hash_password("hunter22"),
+            is_approved=True, is_admin=True,
+        ))
+        db.commit()
+    finally:
+        db.close()
+    session_token = split_channel_client.post(
+        "/paas/api/v1/auth/login",
+        json={"email": "alice@cho-fam.com", "password": "hunter22"},
+    ).json()["key"]
+    split_channel_client.cookies.set("paas_session", session_token)
+
+    code = _get_code(split_channel_client)
+    id_token = split_channel_client.post("/paas/oauth2/token", data={
+        "grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT_URI,
+        "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
+    }).json()["id_token"]
+
+    key = security.authenticate_bearer(id_token)
+    assert key.name == "alice@cho-fam.com" and key.is_admin is True
+
+
 def test_split_channel_tokens_carry_the_backchannel_issuer(split_channel_client):
     """발급 토큰의 iss는 백채널 issuer여야 한다 — 클라이언트는 자기가 아는 provider
     issuer와 토큰의 iss가 같은지 확인하므로, 여기가 어긋나면 로그인이 거부된다."""
@@ -305,6 +341,23 @@ def test_session_cookie_is_secure_on_an_https_deployment(monkeypatch, fresh_sett
     get_settings.cache_clear()
     cookie = _login_cookie_flags(TestClient(create_app()))
     assert "secure" in cookie.lower()
+
+
+def test_backchannel_without_public_url_is_rejected(monkeypatch, fresh_settings, tmp_path):
+    """백채널만 설정하고 공개 주소를 빠뜨리면 authorization_endpoint까지 내부 주소로
+    나간다 — 백채널이 localhost면 브라우저가 '사용자 자기 PC'로 가서 로그인 화면이 아예
+    안 열린다. 증상만으로는 원인을 찾기 어려우므로 여기서 분명히 실패시킨다."""
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "http://localhost:7000/paas")
+    monkeypatch.delenv("PAAS_PLATFORM_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH", str(tmp_path / "k.pem"))
+    get_settings.cache_clear()
+
+    with pytest.raises(oidc_provider.OidcProviderError, match="PAAS_PLATFORM_PUBLIC_URL"):
+        oidc_provider.browser_base()
+    r = TestClient(create_app()).get("/paas/.well-known/openid-configuration")
+    assert r.status_code == 500
+    assert "PAAS_PLATFORM_PUBLIC_URL" in r.json()["detail"]
 
 
 def test_issuer_requires_an_absolute_url(monkeypatch, fresh_settings):
