@@ -39,6 +39,10 @@ services:
       #   GITEA__oauth2_client__ENABLE_AUTO_REGISTRATION=true
       #   GITEA__oauth2_client__USERNAME=email
       #   GITEA__oauth2_client__ACCOUNT_LINKING=auto
+      # [oauth2] ENABLED와 DEFAULT_APPLICATIONS는 기본값(켜짐)을 그대로 둔다 — 개발자가
+      # git push할 때 토큰을 손으로 만들지 않고 브라우저 로그인으로 끝내는 경로가
+      # 여기에 달려 있다(Gitea가 Git Credential Manager용 OAuth 앱을 미리 등록해 둔다).
+      # 끄면 GCM이 OAuth를 못 찾아 비밀번호를 묻는 방식으로 되돌아간다. README 참고.
     volumes:
       - gitea-data:/data
     ports:

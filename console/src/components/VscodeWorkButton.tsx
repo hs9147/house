@@ -18,7 +18,7 @@ export default function VscodeWorkButton({ project }: { project: ProjectOut | nu
       disabled={!ready}
       title={
         ready
-          ? `${project!.name} 리포를 VS Code로 clone합니다 (첫 push에는 Gitea 액세스 토큰 필요)`
+          ? `${project!.name} 리포를 VS Code로 clone합니다 (첫 push 때 브라우저로 로그인)`
           : '리포 주소를 볼 수 있는 프로젝트만 열 수 있습니다'
       }
       // 프로젝트 목록은 행 클릭이 상세 이동이라 전파를 막아야 한다(삭제 버튼과 동일).

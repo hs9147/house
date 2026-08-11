@@ -214,37 +214,58 @@ GITEA__server__DISABLE_SSH=true
 **SSO로 만들어진 계정은 비밀번호가 아예 없다.** OIDC 자동 등록(`ENABLE_AUTO_REGISTRATION`)
 으로 생긴 계정에는 로컬 비밀번호가 설정돼 있지 않다. 그래서 git이 물어볼 때 평소 쓰는
 **SSO 비밀번호를 넣으면 반드시 실패한다** — 이게 "로그인이 유지되지 않는다"로 보이는
-가장 흔한 원인이다. 반드시 **액세스 토큰**을 써야 한다.
+가장 흔한 원인이다.
 
-**1) Gitea에서 토큰 발급** — 우측 상단 프로필 → Settings → Applications →
-Generate New Token. 스코프는 최소 `write:repository`(리포 읽기/쓰기)면 된다.
+#### 권장 — 브라우저 SSO로 인증 (토큰 수동 발급 없음)
 
-**2) credential helper를 켠다** (한 번만)
+Git Credential Manager(GCM)는 Gitea를 자동 인식해 **브라우저 OAuth 로그인**으로 처리한다.
+`git push` 시 브라우저가 열리고, 이미 SSO 세션이 있으면 클릭 한 번으로 끝난다 — 사용자가
+토큰을 만들 필요도, 어디에 붙여넣을지 고민할 필요도 없다. 발급된 토큰은 GCM이 OS 자격
+증명 저장소에 넣어 두므로 다음 push부터는 아무것도 묻지 않는다.
+
+서버 쪽에 등록할 것이 없다. Gitea 1.21+는 GCM용 OAuth 애플리케이션을 **기본으로 미리
+등록해 둔다**(`[oauth2] DEFAULT_APPLICATIONS`의 `git-credential-manager`, 이 리포의
+compose는 1.22를 쓴다). `[oauth2] ENABLED`도 기본값이 true여야 한다 — 끄면 GCM이
+OAuth를 못 찾고 비밀번호를 묻는 방식으로 되돌아간다.
+
+개발자 PC에서 한 번만:
 ```bash
-# Windows: Git for Windows에 Git Credential Manager가 같이 설치돼 있다
-git config --global credential.helper manager
-#   (구버전 Git이면 manager-core)
-
-# Linux/macOS
-git config --global credential.helper store      # 파일에 평문 저장(사내 PC 한정)
-# macOS는 osxkeychain, GNOME은 libsecret이 더 낫다
+git config --global credential.helper manager     # 구버전 Git이면 manager-core
+# Windows: Git for Windows에 GCM이 함께 설치돼 있다
+# Linux/macOS: 별도 설치 필요 (https://github.com/git-ecosystem/git-credential-manager)
+```
+이후 평소처럼 clone/push하면 브라우저가 뜬다:
+```bash
+git clone https://git.example.com/org/repo.git
 ```
 
-**3) 평소처럼 clone하고, 물어보면 토큰을 넣는다**
+> 콘솔의 **프로젝트**·**에이전트 기획** 화면에 있는 `VS Code` 버튼을 쓰면 주소를 직접
+> 복사하지 않아도 된다 — VS Code가 열리며 clone 위치를 묻는다.
 
-> 콘솔의 **프로젝트**·**에이전트 기획** 화면에 있는 `VS Code로 작업` 버튼을 쓰면
-> 주소를 직접 복사하지 않아도 된다 — VS Code가 열리며 clone 위치를 묻는다. 그 다음
-> 첫 push에서 아래와 같이 토큰을 요구하는 것은 동일하다.
+**Gitea를 서브패스로 뒀다면 자동 인식이 안 된다.** GCM이 쓰는 Gitea 기본 엔드포인트는
+도메인 루트 기준(`/login/oauth/authorize`)이라, `https://host/gitea/`처럼 하위 경로에
+있으면 엉뚱한 주소를 부른다([GCM #1650](https://github.com/git-ecosystem/git-credential-manager/issues/1650)).
+이 경우 엔드포인트를 직접 지정한다(클라이언트 시크릿은 없다 — 공개 클라이언트다):
 ```bash
-git clone http://git.example.com/org/repo.git
+git config --global credential.https://host.example.com.oauthClientId e90ee53c-94e2-48ac-9358-a874fb9e0662
+git config --global credential.https://host.example.com.oauthAuthorizeEndpoint /gitea/login/oauth/authorize
+git config --global credential.https://host.example.com.oauthTokenEndpoint    /gitea/login/oauth/token
+git config --global credential.https://host.example.com.oauthRedirectUri      http://127.0.0.1
+```
+
+#### 대안 — 액세스 토큰 (GCM을 못 쓰는 환경)
+
+CI 러너나 GCM 설치가 불가능한 PC에서는 개인 액세스 토큰을 쓴다. 프로필 → Settings →
+Applications → Generate New Token, 스코프는 최소 `write:repository`.
+```bash
+git clone https://git.example.com/org/repo.git
 #   Username: <Gitea 사용자명>
-#   Password: <1)에서 발급한 토큰>   ← SSO 비밀번호가 아니다
+#   Password: <발급한 토큰>   ← SSO 비밀번호가 아니다
 ```
-이후 push부터는 helper가 저장한 값을 써서 다시 묻지 않는다.
 
-> **토큰을 URL에 넣지 말 것.** `http://user:token@host/...` 형태로 clone하면 토큰이
+> **토큰을 URL에 넣지 말 것.** `https://user:token@host/...` 형태로 clone하면 토큰이
 > `.git/config`에 평문으로 남아 리포를 압축해 보내거나 백업할 때 그대로 새어 나간다.
-> 이미 그렇게 받았다면 `git remote set-url origin http://git.example.com/org/repo.git`로
+> 이미 그렇게 받았다면 `git remote set-url origin https://git.example.com/org/repo.git`로
 > 정리한 뒤 위 방식으로 다시 인증한다.
 
 **이미 틀린 자격 증명이 캐시된 경우** — 한 번 잘못 입력하면 helper가 그걸 저장해 두고
