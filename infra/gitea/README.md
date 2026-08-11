@@ -271,6 +271,73 @@ git config --global credential.https://host.example.com.oauthRedirectUri      ht
 > 포트를 가리지 않는데, 그 처리가 `127.0.0.1`에만 적용된다 — GCM은 매번 임의 포트로
 > 대기하므로 이게 맞아야 콜백이 돌아온다.
 
+#### 승인했는데 `127.0.0.1`로 넘어가지 않는다 (code·state까지만 가고 끊김)
+
+이 흐름에는 `code`·`state`를 나르는 구간이 **두 개** 있다. 어디서 끊겼는지는
+**브라우저가 멈춘 주소**에 그대로 드러나므로 그것부터 본다.
+
+```
+① 플랫폼(IdP) ──code,state──▶ Gitea 콜백        (Gitea에 로그인하는 단계)
+② Gitea(IdP)  ──code,state──▶ 127.0.0.1 (개발자 PC)  (git 자격 증명을 받는 단계)
+```
+
+| 멈춘 주소 | 끊긴 구간 | 원인 |
+| --- | --- | --- |
+| `…/gitea/user/oauth2/paas/callback?code=…&state=…` | ① 끝 | Gitea가 그 code를 플랫폼에 교환하러 갔다가 실패 — **백채널** |
+| 공개 도메인인데 `?code=…&state=…`가 붙어 있음 | ② 중간 | 리버스 프록시가 응답의 `Location`을 고쳐 씀 — **ARR** |
+| Gitea 화면에 오류(`unregistered redirect uri` 등) | ② 시작 전 | redirect URI 불일치 (`localhost` 사용 등) |
+| `http://127.0.0.1:<포트>/…`까지 갔는데 연결 거부 | ② 도착 후 | 브라우저와 GCM이 서로 다른 머신 |
+
+**① 백채널** — 플랫폼 콘솔 로그에 두 줄이 한 쌍으로 찍힌다.
+```
+[paas] OIDC authorize → code 발급: client=gitea user=... redirect_uri=...
+[paas] OIDC token 교환 성공: client=gitea user=...
+```
+앞줄만 있고 뒷줄이 없으면 **Gitea가 플랫폼 토큰 엔드포인트에 아예 닿지 못한 것**이다.
+Gitea가 도는 머신에서 직접 찔러 본다(405/400이면 닿는 것, 연결 거부·타임아웃이면 아니다):
+```powershell
+curl.exe -s -o NUL -w "%{http_code}`n" -X POST http://localhost:7000/paas/oauth2/token
+```
+닿지 않으면 `PAAS_OIDC_PROVIDER_BACKCHANNEL_URL`이 **Gitea 머신 기준** 주소가 아니다 —
+Gitea가 컨테이너면 그 안의 `localhost`는 컨테이너 자신이다(`host.docker.internal` 등).
+`교환 실패` 줄이 찍혔다면 사유가 그 줄에 함께 나온다.
+
+**② ARR의 `Location` 재작성** — "127.0.0.1로 안 넘어간다"의 가장 흔한 원인이다.
+Gitea는 `302 Location: http://127.0.0.1:<포트>/?code=…&state=…`를 **응답으로만** 내려보내는데,
+ARR의 *Reverse rewrite host in response headers*가 켜져 있으면 백엔드 호스트와 같은 이름을
+공개 도메인으로 바꿔치기한다. **백엔드를 `127.0.0.1:3000`으로 잡아 두면 GCM의 콜백 호스트와
+이름이 겹쳐서**, 개발자 PC로 가야 할 리다이렉트가 서버로 되돌아온다 — code·state는 그대로
+붙어 있으니 "전달은 됐는데 목적지가 다르다"로 보인다.
+
+확인 — 프록시를 통과한 것과 Gitea를 직접 부른 것의 `Location`을 비교한다:
+```powershell
+$q = "client_id=e90ee53c-94e2-48ac-9358-a874fb9e0662&redirect_uri=http://127.0.0.1:5000/&response_type=code&state=t"
+curl.exe -s -D - -o NUL "https://paas.example.com/gitea/login/oauth/authorize?$q"   # 프록시 통과
+curl.exe -s -D - -o NUL "http://localhost:3000/login/oauth/authorize?$q"            # Gitea 직접
+```
+직접 호출의 `Location`에는 `127.0.0.1`이 남아 있는데 프록시 쪽만 공개 도메인으로 바뀌었다면
+확정이다. 둘 중 하나로 푼다:
+
+1. **백엔드 주소를 `127.0.0.1` 대신 `localhost`(또는 머신 이름)로 바꾼다** — 이름이 안 겹치니
+   콜백은 건드려지지 않는다. 영향 범위가 가장 좁다.
+2. 역방향 재작성을 끈다 — Gitea는 이미 `ROOT_URL` 기준의 공개 주소를 스스로 만들어 내보내므로
+   이 기능이 할 일이 없다(서버 단위 설정이다):
+   ```powershell
+   %windir%\system32\inetsrv\appcmd.exe set config -section:system.webServer/proxy `
+     /reverseRewriteHostInResponseHeaders:"False" /commit:apphost
+   ```
+URL Rewrite의 **아웃바운드 규칙**에서 `Location`을 손대고 있다면 거기에도 루프백 제외 조건을
+넣는다(`{RESPONSE_Location}`이 `^http://127\.0\.0\.1`이면 건너뛰기). Caddy는 `Location`을
+고치지 않으므로 이 문제가 없다.
+
+**③ redirect URI 불일치** — 위 [redirect URI 정하기](#redirect-uri-정하기)의 2번. `localhost`가
+아니라 `127.0.0.1`이어야 한다.
+
+**④ 브라우저와 GCM이 다른 머신** — `127.0.0.1`은 **브라우저가 도는 PC**를 가리킨다. SSH 원격
+개발·WSL·컨테이너 안에서 `git push`를 하면 GCM은 그쪽에서 대기하는데 브라우저는 내 PC에서
+열려, 리다이렉트가 엉뚱한 곳의 루프백으로 간다. 같은 머신에서 하거나
+[액세스 토큰 방식](#대안--액세스-토큰-gcm을-못-쓰는-환경)을 쓴다.
+
 #### 브라우저 승인까지 됐는데 push가 멈춘다
 
 로그인·승인이 끝났는데 VS Code/터미널이 계속 대기한다면, 인가 코드를 토큰으로
