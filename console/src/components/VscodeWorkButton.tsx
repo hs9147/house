@@ -2,7 +2,7 @@ import { canOpenInVscode, vscodeCloneUri } from '../lib/vscode';
 import type { ProjectOut } from '../lib/types';
 
 /**
- * "VS Code" — 이 프로젝트 리포를 사용자 PC의 VS Code로 clone한다.
+ * "→ VS Code" — 이 프로젝트 리포를 사용자 PC의 VS Code로 clone한다.
  *
  * clone은 서버가 아니라 사용자 PC에서 일어난다(lib/vscode.ts 참고) — VS Code가 등록해 둔
  * vscode: URI 핸들러를 여는 것이라 백엔드 호출이 없다.
@@ -24,7 +24,7 @@ export default function VscodeWorkButton({ project }: { project: ProjectOut | nu
       // 프로젝트 목록은 행 클릭이 상세 이동이라 전파를 막아야 한다(삭제 버튼과 동일).
       onClick={(e) => { e.stopPropagation(); openInVscode(project!.git_url); }}
     >
-      VS Code
+      → VS Code
     </button>
   );
 }
