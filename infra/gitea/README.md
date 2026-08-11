@@ -205,12 +205,60 @@ GITEA__server__DISABLE_SSH=true
   이어붙이고 `nssm restart gitea`. 방화벽의 2222 규칙도 지운다.
 - K8s: `k8s/service.yaml`의 ssh 포트 항목과 `deployment.yaml`의 `GITEA__server__SSH_PORT`를 지운다.
 
-개인 개발자는 http clone에 Gitea 계정 토큰(Settings → Applications → Generate Token)을
-쓰면 된다:
+### 개발자 PC에서 clone/push (VS Code 포함)
+
+**http git에는 "로그인 세션"이 없다.** 브라우저로 Gitea(또는 SSO)에 로그인해 둬도 git은
+그 세션을 쓰지 않는다 — push할 때마다 자격 증명을 다시 보낸다. 그래서 매번 물어보는
+것처럼 보인다. 저장은 git credential helper가 담당한다.
+
+**SSO로 만들어진 계정은 비밀번호가 아예 없다.** OIDC 자동 등록(`ENABLE_AUTO_REGISTRATION`)
+으로 생긴 계정에는 로컬 비밀번호가 설정돼 있지 않다. 그래서 git이 물어볼 때 평소 쓰는
+**SSO 비밀번호를 넣으면 반드시 실패한다** — 이게 "로그인이 유지되지 않는다"로 보이는
+가장 흔한 원인이다. 반드시 **액세스 토큰**을 써야 한다.
+
+**1) Gitea에서 토큰 발급** — 우측 상단 프로필 → Settings → Applications →
+Generate New Token. 스코프는 최소 `write:repository`(리포 읽기/쓰기)면 된다.
+
+**2) credential helper를 켠다** (한 번만)
 ```bash
-git clone http://<사용자>:<토큰>@git.example.com/org/repo.git
-# 또는 git credential helper에 저장해 두고 평소처럼 clone
+# Windows: Git for Windows에 Git Credential Manager가 같이 설치돼 있다
+git config --global credential.helper manager
+#   (구버전 Git이면 manager-core)
+
+# Linux/macOS
+git config --global credential.helper store      # 파일에 평문 저장(사내 PC 한정)
+# macOS는 osxkeychain, GNOME은 libsecret이 더 낫다
 ```
+
+**3) 평소처럼 clone하고, 물어보면 토큰을 넣는다**
+```bash
+git clone http://git.example.com/org/repo.git
+#   Username: <Gitea 사용자명>
+#   Password: <1)에서 발급한 토큰>   ← SSO 비밀번호가 아니다
+```
+이후 push부터는 helper가 저장한 값을 써서 다시 묻지 않는다.
+
+> **토큰을 URL에 넣지 말 것.** `http://user:token@host/...` 형태로 clone하면 토큰이
+> `.git/config`에 평문으로 남아 리포를 압축해 보내거나 백업할 때 그대로 새어 나간다.
+> 이미 그렇게 받았다면 `git remote set-url origin http://git.example.com/org/repo.git`로
+> 정리한 뒤 위 방식으로 다시 인증한다.
+
+**이미 틀린 자격 증명이 캐시된 경우** — 한 번 잘못 입력하면 helper가 그걸 저장해 두고
+계속 재사용하므로, 토큰을 새로 발급해도 계속 실패한다. 저장된 항목을 먼저 지운다:
+```powershell
+# Windows: 제어판 → 자격 증명 관리자 → Windows 자격 증명 →
+#          "git:http://git.example.com" 항목 제거
+# 또는 명령으로:
+cmdkey /list | findstr git
+```
+```bash
+# 공통 — helper에게 직접 지우게 한다
+printf 'protocol=http\nhost=git.example.com\n\n' | git credential reject
+```
+
+> VS Code는 자체 자격 증명 저장소를 쓰지 않고 위 git credential helper를 그대로
+> 사용한다. 그래서 터미널에서 `git push`가 되면 VS Code에서도 된다 — 문제가 생기면
+> **터미널에서 먼저 확인**하는 편이 원인을 가리기 쉽다.
 
 ## 최초 설정 (공통)
 
