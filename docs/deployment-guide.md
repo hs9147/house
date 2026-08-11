@@ -693,6 +693,20 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7000/paas/health   # 2
 ```
 - 200이 아니면 플랫폼이 안 떠 있거나 다른 포트다 — 서비스 상태와 기동 로그를 본다
   (nssm이면 `nssm status paas`, systemd면 `journalctl -u paas -n 50`).
+
+  > **`.env`를 고친 직후라면 설정값 오류를 먼저 의심한다.** `PAAS_*` 값이 **하나라도**
+  > 형식에 안 맞으면(예: `PAAS_OIDC_PROVIDER_ENABLED=truee`) 플랫폼이 아예 기동하지
+  > 못하고, 그러면 콘솔 로그인부터 모든 API까지 전부 502로 보인다 — 방금 만진 설정과
+  > 무관해 보이는 기능까지 같이 죽어서 원인을 엉뚱한 데서 찾기 쉽다.
+  > 기동 로그 마지막 줄에 어떤 환경변수가 문제인지 그대로 찍힌다:
+  > ```
+  > 설정값이 잘못돼 기동할 수 없습니다:
+  >   - PAAS_OIDC_PROVIDER_ENABLED: Input should be a valid boolean (현재 값: 'truee')
+  > ```
+  > 로그를 못 보는 상황이면 서버에서 아래로 같은 검사를 바로 할 수 있다:
+  > ```bash
+  > python -c "from app.config import get_settings; get_settings(); print('설정 OK')"
+  > ```
 - 200인데 프록시만 502면 프록시 쪽 문제다:
   - **IIS — 가장 흔한 원인.** URL Rewrite 규칙의 절대 URL(`http://127.0.0.1:7000/...`)은
     URL Rewrite 모듈이 아니라 **ARR(Application Request Routing)**이 실제로 전달한다.
