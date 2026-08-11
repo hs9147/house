@@ -59,10 +59,14 @@ def create_app() -> FastAPI:
         # 시도까지 기다리지 말고 지금 알린다 — 기동 자체를 막지는 않는다(SSO 설정 하나로
         # 플랫폼 전체를 못 뜨게 할 이유는 없다).
         from .services.oidc_provider import OidcProviderError  # noqa: PLC0415
+        from .services.oidc_provider import browser_base as _oidc_browser  # noqa: PLC0415
         from .services.oidc_provider import issuer as _oidc_issuer  # noqa: PLC0415
 
         try:
-            print(f"[paas] OIDC Provider 활성화 — issuer={_oidc_issuer()}")
+            # 브라우저용 주소도 함께 확인한다 — 백채널만 설정하고 공개 주소를 빠뜨리면
+            # 로그인 화면 주소가 내부 주소로 나가 사용자가 열 수 없다.
+            print(f"[paas] OIDC Provider 활성화 — issuer={_oidc_issuer()} "
+                  f"authorize={_oidc_browser()}/oauth2/authorize")
         except OidcProviderError as e:
             print(f"[paas] OIDC Provider 설정 오류: {e}")
 

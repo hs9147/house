@@ -376,6 +376,29 @@ gitea admin auth add-oauth \
 공개 주소가 된다. 사용자는 평소처럼 공개 도메인에서 로그인하고, Gitea는 인증서 없이
 사내로 토큰을 받아 간다.
 
+**Gitea와 플랫폼이 같은 서버라면 `localhost`가 가장 간단하다** — 네트워크를 아예 안 타므로
+방화벽·DNS·인증서가 전부 무관해진다(플랫폼 기동 포트가 7000이라면):
+```bash
+PAAS_OIDC_PROVIDER_BACKCHANNEL_URL=http://localhost:7000/paas
+```
+```bash
+gitea admin auth add-oauth --name paas --provider openidConnect \
+  --key gitea --secret "<시크릿>" \
+  --auto-discover-url "http://localhost:7000/paas/.well-known/openid-configuration"
+```
+
+두 가지만 주의한다:
+
+- **`PAAS_PLATFORM_PUBLIC_URL`을 반드시 함께 설정할 것.** 안 하면
+  `authorization_endpoint`까지 `http://localhost:7000/...`으로 나가고, 그건 **사용자
+  자기 PC**를 가리켜 로그인 화면이 열리지 않는다. (설정을 빠뜨리면 기동 로그와
+  디스커버리 응답에서 바로 오류로 알려준다.)
+- **Gitea가 컨테이너 안에서 돈다면 `localhost`는 그 컨테이너 자신이다.** 이 경우
+  호스트를 가리키는 주소로 바꾼다 — Docker Desktop(Windows/macOS)은
+  `http://host.docker.internal:7000/paas`, Linux Docker는 호스트 IP(예:
+  `http://172.17.0.1:7000/paas`)를 쓰고 플랫폼이 그 주소로 들어오는 연결을 받는지
+  확인한다(uvicorn을 `--host 127.0.0.1`로 띄웠다면 컨테이너에서 못 닿는다).
+
 > 평문 http를 쓰므로 **그 구간이 신뢰할 수 있는 사내망이어야 한다**(같은 호스트나 같은
 > 서브넷). 인터넷을 지나는 경로라면 쓰지 말 것 — 이 구간에는 인가 코드와 토큰이 흐른다.
 

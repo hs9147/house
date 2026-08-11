@@ -343,6 +343,23 @@ def test_session_cookie_is_secure_on_an_https_deployment(monkeypatch, fresh_sett
     assert "secure" in cookie.lower()
 
 
+def test_backchannel_without_public_url_is_rejected(monkeypatch, fresh_settings, tmp_path):
+    """백채널만 설정하고 공개 주소를 빠뜨리면 authorization_endpoint까지 내부 주소로
+    나간다 — 백채널이 localhost면 브라우저가 '사용자 자기 PC'로 가서 로그인 화면이 아예
+    안 열린다. 증상만으로는 원인을 찾기 어려우므로 여기서 분명히 실패시킨다."""
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "http://localhost:7000/paas")
+    monkeypatch.delenv("PAAS_PLATFORM_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH", str(tmp_path / "k.pem"))
+    get_settings.cache_clear()
+
+    with pytest.raises(oidc_provider.OidcProviderError, match="PAAS_PLATFORM_PUBLIC_URL"):
+        oidc_provider.browser_base()
+    r = TestClient(create_app()).get("/paas/.well-known/openid-configuration")
+    assert r.status_code == 500
+    assert "PAAS_PLATFORM_PUBLIC_URL" in r.json()["detail"]
+
+
 def test_issuer_requires_an_absolute_url(monkeypatch, fresh_settings):
     """발급자 주소가 없으면 상대 경로("/paas")가 섞인 잘못된 디스커버리 문서를 내주는
     대신 분명히 실패해야 한다 — 그걸 받은 Gitea 쪽 오류는 원인 파악이 훨씬 어렵다."""
