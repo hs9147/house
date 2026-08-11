@@ -54,6 +54,17 @@ def create_app() -> FastAPI:
     app.include_router(storage.router, prefix=API_PREFIX)
     if settings.oidc_provider_enabled:  # /paas/.well-known/openid-configuration, /paas/oauth2/*
         app.include_router(oidc_provider.router, prefix=PAAS_PREFIX)
+        # 발급자 주소는 클라이언트(Gitea 등)가 조회한 URL과 정확히 같아야 하고, 그
+        # 호스트명은 서버 인증서에 들어 있는 이름이어야 한다. 설정이 아예 없으면 첫 SSO
+        # 시도까지 기다리지 말고 지금 알린다 — 기동 자체를 막지는 않는다(SSO 설정 하나로
+        # 플랫폼 전체를 못 뜨게 할 이유는 없다).
+        from .services.oidc_provider import OidcProviderError  # noqa: PLC0415
+        from .services.oidc_provider import issuer as _oidc_issuer  # noqa: PLC0415
+
+        try:
+            print(f"[paas] OIDC Provider 활성화 — issuer={_oidc_issuer()}")
+        except OidcProviderError as e:
+            print(f"[paas] OIDC Provider 설정 오류: {e}")
 
     # 1일 1회 외부 API 수집 루트 백그라운드 탐색 및 갱신 스케줄러 시동
     from .services.apisearch import start_daily_api_directory_scheduler  # noqa: PLC0415

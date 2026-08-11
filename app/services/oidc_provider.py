@@ -91,17 +91,57 @@ def jwks() -> dict:
 
 
 def issuer() -> str:
+    """이 발급자의 절대 주소.
+
+    반드시 절대 URL이어야 한다 — 클라이언트(Gitea 등)는 디스커버리 문서의 issuer가
+    자기가 조회한 URL과 정확히 같은지 확인하고, 다르면 연동을 거부한다. 그리고 이
+    호스트명은 **서버 인증서(CN/SAN)에 실제로 들어 있는 이름**이어야 한다. IP나 내부
+    호스트명을 넣으면 클라이언트가 TLS 검증에서
+    "certificate is valid for A, not B"로 실패한다.
+    """
     settings = get_settings()
-    if settings.oidc_issuer:
-        return settings.oidc_issuer.rstrip("/")
-    return f"{settings.platform_public_url.rstrip('/')}/paas"
+    base = (
+        settings.oidc_provider_backchannel_url.rstrip("/")
+        if settings.oidc_provider_backchannel_url
+        else settings.oidc_issuer.rstrip("/")
+        if settings.oidc_issuer
+        else f"{settings.platform_public_url.rstrip('/')}/paas"
+        if settings.platform_public_url
+        else ""
+    )
+    if not base.startswith(("http://", "https://")):
+        raise OidcProviderError(
+            "OIDC Provider의 발급자 주소를 정할 수 없습니다 — PAAS_OIDC_ISSUER 또는 "
+            "PAAS_PLATFORM_PUBLIC_URL에 http(s)로 시작하는 절대 주소를 설정하세요 "
+            f"(현재: PAAS_OIDC_ISSUER={settings.oidc_issuer!r}, "
+            f"PAAS_PLATFORM_PUBLIC_URL={settings.platform_public_url!r}). "
+            "이 호스트명은 서버 인증서에 들어 있는 이름과 같아야 합니다."
+        )
+    return base
+
+
+def browser_base() -> str:
+    """브라우저가 실제로 가는 주소의 베이스.
+
+    백채널(discovery·token·jwks)과 달라도 된다 — 클라이언트(go-oidc 등)는 discovery
+    문서의 issuer가 자기가 조회한 URL과 같은지만 확인하고, authorization_endpoint가
+    같은 호스트인지는 보지 않는다. 공개 도메인으로 /paas가 안 들어오는 구성에서
+    백채널만 사내 주소로 빼는 것이 이 분리의 목적이다(oidc_provider_backchannel_url).
+    """
+    settings = get_settings()
+    if settings.oidc_provider_backchannel_url and settings.platform_public_url:
+        return f"{settings.platform_public_url.rstrip('/')}/paas"
+    return issuer()
 
 
 def discovery_document() -> dict:
     iss = issuer()
+    # authorization_endpoint만 브라우저가 직접 연다 — 나머지(token·jwks·userinfo)는
+    # 클라이언트가 서버에서 부르는 백채널이라 issuer와 같은 주소를 쓴다.
+    browser = browser_base()
     return {
         "issuer": iss,
-        "authorization_endpoint": f"{iss}/oauth2/authorize",
+        "authorization_endpoint": f"{browser}/oauth2/authorize",
         "token_endpoint": f"{iss}/oauth2/token",
         "userinfo_endpoint": f"{iss}/oauth2/userinfo",
         "jwks_uri": f"{iss}/oauth2/jwks",
@@ -230,13 +270,22 @@ def exchange_client_credentials(client_id: str, client_secret: str) -> None:
         raise OidcProviderError("invalid client credentials")
 
 
-def decode_id_token(token: str) -> dict:
-    """우리가 발급한 토큰 검증(userinfo 등에서 씀) — 외부 issuer용인 authenticate_bearer와
-    달리 JWKS를 네트워크로 가져올 필요 없이 우리 공개키로 바로 검증한다."""
-    pub_pem = _get_signing_key().public_key().public_bytes(
+def public_key_pem() -> bytes:
+    """서명 공개키(PEM) — 우리가 발급한 토큰을 검증할 때 쓴다.
+
+    이게 있으면 JWKS를 HTTP로 가져올 필요가 없다. 자기 자신에게 HTTPS로 붙는 경로는
+    공개 호스트명과 서버 인증서가 어긋나거나(사설 CA·자체 서명·내부 DNS) 워커가
+    자기 요청 처리 중에 자기를 다시 호출하게 되는 문제가 있어 애초에 피한다."""
+    return _get_signing_key().public_key().public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
+
+
+def decode_id_token(token: str) -> dict:
+    """우리가 발급한 토큰 검증(userinfo 등에서 씀) — 외부 issuer용인 authenticate_bearer와
+    달리 JWKS를 네트워크로 가져올 필요 없이 우리 공개키로 바로 검증한다."""
+    pub_pem = public_key_pem()
     try:
         return jwt.decode(
             token, pub_pem, algorithms=["RS256"], issuer=issuer(),

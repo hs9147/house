@@ -18,7 +18,12 @@ router = APIRouter(tags=["oidc-provider"])
 
 @router.get("/.well-known/openid-configuration")
 def discovery():
-    return oidc_provider.discovery_document()
+    # 발급자 주소가 설정되지 않았으면 상대 경로가 섞인 잘못된 문서를 내주는 대신
+    # 여기서 분명히 실패한다 — 그 문서를 받은 Gitea 쪽 오류는 원인 파악이 훨씬 어렵다.
+    try:
+        return oidc_provider.discovery_document()
+    except oidc_provider.OidcProviderError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/oauth2/jwks")

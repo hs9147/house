@@ -26,7 +26,7 @@ Docker·Caddy가 이미 설치됐을 테니 아래 1)·2)는 건너뛰고 3)부�
 # 실행 위치: 새로 준비한 서버 셸 (sudo 권한)
 sudo ufw allow 22/tcp      # 관리자 SSH 접속
 sudo ufw allow 80,443/tcp  # Caddy(HTTP→HTTPS 자동 리다이렉트, TLS 자동 발급)
-sudo ufw allow 2222/tcp    # git SSH clone/push (docker-compose.yml이 컨테이너의 22를 여기로 매핑)
+sudo ufw allow 2222/tcp    # git SSH clone/push — 안 쓸 거면 생략 (아래 "SSH를 못 쓰는 경우")
 sudo ufw enable
 ```
 
@@ -184,6 +184,34 @@ DB를 Postgres로 교체하려면 deployment.yaml 주석의 `GITEA__database__*`
    nssm restart gitea
    ```
 
+## SSH를 못 쓰는 경우 (git은 http로만)
+
+git SSH 포트(22/2222)를 열 수 없는 환경이라도 **플랫폼 동작에는 아무 영향이 없다.**
+플랫폼은 clone/fetch/push를 전부 http로 하고 인증은 토큰을 헤더로 넣어 처리한다
+(`services/git_auth.py`가 `http.extraHeader`로 주입 — git_url 자체엔 토큰을 심지 않는다).
+조직·업로드로 만드는 리포의 주소도 Gitea API가 주는 **http clone_url**을 쓴다(ssh_url이 아니다).
+
+사람이 직접 쓰는 경로만 정리해 주면 된다:
+
+```
+GITEA__server__DISABLE_SSH=true
+```
+
+이걸 켜야 Gitea UI가 SSH clone 주소를 **안 보여준다.** 안 끄면 리포 화면에 SSH 주소가
+계속 함께 뜨고, 사용자가 그걸 복사해 쓰다 연결이 안 돼서 헤맨다.
+
+- docker-compose: `environment:`에 위 줄을 추가하고 `ports:`의 `2222:22` 줄을 지운다.
+- 네이티브 Windows(nssm): `AppEnvironmentExtra`에 `GITEA__server__DISABLE_SSH=true`를
+  이어붙이고 `nssm restart gitea`. 방화벽의 2222 규칙도 지운다.
+- K8s: `k8s/service.yaml`의 ssh 포트 항목과 `deployment.yaml`의 `GITEA__server__SSH_PORT`를 지운다.
+
+개인 개발자는 http clone에 Gitea 계정 토큰(Settings → Applications → Generate Token)을
+쓰면 된다:
+```bash
+git clone http://<사용자>:<토큰>@git.example.com/org/repo.git
+# 또는 git credential helper에 저장해 두고 평소처럼 clone
+```
+
 ## 최초 설정 (공통)
 
 1. `https://git.example.com`(또는 위 서브패스 주소) 접속 → 설치 마법사에서 관리자 계정 생성
@@ -210,7 +238,8 @@ PAAS_OIDC_PROVIDER_ENABLED=true
 PAAS_PLATFORM_PUBLIC_URL=https://paas.example.com
 # redirect_uris는 Gitea의 콜백 주소. 경로 끝의 "paas"는 아래 --name과 반드시 일치해야 한다.
 PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<a에서 만든 값>","redirect_uris":["https://git.example.com/user/oauth2/paas/callback"]}}
-# 플랫폼 자신이 발급한 토큰을 플랫폼 API에서도 받으려면(선택) issuer를 자기 자신으로:
+# 플랫폼 자신이 발급한 토큰을 플랫폼 API에서도 받으려면(선택) issuer를 자기 자신으로.
+# 이 경우 JWKS는 로컬 개인키로 바로 검증하므로 PAAS_OIDC_JWKS_URL은 설정하지 않는다.
 PAAS_OIDC_ISSUER=https://paas.example.com/paas
 ```
 > Gitea를 서브패스로 뒀다면 redirect_uris도 그 주소로:
@@ -234,6 +263,127 @@ gitea admin auth add-oauth \
 > 서명 키는 `PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH`(기본 `./data/oidc-signing-key.pem`)에
 > 최초 기동 시 자동 생성돼 계속 재사용된다. **이 파일을 지우거나 옮기면 그 순간부터
 > 기존에 발급된 토큰이 전부 검증에 실패한다** — 백업 대상에 포함할 것.
+
+#### "인증서가 일치하지 않는다" 오류가 날 때
+
+Gitea는 `add-oauth`로 인증 소스를 **만드는 시점에** 디스커버리 URL의 TLS 인증서를
+검증하고, 실패하면 소스 자체가 만들어지지 않는다(`x509: certificate signed by unknown
+authority` / hostname mismatch). Gitea에는 이 검증을 끄는 옵션이 없다
+([go-gitea#17867](https://github.com/go-gitea/gitea/issues/17867)) — 인증서 쪽을 맞춰야 한다.
+
+먼저 어느 이름이 안 맞는지부터 확인한다(Gitea가 도는 호스트에서 실행):
+```bash
+curl -v https://paas.example.com/paas/.well-known/openid-configuration 2>&1 | grep -Ei "subject|issuer|SAN|CN|verify"
+```
+
+원인별 조치:
+
+| 증상 | 원인 | 조치 |
+| --- | --- | --- |
+| `certificate signed by unknown authority` | 사설 CA·자체 서명 인증서 | 그 CA 인증서를 **Gitea가 도는 호스트**의 신뢰 저장소에 넣는다. Linux: `/usr/local/share/ca-certificates/`에 복사 후 `update-ca-certificates`. Docker: 호스트의 CA 파일을 컨테이너 `/etc/ssl/certs/`에 마운트. Windows: 로컬 컴퓨터 → 신뢰할 수 있는 루트 인증 기관에 가져오기 |
+| hostname mismatch (`certificate is valid for A, not B`) | 디스커버리 URL의 호스트명(B)이 인증서의 CN/SAN(A)에 없음 | 아래 "hostname mismatch 풀기" 참고 |
+| 위 둘 다 아닌데 실패 | 내부 DNS가 그 호스트명을 다른 서버로 보냄 | Gitea 호스트에서 `getent hosts paas.example.com`으로 확인. 필요하면 `/etc/hosts`(또는 Windows `hosts`)에 올바른 IP를 고정 |
+
+##### hostname mismatch 풀기 (`certificate is valid for A, not B`)
+
+**B(디스커버리 URL에 쓴 이름)를 A(인증서에 있는 이름)로 바꾸는 것이 정답이다.** 반대로
+"연결이 되니까" IP나 내부 호스트명을 그대로 두고 인증서 검증만 우회하려는 시도는
+Gitea에 그런 옵션이 없어서 통하지 않는다.
+
+주의할 점: **URL을 바꾸면 세 곳이 동시에 같아야 한다.** Gitea(엄밀히는 go-oidc)는
+디스커버리 문서의 `issuer` 값이 자기가 조회한 URL과 정확히 일치하는지도 확인하기
+때문에, 하나만 바꾸면 이번엔 issuer 불일치로 실패한다.
+
+1. 플랫폼 `.env`의 `PAAS_OIDC_ISSUER`(없으면 `PAAS_PLATFORM_PUBLIC_URL`)
+2. Gitea 인증 소스의 `--auto-discover-url`
+3. `PAAS_OIDC_PROVIDER_CLIENTS`의 `redirect_uris`(이건 Gitea 쪽 주소라 별개지만,
+   주소 체계를 바꿨다면 같이 점검할 것)
+
+플랫폼이 지금 자기 발급자를 뭐라고 알고 있는지는 기동 로그(`[paas] OIDC Provider
+활성화 — issuer=...`)나 디스커버리 문서로 확인한다:
+```bash
+curl -s https://<공개도메인>/paas/.well-known/openid-configuration | grep -o '"issuer":"[^"]*"'
+```
+
+**공개 도메인으로 바꿨더니 이번엔 연결이 안 되는 경우**(사내망에서 자기 공개 주소로
+못 돌아오는 hairpin NAT 등): 이름은 그대로 두고 **경로만** 고친다 — Gitea가 도는
+호스트의 hosts 파일에 그 도메인을 내부 IP로 고정한다. 이름이 안 바뀌므로 인증서는
+계속 유효하다(IP로 바꿔 적으면 다시 mismatch가 난다).
+```
+# Linux: /etc/hosts   |   Windows: C:\Windows\System32\drivers\etc\hosts
+10.0.0.5   paas.example.com
+```
+
+인증서에 이름을 추가할 수 있는 상황이면(사내 CA 등) 반대로 B를 SAN에 넣어 재발급해도
+된다 — 그 경우 위 1·2의 URL은 B로 통일한다.
+
+##### 80 포트(평문 http)만 쓸 수 있는 경우
+
+443을 못 열어 전 구간을 http로만 운영한다면 **인증서가 개입할 여지가 없으므로 이 절의
+문제 자체가 발생하지 않는다.** 주소를 `http://`로 통일하기만 하면 된다:
+
+```bash
+# 플랫폼 .env — https가 아니라 http로 적는 것이 핵심
+PAAS_PLATFORM_PUBLIC_URL=http://paas.example.com
+PAAS_OIDC_ISSUER=http://paas.example.com/paas
+PAAS_OIDC_PROVIDER_CLIENTS={"gitea":{"secret":"<시크릿>","redirect_uris":["http://git.example.com/user/oauth2/paas/callback"]}}
+```
+```bash
+gitea admin auth add-oauth --name paas --provider openidConnect \
+  --key gitea --secret "<시크릿>" \
+  --auto-discover-url "http://paas.example.com/paas/.well-known/openid-configuration"
+```
+
+`PAAS_PLATFORM_PUBLIC_URL`을 **반드시 `http://`로** 둘 것. 이 값이 `https://`면 로그인
+세션 쿠키에 `secure`가 붙어 브라우저가 저장을 거부하고, 그러면 로그인은 성공한 것처럼
+보이는데 authorize는 계속 미로그인으로 판단해 로그인 화면으로 되돌린다(무한 루프).
+
+> 평문 http라 **로그인 비밀번호·세션 쿠키·인가 코드·토큰이 모두 암호화되지 않는다.**
+> 사내망 전용이라는 전제에서만 쓸 것이고, 가능해지면 https로 올리는 것이 맞다.
+> (TLS를 상단 게이트웨이에서 종료하고 이 서버는 80으로만 받는 구성이라면, 사용자가
+> 실제로 보는 주소가 https이므로 `PAAS_PLATFORM_PUBLIC_URL`은 그 https 주소로 적는다.)
+
+##### 공개 도메인으로 아예 `/paas`가 안 들어오는 경우
+
+공개 도메인의 binding이 이 플랫폼을 가리키지 않아(다른 사이트가 물고 있거나 그 경로
+규칙이 없어) `https://<공개도메인>/paas`로 애초에 도달할 수 없다면, 위 방법들은 쓸 수
+없다. **원칙적인 해법은 그 도메인에 `/paas` 라우팅을 추가하는 것**이고(아래 참고),
+그게 불가능하면 백채널만 분리한다.
+
+Gitea가 서버에서 부르는 호출(discovery·token·jwks)과 브라우저가 여는 화면
+(authorization_endpoint)은 **같은 주소일 필요가 없다** — 클라이언트(go-oidc)는
+디스커버리 문서의 `issuer`가 자기가 조회한 URL과 같은지만 확인하고,
+`authorization_endpoint`가 같은 호스트인지는 보지 않는다
+([go-oidc#159](https://github.com/coreos/go-oidc/issues/159)). 그래서 서버 호출만
+사내 주소(평문 http)로 빼면 **TLS 자체를 안 타므로 인증서 문제가 사라진다**:
+
+```bash
+# 플랫폼 .env
+PAAS_PLATFORM_PUBLIC_URL=https://public.example.com        # 브라우저가 가는 주소(그대로)
+PAAS_OIDC_PROVIDER_BACKCHANNEL_URL=http://10.0.0.5:7000/paas   # Gitea가 서버에서 닿는 주소
+```
+```bash
+# Gitea 인증 소스도 그 사내 주소로 등록한다(issuer와 같아야 하므로)
+gitea admin auth add-oauth \
+  --name paas --provider openidConnect \
+  --key gitea --secret "<시크릿>" \
+  --auto-discover-url "http://10.0.0.5:7000/paas/.well-known/openid-configuration"
+```
+결과: `issuer`·`token_endpoint`·`jwks_uri`는 사내 주소, `authorization_endpoint`만
+공개 주소가 된다. 사용자는 평소처럼 공개 도메인에서 로그인하고, Gitea는 인증서 없이
+사내로 토큰을 받아 간다.
+
+> 평문 http를 쓰므로 **그 구간이 신뢰할 수 있는 사내망이어야 한다**(같은 호스트나 같은
+> 서브넷). 인터넷을 지나는 경로라면 쓰지 말 것 — 이 구간에는 인가 코드와 토큰이 흐른다.
+
+**참고 — 라우팅을 추가하는 쪽(권장).** 공개 도메인 사이트에 `/paas` 경로 규칙 하나를
+더하면 위 우회가 필요 없다. Caddy는 [서브패스 절](#서브패스단일-포트로-노출하는-경우)의
+`handle`과 같은 방식이고, IIS/ARR이면 그 사이트의 URL Rewrite에 `/paas/*`를
+`http://127.0.0.1:7000/paas/{R:1}`로 보내는 규칙을 추가한다(경로를 벗기지 말 것).
+
+> 플랫폼 **자신**은 이 문제를 겪지 않는다. 자기가 발급한 토큰은 로컬 개인키로 바로
+> 검증하고 JWKS를 HTTP로 가져오지 않는다(`app/security.py`의 `_verification_key`) —
+> `PAAS_OIDC_JWKS_URL`을 따로 설정할 필요도 없다.
 
 ### B. 외부 Keycloak을 쓰는 경우 (대안)
 

@@ -44,9 +44,10 @@ class Settings(BaseSettings):
     # true면 paas가 /paas/.well-known/openid-configuration 등 OIDC Provider 엔드포인트를
     # 노출한다(services/oidc_provider.py). Gitea 등 외부 서비스가 이 엔드포인트로 SSO를
     # 걸면 paas의 UserAccount 계정 그 자체가 로그인 ID가 된다 — 별도 IdP(Keycloak 등)
-    # 없이도 SSO가 성립한다. 켤 때는 oidc_issuer도 paas 자신의 주소로 맞출 것(예:
-    # https://paas.example.com/paas) — 그러면 위 authenticate_bearer 검증 로직이
-    # 우리가 발급한 토큰을 그대로 검증한다(코드 변경 없음).
+    # 없이도 SSO가 성립한다. 켤 때는 oidc_issuer도 이 플랫폼 자신의 주소로 맞출 것(예:
+    # https://paas.example.com/paas) — 그러면 위 authenticate_bearer가 우리 토큰도
+    # 받는다. 이때 JWKS는 HTTP로 가져오지 않고 로컬 개인키로 바로 검증하므로
+    # oidc_jwks_url을 따로 설정할 필요가 없다(security._verification_key 참고).
     oidc_provider_enabled: bool = False
     # RSA 서명 키(PEM) 경로 — 없으면 최초 기동 시 새로 만들어 저장한다. 재시작 후에도
     # 같은 키를 써야 이미 나눠준 JWKS 공개키를 신뢰하는 클라이언트(Gitea 등)가 계속
@@ -58,6 +59,17 @@ class Settings(BaseSettings):
     # 미로그인 사용자를 이 URL로 보낸다(콘솔 로그인 화면). 비우면 platform_public_url
     # 기준으로 자동 계산(/console/#/login).
     oidc_provider_login_url: str = ""
+    # 백채널(서버→서버) 전용 주소. Gitea 같은 클라이언트가 discovery·token·jwks를
+    # 부를 때 쓰는 주소로, 브라우저가 가는 주소와 달라도 된다.
+    #
+    # 공개 도메인의 binding이 이 플랫폼을 가리키지 않아 https://공개도메인/paas 로는
+    # 들어올 수 없는 구성에서 쓴다 — 클라이언트가 사내에서 직접 닿는 주소(예:
+    # http://10.0.0.5:7000/paas)를 넣으면 TLS 자체를 안 타므로 인증서 불일치가 사라진다.
+    # 이 값이 issuer가 되고(클라이언트는 discovery URL과 issuer가 같은지만 확인한다),
+    # 브라우저가 가는 authorization_endpoint·로그인 화면은 계속 platform_public_url을
+    # 쓴다 — 이 둘이 달라도 되는 건 OIDC 규약이 보장한다.
+    # 비우면(기본) 백채널도 브라우저와 같은 주소를 쓴다.
+    oidc_provider_backchannel_url: str = ""
 
     # --- 배포 작업 큐 ---
     deploy_workers: int = 2
