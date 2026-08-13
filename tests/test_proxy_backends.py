@@ -614,3 +614,40 @@ def test_iis_example_web_config_survives_platform_splice():
     again = _splice_managed_rules(spliced, '        <rule name="app-path-1" />\n')
     assert 'name="app-path-0"' not in again and 'name="app-path-1"' in again
     assert 'name="gitea"' in again and 'name="paas"' in again
+
+
+def test_dev_route_is_not_stripped_by_any_backend(monkeypatch, tmp_path, fresh_settings):
+    """Vite dev 서버는 자기 공개 경로(base)가 붙은 요청만 받는다 — 접두사를 벗기면
+    /@vite/client 같은 요청이 어긋나 화면이 뜨지 않는다. 빌드본은 반대로 벗겨야 한다
+    (HTML에 전체 경로가 박혀 있고 서버는 루트에서 서빙한다)."""
+    from app.services.proxy.base import PathRoute
+    from app.services.proxy.caddy_proxy import _path_block
+    from app.services.proxy.iis_proxy import _rewrite_target
+    from app.services.runtime.base import Endpoint
+
+    ep = Endpoint(host="localhost", port=8123)
+    kept = PathRoute(path_prefix="/apps/org/shop/dev/", endpoint=ep, strip_prefix=False)
+    stripped = PathRoute(path_prefix="/apps/org/shop/", endpoint=ep)
+
+    # Caddy: handle_path는 벗기고, handle은 그대로 넘긴다.
+    assert "handle_path" in _path_block(stripped, [])
+    assert "handle_path" not in _path_block(kept, [])
+    assert "handle /apps/org/shop/dev/*" in _path_block(kept, [])
+
+    # IIS: {R:1}은 캡처만, {R:0}은 매칭 전체(접두사 포함)를 넘긴다.
+    assert _rewrite_target(stripped).endswith("/{R:1}")
+    assert _rewrite_target(kept).endswith("/{R:0}")
+
+
+def test_apache_keeps_prefix_by_repeating_it_on_the_upstream(fresh_settings):
+    """mod_proxy의 ProxyPass는 지정한 접두사를 스스로 벗긴다 — 벗기지 않으려면
+    업스트림 쪽에도 같은 경로를 붙여야 결과적으로 원래 경로가 그대로 전달된다."""
+    from app.services.proxy.apache_proxy import _path_directives
+    from app.services.proxy.base import PathRoute
+    from app.services.runtime.base import Endpoint
+
+    ep = Endpoint(host="localhost", port=8123)
+    kept = _path_directives([PathRoute("/apps/org/shop/dev/", ep, strip_prefix=False)])
+    stripped = _path_directives([PathRoute("/apps/org/shop/", ep)])
+    assert "http://localhost:8123/apps/org/shop/dev/" in kept
+    assert "http://localhost:8123/\n" in stripped or "http://localhost:8123/ " in stripped

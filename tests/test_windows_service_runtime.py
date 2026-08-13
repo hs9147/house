@@ -192,3 +192,13 @@ def test_hung_sc_does_not_block_status(env, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _hang)
     assert WindowsServiceRuntime().status("shop", BuildProfile.release) == "stopped"
     assert wsr.list_registered_services() == []
+
+
+def test_start_passes_profile_and_base_path(env):
+    """start.cmd가 dev 서버로 띄울지 판단하고, dev 서버에 줄 base를 얻는 경로다."""
+    spec = RuntimeSpec("shop", "", 8000, BuildProfile.development, "shop.apps.test")
+    spec.base_path = "/apps/org/shop/dev/"
+    WindowsServiceRuntime().start(spec)
+    env_arg = [c for c in env.calls if c[1] == "set" and c[3] == "AppEnvironmentExtra"][0][4]
+    assert "PAAS_PROFILE=development" in env_arg
+    assert "PAAS_BASE_PATH=/apps/org/shop/dev/" in env_arg

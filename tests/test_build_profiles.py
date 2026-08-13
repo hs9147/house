@@ -416,11 +416,9 @@ def test_start_script_explains_missing_vite(tmp_path):
     assert "NODE_ENV=production" in content
 
 
-def _make_vite(tmp_path):
-    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
-    bin_dir = tmp_path / "node_modules" / ".bin"
-    bin_dir.mkdir(parents=True)
-    (bin_dir / "vite").write_text("", encoding="utf-8")
+def _make_vite(tmp_path, build="vite build"):
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"build": "%s"}}' % build, encoding="utf-8")
 
 
 def test_build_receives_public_subpath_for_vite(monkeypatch, tmp_path):
@@ -441,8 +439,15 @@ def test_build_receives_public_subpath_for_vite(monkeypatch, tmp_path):
 
 
 def test_build_does_not_pass_base_to_non_vite_projects(monkeypatch, tmp_path):
-    """--base는 Vite 옵션이다 — webpack/next 등에 넘기면 모르는 인자로 빌드가 깨진다."""
-    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    """--base는 Vite 옵션이다 — webpack/next 등에 넘기면 모르는 인자로 빌드가 깨진다.
+
+    .bin/vite 존재로 판별하면 안 된다 — npm은 전이 의존의 bin도 최상위 .bin에
+    호이스팅하므로, vite를 간접적으로만 끌고 오는 Next 프로젝트도 통과해 버린다.
+    """
+    (tmp_path / "package.json").write_text('{"scripts": {"build": "next build"}}', encoding="utf-8")
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "vite").write_text("", encoding="utf-8")  # 전이 의존으로 호이스팅된 상태
     calls: list = []
     _fake_run_ok(monkeypatch, calls)
     monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -461,3 +466,118 @@ def test_build_without_base_path_is_unchanged(monkeypatch, tmp_path):
     install_dependencies(tmp_path, tmp_path / "env.log")
 
     assert calls[-1] == ["/usr/bin/npm", "run", "build", "--if-present"]
+
+
+def _npm_calls(calls):
+    return [c for c in calls if c[0].endswith("npm")]
+
+
+def test_install_is_skipped_when_dependencies_unchanged(monkeypatch, tmp_path):
+    """npm ci는 node_modules를 통째로 지우고 다시 설치한다. 의존성이 안 바뀌었는데도
+    배포마다 반복하면 시간이 그대로 나가고 서비스 재기동까지 늦어진다."""
+    (tmp_path / "package.json").write_text('{"name":"a"}', encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"v":1}', encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log")
+    assert _npm_calls(calls)[0][:2] == ["/usr/bin/npm", "ci"]
+
+    calls.clear()
+    install_dependencies(tmp_path, tmp_path / "env.log")
+    assert not any(c[1] in ("ci", "install") for c in _npm_calls(calls)), "설치를 또 했다"
+    assert "설치를 건너뜁니다" in (tmp_path / "env.log").read_text(encoding="utf-8")
+    # 빌드는 매번 돌아야 한다 — 소스는 배포마다 바뀐다.
+    assert _npm_calls(calls)[-1][1:3] == ["run", "build"]
+
+
+def test_install_runs_again_when_lockfile_changes(monkeypatch, tmp_path):
+    (tmp_path / "package.json").write_text('{"name":"a"}', encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"v":1}', encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+    install_dependencies(tmp_path, tmp_path / "env.log")
+
+    (tmp_path / "package-lock.json").write_text('{"v":2}', encoding="utf-8")
+    calls.clear()
+    install_dependencies(tmp_path, tmp_path / "env.log")
+    assert _npm_calls(calls)[0][:2] == ["/usr/bin/npm", "ci"]
+
+
+def test_failed_install_is_not_remembered_as_current(monkeypatch, tmp_path):
+    """실패한 설치를 "최신"으로 기억하면 다음 배포가 깨진 node_modules로 그냥 진행한다."""
+    (tmp_path / "package.json").write_text('{"name":"a"}', encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+
+    class _Fail:
+        returncode = 1
+
+    monkeypatch.setattr(build_service.subprocess, "run", lambda *a, **kw: _Fail())
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+    with pytest.raises(build_service.BuildError):
+        install_dependencies(tmp_path, tmp_path / "env.log")
+    assert not (tmp_path / build_service.INSTALL_STAMP).exists()
+
+
+def test_base_is_not_passed_when_vite_is_not_the_last_command(monkeypatch, tmp_path):
+    """npm은 인자를 스크립트 **끝**에 이어 붙인다 — vite가 마지막이 아니면 --base가
+    엉뚱한 명령으로 간다."""
+    _make_vite(tmp_path, build="vite build && node scripts/post.js")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log", base_path="/apps/org/shop/dev/")
+
+    assert calls[-1] == ["/usr/bin/npm", "run", "build", "--if-present"]
+
+
+def test_base_is_passed_when_vite_runs_after_tsc(monkeypatch, tmp_path):
+    """Vite 스캐폴드의 흔한 형태 — "tsc -b && vite build"는 --base가 vite로 간다."""
+    _make_vite(tmp_path, build="tsc -b && vite build")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log", base_path="/apps/org/shop/dev/")
+
+    assert calls[-1][-1] == "--base=/apps/org/shop/dev/"
+
+
+def test_dev_profile_skips_the_build(monkeypatch, tmp_path):
+    """dev 서버가 소스를 즉석에서 변환해 서빙하므로 빌드 산출물을 쓰지 않는다 —
+    배포마다 도는 빌드가 그대로 낭비다."""
+    _make_vite(tmp_path)
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log", base_path="/apps/o/s/dev/", build=False)
+
+    assert not any(c[1:3] == ["run", "build"] for c in calls if len(c) > 2)
+    assert "빌드를 건너뜁니다" in (tmp_path / "env.log").read_text(encoding="utf-8")
+
+
+def test_dev_profile_still_installs_python_dependencies(monkeypatch, tmp_path):
+    """빌드를 건너뛴다고 그 아래 pip 설치까지 건너뛰면 안 된다 — 두 파일을 다 가진
+    프로젝트에서 파이썬 의존성이 통째로 빠진다."""
+    _make_vite(tmp_path)
+    (tmp_path / "requirements.txt").write_text("httpx\n", encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log", build=False)
+
+    assert any("pip" in " ".join(map(str, c)) for c in calls), calls
+
+
+def test_start_script_runs_dev_server_for_development_profile(tmp_path):
+    """dev 프로필은 빌드본이 아니라 dev 서버로 띄운다. 프록시가 서브패스를 벗기지 않고
+    넘기므로 dev 서버에도 같은 base를 줘야 /@vite/client 요청이 아귀가 맞는다."""
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    assert '"%PAAS_PROFILE%"=="development"' in content
+    assert "--base %PAAS_BASE_PATH%" in content
+    assert "call npm run dev" in content

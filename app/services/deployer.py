@@ -107,6 +107,7 @@ def make_spec(
         internal_port=port,
         profile=profile,
         domain=proxy.domain_for(project.name, project.domain, profile),
+        base_path=proxy.path_prefix_for(_org_name(project), project.name, project.domain, profile),
         env=resolve_env(db, project, profile),
         secret_keys=secret_env_keys(db, project),
         memory_limit=project.memory_limit or settings.default_memory_limit,
@@ -172,6 +173,8 @@ def deploy_sync(
                     base_path=proxy.path_prefix_for(
                         _org_name(project), project.name, project.domain, profile,
                     ),
+                    # dev는 dev 서버가 소스를 즉석에서 서빙하므로 빌드 산출물을 쓰지 않는다.
+                    build=profile != BuildProfile.development,
                 )
                 image_tag = ""
             else:
@@ -189,6 +192,11 @@ def deploy_sync(
                 proxy.configure(
                     project.name, profile, spec.domain, path_prefix, endpoint,
                     redirects_for(db, project),
+                    # dev는 빌드본이 아니라 dev 서버가 소스를 그대로 서빙한다. dev 서버는
+                    # 자기 공개 경로(base)가 붙은 요청만 받으므로 접두사를 벗기면 안 된다
+                    # (/@vite/client 같은 요청이 어긋난다). release는 반대로 벗겨야 한다 —
+                    # 빌드된 HTML에 전체 경로가 박혀 있고 서버는 루트에서 서빙한다.
+                    strip_prefix=profile != BuildProfile.development,
                 )
                 record.host_port = endpoint.port
 

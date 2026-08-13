@@ -9,6 +9,7 @@ const TERMINAL: DeploymentStatus[] = ['running', 'failed', 'stopped'];
 // 출력한다. 배포 요청(POST) 자체는 호출측(클릭 핸들러)에서 한 번만 수행하므로 이 컴포넌트는
 // 폴링만 한다 — StrictMode 이중 마운트에서도 중복 배포가 발생하지 않는다.
 // 완료(모든 레코드가 종료 상태) 전까지는 닫기가 막히고, 완료 후 "확인"으로만 닫는다.
+// 완료돼도 로그는 그대로 남는다 — 사용자가 닫기 전까지 창이 저절로 사라지지 않는다.
 export default function DeployProgressModal({
   projectId, projectName, profile, deploymentIds, onClose,
 }: {
@@ -100,7 +101,8 @@ export default function DeployProgressModal({
           if (!cancelledRef.current) {
             setFailed(anyFail);
             setDone(true);
-            setLiveLogs({}); // 완료 후에는 진행 중 로그 블록을 치운다(위 최종 로그로 대체됨)
+            // 완료돼도 빌드 로그를 지우지 않는다 — 무엇이 실행됐고 어디서 틀어졌는지는
+            // 끝난 뒤에 보게 되는데, 여기서 치우면 그걸 다시 볼 방법이 없다.
           }
           return;
         }
@@ -142,9 +144,11 @@ export default function DeployProgressModal({
         {lines.join('\n')}
         {!done ? '\n▍진행 중…' : ''}
       </pre>
-      {!done && Object.values(liveLogs).map((lg) => (
+      {Object.values(liveLogs).map((lg) => (
         <div key={lg.label} style={{ marginTop: 10 }}>
-          <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>실행 중 — {lg.label}</div>
+          <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>
+            {done ? '빌드 로그' : '실행 중'} — {lg.label}
+          </div>
           <pre
             className="mono"
             style={{

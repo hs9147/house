@@ -83,8 +83,11 @@ def _path_directives(routes: list[PathRoute]) -> str:
         if r.path_prefix in ("/", ""):
             continue
         prefix = "/" + r.path_prefix.strip("/") + "/"
-        lines.append(f"    ProxyPass {prefix} http://{r.endpoint.host}:{r.endpoint.port}/\n")
-        lines.append(f"    ProxyPassReverse {prefix} http://{r.endpoint.host}:{r.endpoint.port}/\n")
+        # ProxyPass는 지정한 접두사를 벗겨내므로, 벗기지 않으려면 업스트림 쪽에도 같은
+        # 경로를 붙여 준다(그러면 결과적으로 원래 경로가 그대로 전달된다).
+        upstream = f"http://{r.endpoint.host}:{r.endpoint.port}{'/' if r.strip_prefix else prefix}"
+        lines.append(f"    ProxyPass {prefix} {upstream}\n")
+        lines.append(f"    ProxyPassReverse {prefix} {upstream}\n")
     return "".join(lines)
 
 
