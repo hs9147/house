@@ -53,12 +53,24 @@ if exist package.json (
   REM "Missing script: start"로 즉시 죽는다. "start"가 없고 vite가 설치돼 있으면
   REM (npm ci/install이 devDependencies도 함께 설치하므로 vite도 이미 있다) 이미
   REM 빌드된(위 npm run build) 산출물을 "vite preview"로 그대로 서빙한다.
-  findstr /R /C:"\\<start\\>" package.json >nul 2>&1
-  if %errorlevel%==0 (
-    npm start
-  ) else if exist node_modules\\.bin\\vite.cmd (
-    echo [PaaS Auto-Provisioning] No "start" script in package.json — serving the Vite build via "vite preview".
-    node_modules\\.bin\\vite.cmd preview --host %HOST% --port %PORT%
+  REM
+  REM 판정에 %errorlevel%을 쓰면 안 된다. 여기는 "if exist package.json (" 로 열린
+  REM 괄호 블록 안이고, 블록은 통째로 한 번 파싱되면서 %errorlevel%이 블록에 들어오기
+  REM 전 값으로 치환된다 — 바로 위가 set이라 항상 0이라, 검사 결과와 무관하게 늘
+  REM npm start로 갔다(= vite 분기가 실행된 적이 없다). 실행 시점에 평가되는
+  REM "if errorlevel"을 쓴다.
+  REM
+  REM 존재 여부는 node로 package.json을 직접 읽어 본다 — 텍스트 검색은 "start:dev"나
+  REM "pre-start" 같은 다른 이름에도 걸린다. 읽기에 실패하면 비정상 종료 코드가 나와
+  REM "start 없음" 쪽으로 가는데, 그쪽이 안전한 기본값이다.
+  node -e "var p=require('./package.json');var s=p.scripts?p.scripts.start:0;process.exit(s?0:1)" >nul 2>&1
+  if errorlevel 1 (
+    if exist node_modules\\.bin\\vite.cmd (
+      echo [PaaS Auto-Provisioning] No "start" script in package.json - serving the Vite build via "vite preview".
+      node_modules\\.bin\\vite.cmd preview --host %HOST% --port %PORT%
+    ) else (
+      npm start
+    )
   ) else (
     npm start
   )
