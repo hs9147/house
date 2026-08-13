@@ -515,16 +515,24 @@ async def powershell_websocket_terminal(websocket: WebSocket):
         await asyncio.to_thread(daemon.stop)
 
 
-@router.get("/system/build-logs")
-def list_build_log_files(
-    _: ApiKey = Depends(require_admin),
-):
-    """PAAS_BUILD_LOG_DIR 하위의 .txt 빌드 로그 파일 목록을 최신순으로 반환한다."""
+def _server_log_dir():
+    """서버 로그 폴더 — 플랫폼 실행 경로 하위의 logs/.
+
+    배포 빌드 로그(PAAS_BUILD_LOG_DIR)와는 다른 것이다. 그쪽은 배포 레코드마다
+    자기 로그를 따로 보여준다(api/projects.py의 deployment_build_log).
+    """
     from pathlib import Path  # noqa: PLC0415
 
+    return (get_settings().resolved_repo_root / "logs").resolve()
+
+
+@router.get("/system/server-logs")
+def list_server_log_files(
+    _: ApiKey = Depends(require_admin),
+):
+    """실행 경로 하위 logs/의 .txt 서버 로그 파일 목록을 최신순으로 반환한다."""
     try:
-        settings = get_settings()
-        log_dir = Path(settings.build_log_dir).resolve()
+        log_dir = _server_log_dir()
         if not log_dir.exists():
             log_dir.mkdir(parents=True, exist_ok=True)
             return {"files": [], "log_dir": str(log_dir)}
@@ -664,21 +672,22 @@ def sw_update(
         raise HTTPException(status_code=500, detail=f"Failed to schedule SW update: {e}")
 
 
-@router.get("/system/build-logs/content")
-def get_build_log_content(
+@router.get("/system/server-logs/content")
+def get_server_log_content(
     filename: str,
     tail_lines: int = 1000,
     _: ApiKey = Depends(require_admin),
 ):
-    """PAAS_BUILD_LOG_DIR 하위의 .txt 로그 파일 내용을 파일 끝(Tail)을 기본으로 반환한다."""
-    from pathlib import Path  # noqa: PLC0415
-
-    settings = get_settings()
-    log_dir = Path(settings.build_log_dir).resolve()
+    """실행 경로 하위 logs/의 .txt 로그 파일 내용을 파일 끝(Tail)을 기본으로 반환한다."""
+    log_dir = _server_log_dir()
     target_path = (log_dir / filename).resolve()
 
-    if not str(target_path).startswith(str(log_dir)):
+    # 문자열 startswith로 비교하면 형제 디렉터리(logs-old 등)가 통과한다 — 경로 단위로 본다.
+    if not target_path.is_relative_to(log_dir):
         raise HTTPException(status_code=403, detail="Access denied: outside log directory")
+    # 목록이 .txt만 보여주므로 읽기도 같은 범위로 맞춘다.
+    if target_path.suffix.lower() != ".txt":
+        raise HTTPException(status_code=403, detail="Access denied: .txt only")
 
     if not target_path.is_file():
         raise HTTPException(status_code=404, detail=f"Log file '{filename}' not found")

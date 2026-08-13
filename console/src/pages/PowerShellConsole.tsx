@@ -7,7 +7,7 @@ const PS_HISTORY_STORAGE_KEY = 'paas_powershell_cmd_history';
 
 export default function PowerShellConsole() {
   const me = useApi(() => api.me());
-  const [activeTab, setActiveTab] = useState<'console' | 'build_logs'>('console');
+  const [activeTab, setActiveTab] = useState<'console' | 'server_logs'>('console');
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [inputCmd, setInputCmd] = useState('');
@@ -56,8 +56,8 @@ export default function PowerShellConsole() {
     }
   };
 
-  // 빌드 로그 (.txt) 탭용 API State
-  const buildLogsState = useApi(() => api.listBuildLogs(), []);
+  // 서버 로그 (.txt) 탭용 API State — 실행 경로 하위 logs/
+  const serverLogsState = useApi(() => api.listServerLogs(), []);
   const [selectedFile, setSelectedFile] = useState<string>('');
   const [logContent, setLogContent] = useState<string>('');
   const [tailLines, setTailLines] = useState<number>(1000);
@@ -66,21 +66,21 @@ export default function PowerShellConsole() {
 
 
   useEffect(() => {
-    if (buildLogsState.data && buildLogsState.data.files.length > 0 && !selectedFile) {
-      const firstFile = buildLogsState.data.files[0].relative_path;
+    if (serverLogsState.data && serverLogsState.data.files.length > 0 && !selectedFile) {
+      const firstFile = serverLogsState.data.files[0].relative_path;
       setSelectedFile(firstFile);
       loadLogFile(firstFile, tailLines);
     }
-  }, [buildLogsState.data]);
+  }, [serverLogsState.data]);
 
   const loadLogFile = async (filename: string, lines = 1000) => {
     if (!filename) return;
     setLoadingLog(true);
     try {
-      const res = await api.getBuildLogContent(filename, lines);
+      const res = await api.getServerLogContent(filename, lines);
       setLogContent(res.content);
     } catch (err) {
-      setLogContent(`[Error] 빌드 로그 파일을 읽을 수 없습니다: ${(err as Error).message}`);
+      setLogContent(`[Error] 서버 로그 파일을 읽을 수 없습니다: ${(err as Error).message}`);
     } finally {
       setLoadingLog(false);
     }
@@ -188,10 +188,10 @@ export default function PowerShellConsole() {
       <div className="row" style={{ alignItems: 'center' }}>
         <div>
           <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-            ⚡ PowerShell & 빌드 로그
+            ⚡ PowerShell & 서버 로그
           </h2>
           <p className="mutedtext" style={{ margin: '4px 0 0 0', fontSize: 12 }}>
-            관리자 권한 PowerShell 프롬프트 터미널과 빌드 로그를 조회합니다.
+            관리자 권한 PowerShell 프롬프트 터미널과 서버 로그를 조회합니다.
           </p>
         </div>
         <div className="spacer" />
@@ -234,7 +234,7 @@ export default function PowerShellConsole() {
         )}
       </div>
 
-      {/* Tab Nav Selector: PowerShell 콘솔 -> 빌드 로그 순서 */}
+      {/* Tab Nav Selector: PowerShell 콘솔 -> 서버 로그 순서 */}
       <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', paddingBottom: 8 }}>
         <button
           className={activeTab === 'console' ? 'primary small' : 'secondary small'}
@@ -243,13 +243,13 @@ export default function PowerShellConsole() {
           ⚡ PowerShell 콘솔
         </button>
         <button
-          className={activeTab === 'build_logs' ? 'primary small' : 'secondary small'}
+          className={activeTab === 'server_logs' ? 'primary small' : 'secondary small'}
           onClick={() => {
-            setActiveTab('build_logs');
-            buildLogsState.reload();
+            setActiveTab('server_logs');
+            serverLogsState.reload();
           }}
         >
-          📄 빌드 로그
+          📄 서버 로그
         </button>
       </div>
 
@@ -344,10 +344,10 @@ export default function PowerShellConsole() {
         </div>
       )}
 
-      {/* TAB 2: 빌드 로그 (PAAS_BUILD_LOG_DIR .txt Files View) */}
-      {activeTab === 'build_logs' && (
+      {/* TAB 2: 서버 로그 (실행 경로 하위 logs/의 .txt 파일) */}
+      {activeTab === 'server_logs' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <Async state={buildLogsState} empty="PAAS_BUILD_LOG_DIR 하위에 빌드 로그 (.txt) 파일이 존재하지 않습니다.">
+          <Async state={serverLogsState} empty="실행 경로 하위 logs/ 폴더에 .txt 로그 파일이 없습니다.">
             {(data) => (
               <>
                 <div className="row" style={{ alignItems: 'center', gap: 8 }}>
@@ -410,11 +410,11 @@ export default function PowerShellConsole() {
                 >
                   {loadingLog ? (
                     <div style={{ color: '#94a3b8', textAlign: 'center', padding: '60px 0' }}>
-                      빌드 로그 파일 읽는 중...
+                      서버 로그 파일 읽는 중...
                     </div>
                   ) : !logContent ? (
                     <div style={{ color: '#94a3b8', textAlign: 'center', padding: '60px 0' }}>
-                      선택된 빌드 로그 파일 내용이 비어있습니다.
+                      선택된 서버 로그 파일 내용이 비어있습니다.
                     </div>
                   ) : (
                     logContent
