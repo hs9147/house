@@ -2,6 +2,7 @@ import { useState } from 'react';
 import Async from '../components/Async';
 import DeployProgressModal from '../components/DeployProgressModal';
 import Modal from '../components/Modal';
+import AutoDeployMark from '../components/AutoDeployMark';
 import StatusPill from '../components/StatusPill';
 import TopologyDiagram from '../components/TopologyDiagram';
 import { api, ApiError } from '../lib/api';
@@ -87,6 +88,7 @@ export default function ServerConfig() {
                 <th>프로필</th>
                 <th>URL</th>
                 <th>상태</th>
+                <th>자동배포</th>
                 <th>리다이렉트</th>
                 <th style={{ width: 280 }}>동작</th>
               </tr>
@@ -101,6 +103,7 @@ export default function ServerConfig() {
                     <td><StatusPill value={s.profile} /></td>
                     <td className="mono">{s.domain}{s.path_prefix !== '/' ? s.path_prefix : ''}</td>
                     <td><StatusPill value={s.status} /></td>
+                    <td><AutoDeployMark status={s.status} /></td>
                     <td>{s.redirect_count}</td>
                     <td>
                       <div className="row">
