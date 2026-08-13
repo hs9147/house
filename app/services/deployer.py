@@ -165,7 +165,14 @@ def deploy_sync(
                 log_path = env_setup_log_path(project.name, sha, profile)
                 record.build_log_path = str(log_path)
                 db.commit()
-                install_dependencies(workdir, log_path)
+                # 외부에서 열리는 서브패스를 빌드에 넘긴다 — 프록시가 접두어를 벗겨
+                # 넘기므로 앱은 "/"를 받지만 브라우저가 보는 주소는 서브패스다.
+                install_dependencies(
+                    workdir, log_path,
+                    base_path=proxy.path_prefix_for(
+                        _org_name(project), project.name, project.domain, profile,
+                    ),
+                )
                 image_tag = ""
             else:
                 log_path = docker_build_log_path(project.name, sha, profile)
