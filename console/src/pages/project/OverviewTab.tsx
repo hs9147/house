@@ -82,7 +82,12 @@ export default function OverviewTab() {
                     : `/apps/${orgSegment}/${project.name}/dev/`;
                   // base_domain을 아직 못 불러왔으면(로딩 중) 경로만 보여준다 —
                   // 잘못된 호스트로 링크를 만드는 것보다 안전하다.
-                  const fullUrl = health.data ? `https://${health.data.base_domain}${pathUrl}` : pathUrl;
+                  // 스킴을 https로 박아 두면 80포트만 여는 구성에서 죽은 링크가 된다.
+                  // 공개 주소가 설정돼 있으면 그 스킴을, 없으면 콘솔 자신이 열린 스킴을
+                  // 쓴다 — 배포된 앱은 콘솔과 같은 프록시 뒤에 있다.
+                  const scheme = health.data?.public_scheme
+                    ?? window.location.protocol.replace(':', '');
+                  const fullUrl = health.data ? `${scheme}://${health.data.base_domain}${pathUrl}` : pathUrl;
                   return (
                     <tr key={profile}>
                       <td><StatusPill value={profile} /></td>
@@ -90,7 +95,21 @@ export default function OverviewTab() {
                       <td><AutoDeployMark status={status[profile] ?? ''} branch={project.branch} /></td>
                       <td className="mono">
                         {health.data && status[profile] === 'running' ? (
-                          <a href={fullUrl} target="_blank" rel="noreferrer">{fullUrl}</a>
+                          <a
+                            href={fullUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            // target="_blank"만으로는 대부분의 브라우저가 새 "탭"을 연다.
+                            // 새 창으로 띄우려면 창 속성을 지정해 window.open을 불러야 한다.
+                            // href는 그대로 둔다 — 가운데 클릭·주소 복사 같은 링크 동작을
+                            // 잃지 않고, 팝업이 막혀도 링크로는 열린다.
+                            onClick={(e) => {
+                              e.preventDefault();
+                              window.open(fullUrl, '_blank', 'noopener,noreferrer,popup=yes');
+                            }}
+                          >
+                            {fullUrl}
+                          </a>
                         ) : (
                           fullUrl
                         )}
