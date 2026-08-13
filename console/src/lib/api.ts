@@ -419,14 +419,15 @@ export const api = {
   registerUser: (body: { email: string; name: string; password: string }) =>
     request<{ name: string; email: string; key: string; is_admin: boolean }>('POST', '/auth/register', body),
 
-  // PowerShell 터미널 & 빌드 로그
+  // PowerShell 터미널 & 서버 로그
   execPowerShell: (command: string) =>
     request<{ command: string; returncode: number; output: string }>('POST', '/system/powershell/exec', { command }),
-  listBuildLogs: () =>
-    request<{ files: { filename: string; relative_path: string; size_bytes: number; mtime: number }[]; log_dir: string }>('GET', '/system/build-logs'),
-  getBuildLogContent: (filename: string, tail_lines = 1000) =>
-    request<{ filename: string; total_lines: number; tail_lines: number; content: string }>('GET', `/system/build-logs/content?filename=${encodeURIComponent(filename)}&tail_lines=${tail_lines}`),
+  listServerLogs: () =>
+    request<{ files: { filename: string; relative_path: string; size_bytes: number; mtime: number }[]; log_dir: string }>('GET', '/system/server-logs'),
+  getServerLogContent: (filename: string, tail_lines = 1000) =>
+    request<{ filename: string; total_lines: number; tail_lines: number; content: string }>('GET', `/system/server-logs/content?filename=${encodeURIComponent(filename)}&tail_lines=${tail_lines}`),
+  // 응답 형태는 app/api/system.py의 sw_update와 맞춘다(실패는 HTTP 500 + detail).
   swUpdate: () =>
-    request<{ status: string; message: string; services?: string[]; error?: string | null }>(
+    request<{ status: string; message: string; error: string | null; services: string[] }>(
       'POST', '/system/sw-update'),
 };

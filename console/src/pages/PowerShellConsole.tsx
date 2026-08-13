@@ -6,7 +6,8 @@ import { useApi } from '../lib/hooks';
 const PS_HISTORY_STORAGE_KEY = 'paas_powershell_cmd_history';
 
 export default function PowerShellConsole() {
-  const [activeTab, setActiveTab] = useState<'console' | 'build_logs'>('console');
+  const me = useApi(() => api.me());
+  const [activeTab, setActiveTab] = useState<'console' | 'server_logs'>('console');
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [inputCmd, setInputCmd] = useState('');
@@ -55,8 +56,8 @@ export default function PowerShellConsole() {
     }
   };
 
-  // 빌드 로그 (.txt) 탭용 API State
-  const buildLogsState = useApi(() => api.listBuildLogs(), []);
+  // 서버 로그 (.txt) 탭용 API State — 실행 경로 하위 logs/
+  const serverLogsState = useApi(() => api.listServerLogs(), []);
   const [selectedFile, setSelectedFile] = useState<string>('');
   const [logContent, setLogContent] = useState<string>('');
   const [tailLines, setTailLines] = useState<number>(1000);
@@ -65,21 +66,21 @@ export default function PowerShellConsole() {
 
 
   useEffect(() => {
-    if (buildLogsState.data && buildLogsState.data.files.length > 0 && !selectedFile) {
-      const firstFile = buildLogsState.data.files[0].relative_path;
+    if (serverLogsState.data && serverLogsState.data.files.length > 0 && !selectedFile) {
+      const firstFile = serverLogsState.data.files[0].relative_path;
       setSelectedFile(firstFile);
       loadLogFile(firstFile, tailLines);
     }
-  }, [buildLogsState.data]);
+  }, [serverLogsState.data]);
 
   const loadLogFile = async (filename: string, lines = 1000) => {
     if (!filename) return;
     setLoadingLog(true);
     try {
-      const res = await api.getBuildLogContent(filename, lines);
+      const res = await api.getServerLogContent(filename, lines);
       setLogContent(res.content);
     } catch (err) {
-      setLogContent(`[Error] 빌드 로그 파일을 읽을 수 없습니다: ${(err as Error).message}`);
+      setLogContent(`[Error] 서버 로그 파일을 읽을 수 없습니다: ${(err as Error).message}`);
     } finally {
       setLoadingLog(false);
     }
@@ -150,33 +151,27 @@ export default function PowerShellConsole() {
 
   const [restarting, setRestarting] = useState(false);
 
+  // git pull + 서비스 재시작. 백엔드는 이걸 paas와 분리된 PowerShell 프로세스로 띄우므로
+  // (powershell_daemon.run_detached_script) 이 페이지의 콘솔 세션 연결 여부와 무관하다 —
+  // 오히려 paas 서비스 자신이 재시작 대상이라 요청 직후 백엔드가 잠시 내려간다.
   const handleSwUpdate = async () => {
-    if (!connected) {
-      alert('백엔드가 연결 끊김(Disconnected) 상태일 때는 SW 업데이트 요청을 전송할 수 없습니다.');
-      return;
-    }
-    if (!window.confirm('프로젝트 폴더에서 git pull 후 paas·console 서비스를 재시작합니다. 진행하시겠습니까?')) return;
+    if (!window.confirm(
+      '프로젝트 폴더에서 git pull 후 paas·console 서비스를 재시작합니다.\n'
+      + '재시작하는 동안 백엔드가 잠시 내려갑니다. 진행하시겠습니까?',
+    )) return;
     setRestarting(true);
     try {
       const res = await api.swUpdate();
-      const statusStr = res.status || 'updating';
-      const msgStr = res.message || 'git pull 후 서비스가 재시작됩니다.';
-      const errStr = res.error ? ` | Error: ${res.error}` : '';
-
       setLogs((prev) => [
         ...prev,
-        `\n[System Notification] Status: ${statusStr} | Message: ${msgStr}${errStr}`,
-        `[System] 잠시 후 백엔드 서비스 연결 상태를 확인하세요.\n`,
+        `\n[SW Update] ${res.status}: ${res.message}`,
+        `[SW Update] 재시작 대상: ${res.services.join(', ') || '(없음)'}`,
+        '[SW Update] 백엔드가 내려갔다 올라옵니다 — 잠시 후 "연결"로 다시 붙으세요.\n',
       ]);
     } catch (err) {
-      setLogs((prev) => [
-        ...prev,
-        `\n[System Error] Status: error | Error: ${(err as Error).message}`,
-        `[Hint] 백엔드 서비스 통신 장애 상태입니다.\n`,
-      ]);
+      setLogs((prev) => [...prev, `\n[SW Update] 실패: ${(err as Error).message}\n`]);
     } finally {
       setRestarting(false);
-      setTimeout(() => inputRef.current?.focus(), 50);
     }
   };
 
@@ -193,10 +188,10 @@ export default function PowerShellConsole() {
       <div className="row" style={{ alignItems: 'center' }}>
         <div>
           <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-            ⚡ PowerShell & 빌드 로그
+            ⚡ PowerShell & 서버 로그
           </h2>
           <p className="mutedtext" style={{ margin: '4px 0 0 0', fontSize: 12 }}>
-            관리자 권한 PowerShell 프롬프트 터미널과 빌드 로그를 조회합니다.
+            관리자 권한 PowerShell 프롬프트 터미널과 서버 로그를 조회합니다.
           </p>
         </div>
         <div className="spacer" />
@@ -215,14 +210,17 @@ export default function PowerShellConsole() {
             >
               {connected ? '● 연결됨 (Connected)' : '○ 연결 끊김 (Disconnected)'}
             </span>
-            <button
-              className="secondary small"
-              disabled={!connected || restarting}
-              onClick={handleSwUpdate}
-              title={connected ? 'git pull 후 paas·console 서비스 재시작' : '백엔드가 연결된 상태에서만 SW 업데이트가 가능합니다'}
-            >
-              {restarting ? 'SW 업데이트 중...' : '⬆️ SW 업데이트'}
-            </button>
+            {/* 엔드포인트가 require_admin이라 관리자에게만 보인다 — 아니면 눌러야 403을 안다. */}
+            {me.data?.is_admin && (
+              <button
+                className="secondary small"
+                disabled={restarting}
+                onClick={handleSwUpdate}
+                title="git pull 후 paas·console 서비스를 재시작합니다 (백엔드가 잠시 내려갑니다)"
+              >
+                {restarting ? 'SW 업데이트 중...' : '⬆️ SW 업데이트'}
+              </button>
+            )}
             {!connected ? (
               <button className="primary small" onClick={handleConnect}>
                 🔗 연결
@@ -236,7 +234,7 @@ export default function PowerShellConsole() {
         )}
       </div>
 
-      {/* Tab Nav Selector: PowerShell 콘솔 -> 빌드 로그 순서 */}
+      {/* Tab Nav Selector: PowerShell 콘솔 -> 서버 로그 순서 */}
       <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', paddingBottom: 8 }}>
         <button
           className={activeTab === 'console' ? 'primary small' : 'secondary small'}
@@ -245,13 +243,13 @@ export default function PowerShellConsole() {
           ⚡ PowerShell 콘솔
         </button>
         <button
-          className={activeTab === 'build_logs' ? 'primary small' : 'secondary small'}
+          className={activeTab === 'server_logs' ? 'primary small' : 'secondary small'}
           onClick={() => {
-            setActiveTab('build_logs');
-            buildLogsState.reload();
+            setActiveTab('server_logs');
+            serverLogsState.reload();
           }}
         >
-          📄 빌드 로그
+          📄 서버 로그
         </button>
       </div>
 
@@ -346,10 +344,10 @@ export default function PowerShellConsole() {
         </div>
       )}
 
-      {/* TAB 2: 빌드 로그 (PAAS_BUILD_LOG_DIR .txt Files View) */}
-      {activeTab === 'build_logs' && (
+      {/* TAB 2: 서버 로그 (실행 경로 하위 logs/의 .txt 파일) */}
+      {activeTab === 'server_logs' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <Async state={buildLogsState} empty="PAAS_BUILD_LOG_DIR 하위에 빌드 로그 (.txt) 파일이 존재하지 않습니다.">
+          <Async state={serverLogsState} empty="실행 경로 하위 logs/ 폴더에 .txt 로그 파일이 없습니다.">
             {(data) => (
               <>
                 <div className="row" style={{ alignItems: 'center', gap: 8 }}>
@@ -412,11 +410,11 @@ export default function PowerShellConsole() {
                 >
                   {loadingLog ? (
                     <div style={{ color: '#94a3b8', textAlign: 'center', padding: '60px 0' }}>
-                      빌드 로그 파일 읽는 중...
+                      서버 로그 파일 읽는 중...
                     </div>
                   ) : !logContent ? (
                     <div style={{ color: '#94a3b8', textAlign: 'center', padding: '60px 0' }}>
-                      선택된 빌드 로그 파일 내용이 비어있습니다.
+                      선택된 서버 로그 파일 내용이 비어있습니다.
                     </div>
                   ) : (
                     logContent
