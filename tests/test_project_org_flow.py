@@ -160,3 +160,53 @@ def test_legacy_project_without_organization_still_works(fresh_settings):
     assert r.status_code == 201
     assert r.json()["git_url"] == "https://github.com/org/legacy"
     assert r.json()["organization_id"] is None
+
+
+# ─── 조직 배지 → Gitea 팀 소속 ────────────────────────────────────────────────
+
+def _register_and_approve(c, monkeypatch, email: str) -> int:
+    monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "")
+    get_settings.cache_clear()
+    c.post("/paas/api/v1/auth/register", json={"email": email, "name": "dev", "password": "pw12345"})
+    account_id = next(a["id"] for a in c.get("/paas/api/v1/auth/accounts", headers=ADMIN).json()
+                      if a["email"] == email)
+    c.post(f"/paas/api/v1/auth/accounts/{account_id}/approve", headers=ADMIN)
+    return account_id
+
+
+def test_org_badge_grants_gitea_write_access(monkeypatch, fresh_settings):
+    """조직 배지를 주면 Gitea 팀에도 넣어야 한다 — 안 넣으면 리포는 clone되는데
+    push만 403이 나서 증상만으로는 원인을 찾기 어렵다."""
+    c, org_id = _client_with_org(monkeypatch)
+    account_id = _register_and_approve(c, monkeypatch, "dev@shop.com")
+
+    calls = []
+    monkeypatch.setattr(gitea, "set_org_membership",
+                        lambda org, email, member, full_name="": (calls.append((org, email, member)), True)[1])
+    r = c.post(f"/paas/api/v1/auth/accounts/{account_id}/organizations/modify",
+               json={"organization_id": org_id, "action": "add"}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert calls == [("shop-team", "dev@shop.com", True)]
+
+    calls.clear()
+    c.post(f"/paas/api/v1/auth/accounts/{account_id}/organizations/modify",
+           json={"organization_id": org_id, "action": "remove"}, headers=ADMIN)
+    assert calls == [("shop-team", "dev@shop.com", False)]
+
+
+def test_org_badge_survives_gitea_failure(monkeypatch, fresh_settings):
+    """Gitea 반영이 실패해도 플랫폼 배지는 그대로 둔다 — 소속은 이미 커밋됐고,
+    되돌리면 관리자가 방금 한 조작이 조용히 사라진 것처럼 보인다."""
+    c, org_id = _client_with_org(monkeypatch)
+    account_id = _register_and_approve(c, monkeypatch, "dev2@shop.com")
+
+    def _boom(org, email, member, full_name=""):
+        raise gitea.GiteaError("Gitea 팀 조회 실패 (HTTP 500)")
+
+    monkeypatch.setattr(gitea, "set_org_membership", _boom)
+    r = c.post(f"/paas/api/v1/auth/accounts/{account_id}/organizations/modify",
+               json={"organization_id": org_id, "action": "add"}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert any(o["id"] == org_id for o in r.json()["organizations"])
+    events = c.get("/paas/api/v1/audit", headers=ADMIN).json()
+    assert any(e["action"] == "user.gitea_sync.failed" for e in events), events

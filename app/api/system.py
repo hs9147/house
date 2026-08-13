@@ -1,6 +1,7 @@
 import hmac
 from datetime import timedelta
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, WebSocket
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -32,7 +33,7 @@ from ..security import (
     validate_email_domain,
     verify_password,
 )
-from ..services import monitor
+from ..services import gitea, monitor
 
 # 헬스체크·상태 프로브는 버전 prefix 밖에 둔다(로드밸런서/k8s liveness probe, 콘솔 로그인
 # 프로브가 API 버전과 무관하게 고정된 경로를 기대함) — router.py 참고.
@@ -274,6 +275,30 @@ def approve_user_account(
     return _build_user_account_out(db, user)
 
 
+def _sync_gitea_membership(db: Session, actor: str, user: UserAccount, org: Organization, member: bool) -> None:
+    """플랫폼 조직 소속을 Gitea 팀 소속으로 반영한다 — 개발자가 push하려면 필요하다.
+
+    조직 소속만 바꾸고 Gitea를 그대로 두면 리포는 clone되는데 push만 403이 나서,
+    증상만 봐서는 원인을 찾기 어렵다. 반대로 Gitea 반영이 실패했다고 플랫폼 쪽 소속
+    변경까지 되돌리지는 않는다 — 소속 자체는 이미 커밋됐고, 실패는 감사 로그에 남겨
+    관리자가 다시 시도할 수 있게 한다(사용자가 아직 Gitea에 로그인한 적이 없으면
+    계정이 없어 반영할 대상 자체가 없다).
+    """
+    try:
+        applied = gitea.set_org_membership(org.name, user.email, member, full_name=user.name or "")
+    except (gitea.GiteaError, httpx.HTTPError) as e:
+        # httpx도 함께 잡는다 — Gitea가 꺼져 있거나 주소가 틀리면 GiteaError가 아니라
+        # ConnectError가 난다. 그걸 흘려보내면 이미 커밋된 배지 변경 뒤에 500이 나가서,
+        # 관리자에게는 조작이 실패한 것처럼 보인다.
+        audit.record(db, actor, "user.gitea_sync.failed", user.email,
+                     {"organization": org.name, "member": member, "error": str(e)[:300]})
+        return
+    if not applied:
+        # 소속을 뺄 때만 나올 수 있다 — 줄 때는 계정이 없으면 만들어서라도 붙인다.
+        audit.record(db, actor, "user.gitea_sync.pending", user.email,
+                     {"organization": org.name, "reason": "Gitea 계정 없음"})
+
+
 @router.post("/auth/accounts/{account_id}/organization", response_model=UserAccountOut)
 def update_user_account_organization(
     account_id: int,
@@ -285,14 +310,18 @@ def update_user_account_organization(
     if user is None:
         raise HTTPException(status_code=404, detail="account not found")
     
+    added: Organization | None = None
     if body.organization_id is not None:
         org = db.get(Organization, body.organization_id)
         if org and org not in user.organizations:
             user.organizations.append(org)
+            added = org
     user.organization_id = body.organization_id
     db.commit()
     db.refresh(user)
     audit.record(db, admin.name, "user.set_organization", user.email, {"organization_id": body.organization_id})
+    if added is not None:
+        _sync_gitea_membership(db, admin.name, user, added, member=True)
     return _build_user_account_out(db, user)
 
 
@@ -326,6 +355,7 @@ def modify_user_account_organization(
     db.commit()
     db.refresh(user)
     audit.record(db, admin.name, f"user.org.{body.action}", user.email, {"organization_id": body.organization_id})
+    _sync_gitea_membership(db, admin.name, user, org, member=body.action == "add")
     return _build_user_account_out(db, user)
 
 

@@ -5,7 +5,7 @@ import type { ProjectOut } from '../lib/types';
 const SNACKBAR_MS = 2000;
 
 /**
- * "복사" — 이 프로젝트의 git 주소를 클립보드에 넣고 스낵바로 알린다.
+ * "Git 주소복사" — 이 프로젝트의 git 주소를 클립보드에 넣고 스낵바로 알린다.
  *
  * navigator.clipboard는 보안 컨텍스트(https 또는 localhost)에서만 있다 — 평문 http로
  * 접속하면 아예 undefined다. 이 플랫폼은 사내에서 http로도 접근하므로, 조용히 아무 일도
@@ -39,7 +39,7 @@ export default function CopyGitUrlButton({ project }: { project: ProjectOut | nu
         // 프로젝트 목록은 행 클릭이 상세 이동이라 전파를 막아야 한다(VS Code 버튼과 동일).
         onClick={(e) => { e.stopPropagation(); void copy(); }}
       >
-        복사
+        Git 주소복사
       </button>
       {message && <div className="snackbar">{message}</div>}
     </>
