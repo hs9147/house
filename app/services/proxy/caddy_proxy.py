@@ -77,8 +77,10 @@ def _path_block(route: PathRoute, redirects: list[RedirectSpec]) -> str:
     if route.path_prefix in ("/", ""):
         return f"{_redirect_lines(redirects)}    reverse_proxy {route.endpoint.host}:{route.endpoint.port}\n"
     prefix = route.path_prefix.rstrip("/")
+    # handle_path는 접두사를 벗기고, handle은 그대로 넘긴다.
+    directive = "handle_path" if route.strip_prefix else "handle"
     return (
-        f"    handle_path {prefix}/* {{\n"
+        f"    {directive} {prefix}/* {{\n"
         f"{_redirect_lines(redirects, indent='        ')}"
         f"        reverse_proxy {route.endpoint.host}:{route.endpoint.port}\n"
         f"    }}\n"

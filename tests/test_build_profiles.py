@@ -544,3 +544,40 @@ def test_base_is_passed_when_vite_runs_after_tsc(monkeypatch, tmp_path):
     install_dependencies(tmp_path, tmp_path / "env.log", base_path="/apps/org/shop/dev/")
 
     assert calls[-1][-1] == "--base=/apps/org/shop/dev/"
+
+
+def test_dev_profile_skips_the_build(monkeypatch, tmp_path):
+    """dev 서버가 소스를 즉석에서 변환해 서빙하므로 빌드 산출물을 쓰지 않는다 —
+    배포마다 도는 빌드가 그대로 낭비다."""
+    _make_vite(tmp_path)
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log", base_path="/apps/o/s/dev/", build=False)
+
+    assert not any(c[1:3] == ["run", "build"] for c in calls if len(c) > 2)
+    assert "빌드를 건너뜁니다" in (tmp_path / "env.log").read_text(encoding="utf-8")
+
+
+def test_dev_profile_still_installs_python_dependencies(monkeypatch, tmp_path):
+    """빌드를 건너뛴다고 그 아래 pip 설치까지 건너뛰면 안 된다 — 두 파일을 다 가진
+    프로젝트에서 파이썬 의존성이 통째로 빠진다."""
+    _make_vite(tmp_path)
+    (tmp_path / "requirements.txt").write_text("httpx\n", encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log", build=False)
+
+    assert any("pip" in " ".join(map(str, c)) for c in calls), calls
+
+
+def test_start_script_runs_dev_server_for_development_profile(tmp_path):
+    """dev 프로필은 빌드본이 아니라 dev 서버로 띄운다. 프록시가 서브패스를 벗기지 않고
+    넘기므로 dev 서버에도 같은 base를 줘야 /@vite/client 요청이 아귀가 맞는다."""
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    assert '"%PAAS_PROFILE%"=="development"' in content
+    assert "--base %PAAS_BASE_PATH%" in content
+    assert "call npm run dev" in content

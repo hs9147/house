@@ -41,6 +41,10 @@ class PathRoute:
 
     path_prefix: str  # 예: "/api/", "/"
     endpoint: Endpoint
+    # False면 접두사를 벗기지 않고 그대로 전달한다. Vite dev 서버처럼 업스트림이 자기
+    # 공개 경로(base)를 알고 그 접두사가 붙은 요청만 받는 경우에 쓴다 — 빌드본은 반대로
+    # 벗겨서 넘겨야 한다(HTML에 이미 전체 경로가 박혀 있고 서버는 루트에서 서빙한다).
+    strip_prefix: bool = True
 
 
 class ReverseProxy(ABC):

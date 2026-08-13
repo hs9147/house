@@ -49,7 +49,11 @@ import { defineConfig, loadConfigFromFile, mergeConfig } from 'vite'
 
 export default defineConfig(async (env) => {
   const loaded = await loadConfigFromFile(env)
-  return mergeConfig(loaded?.config ?? {}, { preview: { allowedHosts: true } })
+  return mergeConfig(loaded?.config ?? {}, {
+    preview: { allowedHosts: true },
+    // dev 서버도 같은 Host 검사를 한다 — dev 프로필은 이 설정으로 띄운다.
+    server: { allowedHosts: true },
+  })
 })
 """
 
@@ -71,6 +75,19 @@ if exist package.json (
   if not exist node_modules (
     echo [PaaS Auto-Provisioning] node_modules missing - installing as a fallback.
     call npm install
+  )
+  REM dev 프로필은 빌드본이 아니라 dev 서버로 띄운다(런타임이 PAAS_PROFILE로 알려준다).
+  REM 프록시가 서브패스를 벗기지 않고 그대로 넘기므로, dev 서버에도 같은 base를 준다 —
+  REM 그래야 /@vite/client 같은 요청이 아귀가 맞는다.
+  if /I "%PAAS_PROFILE%"=="development" (
+    if exist node_modules\\.bin\\vite.cmd (
+      echo [PaaS Auto-Provisioning] development profile - starting the Vite dev server.
+      node_modules\\.bin\\vite.cmd --config paas-preview.config.mjs --host %HOST% --port %PORT% --base %PAAS_BASE_PATH%
+    ) else (
+      echo [PaaS Auto-Provisioning] development profile - running "npm run dev".
+      call npm run dev
+    )
+    goto :eof
   )
   REM Vite로 스캐폴딩된 프로젝트(npm create vite@latest)는 package.json에 "start"
   REM 스크립트가 없다 — dev/build/preview만 있고, 그대로 "npm start"를 부르면
@@ -292,7 +309,9 @@ def _build_script_uses_vite(workdir: Path) -> bool:
     return last.startswith("vite ") or last == "vite"
 
 
-def install_dependencies(workdir: Path, log_path: Path, base_path: str | None = None) -> None:
+def install_dependencies(
+    workdir: Path, log_path: Path, base_path: str | None = None, build: bool = True,
+) -> None:
     """windows_service 런타임의 명시적 환경설정 단계 — npm/pip install을 배포의 build
     단계로 끝내고, 실패하면 배포 자체를 실패로 남긴다(Docker의 build_image와 대응).
 
@@ -382,25 +401,34 @@ def install_dependencies(workdir: Path, log_path: Path, base_path: str | None = 
             # 포함) 다시 빌드하고, 실패해도 배포는 성공으로 남는다 — 이 단계에서 하면
             # 실패가 배포 실패로 드러난다. --if-present는 npm run의 정식 옵션이라
             # build 스크립트가 없는 프로젝트에서는 조용히 넘어간다.
-            build_cmd = [npm_exe, "run", "build", "--if-present"]
+            # dev 프로필은 빌드하지 않는다 — dev 서버가 소스를 즉석에서 변환해 서빙하므로
+            # 빌드 산출물을 쓰지 않고, 배포마다 도는 빌드가 그대로 낭비다.
+            build_cmd = [npm_exe, "run", "build", "--if-present"] if build else None
             # --base는 Vite 옵션이라 Vite 프로젝트에만 붙인다 — webpack/next 등에 넘기면
             # 모르는 인자로 빌드가 깨진다. 설치가 끝난 뒤라 .bin 존재 여부로 판별할 수 있다.
-            if base_path and _build_script_uses_vite(workdir):
+            if build_cmd is None:
+                # return을 쓰면 아래 requirements.txt 단계까지 건너뛴다 — 두 파일을 다
+                # 가진 프로젝트에서 pip 설치가 통째로 빠진다.
+                log.write("[env-setup] dev 프로필 — 빌드를 건너뜁니다(dev 서버가 서빙).\n")
+                log.flush()
+            elif base_path and _build_script_uses_vite(workdir):
                 build_cmd += ["--", f"--base={base_path}"]
-            log.write(f"[env-setup] {' '.join(build_cmd)} (cwd={workdir})\n")
-            log.flush()
-            try:
-                proc = subprocess.run(
-                    build_cmd,
-                    cwd=workdir, stdout=log, stderr=subprocess.STDOUT, timeout=timeout_seconds,
-                )
-            except subprocess.TimeoutExpired as e:
-                raise BuildError(
-                    f"npm run build가 {timeout_seconds}초 내에 끝나지 않아 중단했습니다 "
-                    "(PAAS_BUILD_TIMEOUT_SECONDS로 늘릴 수 있습니다).", log_path,
-                ) from e
-            if proc.returncode != 0:
-                raise BuildError(f"npm run build 실패 (exit {proc.returncode})", log_path)
+            if build_cmd is not None:
+                log.write(f"[env-setup] {' '.join(build_cmd)} (cwd={workdir})\n")
+                log.flush()
+                try:
+                    proc = subprocess.run(
+                        build_cmd,
+                        cwd=workdir, stdout=log, stderr=subprocess.STDOUT,
+                        timeout=timeout_seconds,
+                    )
+                except subprocess.TimeoutExpired as e:
+                    raise BuildError(
+                        f"npm run build가 {timeout_seconds}초 내에 끝나지 않아 중단했습니다 "
+                        "(PAAS_BUILD_TIMEOUT_SECONDS로 늘릴 수 있습니다).", log_path,
+                    ) from e
+                if proc.returncode != 0:
+                    raise BuildError(f"npm run build 실패 (exit {proc.returncode})", log_path)
 
         if (workdir / "requirements.txt").exists():
             venv_dir = workdir / ".venv"

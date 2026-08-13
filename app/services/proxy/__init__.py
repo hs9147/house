@@ -56,12 +56,17 @@ def path_prefix_for(
 def configure(
     project_name: str, profile: BuildProfile, domain: str, path_prefix: str, endpoint: Endpoint,
     redirects: list[RedirectRule] | list[RedirectSpec] | None = None,
+    strip_prefix: bool = True,
 ) -> None:
     specs = [
         r if isinstance(r, RedirectSpec) else RedirectSpec.from_rule(r)
         for r in (redirects or [])
     ]
-    get_proxy().configure(project_name, profile, domain, path_prefix, endpoint, specs)
+    get_proxy().configure_paths(
+        project_name, profile, domain,
+        [PathRoute(path_prefix=path_prefix, endpoint=endpoint, strip_prefix=strip_prefix)],
+        specs,
+    )
 
 
 def configure_paths(

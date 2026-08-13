@@ -166,7 +166,14 @@ class WindowsServiceRuntime(Runtime):
 
         log_path = settings.build_log_dir / f"{name}.log"
         env_pairs = "\n".join(
-            f"{k}={v}" for k, v in {**spec.env, "PORT": str(host_port), "HOST": UPSTREAM_HOST}.items()
+            f"{k}={v}" for k, v in {
+                **spec.env,
+                "PORT": str(host_port),
+                "HOST": UPSTREAM_HOST,
+                # start.cmd가 dev 서버로 띄울지 판단하고, dev 서버에 줄 base를 얻는다.
+                "PAAS_PROFILE": spec.profile.value,
+                "PAAS_BASE_PATH": spec.base_path,
+            }.items()
         )
 
         # .cmd는 CreateProcess로 직접 실행되지 않으므로 cmd.exe /c로 감싼다 —

@@ -49,7 +49,7 @@ def test_windows_service_deploy_skips_build_and_generates_start_script(
     # 실제 npm/pip install은 느리고 네트워크가 필요하다 — 호출 여부·인자만 확인한다.
     install_calls = []
     monkeypatch.setattr(deployer, "install_dependencies",
-                        lambda wd, log_path, base_path=None: install_calls.append((wd, log_path, base_path)))
+                        lambda wd, log_path, base_path=None, build=True: install_calls.append((wd, log_path, base_path)))
 
     runtime = _FakeRuntime()
     monkeypatch.setattr(deployer, "get_runtime", lambda: runtime)
@@ -104,7 +104,7 @@ def test_windows_service_deploy_commits_build_log_path_before_install_starts(
 
         observed = {}
 
-        def _observe_during_install(wd, log_path, base_path=None):
+        def _observe_during_install(wd, log_path, base_path=None, build=True):
             # install_dependencies가 아직 반환하기 전에 "다른 세션"으로 같은 레코드를
             # 읽어, 그 시점에 이미 build_log_path가 커밋돼 있는지 확인한다.
             reader = SessionLocal()
@@ -138,7 +138,7 @@ def test_windows_service_deploy_fails_when_dependency_install_fails(
     monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None: (workdir, "c" * 40))
     monkeypatch.setattr(deployer, "build_image", lambda *a, **kw: pytest.fail("build 금지"))
 
-    def _fail_install(wd, log_path, base_path=None):
+    def _fail_install(wd, log_path, base_path=None, build=True):
         raise BuildError("pip install 실패 (exit 1)", log_path)
     monkeypatch.setattr(deployer, "install_dependencies", _fail_install)
 
@@ -178,7 +178,7 @@ def test_windows_service_deploy_regenerates_start_script_unconditionally(
     (workdir / START_SCRIPT_NAME).write_text("@echo custom start\n", encoding="utf-8")
     monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None: (workdir, "b" * 40))
     monkeypatch.setattr(deployer, "build_image", lambda *a, **kw: pytest.fail("build 금지"))
-    monkeypatch.setattr(deployer, "install_dependencies", lambda wd, log_path, base_path=None: None)
+    monkeypatch.setattr(deployer, "install_dependencies", lambda wd, log_path, base_path=None, build=True: None)
     monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
     monkeypatch.setattr(deployer.proxy, "configure", lambda *a, **kw: None)
 

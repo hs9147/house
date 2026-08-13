@@ -142,13 +142,18 @@ def _rule_xml(name: str, match_url: str, r: RedirectSpec) -> str:
     )
 
 
+def _rewrite_target(route: PathRoute) -> str:
+    """접두사를 벗기면 캡처({R:1})만, 벗기지 않으면 매칭 전체({R:0})를 그대로 넘긴다."""
+    capture = "{R:1}" if route.strip_prefix else "{R:0}"
+    return f"http://{route.endpoint.host}:{route.endpoint.port}/{capture}"
+
+
 def _path_rule_xml(name: str, route: PathRoute) -> str:
     prefix = route.path_prefix.strip("/")
-    proxy_target = f"http://{route.endpoint.host}:{route.endpoint.port}/{{R:1}}"
     return (
         f'        <rule name="{name}" stopProcessing="true">\n'
         f'          <match url="^{prefix}/(.*)" />\n'
-        f'          <action type="Rewrite" url="{proxy_target}" />\n'
+        f'          <action type="Rewrite" url="{_rewrite_target(route)}" />\n'
         f'        </rule>\n'
     )
 
@@ -218,7 +223,7 @@ def _build_shared_fragment(
     blocks = []
     for i, r in enumerate(ordered):
         prefix = r.path_prefix.strip("/")
-        proxy_target = f"http://{r.endpoint.host}:{r.endpoint.port}/{{R:1}}"
+        proxy_target = _rewrite_target(r)
         blocks.append(
             f'        <rule name="{frag_key}-path-{i}" stopProcessing="true">\n'
             f'          <match url="^{prefix}/(.*)" />\n'
