@@ -6,6 +6,7 @@ import { useApi } from '../lib/hooks';
 const PS_HISTORY_STORAGE_KEY = 'paas_powershell_cmd_history';
 
 export default function PowerShellConsole() {
+  const me = useApi(() => api.me());
   const [activeTab, setActiveTab] = useState<'console' | 'build_logs'>('console');
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
@@ -148,6 +149,32 @@ export default function PowerShellConsole() {
     }
   };
 
+  const [restarting, setRestarting] = useState(false);
+
+  // git pull + 서비스 재시작. 백엔드는 이걸 paas와 분리된 PowerShell 프로세스로 띄우므로
+  // (powershell_daemon.run_detached_script) 이 페이지의 콘솔 세션 연결 여부와 무관하다 —
+  // 오히려 paas 서비스 자신이 재시작 대상이라 요청 직후 백엔드가 잠시 내려간다.
+  const handleSwUpdate = async () => {
+    if (!window.confirm(
+      '프로젝트 폴더에서 git pull 후 paas·console 서비스를 재시작합니다.\n'
+      + '재시작하는 동안 백엔드가 잠시 내려갑니다. 진행하시겠습니까?',
+    )) return;
+    setRestarting(true);
+    try {
+      const res = await api.swUpdate();
+      setLogs((prev) => [
+        ...prev,
+        `\n[SW Update] ${res.status}: ${res.message}`,
+        `[SW Update] 재시작 대상: ${res.services.join(', ') || '(없음)'}`,
+        '[SW Update] 백엔드가 내려갔다 올라옵니다 — 잠시 후 "연결"로 다시 붙으세요.\n',
+      ]);
+    } catch (err) {
+      setLogs((prev) => [...prev, `\n[SW Update] 실패: ${(err as Error).message}\n`]);
+    } finally {
+      setRestarting(false);
+    }
+  };
+
   // 명령어 실행 완료 후 인풋 커서 포커스 자동 유지
   useEffect(() => {
     if (!running && connected && activeTab === 'console') {
@@ -183,6 +210,17 @@ export default function PowerShellConsole() {
             >
               {connected ? '● 연결됨 (Connected)' : '○ 연결 끊김 (Disconnected)'}
             </span>
+            {/* 엔드포인트가 require_admin이라 관리자에게만 보인다 — 아니면 눌러야 403을 안다. */}
+            {me.data?.is_admin && (
+              <button
+                className="secondary small"
+                disabled={restarting}
+                onClick={handleSwUpdate}
+                title="git pull 후 paas·console 서비스를 재시작합니다 (백엔드가 잠시 내려갑니다)"
+              >
+                {restarting ? 'SW 업데이트 중...' : '⬆️ SW 업데이트'}
+              </button>
+            )}
             {!connected ? (
               <button className="primary small" onClick={handleConnect}>
                 🔗 연결
