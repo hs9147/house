@@ -69,9 +69,9 @@ export default function OverviewTab() {
                 <tr>
                   <th>프로필</th>
                   <th>상태</th>
-                  <th>자동배포</th>
                   <th>도메인</th>
                   <th style={{ width: 260 }}>동작</th>
+                  <th>자동배포</th>
                 </tr>
               </thead>
               <tbody>
@@ -92,7 +92,6 @@ export default function OverviewTab() {
                     <tr key={profile}>
                       <td><StatusPill value={profile} /></td>
                       <td><StatusPill value={status[profile] ?? 'unknown'} /></td>
-                      <td><AutoDeployMark status={status[profile] ?? ''} branch={project.branch} /></td>
                       <td className="mono">
                         {health.data && status[profile] === 'running' ? (
                           <a
@@ -139,6 +138,7 @@ export default function OverviewTab() {
                           </button>
                         </div>
                       </td>
+                      <td><AutoDeployMark status={status[profile] ?? ''} branch={project.branch} /></td>
                     </tr>
                   );
                 })}
