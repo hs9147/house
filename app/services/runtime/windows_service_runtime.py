@@ -29,6 +29,16 @@ class WindowsServiceError(RuntimeError):
     pass
 
 
+# sc/nssm 호출에 반드시 타임아웃을 건다. 이 함수들은 요청 경로에서 불린다 —
+# /server-config는 프로젝트·프로필마다 status()를 부르고 서비스 목록까지 조회한다.
+# 타임아웃 없이 하나라도 멈추면 그 요청이 Starlette 스레드풀 슬롯을 영원히 잡고,
+# 슬롯이 마르면 같은 풀을 쓰는 동기 엔드포인트가 전부 대기한다 — PowerShell 콘솔
+# (POST /system/powershell/exec)이 "명령어 실행 중"에서 멈추던 경로가 이것이다.
+_QUERY_TIMEOUT = 10.0   # sc query — 단건 조회
+_LIST_TIMEOUT = 15.0    # sc query state= all — 전체 목록이라 출력이 크다
+_MANAGE_TIMEOUT = 30.0  # nssm install/set/start/stop/remove — 서비스 기동·정지를 기다린다
+
+
 def _read_log_tail(log_path, n: int = 40) -> str:
     """서비스 stdout/stderr 로그의 마지막 n줄 — 헬스체크 실패 원인(트레이스백, 의존성
     설치 로그 등)을 에러에 실어 보여주기 위한 것(teardown 후에도 파일은 남는다)."""
@@ -98,9 +108,10 @@ def list_registered_services() -> list[tuple[str, str]]:
     """
     try:
         proc = subprocess.run(
-            [_sc_binary(), "query", "state=", "all"], capture_output=True, text=True,
+            [_sc_binary(), "query", "state=", "all"],
+            capture_output=True, text=True, timeout=_LIST_TIMEOUT,
         )
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return []
     if proc.returncode != 0:
         return []
@@ -206,14 +217,20 @@ class WindowsServiceRuntime(Runtime):
 
     def _exists(self, name: str) -> bool:
         try:
-            proc = subprocess.run([_sc_binary(), "query", name], capture_output=True, text=True)
+            proc = subprocess.run(
+                [_sc_binary(), "query", name],
+                capture_output=True, text=True, timeout=_QUERY_TIMEOUT,
+            )
             return proc.returncode == 0
-        except FileNotFoundError:
+        except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
     def _query_state(self, name: str) -> str:
         try:
-            proc = subprocess.run([_sc_binary(), "query", name], capture_output=True, text=True)
+            proc = subprocess.run(
+                [_sc_binary(), "query", name],
+                capture_output=True, text=True, timeout=_QUERY_TIMEOUT,
+            )
             if proc.returncode != 0:
                 return "stopped"
             out = proc.stdout.upper()
@@ -222,22 +239,38 @@ class WindowsServiceRuntime(Runtime):
             if "STOPPED" in out:
                 return "stopped"
             return "unknown"
+        except subprocess.TimeoutExpired:
+            return "unknown"
         except FileNotFoundError:
             return "stopped"
 
     def _teardown(self, name: str) -> None:
         nssm = _nssm_binary()
         try:
-            subprocess.run([nssm, "stop", name], capture_output=True, text=True)
-            subprocess.run([nssm, "remove", name, "confirm"], capture_output=True, text=True)
-        except FileNotFoundError:
+            subprocess.run(
+                [nssm, "stop", name], capture_output=True, text=True, timeout=_MANAGE_TIMEOUT,
+            )
+            subprocess.run(
+                [nssm, "remove", name, "confirm"],
+                capture_output=True, text=True, timeout=_MANAGE_TIMEOUT,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # 정리는 베스트 에포트다 — 남으면 다음 배포가 설치 전에 다시 치운다(start 참고).
             pass
 
     def _nssm(self, *args: str) -> None:
         nssm = _nssm_binary()
         settings = get_settings()
         try:
-            proc = subprocess.run([nssm, *args], capture_output=True, text=True)
+            proc = subprocess.run(
+                [nssm, *args], capture_output=True, text=True, timeout=_MANAGE_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as e:
+            # 배포 경로다 — 조용히 넘어가면 반쯤 등록된 서비스가 남는다.
+            raise WindowsServiceError(
+                f"nssm {args[0]}이(가) {_MANAGE_TIMEOUT:.0f}초 내에 끝나지 않았습니다 "
+                f"(서비스: {args[1] if len(args) > 1 else '?'})."
+            ) from e
         except FileNotFoundError as e:
             raise WindowsServiceError(
                 f"[WinError 2] nssm 실행 파일을 찾을 수 없습니다 (설정: PAAS_NSSM_PATH={settings.nssm_path}, 시도 경로: {nssm}): {e}"
