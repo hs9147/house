@@ -152,7 +152,13 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
                 domain=domain_for(p.name, p.domain, profile),
                 path_prefix=path_prefix_for(org_name, p.name, p.domain, profile),
                 status=status,
-                internal_host="127.0.0.1" if upstreams.get((p.id, profile)) else None,
+                # 표기는 localhost로 한다 — 127.0.0.1은 "사용자 자기 PC"를 가리켜야
+                # 하는 자리(git 클라이언트 OAuth 콜백 등)에 남겨 두고, 서버 안쪽
+                # 업스트림과 헷갈리지 않게 한다. 둘은 같은 루프백 호스트라 가리키는
+                # 곳은 같다. 실제 바인드·프록시 설정 문자열은 127.0.0.1 그대로다
+                # (Windows에서 localhost는 ::1로 먼저 풀려, 앱이 127.0.0.1에만 듣는
+                #  지금 구성에서 프록시 대상까지 바꾸면 502가 난다).
+                internal_host="localhost" if upstreams.get((p.id, profile)) else None,
                 internal_port=upstreams.get((p.id, profile)),
                 redirect_count=len(project_rules),
                 redirects=[

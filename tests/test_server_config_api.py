@@ -306,7 +306,8 @@ def test_site_reports_internal_upstream(monkeypatch, fresh_settings):
 
     sites = c.get("/paas/api/v1/server-config", headers=ADMIN).json()["sites"]
     release = next(s for s in sites if s["project_id"] == project_id and s["profile"] == "release")
-    assert release["internal_host"] == "127.0.0.1"
+    # 표기는 localhost — 127.0.0.1은 "사용자 자기 PC"를 가리키는 자리에 남겨 둔다.
+    assert release["internal_host"] == "localhost"
     assert release["internal_port"] == 8123
 
     # 떠 있지 않은 프로필은 할당된 포트가 없다 — 없는 값을 지어내지 않는다.

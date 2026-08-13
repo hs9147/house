@@ -107,7 +107,7 @@ export default function ServerConfig() {
                         할당된 포트가 없다. */}
                     <td className="mono">
                       {s.internal_port
-                        ? `http://${s.internal_host ?? '127.0.0.1'}:${s.internal_port}`
+                        ? `http://${s.internal_host ?? 'localhost'}:${s.internal_port}`
                         : '-'}
                     </td>
                     <td><StatusPill value={s.status} /></td>
