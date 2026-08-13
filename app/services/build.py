@@ -235,7 +235,13 @@ def env_setup_log_path(project_name: str, git_sha: str, profile: BuildProfile) -
     return get_settings().build_log_dir / f"{project_name}-{git_sha[:12]}{PROFILES[profile].tag_suffix}-env.log"
 
 
-def install_dependencies(workdir: Path, log_path: Path) -> None:
+def _has_vite(workdir: Path) -> bool:
+    """설치된 vite 실행 파일이 있는지 — Vite 프로젝트 판별(설치 이후에만 유효)."""
+    bin_dir = workdir / "node_modules" / ".bin"
+    return (bin_dir / "vite.cmd").exists() or (bin_dir / "vite").exists()
+
+
+def install_dependencies(workdir: Path, log_path: Path, base_path: str | None = None) -> None:
     """windows_service 런타임의 명시적 환경설정 단계 — npm/pip install을 배포의 build
     단계로 끝내고, 실패하면 배포 자체를 실패로 남긴다(Docker의 build_image와 대응).
 
@@ -244,6 +250,12 @@ def install_dependencies(workdir: Path, log_path: Path) -> None:
     않는지 확인하세요" 라는 힌트가 남던 이유), 실패해도 배포 상태는 실패로 남지 않았다
     (start.cmd는 설치 실패 후에도 다음 줄로 계속 진행한다). 여기서 헬스체크 창 밖에서
     먼저 끝내면 그 모호함이 없어진다.
+
+    base_path는 이 배포가 외부에서 열리는 서브패스(/apps/{조직}/{프로젝트}/[dev/])다.
+    프록시가 그 접두어를 벗기고 넘기므로 앱은 내부적으로 "/"를 받지만, 브라우저가 보는
+    주소는 서브패스다 — 프런트엔드를 기본값(base="/")으로 빌드하면 HTML이 자산을
+    /assets/...로 참조하고, 그 요청은 어떤 라우팅에도 안 걸려 404가 된다(제목만 뜨는
+    빈 화면). Vite 프로젝트일 때만 빌드에 --base로 넘긴다.
 
     설치와 빌드가 **모두** 여기에 있다는 점이 중요하다. 예전에는 start.cmd도 같은
     설치·빌드를 한 번 더 했는데, start.cmd는 배포 때만이 아니라 서비스가 뜰 때마다
@@ -301,11 +313,16 @@ def install_dependencies(workdir: Path, log_path: Path) -> None:
             # 포함) 다시 빌드하고, 실패해도 배포는 성공으로 남는다 — 이 단계에서 하면
             # 실패가 배포 실패로 드러난다. --if-present는 npm run의 정식 옵션이라
             # build 스크립트가 없는 프로젝트에서는 조용히 넘어간다.
-            log.write(f"[env-setup] {npm_exe} run build --if-present (cwd={workdir})\n")
+            build_cmd = [npm_exe, "run", "build", "--if-present"]
+            # --base는 Vite 옵션이라 Vite 프로젝트에만 붙인다 — webpack/next 등에 넘기면
+            # 모르는 인자로 빌드가 깨진다. 설치가 끝난 뒤라 .bin 존재 여부로 판별할 수 있다.
+            if base_path and _has_vite(workdir):
+                build_cmd += ["--", f"--base={base_path}"]
+            log.write(f"[env-setup] {' '.join(build_cmd)} (cwd={workdir})\n")
             log.flush()
             try:
                 proc = subprocess.run(
-                    [npm_exe, "run", "build", "--if-present"],
+                    build_cmd,
                     cwd=workdir, stdout=log, stderr=subprocess.STDOUT, timeout=timeout_seconds,
                 )
             except subprocess.TimeoutExpired as e:

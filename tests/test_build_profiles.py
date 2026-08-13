@@ -414,3 +414,50 @@ def test_start_script_explains_missing_vite(tmp_path):
     content = write_start_script(tmp_path).read_text(encoding="utf-8")
     assert "vite.cmd is missing" in content
     assert "NODE_ENV=production" in content
+
+
+def _make_vite(tmp_path):
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "vite").write_text("", encoding="utf-8")
+
+
+def test_build_receives_public_subpath_for_vite(monkeypatch, tmp_path):
+    """프록시가 서브패스 접두어를 벗기고 넘기므로 앱은 "/"를 받지만, 브라우저가 보는
+    주소는 /apps/조직/프로젝트/[dev/]다. 기본값(base="/")으로 빌드하면 HTML이 자산을
+    /assets/...로 참조하고 그 요청은 어떤 라우팅에도 안 걸려 404가 된다 — 제목만 뜨는
+    빈 화면이 되던 자리다."""
+    _make_vite(tmp_path)
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log", base_path="/apps/org/shop/dev/")
+
+    assert calls[-1] == [
+        "/usr/bin/npm", "run", "build", "--if-present", "--", "--base=/apps/org/shop/dev/",
+    ]
+
+
+def test_build_does_not_pass_base_to_non_vite_projects(monkeypatch, tmp_path):
+    """--base는 Vite 옵션이다 — webpack/next 등에 넘기면 모르는 인자로 빌드가 깨진다."""
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log", base_path="/apps/org/shop/dev/")
+
+    assert calls[-1] == ["/usr/bin/npm", "run", "build", "--if-present"]
+
+
+def test_build_without_base_path_is_unchanged(monkeypatch, tmp_path):
+    _make_vite(tmp_path)
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log")
+
+    assert calls[-1] == ["/usr/bin/npm", "run", "build", "--if-present"]
