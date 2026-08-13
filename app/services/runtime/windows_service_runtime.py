@@ -18,6 +18,7 @@ import os
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.request
 
 from ...config import get_settings
@@ -59,10 +60,16 @@ def _read_log_tail(log_path, n: int = 40) -> str:
 
 
 def allocate_port() -> int:
+    """비어 있는 포트를 찾는다 — 앱이 실제로 바인드할 이름(UPSTREAM_HOST)으로 확인한다.
+
+    127.0.0.1로 확인하면 안 된다. 앱에는 HOST=localhost를 넘기고 Windows에서 그건 ::1로
+    먼저 풀리는데, ::1에서 이미 쓰이는 포트가 127.0.0.1에서는 비어 보인다 — 그러면 이미
+    다른 배포가 쓰는 포트를 다시 내주고 두 번째 기동이 조용히 실패한다.
+    """
     settings = get_settings()
     for port in range(settings.port_range_start, settings.port_range_end + 1):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(("127.0.0.1", port)) != 0:
+            if s.connect_ex((UPSTREAM_HOST, port)) != 0:
                 return port
     raise RuntimeError("no free port in configured range")
 
@@ -190,10 +197,13 @@ class WindowsServiceRuntime(Runtime):
         if not self._wait_healthy(host_port, spec.health_check_path):
             tail = _read_log_tail(log_path)
             self._teardown(name)
+            probed = self._health_url(host_port, spec.health_check_path)
             raise WindowsServiceError(
-                f"health check failed on :{host_port} — 헬스체크 시간 내 응답이 없습니다. "
-                f"앱이 %PORT%={host_port}로 리슨하는지, 의존성 설치가 헬스 타임아웃을 넘기지 "
-                f"않는지 확인하세요.\n--- {log_path.name} ---\n{tail}"
+                f"health check failed — {probed} 로 헬스체크 시간 내 응답이 없습니다. "
+                f"앱이 HOST={UPSTREAM_HOST} PORT={host_port}를 지켜 리슨하는지 확인하세요"
+                f"(HOST를 무시하고 다른 주소에 바인드하면 여기서 못 찾습니다). "
+                f"아래 서비스 로그에 기동 오류가 그대로 남습니다.\n"
+                f"--- {log_path.name} ---\n{tail}"
             )
 
         if old_slot is not None:
@@ -298,14 +308,30 @@ class WindowsServiceRuntime(Runtime):
             )
 
     @staticmethod
+    def _health_url(port: int, path: str) -> str:
+        return f"http://{UPSTREAM_HOST}:{port}{path}"
+
+    @staticmethod
     def _wait_healthy(port: int, path: str, timeout: float = 60.0) -> bool:
-        url = f"http://127.0.0.1:{port}{path}"
+        """포트가 HTTP로 응답하기 시작했는지만 본다(기동 확인).
+
+        호스트는 앱에 넘긴 HOST와 같은 이름을 쓴다 — 127.0.0.1로 박아 두면, localhost가
+        ::1로 먼저 풀리는 Windows에서 앱이 ::1에 듣고 있을 때 영영 실패한다.
+
+        4xx도 "떠 있음"이다. urlopen은 4xx에서 HTTPError를 던지는데 그걸 통째로 삼키면
+        404가 죽은 것으로 계산된다 — dev 서버는 base가 붙은 경로만 받으므로 "/"에서
+        404를 내고, 그 배포가 전부 실패했다. 5xx만 아직 준비되지 않은 것으로 본다.
+        """
+        url = WindowsServiceRuntime._health_url(port, path)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 with urllib.request.urlopen(url, timeout=3) as res:
                     if res.status < 500:
                         return True
+            except urllib.error.HTTPError as e:
+                if e.code < 500:
+                    return True
             except Exception:
                 pass
             time.sleep(2)

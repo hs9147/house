@@ -202,3 +202,72 @@ def test_start_passes_profile_and_base_path(env):
     env_arg = [c for c in env.calls if c[1] == "set" and c[3] == "AppEnvironmentExtra"][0][4]
     assert "PAAS_PROFILE=development" in env_arg
     assert "PAAS_BASE_PATH=/apps/org/shop/dev/" in env_arg
+
+
+def test_health_check_uses_the_same_host_the_app_binds(monkeypatch, tmp_path, fresh_settings):
+    """127.0.0.1로 박아 두면, localhost가 ::1로 먼저 풀리는 Windows에서 앱이 ::1에
+    듣고 있을 때 헬스체크가 영영 실패한다 — 배포가 전부 실패로 끝났다."""
+    urls: list[str] = []
+
+    def _fake_urlopen(url, timeout=None):
+        urls.append(url)
+        raise OSError("refused")
+
+    monkeypatch.setattr(wsr.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(wsr.time, "sleep", lambda _s: None)
+    WindowsServiceRuntime._wait_healthy(9100, "/", timeout=0.01)
+    assert urls and urls[0].startswith(f"http://{wsr.UPSTREAM_HOST}:9100")
+
+
+def test_health_check_treats_4xx_as_up(monkeypatch, fresh_settings):
+    """dev 서버는 base가 붙은 경로만 받으므로 "/"에서 404를 낸다. urlopen은 4xx에서
+    예외를 던지는데 그걸 삼키면 404가 죽은 것으로 계산돼 배포가 실패한다."""
+    def _raise_404(url, timeout=None):
+        raise wsr.urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(wsr.urllib.request, "urlopen", _raise_404)
+    monkeypatch.setattr(wsr.time, "sleep", lambda _s: None)
+    assert WindowsServiceRuntime._wait_healthy(9100, "/", timeout=5) is True
+
+
+def test_health_check_still_fails_on_5xx(monkeypatch, fresh_settings):
+    """5xx는 아직 준비되지 않은 것으로 본다 — 그것까지 통과시키면 죽은 앱이 배포된다."""
+    def _raise_500(url, timeout=None):
+        raise wsr.urllib.error.HTTPError(url, 500, "Server Error", {}, None)
+
+    monkeypatch.setattr(wsr.urllib.request, "urlopen", _raise_500)
+    monkeypatch.setattr(wsr.time, "sleep", lambda _s: None)
+    assert WindowsServiceRuntime._wait_healthy(9100, "/", timeout=0.01) is False
+
+
+def test_health_failure_message_names_the_probed_url(env, monkeypatch):
+    """어디를 찔렀는지 없이 "타임아웃"만 남으면, 포트가 틀린 건지 호스트가 틀린 건지
+    앱이 안 뜬 건지 구분할 수 없다."""
+    monkeypatch.setattr(wsr.WindowsServiceRuntime, "_wait_healthy", lambda self, *a, **kw: False)
+    with pytest.raises(WindowsServiceError) as exc:
+        WindowsServiceRuntime().start(_spec())
+    assert f"http://{wsr.UPSTREAM_HOST}:" in str(exc.value)
+    assert f"HOST={wsr.UPSTREAM_HOST}" in str(exc.value)
+
+
+def test_port_probe_uses_the_same_host_the_app_binds(monkeypatch, fresh_settings):
+    """127.0.0.1로 확인하면 ::1에서 이미 쓰이는 포트가 비어 보인다 — 이미 다른 배포가
+    쓰는 포트를 다시 내주고 두 번째 기동이 조용히 실패한다."""
+    import socket as _socket
+
+    probed: list = []
+
+    class _Sock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def connect_ex(self, addr):
+            probed.append(addr)
+            return 1  # 비어 있음
+
+    monkeypatch.setattr(_socket, "socket", lambda *a, **kw: _Sock())
+    wsr.allocate_port()
+    assert probed and probed[0][0] == wsr.UPSTREAM_HOST
