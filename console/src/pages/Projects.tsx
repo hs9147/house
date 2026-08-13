@@ -57,8 +57,8 @@ export default function Projects() {
                 <tr>
                   <th>이름</th>
                   <th>타입</th>
-                  <th>Git</th>
                   <th>브랜치</th>
+                  <th>Git</th>
                   <th>기본 프로필</th>
                   <th>생성일</th>
                   {canDelete && <th />}
@@ -69,6 +69,7 @@ export default function Projects() {
                   <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
                     <td>{p.name}</td>
                     <td><StatusPill value={p.type} /></td>
+                    <td className="mono">{p.branch}</td>
                     {/* 주소 자체는 길어서 표를 밀어낸다 — 필요하면 복사 버튼으로 가져간다. */}
                     <td>
                       <span className="row" style={{ alignItems: 'center', gap: 8 }}>
@@ -77,7 +78,6 @@ export default function Projects() {
                         <ZipDownloadButton project={p} />
                       </span>
                     </td>
-                    <td className="mono">{p.branch}</td>
                     <td><StatusPill value={p.default_profile} /></td>
                     <td className="mono">{fmtDate(p.created_at)}</td>
                     {canDelete && (
