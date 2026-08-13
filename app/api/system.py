@@ -285,7 +285,7 @@ def _sync_gitea_membership(db: Session, actor: str, user: UserAccount, org: Orga
     계정이 없어 반영할 대상 자체가 없다).
     """
     try:
-        applied = gitea.set_org_membership(org.name, user.email, member)
+        applied = gitea.set_org_membership(org.name, user.email, member, full_name=user.name or "")
     except (gitea.GiteaError, httpx.HTTPError) as e:
         # httpx도 함께 잡는다 — Gitea가 꺼져 있거나 주소가 틀리면 GiteaError가 아니라
         # ConnectError가 난다. 그걸 흘려보내면 이미 커밋된 배지 변경 뒤에 500이 나가서,
@@ -294,9 +294,9 @@ def _sync_gitea_membership(db: Session, actor: str, user: UserAccount, org: Orga
                      {"organization": org.name, "member": member, "error": str(e)[:300]})
         return
     if not applied:
+        # 소속을 뺄 때만 나올 수 있다 — 줄 때는 계정이 없으면 만들어서라도 붙인다.
         audit.record(db, actor, "user.gitea_sync.pending", user.email,
-                     {"organization": org.name,
-                      "reason": "Gitea 계정 없음 — 최초 SSO 로그인 후 다시 반영하세요"})
+                     {"organization": org.name, "reason": "Gitea 계정 없음"})
 
 
 @router.post("/auth/accounts/{account_id}/organization", response_model=UserAccountOut)

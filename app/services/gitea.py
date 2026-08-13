@@ -5,6 +5,8 @@
 않는다 — git_url은 서버 내부에서만 사용되고 비관리자 API 응답에서는 마스킹된다
 (api/projects.py `_serialize_project` 참고).
 """
+import re
+import secrets
 from urllib.parse import urlsplit
 
 import httpx
@@ -263,13 +265,67 @@ def _write_team_id(org_name: str) -> int:
     raise GiteaError(f"Gitea 팀 생성 실패 (HTTP {created.status_code}): {created.text[:300]}")
 
 
-def set_org_membership(org_name: str, email: str, member: bool) -> bool:
+def _username_for(email: str) -> str:
+    """이메일에서 Gitea 사용자명을 만든다(계정을 새로 만들 때만 쓴다).
+
+    Gitea 사용자명에는 @가 못 들어가므로 앞부분만 쓰고, 허용 문자(영숫자·.·-·_) 밖은
+    -로 바꾼다. 이 이름이 SSO 자동 등록이 붙였을 이름과 달라도 상관없다 —
+    [oauth2_client] ACCOUNT_LINKING = auto 는 **이메일**로 연결하기 때문이다.
+    """
+    local = re.sub(r"[^A-Za-z0-9._-]", "-", email.split("@", 1)[0]).strip("-._")
+    return local or "user"
+
+
+def ensure_user(email: str, full_name: str = "") -> str:
+    """이메일에 해당하는 Gitea 계정을 보장하고 사용자명을 반환한다(멱등).
+
+    없으면 만든다 — 그래야 관리자가 조직 배지를 주는 시점에 바로 쓰기 권한이 붙는다.
+    "사용자가 Gitea에 한 번 로그인한 뒤에 배지를 줘야 한다"는 순서 제약이 사라진다.
+    비밀번호는 난수로 두고 어디에도 남기지 않는다 — 이 계정은 SSO로만 들어온다.
+    나중에 그 사람이 SSO로 로그인하면 ACCOUNT_LINKING = auto 가 이메일로 이 계정에
+    연결한다(ACCOUNT_LINKING을 login으로 바꾸면 아무도 모르는 비밀번호를 묻게 된다).
+    """
+    existing = find_username_by_email(email)
+    if existing is not None:
+        return existing
+    base, headers = _base_and_headers()
+    username = _username_for(email)
+    res = httpx.post(
+        f"{base}/api/v1/admin/users", headers=headers,
+        json={
+            "username": username,
+            "email": email,
+            "full_name": full_name or username,
+            "password": secrets.token_urlsafe(32),
+            "must_change_password": False,
+            "send_notify": False,
+        },
+        timeout=15,
+    )
+    if res.status_code in (200, 201):
+        return res.json().get("login", username)
+    if res.status_code == 403:
+        raise GiteaError(
+            "Gitea 계정 생성 권한이 없습니다 — PAAS_GITEA_API_TOKEN이 관리자 계정의 "
+            f"토큰이어야 합니다 (HTTP 403): {res.text[:200]}"
+        )
+    if res.status_code == 422:
+        # 이메일은 다른데 사용자명만 겹치는 경우 — 자동으로 다른 이름을 지어내면 나중에
+        # 누가 누구인지 알아보기 어려워지므로, 관리자가 정하도록 그대로 알린다.
+        raise GiteaError(
+            f"Gitea 계정 생성 실패 — 사용자명 '{username}'이(가) 이미 다른 계정에 "
+            f"쓰이고 있을 수 있습니다: {res.text[:200]}"
+        )
+    raise GiteaError(f"Gitea 계정 생성 실패 (HTTP {res.status_code}): {res.text[:300]}")
+
+
+def set_org_membership(org_name: str, email: str, member: bool, full_name: str = "") -> bool:
     """플랫폼의 조직 소속을 Gitea 팀 소속으로 반영한다.
 
-    아직 Gitea 계정이 없으면(= SSO로 한 번도 로그인 안 함) False를 반환한다 — 실패가
-    아니라 "지금은 반영할 대상이 없음"이다. 그 사용자가 처음 로그인한 뒤 다시 부르면 된다.
+    소속을 **줄 때**는 Gitea 계정이 없으면 만들어서라도 붙인다(ensure_user). 뺄 때는
+    없으면 뺄 것도 없으므로 False를 반환한다 — 없는 계정을 만들 이유가 없다.
     """
-    username = find_username_by_email(email)
+    username = ensure_user(email, full_name) if member else find_username_by_email(email)
     if username is None:
         return False
     base, headers = _base_and_headers()

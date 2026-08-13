@@ -65,16 +65,19 @@ ENABLE_AUTO_REGISTRATION = true
 ; 플랫폼 계정과 같은 식별자를 쓰도록 이메일 기준으로 만든다.
 USERNAME = email
 ; 같은 이메일의 기존 Gitea 계정이 있으면 새로 만들지 않고 SSO 로그인에 연결한다.
+; **auto여야 한다.** 플랫폼은 조직 배지를 줄 때 아직 로그인한 적 없는 사람의 Gitea
+; 계정을 미리 만들어 두는데(app/services/gitea.py의 ensure_user), 그 계정의 비밀번호는
+; 난수라 아무도 모른다. login으로 두면 첫 SSO 로그인 때 그 비밀번호를 물어 막힌다.
 ACCOUNT_LINKING = auto
 ;
-; 여기서 만들어진 계정은 **아무 조직에도 속하지 않는다.** 리포는 public이라 clone은
-; 되는데 push만 403이 난다 — 쓰기 권한은 조직 소속에서 나오기 때문이다. 플랫폼이
-; 조직 배지를 줄 때 Gitea의 "developers" 팀(write)에 함께 넣는다
-; (app/services/gitea.py의 set_org_membership). 순서가 중요하다:
-;   1) 사용자가 Gitea에 SSO로 한 번 로그인 → 계정이 생긴다
-;   2) 관리자가 콘솔에서 조직 배지를 준다 → 그때 팀에 들어간다
-; 배지를 먼저 주면 넣을 계정이 없어 감사 로그에 user.gitea_sync.pending으로 남는다.
-; 그 경우 사용자의 첫 로그인 뒤 배지를 다시 적용하면 된다.
+; 자동 등록이든 플랫폼이 미리 만든 것이든, 계정 자체는 **아무 조직에도 속하지 않는다.**
+; 리포는 public이라 clone은 되는데 push만 403이 난다 — 쓰기 권한은 조직 소속에서
+; 나오기 때문이다. 플랫폼이 조직 배지를 줄 때 Gitea의 "developers" 팀(write)에 함께
+; 넣는다(set_org_membership). 배지가 없으면 push 권한도 없다.
+;
+; 이 동작에는 PAAS_GITEA_API_TOKEN이 **관리자 계정의** 토큰이어야 한다 — 계정 생성
+; (/api/v1/admin/users)과 팀 관리에 관리자 권한이 필요하다. 아니면 배지를 줄 때
+; 감사 로그에 user.gitea_sync.failed로 남는다.
 
 ; ─────────────────────────────────────────────────────────────────────────────
 ; app.ini로 설정하지 않는 것들

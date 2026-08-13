@@ -182,7 +182,7 @@ def test_org_badge_grants_gitea_write_access(monkeypatch, fresh_settings):
 
     calls = []
     monkeypatch.setattr(gitea, "set_org_membership",
-                        lambda org, email, member: (calls.append((org, email, member)), True)[1])
+                        lambda org, email, member, full_name="": (calls.append((org, email, member)), True)[1])
     r = c.post(f"/paas/api/v1/auth/accounts/{account_id}/organizations/modify",
                json={"organization_id": org_id, "action": "add"}, headers=ADMIN)
     assert r.status_code == 200, r.text
@@ -200,7 +200,7 @@ def test_org_badge_survives_gitea_failure(monkeypatch, fresh_settings):
     c, org_id = _client_with_org(monkeypatch)
     account_id = _register_and_approve(c, monkeypatch, "dev2@shop.com")
 
-    def _boom(org, email, member):
+    def _boom(org, email, member, full_name=""):
         raise gitea.GiteaError("Gitea 팀 조회 실패 (HTTP 500)")
 
     monkeypatch.setattr(gitea, "set_org_membership", _boom)
