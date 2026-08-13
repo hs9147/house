@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { ReactNode } from 'react';
 import Async from '../components/Async';
 import DeployProgressModal from '../components/DeployProgressModal';
 import Modal from '../components/Modal';
@@ -143,40 +144,14 @@ export default function ServerConfig() {
           </table>
         )}
       </Async>
-      {state.data && state.data.unregistered.length > 0 && (
-        <div style={{ marginTop: 18 }}>
-          <h3 style={{ marginBottom: 6 }}>미등록 라우트</h3>
-          <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
-            프록시 설정(web.config)에는 있으나 프로젝트로 등록되지 않은 항목입니다 —
-            이름과 rewrite 대상 주소만 표시합니다.
-          </p>
-          <table>
-            <thead>
-              <tr>
-                <th>이름</th>
-                <th>rewrite 주소</th>
-              </tr>
-            </thead>
-            <tbody>
-              {state.data.unregistered.map((u) => (
-                <tr key={u.name}>
-                  <td className="mono">{u.name}</td>
-                  <td className="mono">
-                    {u.rewrite_targets.length > 0 ? u.rewrite_targets.join(', ') : '-'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
       {state.data && state.data.windows_services.length > 0 && (
-        <div style={{ marginTop: 18 }}>
-          <h3 style={{ marginBottom: 6 }}>등록된 Windows Service</h3>
-          <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
-            nssm에 실제로 등록돼 있는 서비스입니다. 배포마다 -a / -b 슬롯을 번갈아 쓰므로
-            프로젝트·프로필당 하나만 있는 것이 정상입니다.
-          </p>
+        <Section
+          title="등록된 Windows Service"
+          count={state.data.windows_services.length}
+          // 슬롯 중복·잔여 서비스가 있으면 펼친 채로 연다 — 접어서 감출 내용이 아니다.
+          defaultOpen={state.data.windows_services.some((w) => w.duplicate_slot || w.project_name === null)}
+          description="nssm에 실제로 등록돼 있는 서비스입니다. 배포마다 -a / -b 슬롯을 번갈아 쓰므로 프로젝트·프로필당 하나만 있는 것이 정상입니다."
+        >
           <table>
             <thead>
               <tr>
@@ -205,7 +180,33 @@ export default function ServerConfig() {
               ))}
             </tbody>
           </table>
-        </div>
+        </Section>
+      )}
+      {state.data && state.data.unregistered.length > 0 && (
+        <Section
+          title="미등록 라우트"
+          count={state.data.unregistered.length}
+          description="프록시 설정(web.config)에는 있으나 프로젝트로 등록되지 않은 항목입니다 — 이름과 rewrite 대상 주소만 표시합니다."
+        >
+          <table>
+            <thead>
+              <tr>
+                <th>이름</th>
+                <th>rewrite 주소</th>
+              </tr>
+            </thead>
+            <tbody>
+              {state.data.unregistered.map((u) => (
+                <tr key={u.name}>
+                  <td className="mono">{u.name}</td>
+                  <td className="mono">
+                    {u.rewrite_targets.length > 0 ? u.rewrite_targets.join(', ') : '-'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
       )}
       {rulesFor && (
         <RedirectRulesModal
@@ -226,6 +227,41 @@ export default function ServerConfig() {
             state.reload();
           }}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * 접었다 펼 수 있는 진단용 목록 구역(등록 서비스·미등록 라우트).
+ *
+ * 기본은 접힘이다 — 평소에는 위쪽 사이트 표만 보면 되고, 이 둘은 뭔가 이상할 때만
+ * 들여다본다. 대신 제목에 건수를 붙여, 접힌 채로도 볼 것이 있는지는 알 수 있게 한다.
+ * 이상 징후가 있는 구역은 defaultOpen으로 펼친 채 연다(접어서 감출 내용이 아니다).
+ */
+function Section({
+  title, count, description, defaultOpen = false, children,
+}: {
+  title: string;
+  count: number;
+  description: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div className="row" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <h3 style={{ margin: 0 }}>{title} ({count})</h3>
+        <button className="small secondary" onClick={() => setOpen((v) => !v)}>
+          {open ? '접기' : '펼치기'}
+        </button>
+      </div>
+      {open && (
+        <>
+          <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>{description}</p>
+          {children}
+        </>
       )}
     </div>
   );
