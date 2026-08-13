@@ -15,10 +15,15 @@ ADMIN = {"x-api-key": "test-admin-key"}
 
 class _FakeRuntime:
     def start(self, spec):
+        self._started = getattr(self, "_started", set()) | {spec.profile}
         return Endpoint(host="127.0.0.1", port=8123)
 
     def stop(self, *a): ...
-    def status(self, *a): return "running"
+    def status(self, project_name, profile):
+        # 프로필별로 답한다 — 실제 런타임은 배포된 적 없는 프로필에 running이라
+        # 하지 않는다. 무조건 running을 돌려주면 "다른 프로필이 떠 있다"는
+        # 판정이 항상 참이 돼, 첫 배포조차 막힌다.
+        return "running" if profile in getattr(self, "_started", set()) else "stopped"
     def logs(self, *a, **kw): return ""
 
 
