@@ -266,10 +266,30 @@ def _install_is_current(workdir: Path) -> bool:
         return False
 
 
-def _has_vite(workdir: Path) -> bool:
-    """설치된 vite 실행 파일이 있는지 — Vite 프로젝트 판별(설치 이후에만 유효)."""
-    bin_dir = workdir / "node_modules" / ".bin"
-    return (bin_dir / "vite.cmd").exists() or (bin_dir / "vite").exists()
+def _build_script_uses_vite(workdir: Path) -> bool:
+    """package.json의 build 스크립트가 실제로 vite를 부르는지.
+
+    node_modules/.bin에 vite가 있는지로 판별하면 안 된다 — npm은 **전이 의존**의 bin도
+    최상위 .bin에 호이스팅하므로, vite를 간접적으로만 끌고 오는 Next/webpack 프로젝트도
+    통과한다. 그런 프로젝트에 --base를 붙이면 모르는 인자로 빌드가 깨진다.
+
+    또 --base는 npm이 스크립트 **끝**에 이어 붙이므로, vite 명령이 마지막일 때만 그
+    인자가 vite에게 간다("vite build && node post.js"면 post.js로 간다).
+    """
+    import json  # noqa: PLC0415
+
+    try:
+        scripts = json.loads((workdir / "package.json").read_text(encoding="utf-8")).get("scripts")
+    except (OSError, ValueError, AttributeError):
+        return False
+    build = (scripts or {}).get("build", "") if isinstance(scripts, dict) else ""
+    if not isinstance(build, str) or "vite" not in build:
+        return False
+    # 마지막 명령이 vite여야 한다. &&·;·| 로 이어진 마지막 조각만 본다.
+    import re as _re  # noqa: PLC0415
+
+    last = _re.split(r"&&|\|\||;|\|", build)[-1].strip()
+    return last.startswith("vite ") or last == "vite"
 
 
 def install_dependencies(workdir: Path, log_path: Path, base_path: str | None = None) -> None:
@@ -365,7 +385,7 @@ def install_dependencies(workdir: Path, log_path: Path, base_path: str | None = 
             build_cmd = [npm_exe, "run", "build", "--if-present"]
             # --base는 Vite 옵션이라 Vite 프로젝트에만 붙인다 — webpack/next 등에 넘기면
             # 모르는 인자로 빌드가 깨진다. 설치가 끝난 뒤라 .bin 존재 여부로 판별할 수 있다.
-            if base_path and _has_vite(workdir):
+            if base_path and _build_script_uses_vite(workdir):
                 build_cmd += ["--", f"--base={base_path}"]
             log.write(f"[env-setup] {' '.join(build_cmd)} (cwd={workdir})\n")
             log.flush()

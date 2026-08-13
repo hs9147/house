@@ -416,11 +416,9 @@ def test_start_script_explains_missing_vite(tmp_path):
     assert "NODE_ENV=production" in content
 
 
-def _make_vite(tmp_path):
-    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
-    bin_dir = tmp_path / "node_modules" / ".bin"
-    bin_dir.mkdir(parents=True)
-    (bin_dir / "vite").write_text("", encoding="utf-8")
+def _make_vite(tmp_path, build="vite build"):
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"build": "%s"}}' % build, encoding="utf-8")
 
 
 def test_build_receives_public_subpath_for_vite(monkeypatch, tmp_path):
@@ -441,8 +439,15 @@ def test_build_receives_public_subpath_for_vite(monkeypatch, tmp_path):
 
 
 def test_build_does_not_pass_base_to_non_vite_projects(monkeypatch, tmp_path):
-    """--base는 Vite 옵션이다 — webpack/next 등에 넘기면 모르는 인자로 빌드가 깨진다."""
-    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    """--base는 Vite 옵션이다 — webpack/next 등에 넘기면 모르는 인자로 빌드가 깨진다.
+
+    .bin/vite 존재로 판별하면 안 된다 — npm은 전이 의존의 bin도 최상위 .bin에
+    호이스팅하므로, vite를 간접적으로만 끌고 오는 Next 프로젝트도 통과해 버린다.
+    """
+    (tmp_path / "package.json").write_text('{"scripts": {"build": "next build"}}', encoding="utf-8")
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "vite").write_text("", encoding="utf-8")  # 전이 의존으로 호이스팅된 상태
     calls: list = []
     _fake_run_ok(monkeypatch, calls)
     monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -514,3 +519,28 @@ def test_failed_install_is_not_remembered_as_current(monkeypatch, tmp_path):
     with pytest.raises(build_service.BuildError):
         install_dependencies(tmp_path, tmp_path / "env.log")
     assert not (tmp_path / build_service.INSTALL_STAMP).exists()
+
+
+def test_base_is_not_passed_when_vite_is_not_the_last_command(monkeypatch, tmp_path):
+    """npm은 인자를 스크립트 **끝**에 이어 붙인다 — vite가 마지막이 아니면 --base가
+    엉뚱한 명령으로 간다."""
+    _make_vite(tmp_path, build="vite build && node scripts/post.js")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log", base_path="/apps/org/shop/dev/")
+
+    assert calls[-1] == ["/usr/bin/npm", "run", "build", "--if-present"]
+
+
+def test_base_is_passed_when_vite_runs_after_tsc(monkeypatch, tmp_path):
+    """Vite 스캐폴드의 흔한 형태 — "tsc -b && vite build"는 --base가 vite로 간다."""
+    _make_vite(tmp_path, build="tsc -b && vite build")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log", base_path="/apps/org/shop/dev/")
+
+    assert calls[-1][-1] == "--base=/apps/org/shop/dev/"
