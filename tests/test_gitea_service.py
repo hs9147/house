@@ -238,3 +238,65 @@ def test_ensure_webhook_idempotent_when_already_registered(monkeypatch, fresh_se
     monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: posted.append(1))
     gitea.ensure_webhook("shop-team", "api")
     assert posted == []
+
+
+# ─── 조직 소속(팀) — 개발자 push 권한 ────────────────────────────────────────
+# 리포는 public이지만 push에는 쓰기 권한이 필요하다. SSO 자동 등록으로 갓 만들어진
+# 계정은 아무 조직에도 없어 clone은 되고 push만 403이 난다.
+
+def test_find_username_by_email_requires_exact_match(monkeypatch):
+    """검색은 부분 일치라 비슷한 이메일이 함께 온다 — 정확히 같은 것만 골라야 엉뚱한
+    사람에게 쓰기 권한이 나가지 않는다."""
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: _Res(200, {"data": [
+        {"login": "alice-old", "email": "alice@other.com"},
+        {"login": "alice", "email": "Alice@cho-fam.com"},
+    ]}))
+    assert gitea.find_username_by_email("alice@cho-fam.com") == "alice"
+
+
+def test_find_username_by_email_missing_returns_none(monkeypatch):
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: _Res(200, {"data": []}))
+    assert gitea.find_username_by_email("nobody@cho-fam.com") is None
+
+
+def test_set_org_membership_adds_to_existing_team(monkeypatch):
+    calls = []
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: (
+        _Res(200, {"data": [{"login": "alice", "email": "alice@cho-fam.com"}]})
+        if "/users/search" in url else _Res(200, [{"id": 7, "name": gitea.WRITE_TEAM_NAME}])
+    ))
+    monkeypatch.setattr(gitea.httpx, "put", lambda url, **kw: (calls.append(url), _Res(204))[1])
+    assert gitea.set_org_membership("shop-team", "alice@cho-fam.com", True) is True
+    assert calls == ["https://git.example.com/api/v1/teams/7/members/alice"]
+
+
+def test_set_org_membership_creates_team_when_absent(monkeypatch):
+    posted = []
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: (
+        _Res(200, {"data": [{"login": "alice", "email": "alice@cho-fam.com"}]})
+        if "/users/search" in url else _Res(200, [{"id": 1, "name": "Owners"}])
+    ))
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: (posted.append(kw["json"]), _Res(201, {"id": 9}))[1])
+    monkeypatch.setattr(gitea.httpx, "put", lambda url, **kw: _Res(204))
+    assert gitea.set_org_membership("shop-team", "alice@cho-fam.com", True) is True
+    body = posted[0]
+    assert body["permission"] == "write"
+    # units가 비면 아무 권한 없는 팀이 만들어져 push가 그대로 막힌다.
+    assert "repo.code" in body["units"]
+    # 나중에 만들어지는 리포까지 포함돼야 프로젝트를 만들 때마다 팀에 다시 안 붙인다.
+    assert body["includes_all_repositories"] is True
+
+
+def test_set_org_membership_without_gitea_account_is_not_an_error(monkeypatch):
+    """아직 SSO 로그인을 한 번도 안 한 사용자 — 반영할 대상이 없을 뿐 실패가 아니다."""
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: _Res(200, {"data": []}))
+    assert gitea.set_org_membership("shop-team", "new@cho-fam.com", True) is False
+
+
+def test_set_org_membership_remove_tolerates_already_absent(monkeypatch):
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: (
+        _Res(200, {"data": [{"login": "alice", "email": "alice@cho-fam.com"}]})
+        if "/users/search" in url else _Res(200, [{"id": 7, "name": gitea.WRITE_TEAM_NAME}])
+    ))
+    monkeypatch.setattr(gitea.httpx, "delete", lambda url, **kw: _Res(404))
+    assert gitea.set_org_membership("shop-team", "alice@cho-fam.com", False) is True

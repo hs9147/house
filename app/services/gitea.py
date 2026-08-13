@@ -198,3 +198,84 @@ def ensure_webhook(org_name: str, repo_name: str) -> None:
     )
     if res.status_code not in (200, 201):
         raise GiteaError(f"Gitea 웹훅 등록 실패 (HTTP {res.status_code}): {res.text[:300]}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 조직 소속(팀) — 개발자의 push 권한
+#
+# 리포는 public으로 만들지만(ensure_repo) public 리포도 push에는 쓰기 권한이 필요하다.
+# 플랫폼 자신은 관리자 토큰으로 밀어 넣지만(services/git_auth.py), 개발자는 자기
+# Gitea 계정으로 push하므로 그 계정이 조직에 소속돼 있어야 한다. SSO 자동 등록으로
+# 갓 만들어진 계정은 아무 조직에도 안 들어가 있어 clone은 되는데 push만 403이 난다.
+WRITE_TEAM_NAME = "developers"
+# units를 비우면 아무 권한도 없는 팀이 만들어진다 — push에 필요한 것들을 명시한다.
+_WRITE_TEAM_UNITS = ["repo.code", "repo.issues", "repo.pulls", "repo.releases", "repo.wiki"]
+
+
+def find_username_by_email(email: str) -> str | None:
+    """이메일로 Gitea 사용자명을 찾는다. 없으면 None(아직 한 번도 SSO 로그인 안 한 계정).
+
+    사용자명을 이메일에서 직접 계산하지 않는 이유 — SSO 자동 등록이 붙이는 이름은
+    Gitea의 [oauth2_client] USERNAME 설정(email/nickname/preferred_username)에 따라
+    달라진다. 규칙을 여기서 흉내 내면 그 설정이 바뀌는 순간 엉뚱한 사람을 팀에 넣게 된다.
+    """
+    base, headers = _base_and_headers()
+    res = httpx.get(
+        f"{base}/api/v1/users/search", headers=headers,
+        params={"q": email, "limit": 50}, timeout=15,
+    )
+    if res.status_code != 200:
+        raise GiteaError(f"Gitea 사용자 조회 실패 (HTTP {res.status_code}): {res.text[:300]}")
+    for user in res.json().get("data", []):
+        # 부분 일치 검색이라 이메일이 정확히 같은 항목만 받아들인다.
+        if (user.get("email") or "").lower() == email.lower():
+            return user.get("login")
+    return None
+
+
+def _write_team_id(org_name: str) -> int:
+    """조직의 쓰기 권한 팀 id — 없으면 만든다(멱등)."""
+    base, headers = _base_and_headers()
+    res = httpx.get(
+        f"{base}/api/v1/orgs/{org_name}/teams", headers=headers,
+        params={"limit": 50}, timeout=15,
+    )
+    if res.status_code != 200:
+        raise GiteaError(f"Gitea 팀 조회 실패 (HTTP {res.status_code}): {res.text[:300]}")
+    for team in res.json():
+        if team.get("name") == WRITE_TEAM_NAME:
+            return team["id"]
+
+    created = httpx.post(
+        f"{base}/api/v1/orgs/{org_name}/teams", headers=headers,
+        json={
+            "name": WRITE_TEAM_NAME,
+            "permission": "write",
+            "units": _WRITE_TEAM_UNITS,
+            # 조직에 나중에 생기는 리포까지 자동 포함 — 프로젝트를 만들 때마다 팀에
+            # 다시 붙이지 않아도 되게 한다.
+            "includes_all_repositories": True,
+        },
+        timeout=15,
+    )
+    if created.status_code in (200, 201):
+        return created.json()["id"]
+    raise GiteaError(f"Gitea 팀 생성 실패 (HTTP {created.status_code}): {created.text[:300]}")
+
+
+def set_org_membership(org_name: str, email: str, member: bool) -> bool:
+    """플랫폼의 조직 소속을 Gitea 팀 소속으로 반영한다.
+
+    아직 Gitea 계정이 없으면(= SSO로 한 번도 로그인 안 함) False를 반환한다 — 실패가
+    아니라 "지금은 반영할 대상이 없음"이다. 그 사용자가 처음 로그인한 뒤 다시 부르면 된다.
+    """
+    username = find_username_by_email(email)
+    if username is None:
+        return False
+    base, headers = _base_and_headers()
+    team_id = _write_team_id(org_name)
+    url = f"{base}/api/v1/teams/{team_id}/members/{username}"
+    res = httpx.put(url, headers=headers, timeout=15) if member else httpx.delete(url, headers=headers, timeout=15)
+    if res.status_code not in (200, 204, 404):  # 404 = 이미 빠져 있음(삭제 시 멱등)
+        raise GiteaError(f"Gitea 팀 소속 변경 실패 (HTTP {res.status_code}): {res.text[:300]}")
+    return True
