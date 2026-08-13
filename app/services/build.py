@@ -235,6 +235,37 @@ def env_setup_log_path(project_name: str, git_sha: str, profile: BuildProfile) -
     return get_settings().build_log_dir / f"{project_name}-{git_sha[:12]}{PROFILES[profile].tag_suffix}-env.log"
 
 
+INSTALL_STAMP = "node_modules/.paas-install-stamp"
+
+
+def _dependency_fingerprint(workdir: Path) -> str:
+    """의존성 정의(락파일 우선, 없으면 package.json)의 해시."""
+    import hashlib  # noqa: PLC0415
+
+    for name in ("package-lock.json", "npm-shrinkwrap.json", "package.json"):
+        f = workdir / name
+        if f.exists():
+            return hashlib.sha256(f.read_bytes()).hexdigest()
+    return ""
+
+
+def _install_is_current(workdir: Path) -> bool:
+    """지난 설치 이후 의존성 정의가 그대로면 True — 다시 설치할 필요가 없다.
+
+    npm ci는 node_modules를 통째로 지우고 처음부터 다시 설치한다. 의존성이 안 바뀌었는데도
+    배포마다 그걸 반복하면 시간이 그대로 나가고, 서비스 재기동까지 늦어진다. 지문을
+    node_modules 안에 두므로 node_modules를 지우면 지문도 같이 사라진다 — 손으로 지운
+    경우에도 자동으로 다시 설치된다.
+    """
+    stamp = workdir / INSTALL_STAMP
+    if not (workdir / "node_modules").is_dir() or not stamp.is_file():
+        return False
+    try:
+        return stamp.read_text(encoding="utf-8").strip() == _dependency_fingerprint(workdir)
+    except OSError:
+        return False
+
+
 def _has_vite(workdir: Path) -> bool:
     """설치된 vite 실행 파일이 있는지 — Vite 프로젝트 판별(설치 이후에만 유효)."""
     bin_dir = workdir / "node_modules" / ".bin"
@@ -291,23 +322,41 @@ def install_dependencies(workdir: Path, log_path: Path, base_path: str | None = 
             # CLI 플래그가 환경변수·.npmrc보다 우선하므로 여기서 못박는다.
             # (설치 후 prune도 하지 않는다 — vite preview로 서빙하는 경우 vite가 실행
             #  시점에도 필요하다.)
-            base = [npm_exe, "ci"] if (workdir / "package-lock.json").exists() else [npm_exe, "install"]
-            npm_cmd = [*base, "--include=dev"]
-            log.write(f"[env-setup] {' '.join(npm_cmd)} (cwd={workdir})\n")
-            log.flush()
-            try:
-                proc = subprocess.run(
-                    npm_cmd, cwd=workdir, stdout=log, stderr=subprocess.STDOUT, timeout=timeout_seconds,
+            if _install_is_current(workdir):
+                log.write("[env-setup] 의존성 변경 없음 — 설치를 건너뜁니다.\n")
+                log.flush()
+            else:
+                base = (
+                    [npm_exe, "ci"] if (workdir / "package-lock.json").exists()
+                    else [npm_exe, "install"]
                 )
-            except OSError as e:
-                raise BuildError(f"npm 실행 실패: {e}", log_path) from e
-            except subprocess.TimeoutExpired as e:
-                raise BuildError(
-                    f"npm install이 {timeout_seconds}초 내에 끝나지 않아 중단했습니다 "
-                    "(PAAS_BUILD_TIMEOUT_SECONDS로 늘릴 수 있습니다).", log_path,
-                ) from e
-            if proc.returncode != 0:
-                raise BuildError(f"npm install 실패 (exit {proc.returncode})", log_path)
+                npm_cmd = [*base, "--include=dev"]
+                log.write(f"[env-setup] {' '.join(npm_cmd)} (cwd={workdir})\n")
+                log.flush()
+                try:
+                    proc = subprocess.run(
+                        npm_cmd, cwd=workdir, stdout=log, stderr=subprocess.STDOUT,
+                        timeout=timeout_seconds,
+                    )
+                except OSError as e:
+                    raise BuildError(f"npm 실행 실패: {e}", log_path) from e
+                except subprocess.TimeoutExpired as e:
+                    raise BuildError(
+                        f"npm install이 {timeout_seconds}초 내에 끝나지 않아 중단했습니다 "
+                        "(PAAS_BUILD_TIMEOUT_SECONDS로 늘릴 수 있습니다).", log_path,
+                    ) from e
+                if proc.returncode != 0:
+                    raise BuildError(f"npm install 실패 (exit {proc.returncode})", log_path)
+                # 성공한 뒤에만 남긴다 — 실패한 설치를 "최신"으로 기억하면 안 된다.
+                # 지문을 못 남겨도 배포는 성공이다(다음 배포에 한 번 더 설치할 뿐) —
+                # 의존성이 없는 package.json이면 npm이 node_modules를 안 만들 수도 있다.
+                stamp = workdir / INSTALL_STAMP
+                try:
+                    stamp.parent.mkdir(parents=True, exist_ok=True)
+                    stamp.write_text(_dependency_fingerprint(workdir), encoding="utf-8")
+                except OSError as e:
+                    log.write(f"[env-setup] 설치 지문을 남기지 못했습니다: {e}\n")
+                    log.flush()
 
             # 빌드도 여기서 끝낸다. start.cmd에 두면 서비스가 뜰 때마다(재부팅·재시작
             # 포함) 다시 빌드하고, 실패해도 배포는 성공으로 남는다 — 이 단계에서 하면

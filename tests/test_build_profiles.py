@@ -461,3 +461,56 @@ def test_build_without_base_path_is_unchanged(monkeypatch, tmp_path):
     install_dependencies(tmp_path, tmp_path / "env.log")
 
     assert calls[-1] == ["/usr/bin/npm", "run", "build", "--if-present"]
+
+
+def _npm_calls(calls):
+    return [c for c in calls if c[0].endswith("npm")]
+
+
+def test_install_is_skipped_when_dependencies_unchanged(monkeypatch, tmp_path):
+    """npm ci는 node_modules를 통째로 지우고 다시 설치한다. 의존성이 안 바뀌었는데도
+    배포마다 반복하면 시간이 그대로 나가고 서비스 재기동까지 늦어진다."""
+    (tmp_path / "package.json").write_text('{"name":"a"}', encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"v":1}', encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log")
+    assert _npm_calls(calls)[0][:2] == ["/usr/bin/npm", "ci"]
+
+    calls.clear()
+    install_dependencies(tmp_path, tmp_path / "env.log")
+    assert not any(c[1] in ("ci", "install") for c in _npm_calls(calls)), "설치를 또 했다"
+    assert "설치를 건너뜁니다" in (tmp_path / "env.log").read_text(encoding="utf-8")
+    # 빌드는 매번 돌아야 한다 — 소스는 배포마다 바뀐다.
+    assert _npm_calls(calls)[-1][1:3] == ["run", "build"]
+
+
+def test_install_runs_again_when_lockfile_changes(monkeypatch, tmp_path):
+    (tmp_path / "package.json").write_text('{"name":"a"}', encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"v":1}', encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+    install_dependencies(tmp_path, tmp_path / "env.log")
+
+    (tmp_path / "package-lock.json").write_text('{"v":2}', encoding="utf-8")
+    calls.clear()
+    install_dependencies(tmp_path, tmp_path / "env.log")
+    assert _npm_calls(calls)[0][:2] == ["/usr/bin/npm", "ci"]
+
+
+def test_failed_install_is_not_remembered_as_current(monkeypatch, tmp_path):
+    """실패한 설치를 "최신"으로 기억하면 다음 배포가 깨진 node_modules로 그냥 진행한다."""
+    (tmp_path / "package.json").write_text('{"name":"a"}', encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+
+    class _Fail:
+        returncode = 1
+
+    monkeypatch.setattr(build_service.subprocess, "run", lambda *a, **kw: _Fail())
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+    with pytest.raises(build_service.BuildError):
+        install_dependencies(tmp_path, tmp_path / "env.log")
+    assert not (tmp_path / build_service.INSTALL_STAMP).exists()
