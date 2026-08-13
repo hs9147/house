@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import Async from '../../components/Async';
+import AutoDeployMark from '../../components/AutoDeployMark';
 import DeployProgressModal from '../../components/DeployProgressModal';
 import { Confirm } from '../../components/Modal';
 import StatusPill from '../../components/StatusPill';
@@ -68,6 +69,7 @@ export default function OverviewTab() {
                 <tr>
                   <th>프로필</th>
                   <th>상태</th>
+                  <th>자동배포</th>
                   <th>도메인</th>
                   <th style={{ width: 260 }}>동작</th>
                 </tr>
@@ -85,6 +87,7 @@ export default function OverviewTab() {
                     <tr key={profile}>
                       <td><StatusPill value={profile} /></td>
                       <td><StatusPill value={status[profile] ?? 'unknown'} /></td>
+                      <td><AutoDeployMark status={status[profile] ?? ''} branch={project.branch} /></td>
                       <td className="mono">
                         {health.data && status[profile] === 'running' ? (
                           <a href={fullUrl} target="_blank" rel="noreferrer">{fullUrl}</a>
