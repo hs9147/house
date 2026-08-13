@@ -440,12 +440,28 @@ class UnregisteredSite(BaseModel):
     rewrite_targets: list[str]
 
 
+class WindowsServiceOut(BaseModel):
+    """실제로 등록돼 있는 Windows Service 한 건(windows_service 런타임에서만 채워진다)."""
+
+    name: str
+    state: str  # running | stopped | unknown
+    # 이름에서 역산하지 않고 DB 프로젝트의 예상 이름과 맞춰 채운다 — 프로젝트 이름에
+    # 하이픈이 들어가면 역산은 틀린다. 못 맞추면 None(= 지워진 프로젝트의 잔여 서비스).
+    project_name: str | None = None
+    profile: BuildProfile | None = None
+    slot: str | None = None
+    # 같은 프로젝트·프로필의 슬롯이 둘 다 남아 있음 — 다음 배포를 막는 상태였다.
+    duplicate_slot: bool = False
+
+
 class ServerConfigOut(BaseModel):
     runtime_backend: str
     proxy_backend: str
     sites: list[ServerConfigSite]
     # 프록시 설정에만 존재하고 DB 프로젝트와 매칭되지 않는 항목(추적 백엔드에서만 채워짐)
     unregistered: list[UnregisteredSite] = []
+    # windows_service 런타임에서만 채워진다(그 외에는 빈 목록).
+    windows_services: list[WindowsServiceOut] = []
 
 
 class ApiKeyCreate(BaseModel):

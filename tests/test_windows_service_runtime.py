@@ -151,3 +151,39 @@ def test_start_clears_leftover_service_in_target_slot(env):
     removes = [c[2] for c in env.calls if c[1] == "remove"]
     assert removes.count("paas-shop-b") == 1        # 설치 전에 찌꺼기를 치웠다
     assert "paas-shop-a" in removes
+
+
+def test_every_sc_and_nssm_call_has_a_timeout(env, monkeypatch):
+    """요청 경로에서 불리는 호출이라 타임아웃이 없으면 멈춘 sc/nssm 하나가 Starlette
+    스레드풀 슬롯을 영원히 잡는다. 슬롯이 마르면 같은 풀을 쓰는 동기 엔드포인트가 전부
+    대기하고, PowerShell 콘솔(POST /system/powershell/exec)이 "명령어 실행 중"에서
+    멈춘다 — 실제로 겪은 증상이라 구조로 고정한다.
+    """
+    seen: list[tuple[list, dict]] = []
+    inner = env.run
+
+    def _record(args, **kwargs):
+        seen.append((args, kwargs))
+        return inner(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _record)
+
+    runtime = WindowsServiceRuntime()
+    runtime.start(_spec())
+    runtime.status("shop", BuildProfile.release)
+    runtime.stop("shop", BuildProfile.release)
+    wsr.list_registered_services()
+
+    assert seen, "아무 호출도 관찰되지 않았다"
+    missing = [args for args, kwargs in seen if kwargs.get("timeout") is None]
+    assert not missing, f"타임아웃 없는 호출: {missing}"
+
+
+def test_hung_sc_does_not_block_status(env, monkeypatch):
+    """멈춘 sc는 예외로 끝나야 한다 — 그 자리에서 계속 기다리면 안 된다."""
+    def _hang(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 1))
+
+    monkeypatch.setattr(subprocess, "run", _hang)
+    assert WindowsServiceRuntime().status("shop", BuildProfile.release) == "stopped"
+    assert wsr.list_registered_services() == []

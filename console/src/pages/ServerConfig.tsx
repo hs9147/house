@@ -163,6 +163,43 @@ export default function ServerConfig() {
           </table>
         </div>
       )}
+      {state.data && state.data.windows_services.length > 0 && (
+        <div style={{ marginTop: 18 }}>
+          <h3 style={{ marginBottom: 6 }}>등록된 Windows Service</h3>
+          <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
+            nssm에 실제로 등록돼 있는 서비스입니다. 배포마다 -a / -b 슬롯을 번갈아 쓰므로
+            프로젝트·프로필당 하나만 있는 것이 정상입니다.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>서비스</th>
+                <th>상태</th>
+                <th>프로젝트</th>
+                <th>프로필</th>
+                <th>비고</th>
+              </tr>
+            </thead>
+            <tbody>
+              {state.data.windows_services.map((w) => (
+                <tr key={w.name}>
+                  <td className="mono">{w.name}</td>
+                  <td><StatusPill value={w.state} /></td>
+                  <td>{w.project_name ?? '-'}</td>
+                  <td>{w.profile ? <StatusPill value={w.profile} /> : '-'}</td>
+                  <td className="mutedtext" style={{ fontSize: 12 }}>
+                    {w.duplicate_slot
+                      ? '슬롯 중복 — 다음 배포가 자동으로 정리합니다'
+                      : w.project_name === null
+                        ? '등록된 프로젝트 없음 — 삭제된 프로젝트의 잔여 서비스'
+                        : ''}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {rulesFor && (
         <RedirectRulesModal
           projectId={rulesFor.id}

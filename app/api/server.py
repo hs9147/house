@@ -20,7 +20,7 @@ from ..models import (
 )
 from ..schemas import (
     ComponentStatus, RedirectRuleCreate, RedirectRuleOut, RedirectRuleSummary,
-    ServerConfigOut, ServerConfigSite, UnregisteredSite,
+    ServerConfigOut, ServerConfigSite, UnregisteredSite, WindowsServiceOut,
 )
 from ..security import require_api_key
 from ..services import deployer
@@ -29,6 +29,44 @@ from ..services.proxy import domain_for, get_proxy, path_prefix_for
 from ..services.proxy.base import site_name
 
 router = APIRouter(tags=["server"])
+
+
+def _windows_services(projects: list[Project]) -> list[WindowsServiceOut]:
+    """등록된 paas-* Windows Service를 프로젝트에 맞춰 분류한다.
+
+    이름을 문자열로 역산하지 않고 DB 프로젝트에서 예상 이름을 만들어 맞춘다 —
+    프로젝트 이름에 하이픈이 있으면(shop-api 등) 역산은 틀린다.
+    """
+    from ..services.runtime.windows_service_runtime import list_registered_services  # noqa: PLC0415
+    from ..services.runtime.base import RuntimeSpec  # noqa: PLC0415
+
+    expected: dict[str, tuple[str, BuildProfile, str]] = {}
+    for p in projects:
+        for profile in BuildProfile:
+            unit = RuntimeSpec(p.name, "", 0, profile, "").unit_name
+            for slot in ("a", "b"):
+                expected[f"{unit}-{slot}"] = (p.name, profile, slot)
+
+    found = list_registered_services()
+    # 같은 프로젝트·프로필에 슬롯이 둘 다 남아 있으면 다음 배포가 막힌다 — 표시한다.
+    seen_units: dict[tuple[str, BuildProfile], int] = {}
+    for name, _ in found:
+        if name in expected:
+            project_name, profile, _slot = expected[name]
+            seen_units[(project_name, profile)] = seen_units.get((project_name, profile), 0) + 1
+
+    out = []
+    for name, state in found:
+        match = expected.get(name)
+        if match is None:
+            out.append(WindowsServiceOut(name=name, state=state))
+            continue
+        project_name, profile, slot = match
+        out.append(WindowsServiceOut(
+            name=name, state=state, project_name=project_name, profile=profile, slot=slot,
+            duplicate_slot=seen_units.get((project_name, profile), 0) > 1,
+        ))
+    return out
 
 
 @router.get("/server-config", response_model=ServerConfigOut)
@@ -123,6 +161,11 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
         proxy_backend=settings.proxy_backend if settings.tier == "small" else "k8s-ingress",
         sites=sites,
         unregistered=unregistered,
+        windows_services=(
+            _windows_services(projects)
+            if settings.tier == "small" and settings.runtime_backend == "windows_service"
+            else []
+        ),
     )
 
 
