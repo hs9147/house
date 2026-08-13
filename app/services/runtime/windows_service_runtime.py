@@ -18,6 +18,7 @@ import os
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.request
 
 from ...config import get_settings
@@ -299,13 +300,25 @@ class WindowsServiceRuntime(Runtime):
 
     @staticmethod
     def _wait_healthy(port: int, path: str, timeout: float = 60.0) -> bool:
-        url = f"http://127.0.0.1:{port}{path}"
+        """포트가 HTTP로 응답하기 시작했는지만 본다(기동 확인).
+
+        호스트는 앱에 넘긴 HOST와 같은 이름을 쓴다 — 127.0.0.1로 박아 두면, localhost가
+        ::1로 먼저 풀리는 Windows에서 앱이 ::1에 듣고 있을 때 영영 실패한다.
+
+        4xx도 "떠 있음"이다. urlopen은 4xx에서 HTTPError를 던지는데 그걸 통째로 삼키면
+        404가 죽은 것으로 계산된다 — dev 서버는 base가 붙은 경로만 받으므로 "/"에서
+        404를 내고, 그 배포가 전부 실패했다. 5xx만 아직 준비되지 않은 것으로 본다.
+        """
+        url = f"http://{UPSTREAM_HOST}:{port}{path}"
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 with urllib.request.urlopen(url, timeout=3) as res:
                     if res.status < 500:
                         return True
+            except urllib.error.HTTPError as e:
+                if e.code < 500:
+                    return True
             except Exception:
                 pass
             time.sleep(2)
