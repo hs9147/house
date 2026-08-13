@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useParams } from 'react-router-dom';
+import { NavLink, Outlet, useNavigate, useParams } from 'react-router-dom';
 import Async from '../components/Async';
 import StatusPill from '../components/StatusPill';
 import { api } from '../lib/api';
@@ -22,6 +22,7 @@ const TABS = [
 
 export default function ProjectDetail() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const projectId = Number(id);
   // 백엔드에 단건 조회가 없어 목록에서 찾는다
   const state = useApi(async () => {
@@ -35,7 +36,10 @@ export default function ProjectDetail() {
     <Async state={state}>
       {(project) => (
         <>
-          <div className="row" style={{ marginBottom: 12 }}>
+          <div className="row" style={{ marginBottom: 12, alignItems: 'center' }}>
+            <button className="small secondary" onClick={() => navigate('/projects')}>
+              ← 목록
+            </button>
             <h2 style={{ margin: 0 }}>{project.name}</h2>
             <StatusPill value={project.type} />
             <span className="mono mutedtext">

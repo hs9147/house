@@ -123,7 +123,7 @@ export default function DeployProgressModal({
   }, [projectId, profile, projectName, deploymentIds]);
 
   return (
-    <Modal title={`배포 진행 — ${projectName} (${profile})`} onClose={done ? onClose : () => {}}>
+    <Modal title={`배포 진행 — ${projectName} (${profile})`} onClose={onClose} closable={done}>
       <pre
         ref={logRef}
         className="mono"
