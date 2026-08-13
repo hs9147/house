@@ -83,6 +83,43 @@ def _nssm_binary() -> str:
     return configured
 
 
+SERVICE_PREFIX = "paas-"
+
+
+def list_registered_services() -> list[tuple[str, str]]:
+    """플랫폼이 등록한 Windows Service의 (이름, 상태) 목록.
+
+    콘솔에서 "지금 실제로 뭐가 등록돼 있나"를 보기 위한 것 — status()는 예상 이름을
+    조회할 뿐이라, 배포가 중간에 끊겨 남은 슬롯이나 프로젝트를 지운 뒤 남은 서비스는
+    화면에 드러나지 않는다. 그 둘이 배포를 막는 원인이라 눈에 보여야 한다.
+
+    sc가 없거나(비Windows) 실패하면 빈 목록이다 — 조회가 안 되는 것은 오류가 아니라
+    "볼 것이 없음"으로 다룬다(서버구성 화면 전체가 이것 때문에 실패하면 안 된다).
+    """
+    try:
+        proc = subprocess.run(
+            [_sc_binary(), "query", "state=", "all"], capture_output=True, text=True,
+        )
+    except (FileNotFoundError, OSError):
+        return []
+    if proc.returncode != 0:
+        return []
+
+    services: list[tuple[str, str]] = []
+    name: str | None = None
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("SERVICE_NAME:"):
+            candidate = stripped.split(":", 1)[1].strip()
+            name = candidate if candidate.startswith(SERVICE_PREFIX) else None
+        elif name and stripped.upper().startswith("STATE"):
+            upper = stripped.upper()
+            state = "running" if "RUNNING" in upper else "stopped" if "STOPPED" in upper else "unknown"
+            services.append((name, state))
+            name = None
+    return services
+
+
 class WindowsServiceRuntime(Runtime):
     def start(self, spec: RuntimeSpec) -> Endpoint:
         settings = get_settings()

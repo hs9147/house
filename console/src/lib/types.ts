@@ -359,12 +359,24 @@ export interface UnregisteredSite {
   rewrite_targets: string[];
 }
 
+export interface WindowsServiceInfo {
+  name: string;
+  state: string;
+  project_name: string | null;
+  profile: BuildProfile | null;
+  slot: string | null;
+  // 같은 프로젝트·프로필의 슬롯이 둘 다 남아 있음 — 다음 배포를 막던 상태
+  duplicate_slot: boolean;
+}
+
 export interface ServerConfigOut {
   runtime_backend: string;
   proxy_backend: string;
   sites: ServerConfigSite[];
   // 프록시 설정(web.config)에만 있고 DB 프로젝트로 등록되지 않은 항목 (추적 백엔드만)
   unregistered: UnregisteredSite[];
+  // 실제로 등록된 Windows Service (windows_service 런타임에서만 채워짐)
+  windows_services: WindowsServiceInfo[];
 }
 
 export interface RedirectRule {
