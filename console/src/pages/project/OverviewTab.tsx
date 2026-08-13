@@ -90,7 +90,21 @@ export default function OverviewTab() {
                       <td><AutoDeployMark status={status[profile] ?? ''} branch={project.branch} /></td>
                       <td className="mono">
                         {health.data && status[profile] === 'running' ? (
-                          <a href={fullUrl} target="_blank" rel="noreferrer">{fullUrl}</a>
+                          <a
+                            href={fullUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            // target="_blank"만으로는 대부분의 브라우저가 새 "탭"을 연다.
+                            // 새 창으로 띄우려면 창 속성을 지정해 window.open을 불러야 한다.
+                            // href는 그대로 둔다 — 가운데 클릭·주소 복사 같은 링크 동작을
+                            // 잃지 않고, 팝업이 막혀도 링크로는 열린다.
+                            onClick={(e) => {
+                              e.preventDefault();
+                              window.open(fullUrl, '_blank', 'noopener,noreferrer,popup=yes');
+                            }}
+                          >
+                            {fullUrl}
+                          </a>
                         ) : (
                           fullUrl
                         )}
