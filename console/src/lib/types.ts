@@ -424,6 +424,9 @@ export interface HealthInfo {
   features: string[];
   gitea_url: string | null;
   base_domain: string;
+  // 배포된 앱 주소의 스킴(PAAS_PLATFORM_PUBLIC_URL 기준). 미설정이면 null —
+  // 콘솔이 자기 자신이 열린 스킴을 쓴다.
+  public_scheme: string | null;
 }
 
 export interface ApiKeyIssued {

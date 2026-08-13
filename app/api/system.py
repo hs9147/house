@@ -1,5 +1,6 @@
 import hmac
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, WebSocket
@@ -72,6 +73,11 @@ def health():
         "features": sorted(enabled_features()),
         "gitea_url": settings.gitea_url or None,
         "base_domain": settings.base_domain,
+        # 배포된 앱 주소를 만들 때 쓸 스킴. base_domain은 호스트만이라 스킴 정보가 없어
+        # 콘솔이 https로 박아 두고 있었다 — 80포트만 여는 구성에서는 죽은 링크가 된다.
+        # 공개 주소가 설정돼 있으면 그 스킴이 정답이고, 없으면 None(콘솔이 자기 자신이
+        # 열린 스킴을 쓴다 — 같은 프록시 뒤에 있으므로 그게 맞다).
+        "public_scheme": urlsplit(settings.platform_public_url).scheme or None,
     }
 
 

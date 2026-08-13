@@ -249,3 +249,33 @@ def test_audit_trail_recorded():
     }, headers=ADMIN)
     rows = c.get("/paas/api/v1/audit", headers=ADMIN).json()
     assert any(r["action"] == "project.create" and r["target"] == "audit-target" for r in rows)
+
+
+def test_health_reports_public_scheme_from_configured_url(monkeypatch, fresh_settings):
+    """배포된 앱 주소의 스킴은 설정을 따라야 한다 — 콘솔이 https로 박아 두고 있어서
+    80포트만 여는 구성에서는 죽은 링크가 됐다. base_domain은 호스트만이라 스킴 정보를
+    담지 못하므로 여기서 함께 내려준다."""
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from app.main import create_app
+
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "http://paas.example.com")
+    get_settings.cache_clear()
+    assert TestClient(create_app()).get("/paas/health").json()["public_scheme"] == "http"
+
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "https://paas.example.com")
+    get_settings.cache_clear()
+    assert TestClient(create_app()).get("/paas/health").json()["public_scheme"] == "https"
+
+
+def test_health_public_scheme_is_null_when_unset(monkeypatch, fresh_settings):
+    """미설정이면 추측하지 않는다 — 콘솔이 자기 자신이 열린 스킴을 쓴다."""
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from app.main import create_app
+
+    monkeypatch.delenv("PAAS_PLATFORM_PUBLIC_URL", raising=False)
+    get_settings.cache_clear()
+    assert TestClient(create_app()).get("/paas/health").json()["public_scheme"] is None
