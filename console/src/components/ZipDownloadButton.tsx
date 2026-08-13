@@ -2,7 +2,7 @@ import { gitArchiveZipUrl, hasUsableGitUrl } from '../lib/vscode';
 import type { ProjectOut } from '../lib/types';
 
 /**
- * "↓ ZIP" — 이 프로젝트 리포를 zip으로 내려받는다.
+ * "ZIP 다운로드" — 이 프로젝트 리포를 zip으로 내려받는다.
  *
  * VscodeWorkButton과 짝이다 — git을 쓰지 않고 소스만 한 벌 받아 보려는 경우.
  * 압축은 Gitea가 만들어 바로 내려주므로 플랫폼 백엔드를 거치지 않는다. 브라우저에
@@ -25,7 +25,7 @@ export default function ZipDownloadButton({ project }: { project: ProjectOut | n
         window.location.href = gitArchiveZipUrl(project!.git_url, project!.branch);
       }}
     >
-      ↓ ZIP
+      ZIP 다운로드
     </button>
   );
 }

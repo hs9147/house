@@ -69,9 +69,9 @@ export default function Projects() {
                   <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
                     <td>{p.name}</td>
                     <td><StatusPill value={p.type} /></td>
-                    <td className="mono">
+                    {/* 주소 자체는 길어서 표를 밀어낸다 — 필요하면 복사 버튼으로 가져간다. */}
+                    <td>
                       <span className="row" style={{ alignItems: 'center', gap: 8 }}>
-                        {p.git_url}
                         <CopyGitUrlButton project={p} />
                         <VscodeWorkButton project={p} />
                         <ZipDownloadButton project={p} />
