@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
+import CopyGitUrlButton from '../components/CopyGitUrlButton';
 import Modal from '../components/Modal';
 import StatusPill from '../components/StatusPill';
 import VscodeWorkButton from '../components/VscodeWorkButton';
@@ -71,6 +72,7 @@ export default function Projects() {
                     <td className="mono">
                       <span className="row" style={{ alignItems: 'center', gap: 8 }}>
                         {p.git_url}
+                        <CopyGitUrlButton project={p} />
                         <VscodeWorkButton project={p} />
                         <ZipDownloadButton project={p} />
                       </span>
