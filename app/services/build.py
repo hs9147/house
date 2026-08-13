@@ -93,6 +93,9 @@ if exist package.json (
       echo [PaaS Auto-Provisioning] No "start" script in package.json - serving the Vite build via "vite preview".
       node_modules\\.bin\\vite.cmd preview --config paas-preview.config.mjs --host %HOST% --port %PORT%
     ) else (
+      echo [PaaS] No "start" script and node_modules\\.bin\\vite.cmd is missing.
+      echo [PaaS] Dependencies may have been installed without devDependencies -
+      echo [PaaS] check NODE_ENV=production or omit=dev/production in .npmrc.
       npm start
     )
   ) else (
@@ -268,7 +271,16 @@ def install_dependencies(workdir: Path, log_path: Path) -> None:
                     "확인하세요.",
                     log_path,
                 )
-            npm_cmd = [npm_exe, "ci"] if (workdir / "package-lock.json").exists() else [npm_exe, "install"]
+            # --include=dev를 붙이는 이유 — vite·tsc 같은 빌드 도구는 devDependencies에
+            # 있는데, 환경에 NODE_ENV=production이 있거나 .npmrc에 omit=dev/production이
+            # 있으면 npm이 그걸 통째로 건너뛴다(node_modules/.bin 자체가 안 생긴다).
+            # 그러면 빌드가 "'vite' is not recognized"로 죽는다. 이 설치는 paas 서비스
+            # 프로세스의 환경을 그대로 상속하므로 서버 설정 하나에 배포가 끌려다닌다 —
+            # CLI 플래그가 환경변수·.npmrc보다 우선하므로 여기서 못박는다.
+            # (설치 후 prune도 하지 않는다 — vite preview로 서빙하는 경우 vite가 실행
+            #  시점에도 필요하다.)
+            base = [npm_exe, "ci"] if (workdir / "package-lock.json").exists() else [npm_exe, "install"]
+            npm_cmd = [*base, "--include=dev"]
             log.write(f"[env-setup] {' '.join(npm_cmd)} (cwd={workdir})\n")
             log.flush()
             try:
