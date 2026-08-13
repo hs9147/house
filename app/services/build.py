@@ -62,18 +62,21 @@ set PORT=%PORT%
 set HOST=%HOST%
 
 if exist package.json (
+  REM 설치와 빌드는 배포의 build 단계에서 이미 끝난다(build.py의 install_dependencies).
+  REM 여기서 한 번 더 하면 npm.cmd가 배포마다 세 번 뜨고, 더 나쁘게는 이 스크립트가
+  REM **서비스가 뜰 때마다** 실행되므로 재부팅·SW 업데이트·크래시 재시작마다 반복된다.
+  REM (특히 npm ci는 node_modules를 통째로 지우고 처음부터 다시 설치한다 — "이미
+  REM 설치돼 있으면 빠르게 통과"가 아니다.) 그래서 여기서는 아무것도 설치하지 않고,
+  REM node_modules 자체가 없을 때만 마지막 보루로 install한다.
   if not exist node_modules (
-    echo [PaaS Auto-Provisioning] Node environment missing. Installing dependencies...
+    echo [PaaS Auto-Provisioning] node_modules missing - installing as a fallback.
     call npm install
-  ) else (
-    call npm ci --if-present
   )
-  call npm run build --if-present
   REM Vite로 스캐폴딩된 프로젝트(npm create vite@latest)는 package.json에 "start"
   REM 스크립트가 없다 — dev/build/preview만 있고, 그대로 "npm start"를 부르면
   REM "Missing script: start"로 즉시 죽는다. "start"가 없고 vite가 설치돼 있으면
-  REM (npm ci/install이 devDependencies도 함께 설치하므로 vite도 이미 있다) 이미
-  REM 빌드된(위 npm run build) 산출물을 "vite preview"로 그대로 서빙한다.
+  REM (install_dependencies의 npm ci/install이 devDependencies도 함께 설치한다) 그
+  REM 단계에서 빌드해 둔 산출물을 "vite preview"로 그대로 서빙한다.
   REM
   REM 판정에 %errorlevel%을 쓰면 안 된다. 여기는 "if exist package.json (" 로 열린
   REM 괄호 블록 안이고, 블록은 통째로 한 번 파싱되면서 %errorlevel%이 블록에 들어오기
@@ -237,8 +240,13 @@ def install_dependencies(workdir: Path, log_path: Path) -> None:
     오래 걸리면 헬스체크 타임아웃으로만 보였고("의존성 설치가 헬스 타임아웃을 넘기지
     않는지 확인하세요" 라는 힌트가 남던 이유), 실패해도 배포 상태는 실패로 남지 않았다
     (start.cmd는 설치 실패 후에도 다음 줄로 계속 진행한다). 여기서 헬스체크 창 밖에서
-    먼저 끝내면 그 모호함이 없어진다. start.cmd는 계속 조건부로(이미 설치돼 있으면
-    빠르게 통과) 같은 설치를 한 번 더 하지만, 이 단계가 실제 게이트다.
+    먼저 끝내면 그 모호함이 없어진다.
+
+    설치와 빌드가 **모두** 여기에 있다는 점이 중요하다. 예전에는 start.cmd도 같은
+    설치·빌드를 한 번 더 했는데, start.cmd는 배포 때만이 아니라 서비스가 뜰 때마다
+    실행되므로 재부팅·SW 업데이트·크래시 재시작마다 반복됐다. "이미 설치돼 있으면
+    빠르게 통과"할 거라 봤지만 npm ci는 node_modules를 통째로 지우고 처음부터 다시
+    설치한다 — 통과가 아니라 전체 재설치다.
     """
     timeout_seconds = get_settings().build_timeout_seconds
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,6 +284,25 @@ def install_dependencies(workdir: Path, log_path: Path) -> None:
                 ) from e
             if proc.returncode != 0:
                 raise BuildError(f"npm install 실패 (exit {proc.returncode})", log_path)
+
+            # 빌드도 여기서 끝낸다. start.cmd에 두면 서비스가 뜰 때마다(재부팅·재시작
+            # 포함) 다시 빌드하고, 실패해도 배포는 성공으로 남는다 — 이 단계에서 하면
+            # 실패가 배포 실패로 드러난다. --if-present는 npm run의 정식 옵션이라
+            # build 스크립트가 없는 프로젝트에서는 조용히 넘어간다.
+            log.write(f"[env-setup] {npm_exe} run build --if-present (cwd={workdir})\n")
+            log.flush()
+            try:
+                proc = subprocess.run(
+                    [npm_exe, "run", "build", "--if-present"],
+                    cwd=workdir, stdout=log, stderr=subprocess.STDOUT, timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as e:
+                raise BuildError(
+                    f"npm run build가 {timeout_seconds}초 내에 끝나지 않아 중단했습니다 "
+                    "(PAAS_BUILD_TIMEOUT_SECONDS로 늘릴 수 있습니다).", log_path,
+                ) from e
+            if proc.returncode != 0:
+                raise BuildError(f"npm run build 실패 (exit {proc.returncode})", log_path)
 
         if (workdir / "requirements.txt").exists():
             venv_dir = workdir / ".venv"

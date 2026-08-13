@@ -183,7 +183,7 @@ def test_install_dependencies_runs_npm_ci_when_lockfile_present(monkeypatch, tmp
 
     install_dependencies(tmp_path, tmp_path / "env.log")
 
-    assert calls == [["/usr/bin/npm", "ci"]]
+    assert calls == [["/usr/bin/npm", "ci"], ["/usr/bin/npm", "run", "build", "--if-present"]]
     assert "npm ci" in (tmp_path / "env.log").read_text(encoding="utf-8")
 
 
@@ -195,7 +195,7 @@ def test_install_dependencies_runs_npm_install_without_lockfile(monkeypatch, tmp
 
     install_dependencies(tmp_path, tmp_path / "env.log")
 
-    assert calls == [["/usr/bin/npm", "install"]]
+    assert calls == [["/usr/bin/npm", "install"], ["/usr/bin/npm", "run", "build", "--if-present"]]
 
 
 def test_install_dependencies_raises_clear_error_when_npm_not_on_path(monkeypatch, tmp_path):
@@ -356,3 +356,34 @@ def test_preview_config_keeps_project_config_and_allows_proxy_host(tmp_path):
     assert "allowedHosts: true" in config
     # vite가 기본으로 찾는 이름이면 loadConfigFromFile이 자기 자신을 다시 읽는다.
     assert not PREVIEW_CONFIG_NAME.startswith("vite.config")
+
+
+def test_start_script_does_not_reinstall_or_rebuild(tmp_path):
+    """start.cmd는 서비스가 뜰 때마다 실행된다 — 재부팅·SW 업데이트·크래시 재시작 포함.
+    여기에 설치·빌드를 두면 그때마다 반복되고, npm ci는 node_modules를 통째로 지우고
+    다시 설치하므로 "이미 있으면 빠르게 통과"도 아니다. 배포 한 번에 npm.cmd가 세 번
+    뜨던 원인이라, 설치·빌드는 build 단계(install_dependencies)에만 둔다.
+    """
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    executed = "\n".join(
+        ln for ln in content.splitlines() if not ln.strip().upper().startswith("REM")
+    )
+    assert "npm ci" not in executed
+    assert "npm run build" not in executed
+    # node_modules가 아예 없을 때의 보루만 남는다(그때도 ci가 아니라 install).
+    assert "if not exist node_modules (" in executed
+    assert executed.count("call npm install") == 1
+
+
+def test_install_dependencies_builds_after_installing(monkeypatch, tmp_path):
+    """빌드가 build 단계에 있어야 실패가 배포 실패로 드러난다 — start.cmd에 있으면
+    call로 실행돼 실패해도 다음 줄로 넘어가고 배포는 성공으로 남는다."""
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    calls: list = []
+    _fake_run_ok(monkeypatch, calls)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log")
+
+    assert calls[-1] == ["/usr/bin/npm", "run", "build", "--if-present"]
+    assert "npm run build" in (tmp_path / "env.log").read_text(encoding="utf-8")
