@@ -127,7 +127,9 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
   const [zipFile, setZipFile] = useState<File | null>(null);
   const [folderFiles, setFolderFiles] = useState<FileList | null>(null);
   const [singleFiles, setSingleFiles] = useState<FileList | null>(null);
-  const [deployAfterUpload, setDeployAfterUpload] = useState(true);
+  // 기본은 체크 해제 — 백엔드 기본값(schemas.ProjectUploadForm.deploy_after_upload=False)과
+  // 맞추고, 등록만 하려던 사람이 모르는 사이 배포가 돌지 않게 한다.
+  const [deployAfterUpload, setDeployAfterUpload] = useState(false);
   const [gitUrlEdited, setGitUrlEdited] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
