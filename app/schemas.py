@@ -423,6 +423,10 @@ class ServerConfigSite(BaseModel):
     domain: str
     path_prefix: str
     status: str
+    # 프록시가 실제로 전달하는 업스트림(예: 127.0.0.1:8123). 지금 running인 배포
+    # 레코드에서 가져오므로, 떠 있지 않으면 None이다.
+    internal_host: str | None = None
+    internal_port: int | None = None
     redirect_count: int
     redirects: list[RedirectRuleSummary]
     # composite 프로젝트만 채워짐(backend/frontend 개별 상태) — 일반 프로젝트는 None.

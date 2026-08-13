@@ -96,6 +96,19 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
             )
         ).all()
     }
+    # 일반 프로젝트(컴포넌트 없음)의 업스트림 — 서버구성 화면의 URL 칸이 공개 주소가
+    # 아니라 프록시가 실제로 전달하는 곳을 보여주기 위한 값이다.
+    upstreams = {
+        (project_id, profile): port
+        for project_id, profile, port in db.execute(
+            select(
+                Deployment.project_id, Deployment.profile, Deployment.internal_port,
+            ).where(
+                Deployment.status == DeploymentStatus.running,
+                Deployment.component.is_(None),
+            )
+        ).all()
+    }
     sites = []
     for p in projects:
         for profile in BuildProfile:
@@ -134,6 +147,8 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
                 domain=domain_for(p.name, p.domain, profile),
                 path_prefix=path_prefix_for(org_name, p.name, p.domain, profile),
                 status=status,
+                internal_host="127.0.0.1" if upstreams.get((p.id, profile)) else None,
+                internal_port=upstreams.get((p.id, profile)),
                 redirect_count=len(project_rules),
                 redirects=[
                     RedirectRuleSummary(
