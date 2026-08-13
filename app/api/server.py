@@ -98,16 +98,21 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
     }
     # 일반 프로젝트(컴포넌트 없음)의 업스트림 — 서버구성 화면의 URL 칸이 공개 주소가
     # 아니라 프록시가 실제로 전달하는 곳을 보여주기 위한 값이다.
+    #
+    # host_port를 읽는다. internal_port는 **컨테이너 내부** 포트(8000 등)라 프록시가
+    # 바라보는 주소가 아니고, 일반 프로젝트의 배포 레코드에는 채워지지도 않는다
+    # (composite 컴포넌트 재기동용으로만 저장된다) — 그걸 읽으면 항상 비어 보인다.
     upstreams = {
         (project_id, profile): port
         for project_id, profile, port in db.execute(
             select(
-                Deployment.project_id, Deployment.profile, Deployment.internal_port,
+                Deployment.project_id, Deployment.profile, Deployment.host_port,
             ).where(
                 Deployment.status == DeploymentStatus.running,
                 Deployment.component.is_(None),
             )
         ).all()
+        if port is not None
     }
     sites = []
     for p in projects:

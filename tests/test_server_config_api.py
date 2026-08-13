@@ -297,7 +297,10 @@ def test_site_reports_internal_upstream(monkeypatch, fresh_settings):
     with SessionLocal() as db:
         db.add(Deployment(
             project_id=project_id, profile=BuildProfile.release, git_sha="a" * 40,
-            image_tag="t", status=DeploymentStatus.running, internal_port=8123,
+            image_tag="t", status=DeploymentStatus.running, host_port=8123,
+            # internal_port는 컨테이너 내부 포트라 프록시 업스트림이 아니다 — 이 값을
+            # 읽으면 일반 프로젝트에서는 늘 비어 보인다(레코드에 채워지지도 않는다).
+            internal_port=8000,
         ))
         db.commit()
 
