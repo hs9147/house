@@ -238,3 +238,13 @@ def test_health_check_still_fails_on_5xx(monkeypatch, fresh_settings):
     monkeypatch.setattr(wsr.urllib.request, "urlopen", _raise_500)
     monkeypatch.setattr(wsr.time, "sleep", lambda _s: None)
     assert WindowsServiceRuntime._wait_healthy(9100, "/", timeout=0.01) is False
+
+
+def test_health_failure_message_names_the_probed_url(env, monkeypatch):
+    """어디를 찔렀는지 없이 "타임아웃"만 남으면, 포트가 틀린 건지 호스트가 틀린 건지
+    앱이 안 뜬 건지 구분할 수 없다."""
+    monkeypatch.setattr(wsr.WindowsServiceRuntime, "_wait_healthy", lambda self, *a, **kw: False)
+    with pytest.raises(WindowsServiceError) as exc:
+        WindowsServiceRuntime().start(_spec())
+    assert f"http://{wsr.UPSTREAM_HOST}:" in str(exc.value)
+    assert f"HOST={wsr.UPSTREAM_HOST}" in str(exc.value)

@@ -191,10 +191,13 @@ class WindowsServiceRuntime(Runtime):
         if not self._wait_healthy(host_port, spec.health_check_path):
             tail = _read_log_tail(log_path)
             self._teardown(name)
+            probed = self._health_url(host_port, spec.health_check_path)
             raise WindowsServiceError(
-                f"health check failed on :{host_port} — 헬스체크 시간 내 응답이 없습니다. "
-                f"앱이 %PORT%={host_port}로 리슨하는지, 의존성 설치가 헬스 타임아웃을 넘기지 "
-                f"않는지 확인하세요.\n--- {log_path.name} ---\n{tail}"
+                f"health check failed — {probed} 로 헬스체크 시간 내 응답이 없습니다. "
+                f"앱이 HOST={UPSTREAM_HOST} PORT={host_port}를 지켜 리슨하는지 확인하세요"
+                f"(HOST를 무시하고 다른 주소에 바인드하면 여기서 못 찾습니다). "
+                f"아래 서비스 로그에 기동 오류가 그대로 남습니다.\n"
+                f"--- {log_path.name} ---\n{tail}"
             )
 
         if old_slot is not None:
@@ -299,6 +302,10 @@ class WindowsServiceRuntime(Runtime):
             )
 
     @staticmethod
+    def _health_url(port: int, path: str) -> str:
+        return f"http://{UPSTREAM_HOST}:{port}{path}"
+
+    @staticmethod
     def _wait_healthy(port: int, path: str, timeout: float = 60.0) -> bool:
         """포트가 HTTP로 응답하기 시작했는지만 본다(기동 확인).
 
@@ -309,7 +316,7 @@ class WindowsServiceRuntime(Runtime):
         404가 죽은 것으로 계산된다 — dev 서버는 base가 붙은 경로만 받으므로 "/"에서
         404를 내고, 그 배포가 전부 실패했다. 5xx만 아직 준비되지 않은 것으로 본다.
         """
-        url = f"http://{UPSTREAM_HOST}:{port}{path}"
+        url = WindowsServiceRuntime._health_url(port, path)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
