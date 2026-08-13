@@ -148,38 +148,6 @@ export default function PowerShellConsole() {
     }
   };
 
-  const [restarting, setRestarting] = useState(false);
-
-  const handleSwUpdate = async () => {
-    if (!connected) {
-      alert('백엔드가 연결 끊김(Disconnected) 상태일 때는 SW 업데이트 요청을 전송할 수 없습니다.');
-      return;
-    }
-    if (!window.confirm('프로젝트 폴더에서 git pull 후 paas·console 서비스를 재시작합니다. 진행하시겠습니까?')) return;
-    setRestarting(true);
-    try {
-      const res = await api.swUpdate();
-      const statusStr = res.status || 'updating';
-      const msgStr = res.message || 'git pull 후 서비스가 재시작됩니다.';
-      const errStr = res.error ? ` | Error: ${res.error}` : '';
-
-      setLogs((prev) => [
-        ...prev,
-        `\n[System Notification] Status: ${statusStr} | Message: ${msgStr}${errStr}`,
-        `[System] 잠시 후 백엔드 서비스 연결 상태를 확인하세요.\n`,
-      ]);
-    } catch (err) {
-      setLogs((prev) => [
-        ...prev,
-        `\n[System Error] Status: error | Error: ${(err as Error).message}`,
-        `[Hint] 백엔드 서비스 통신 장애 상태입니다.\n`,
-      ]);
-    } finally {
-      setRestarting(false);
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
-  };
-
   // 명령어 실행 완료 후 인풋 커서 포커스 자동 유지
   useEffect(() => {
     if (!running && connected && activeTab === 'console') {
@@ -215,14 +183,6 @@ export default function PowerShellConsole() {
             >
               {connected ? '● 연결됨 (Connected)' : '○ 연결 끊김 (Disconnected)'}
             </span>
-            <button
-              className="secondary small"
-              disabled={!connected || restarting}
-              onClick={handleSwUpdate}
-              title={connected ? 'git pull 후 paas·console 서비스 재시작' : '백엔드가 연결된 상태에서만 SW 업데이트가 가능합니다'}
-            >
-              {restarting ? 'SW 업데이트 중...' : '⬆️ SW 업데이트'}
-            </button>
             {!connected ? (
               <button className="primary small" onClick={handleConnect}>
                 🔗 연결
