@@ -43,7 +43,7 @@ from ..schemas import (
 from ..security import can_view_git_url, encrypt_value, require_admin, require_api_key, viewer_org_ids
 from ..services import deployer, gitea, upload
 from ..services.build import COMPOSITE_COMPONENTS
-from ..services.deployer import DeployInProgress, NoRollbackTarget
+from ..services.deployer import DeployInProgress, NoRollbackTarget, ProfileConflict
 from ..services.gitea import GiteaError, GiteaNotConfigured
 from ..services.upload import UploadError, UploadRejected
 
@@ -272,6 +272,11 @@ async def deploy_project(
 ):
     project = _get_project(db, project_id)
     profile = body.profile or project.default_profile
+    # release와 development는 같은 도메인에서 경로가 겹친다 — 동시에 띄우지 못하게 막는다.
+    try:
+        deployer.assert_no_profile_conflict(project, profile)
+    except ProfileConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
     if project.type == ProjectType.composite:
         if not body.wait:
             records = deployer.deploy_composite_queued(db, project, profile, body.git_sha)

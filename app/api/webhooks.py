@@ -139,6 +139,10 @@ def _deploy_task(project_id: int) -> None:
         except deployer.DeployInProgress:
             # 연속 push: 진행 중 배포가 최신 커밋을 집도록 두고 이번 이벤트는 스킵
             pass
+        except deployer.ProfileConflict as e:
+            # 다른 프로필이 떠 있어 주소가 겹친다 — 실패가 아니라 "지금은 띄우지 않는다"다.
+            # 사람이 그 프로필을 중지하면 다음 push부터 정상 배포된다.
+            audit.record(db, "webhook", "deploy.skipped", project.name, {"reason": str(e)[:500]})
         except Exception as e:
             audit.record(db, "webhook", "deploy.failed", project.name, {"error": str(e)[:500]})
 
