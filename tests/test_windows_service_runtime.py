@@ -31,6 +31,8 @@ class _FakeServices:
             return _Result(1, "")
         if "nssm" in cmd:
             if sub == "install":
+                if args[2] in self.installed:
+                    return _Result(1, "service already exists")  # 실제 nssm 동작
                 self.installed.add(args[2])
             elif sub == "remove":
                 self.installed.discard(args[2])
@@ -132,3 +134,20 @@ def test_missing_nssm_binary_raises_clear_error(tmp_path, monkeypatch, fresh_set
     monkeypatch.setattr(subprocess, "run", boom)
     with pytest.raises(WindowsServiceError, match="nssm"):
         WindowsServiceRuntime().start(_spec())
+
+
+def test_start_clears_leftover_service_in_target_slot(env):
+    """이전 배포가 중간에 끊겨 두 슬롯이 모두 남은 상태에서도 배포가 돼야 한다.
+
+    치우지 않으면 nssm install이 "이미 있음"으로 실패하고, 사람이 손으로 지울 때까지
+    이후 모든 배포가 같은 자리에서 막힌다 — 한 번의 사고가 영구 고장이 된다.
+    """
+    WindowsServiceRuntime().start(_spec())          # a 슬롯 사용 중
+    env.installed.add("paas-shop-b")                # 실패한 배포가 남긴 찌꺼기
+
+    WindowsServiceRuntime().start(_spec())
+
+    assert env.installed == {"paas-shop-b"}         # b로 교체되고 구 슬롯 a는 정리됨
+    removes = [c[2] for c in env.calls if c[1] == "remove"]
+    assert removes.count("paas-shop-b") == 1        # 설치 전에 찌꺼기를 치웠다
+    assert "paas-shop-a" in removes

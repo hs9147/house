@@ -96,11 +96,36 @@ def test_write_start_script_falls_back_to_vite_preview_when_no_start_script(tmp_
     Python 이스케이프로 해석돼 "\\vite.cmd"가 "ite.cmd"로 깨지는 식의 실수가
     나기 쉽다 — 정확한 경로 문자열을 그대로 검증한다.)"""
     content = write_start_script(tmp_path).read_text(encoding="utf-8")
-    assert r"\<start\>" in content  # findstr 워드바운더리 — "prestart" 등 오탐 방지
-    assert r"node_modules\.bin\vite.cmd preview --host %HOST% --port %PORT%" in content
+    assert r"node_modules\.bin\vite.cmd preview --config paas-preview.config.mjs --host %HOST% --port %PORT%" in content
     assert r"exist node_modules\.bin\vite.cmd" in content
-    # "start" 스크립트가 있는 일반적인 경우(Express, Next.js 등)는 그대로 npm start.
-    assert "if %errorlevel%==0 (\n    npm start\n  )" in content
+
+
+def test_start_script_does_not_test_errorlevel_inside_the_block(tmp_path):
+    """분기 판정에 %errorlevel% 치환을 쓰면 vite 분기가 영영 실행되지 않는다.
+
+    이 검사는 "if exist package.json (" 로 열린 괄호 블록 안에 있고, 배치의 괄호
+    블록은 통째로 한 번 파싱되면서 %errorlevel%이 **블록에 들어오기 전** 값으로
+    치환된다. 바로 위가 set이라 그 값은 항상 0 — 즉 "if 0==0"이 되어 package.json에
+    start가 있든 없든 늘 npm start로 갔고, Vite 프로젝트는 "Missing script: start"로
+    죽었다. 실행 시점에 평가되는 "if errorlevel"이어야 한다.
+    """
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    body = content[content.index("if exist package.json ("):content.index(") else if exist requirements.txt")]
+    # 주석(REM)은 실행되지 않으므로 제외한다 — 위 설명 자체가 그 토큰을 담고 있다.
+    executed = "\n".join(ln for ln in body.splitlines() if not ln.strip().upper().startswith("REM"))
+    assert "%errorlevel%" not in executed, "괄호 블록 안에서는 %errorlevel% 치환이 통하지 않는다"
+    assert "if errorlevel 1 (" in executed
+
+
+def test_start_script_detects_start_script_with_node_not_text_search(tmp_path):
+    """텍스트 검색은 "start:dev"·"pre-start" 같은 다른 이름에도 걸려, start가 없는
+    프로젝트를 있다고 오판한다 — package.json의 scripts.start를 직접 본다."""
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    assert "p.scripts?p.scripts.start:0" in content
+    assert "findstr" not in content
+    # 배치 블록 안에서 &&·|| 는 따옴표 밖으로 새면 블록을 깨뜨린다 — 아예 쓰지 않는다.
+    node_line = next(ln for ln in content.splitlines() if ln.strip().startswith("node -e"))
+    assert "&&" not in node_line and "||" not in node_line
 
 
 def test_html_serves_static_files_port_80():
@@ -302,3 +327,32 @@ def test_build_image_raises_clear_error_on_docker_timeout(monkeypatch, tmp_path)
     assert exc.value.log_path == docker_build_log_path(
         project.name, "a" * 40, BuildProfile.release,
     )
+
+
+def test_preview_config_written_only_for_node_projects(tmp_path):
+    """vite preview 분기가 --config로 이 파일을 참조한다. 파이썬 프로젝트 작업
+    디렉터리에는 남기지 않는다."""
+    from app.services.build import PREVIEW_CONFIG_NAME
+
+    write_start_script(tmp_path)
+    assert not (tmp_path / PREVIEW_CONFIG_NAME).exists()
+
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    write_start_script(tmp_path)
+    assert (tmp_path / PREVIEW_CONFIG_NAME).exists()
+
+
+def test_preview_config_keeps_project_config_and_allows_proxy_host(tmp_path):
+    """allowedHosts만 얹고 프로젝트 설정은 살려야 한다 — 통째로 대체하면 base·outDir가
+    사라져 서브패스 배포가 깨진다. 그리고 start.cmd가 실제로 이 파일을 참조해야 한다."""
+    from app.services.build import PREVIEW_CONFIG_NAME
+
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    config = (tmp_path / PREVIEW_CONFIG_NAME).read_text(encoding="utf-8")
+
+    assert f"--config {PREVIEW_CONFIG_NAME}" in content
+    assert "loadConfigFromFile" in config and "mergeConfig" in config
+    assert "allowedHosts: true" in config
+    # vite가 기본으로 찾는 이름이면 loadConfigFromFile이 자기 자신을 다시 읽는다.
+    assert not PREVIEW_CONFIG_NAME.startswith("vite.config")

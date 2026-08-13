@@ -98,6 +98,15 @@ class WindowsServiceRuntime(Runtime):
         old_slot = self._current_slot(spec.unit_name)
         slot = "b" if old_slot == "a" else "a"
         name = f"{spec.unit_name}-{slot}"
+
+        # 우리가 지금 덮어쓸 슬롯에 서비스가 남아 있으면 먼저 치운다. 이전 배포가
+        # 중간에 끊기면(헬스체크 통과 후 구 슬롯 정리 직전에 플랫폼이 내려가거나,
+        # _teardown의 nssm remove가 조용히 실패하면) 두 슬롯이 모두 남는다. 그 상태로
+        # 두면 아래 install이 "이미 있음"으로 실패하고, 사람이 손으로 지우기 전까지
+        # 이후 **모든** 배포가 같은 자리에서 막힌다 — 한 번의 사고가 영구 고장이 된다.
+        if self._exists(name):
+            self._teardown(name)
+
         log_path = settings.build_log_dir / f"{name}.log"
         env_pairs = "\n".join(
             f"{k}={v}" for k, v in {**spec.env, "PORT": str(host_port), "HOST": "127.0.0.1"}.items()

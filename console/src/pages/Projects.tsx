@@ -57,7 +57,6 @@ export default function Projects() {
                 <tr>
                   <th>이름</th>
                   <th>타입</th>
-                  <th>브랜치</th>
                   <th>Git</th>
                   <th>기본 프로필</th>
                   <th>생성일</th>
@@ -69,7 +68,6 @@ export default function Projects() {
                   <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
                     <td>{p.name}</td>
                     <td><StatusPill value={p.type} /></td>
-                    <td className="mono">{p.branch}</td>
                     {/* 주소 자체는 길어서 표를 밀어낸다 — 필요하면 복사 버튼으로 가져간다. */}
                     <td>
                       <span className="row" style={{ alignItems: 'center', gap: 8 }}>
@@ -129,7 +127,9 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
   const [zipFile, setZipFile] = useState<File | null>(null);
   const [folderFiles, setFolderFiles] = useState<FileList | null>(null);
   const [singleFiles, setSingleFiles] = useState<FileList | null>(null);
-  const [deployAfterUpload, setDeployAfterUpload] = useState(true);
+  // 기본은 체크 해제 — 백엔드 기본값(schemas.ProjectUploadForm.deploy_after_upload=False)과
+  // 맞추고, 등록만 하려던 사람이 모르는 사이 배포가 돌지 않게 한다.
+  const [deployAfterUpload, setDeployAfterUpload] = useState(false);
   const [gitUrlEdited, setGitUrlEdited] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
