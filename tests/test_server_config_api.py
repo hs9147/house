@@ -275,3 +275,37 @@ def test_redirect_unknown_project_404(fresh_settings):
 def test_delete_unknown_redirect_404(fresh_settings):
     c = _client()
     assert c.delete("/paas/api/v1/redirects/999999", headers=ADMIN).status_code == 404
+
+
+def test_site_reports_internal_upstream(monkeypatch, fresh_settings):
+    """서버구성의 URL 칸은 공개 주소가 아니라 프록시가 실제로 전달하는 곳을 보여준다 —
+    라우팅이 어디로 꽂혀 있는지 확인하는 화면이다."""
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from app.db import SessionLocal
+    from app.main import create_app
+    from app.models import BuildProfile, Deployment, DeploymentStatus
+
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    project_id = c.post("/paas/api/v1/projects", json={
+        "name": "shop", "type": "python", "git_url": "https://git.example.com/o/r.git",
+        "branch": "main",
+    }, headers=ADMIN).json()["id"]
+
+    with SessionLocal() as db:
+        db.add(Deployment(
+            project_id=project_id, profile=BuildProfile.release, git_sha="a" * 40,
+            image_tag="t", status=DeploymentStatus.running, internal_port=8123,
+        ))
+        db.commit()
+
+    sites = c.get("/paas/api/v1/server-config", headers=ADMIN).json()["sites"]
+    release = next(s for s in sites if s["project_id"] == project_id and s["profile"] == "release")
+    assert release["internal_host"] == "127.0.0.1"
+    assert release["internal_port"] == 8123
+
+    # 떠 있지 않은 프로필은 할당된 포트가 없다 — 없는 값을 지어내지 않는다.
+    dev = next(s for s in sites if s["project_id"] == project_id and s["profile"] == "development")
+    assert dev["internal_port"] is None

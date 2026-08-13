@@ -86,11 +86,11 @@ export default function ServerConfig() {
               <tr>
                 <th>프로젝트</th>
                 <th>프로필</th>
-                <th>URL</th>
+                <th>내부 URL</th>
                 <th>상태</th>
+                <th style={{ width: 280 }}>동작</th>
                 <th>자동배포</th>
                 <th>리다이렉트</th>
-                <th style={{ width: 280 }}>동작</th>
               </tr>
             </thead>
             <tbody>
@@ -101,10 +101,15 @@ export default function ServerConfig() {
                   <tr key={`${s.project_id}-${s.profile}`}>
                     <td>{s.project_name}</td>
                     <td><StatusPill value={s.profile} /></td>
-                    <td className="mono">{s.domain}{s.path_prefix !== '/' ? s.path_prefix : ''}</td>
+                    {/* 공개 주소가 아니라 프록시가 실제로 전달하는 곳을 보여준다 —
+                        라우팅이 어디로 꽂혀 있는지 확인하는 화면이다. 떠 있지 않으면
+                        할당된 포트가 없다. */}
+                    <td className="mono">
+                      {s.internal_port
+                        ? `http://${s.internal_host ?? '127.0.0.1'}:${s.internal_port}`
+                        : '-'}
+                    </td>
                     <td><StatusPill value={s.status} /></td>
-                    <td><AutoDeployMark status={s.status} /></td>
-                    <td>{s.redirect_count}</td>
                     <td>
                       <div className="row">
                         <button
@@ -129,6 +134,8 @@ export default function ServerConfig() {
                         </button>
                       </div>
                     </td>
+                    <td><AutoDeployMark status={s.status} /></td>
+                    <td>{s.redirect_count}</td>
                   </tr>
                 );
               })}
