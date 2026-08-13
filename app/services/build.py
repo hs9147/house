@@ -32,6 +32,27 @@ START_SCRIPT_NAME = "start.cmd"
 # windows_service 런타임용 제네릭 시작 스크립트. 타입별 규칙 없이 리포 시그니처
 # (package.json / requirements.txt / app.py)로 실행 방법을 런타임에 추정한다.
 # PORT/HOST는 windows_service 런타임이 주입한다(HOST=127.0.0.1로 로컬 바인드).
+PREVIEW_CONFIG_NAME = "paas-preview.config.mjs"
+
+# vite preview는 Host 헤더를 검사해서, 리버스 프록시가 넘겨준 공개 도메인 이름을
+# "Blocked request. This host is not allowed."로 거절한다. 그 검사는 개발용 서버가
+# 사설망 밖에서 접근되는 것(DNS rebinding)을 막기 위한 것인데, 이 배포는 프록시만
+# 닿는 127.0.0.1 뒤라 해당하지 않는다.
+#
+# allowedHosts는 CLI 옵션이 없어 설정 파일로만 줄 수 있다(vite의 preview 명령은
+# host/port/strictPort/open/outDir만 받는다). 그렇다고 이 파일로 프로젝트 설정을
+# 대체하면 base·outDir 같은 값이 사라지므로, 프로젝트 자신의 vite.config를 읽어
+# 그 위에 얹는다. 이 파일 이름은 vite가 기본으로 찾는 이름이 아니라서
+# loadConfigFromFile이 자기 자신을 다시 읽는 일은 없다.
+_PREVIEW_CONFIG = """// 플랫폼 자동 생성 — 배포마다 덮어쓴다. 직접 고치지 말 것.
+import { defineConfig, loadConfigFromFile, mergeConfig } from 'vite'
+
+export default defineConfig(async (env) => {
+  const loaded = await loadConfigFromFile(env)
+  return mergeConfig(loaded?.config ?? {}, { preview: { allowedHosts: true } })
+})
+"""
+
 _START_SCRIPT = """@echo off
 REM 플랫폼 자동 생성(windows_service) — PORT/HOST는 런타임이 주입한다.
 REM 배포 환경 미설정 시 Python/Node 가상환경 및 자동 패키지 설치, 환경 설정 수행
@@ -67,7 +88,7 @@ if exist package.json (
   if errorlevel 1 (
     if exist node_modules\\.bin\\vite.cmd (
       echo [PaaS Auto-Provisioning] No "start" script in package.json - serving the Vite build via "vite preview".
-      node_modules\\.bin\\vite.cmd preview --host %HOST% --port %PORT%
+      node_modules\\.bin\\vite.cmd preview --config paas-preview.config.mjs --host %HOST% --port %PORT%
     ) else (
       npm start
     )
@@ -193,6 +214,10 @@ def write_start_script(workdir: Path) -> Path:
     자리를 windows_service에서 이 함수가 대신한다."""
     path = workdir / START_SCRIPT_NAME
     path.write_text(_START_SCRIPT, encoding="utf-8")
+    # vite preview 분기가 --config로 참조한다. node 프로젝트일 때만 쓴다 — 파이썬
+    # 프로젝트 작업 디렉터리에 쓸모없는 파일을 남기지 않는다.
+    if (workdir / "package.json").exists():
+        (workdir / PREVIEW_CONFIG_NAME).write_text(_PREVIEW_CONFIG, encoding="utf-8")
     return path
 
 

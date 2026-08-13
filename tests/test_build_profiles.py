@@ -96,7 +96,7 @@ def test_write_start_script_falls_back_to_vite_preview_when_no_start_script(tmp_
     Python 이스케이프로 해석돼 "\\vite.cmd"가 "ite.cmd"로 깨지는 식의 실수가
     나기 쉽다 — 정확한 경로 문자열을 그대로 검증한다.)"""
     content = write_start_script(tmp_path).read_text(encoding="utf-8")
-    assert r"node_modules\.bin\vite.cmd preview --host %HOST% --port %PORT%" in content
+    assert r"node_modules\.bin\vite.cmd preview --config paas-preview.config.mjs --host %HOST% --port %PORT%" in content
     assert r"exist node_modules\.bin\vite.cmd" in content
 
 
@@ -327,3 +327,32 @@ def test_build_image_raises_clear_error_on_docker_timeout(monkeypatch, tmp_path)
     assert exc.value.log_path == docker_build_log_path(
         project.name, "a" * 40, BuildProfile.release,
     )
+
+
+def test_preview_config_written_only_for_node_projects(tmp_path):
+    """vite preview 분기가 --config로 이 파일을 참조한다. 파이썬 프로젝트 작업
+    디렉터리에는 남기지 않는다."""
+    from app.services.build import PREVIEW_CONFIG_NAME
+
+    write_start_script(tmp_path)
+    assert not (tmp_path / PREVIEW_CONFIG_NAME).exists()
+
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    write_start_script(tmp_path)
+    assert (tmp_path / PREVIEW_CONFIG_NAME).exists()
+
+
+def test_preview_config_keeps_project_config_and_allows_proxy_host(tmp_path):
+    """allowedHosts만 얹고 프로젝트 설정은 살려야 한다 — 통째로 대체하면 base·outDir가
+    사라져 서브패스 배포가 깨진다. 그리고 start.cmd가 실제로 이 파일을 참조해야 한다."""
+    from app.services.build import PREVIEW_CONFIG_NAME
+
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    config = (tmp_path / PREVIEW_CONFIG_NAME).read_text(encoding="utf-8")
+
+    assert f"--config {PREVIEW_CONFIG_NAME}" in content
+    assert "loadConfigFromFile" in config and "mergeConfig" in config
+    assert "allowedHosts: true" in config
+    # vite가 기본으로 찾는 이름이면 loadConfigFromFile이 자기 자신을 다시 읽는다.
+    assert not PREVIEW_CONFIG_NAME.startswith("vite.config")
