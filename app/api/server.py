@@ -31,6 +31,20 @@ from ..services.proxy.base import site_name
 router = APIRouter(tags=["server"])
 
 
+def _upstream_host(settings) -> str:
+    """프록시가 실제로 쓰는 업스트림 호스트 이름 — 런타임이 정한다.
+
+    windows_service는 localhost로 통일했고(그 모듈의 UPSTREAM_HOST), docker 런타임은
+    포트를 127.0.0.1에 명시적으로 바인드하므로 그쪽은 127.0.0.1이 맞다. 화면이 설정
+    파일과 다른 문자열을 보여주면 안 되므로 여기서 갈라 준다.
+    """
+    if settings.runtime_backend == "windows_service":
+        from ..services.runtime.windows_service_runtime import UPSTREAM_HOST  # noqa: PLC0415
+
+        return UPSTREAM_HOST
+    return "127.0.0.1"
+
+
 def _windows_services(projects: list[Project]) -> list[WindowsServiceOut]:
     """등록된 paas-* Windows Service를 프로젝트에 맞춰 분류한다.
 
@@ -158,7 +172,7 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
                 # 곳은 같다. 실제 바인드·프록시 설정 문자열은 127.0.0.1 그대로다
                 # (Windows에서 localhost는 ::1로 먼저 풀려, 앱이 127.0.0.1에만 듣는
                 #  지금 구성에서 프록시 대상까지 바꾸면 502가 난다).
-                internal_host="localhost" if upstreams.get((p.id, profile)) else None,
+                internal_host=_upstream_host(settings) if upstreams.get((p.id, profile)) else None,
                 internal_port=upstreams.get((p.id, profile)),
                 redirect_count=len(project_rules),
                 redirects=[
