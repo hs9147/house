@@ -6,8 +6,8 @@ write_start_script가 자동 생성 — PORT 환경변수로 리슨 포트를 �
 서비스를 띄운다)를 nssm(Non-Sucking Service Manager, public domain)으로 Windows Service에 등록해 실행한다.
 
 Docker와 달리 네이티브 프로세스라 플랫폼이 바인드 주소를 강제할 방법이 없다 — PORT와
-함께 HOST=127.0.0.1도 넘겨주므로, 앱이 이를 지켜 바인드하면 프록시(단일 외부 포트)만
-접근 가능해진다. 앱이 HOST를 무시하고 0.0.0.0에 바인드할 수도 있으므로, 운영 환경에서는
+함께 HOST=localhost(UPSTREAM_HOST)도 넘겨주므로, 앱이 이를 지켜 바인드하면 프록시(단일
+외부 포트)만 접근 가능해진다. 앱이 HOST를 무시하고 0.0.0.0에 바인드할 수도 있으므로, 운영 환경에서는
 Windows 방화벽으로 외부에서 port_range(PAAS_PORT_RANGE_START~END) 인바운드를 반드시
 차단해야 한다(3.6절 문서 참고).
 
@@ -34,6 +34,15 @@ class WindowsServiceError(RuntimeError):
 # 타임아웃 없이 하나라도 멈추면 그 요청이 Starlette 스레드풀 슬롯을 영원히 잡고,
 # 슬롯이 마르면 같은 풀을 쓰는 동기 엔드포인트가 전부 대기한다 — PowerShell 콘솔
 # (POST /system/powershell/exec)이 "명령어 실행 중"에서 멈추던 경로가 이것이다.
+# 프록시가 이 런타임의 앱에 붙을 때 쓰는 호스트 이름. 127.0.0.1이 아니라 localhost다 —
+# 127.0.0.1은 "사용자 자기 PC"를 가리켜야 하는 자리(git 클라이언트 OAuth 콜백 등)에
+# 남겨 두고, ARR의 응답 헤더 역방향 재작성이 그 콜백과 이름이 겹치는 것도 피한다.
+#
+# 앱이 듣는 주소(HOST)도 같은 이름으로 준다. 한쪽만 바꾸면 Windows에서 localhost가
+# ::1로 먼저 풀려 어긋난다 — 앱은 127.0.0.1(IPv4)에만 듣는데 프록시는 ::1로 붙어
+# 502가 난다. 같은 머신의 같은 리졸버를 양쪽이 쓰므로, 이름을 맞추면 어긋나지 않는다.
+UPSTREAM_HOST = "localhost"
+
 _QUERY_TIMEOUT = 10.0   # sc query — 단건 조회
 _LIST_TIMEOUT = 15.0    # sc query state= all — 전체 목록이라 출력이 크다
 _MANAGE_TIMEOUT = 30.0  # nssm install/set/start/stop/remove — 서비스 기동·정지를 기다린다
@@ -157,7 +166,7 @@ class WindowsServiceRuntime(Runtime):
 
         log_path = settings.build_log_dir / f"{name}.log"
         env_pairs = "\n".join(
-            f"{k}={v}" for k, v in {**spec.env, "PORT": str(host_port), "HOST": "127.0.0.1"}.items()
+            f"{k}={v}" for k, v in {**spec.env, "PORT": str(host_port), "HOST": UPSTREAM_HOST}.items()
         )
 
         # .cmd는 CreateProcess로 직접 실행되지 않으므로 cmd.exe /c로 감싼다 —
@@ -182,7 +191,7 @@ class WindowsServiceRuntime(Runtime):
 
         if old_slot is not None:
             self._teardown(f"{spec.unit_name}-{old_slot}")
-        return Endpoint(host="127.0.0.1", port=host_port)
+        return Endpoint(host=UPSTREAM_HOST, port=host_port)
 
     def stop(self, project_name: str, profile: BuildProfile) -> None:
         spec = RuntimeSpec(project_name, "", 0, profile, "")

@@ -297,15 +297,34 @@ def test_site_reports_internal_upstream(monkeypatch, fresh_settings):
     with SessionLocal() as db:
         db.add(Deployment(
             project_id=project_id, profile=BuildProfile.release, git_sha="a" * 40,
-            image_tag="t", status=DeploymentStatus.running, internal_port=8123,
+            image_tag="t", status=DeploymentStatus.running, host_port=8123,
+            # internal_port는 컨테이너 내부 포트라 프록시 업스트림이 아니다 — 이 값을
+            # 읽으면 일반 프로젝트에서는 늘 비어 보인다(레코드에 채워지지도 않는다).
+            internal_port=8000,
         ))
         db.commit()
 
     sites = c.get("/paas/api/v1/server-config", headers=ADMIN).json()["sites"]
     release = next(s for s in sites if s["project_id"] == project_id and s["profile"] == "release")
+    # docker 런타임은 포트를 127.0.0.1에 명시적으로 바인드하므로 그쪽이 맞다.
     assert release["internal_host"] == "127.0.0.1"
     assert release["internal_port"] == 8123
 
     # 떠 있지 않은 프로필은 할당된 포트가 없다 — 없는 값을 지어내지 않는다.
     dev = next(s for s in sites if s["project_id"] == project_id and s["profile"] == "development")
     assert dev["internal_port"] is None
+
+
+def test_upstream_host_follows_runtime(monkeypatch, fresh_settings):
+    """화면이 설정 파일과 다른 문자열을 보여주면 안 된다 — windows_service는 localhost로
+    통일했고(그 런타임의 UPSTREAM_HOST), docker는 127.0.0.1에 명시 바인드한다."""
+    from app.api.server import _upstream_host
+    from app.config import get_settings
+
+    monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "windows_service")
+    get_settings.cache_clear()
+    assert _upstream_host(get_settings()) == "localhost"
+
+    monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "docker")
+    get_settings.cache_clear()
+    assert _upstream_host(get_settings()) == "127.0.0.1"

@@ -74,7 +74,7 @@ def test_start_requires_start_script(tmp_path, monkeypatch, fresh_settings):
 
 def test_start_registers_first_slot_a(env):
     endpoint = WindowsServiceRuntime().start(_spec())
-    assert endpoint.host == "127.0.0.1"
+    assert endpoint.host == wsr.UPSTREAM_HOST == "localhost"
     assert 9100 <= endpoint.port <= 9199
     assert "paas-shop-a" in env.installed
     install_calls = [c for c in env.calls if c[1] == "install"]
@@ -83,11 +83,16 @@ def test_start_registers_first_slot_a(env):
 
 def test_start_passes_host_env_for_loopback_only_binding(env):
     """앱이 HOST를 지키면 방화벽 없이도 외부에서 직접 접근되지 않는다 — 단일 외부 포트(프록시)
-    강제의 일부(defense-in-depth, 완전한 보장은 아님 — 클래스 docstring 참고)."""
-    WindowsServiceRuntime().start(_spec())
+    강제의 일부(defense-in-depth, 완전한 보장은 아님 — 클래스 docstring 참고).
+
+    프록시가 붙는 이름(Endpoint.host)과 앱이 듣는 이름(HOST)은 반드시 같아야 한다 —
+    한쪽만 localhost로 두면 Windows에서 ::1로 먼저 풀려 어긋나고 502가 난다.
+    """
+    endpoint = WindowsServiceRuntime().start(_spec())
     set_env_calls = [c for c in env.calls if c[1] == "set" and c[3] == "AppEnvironmentExtra"]
     assert set_env_calls
-    assert "HOST=127.0.0.1" in set_env_calls[0][4]
+    assert f"HOST={wsr.UPSTREAM_HOST}" in set_env_calls[0][4]
+    assert endpoint.host == wsr.UPSTREAM_HOST
 
 
 def test_start_blue_green_switches_slot_and_tears_down_old(env):

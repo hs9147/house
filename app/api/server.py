@@ -31,6 +31,20 @@ from ..services.proxy.base import site_name
 router = APIRouter(tags=["server"])
 
 
+def _upstream_host(settings) -> str:
+    """프록시가 실제로 쓰는 업스트림 호스트 이름 — 런타임이 정한다.
+
+    windows_service는 localhost로 통일했고(그 모듈의 UPSTREAM_HOST), docker 런타임은
+    포트를 127.0.0.1에 명시적으로 바인드하므로 그쪽은 127.0.0.1이 맞다. 화면이 설정
+    파일과 다른 문자열을 보여주면 안 되므로 여기서 갈라 준다.
+    """
+    if settings.runtime_backend == "windows_service":
+        from ..services.runtime.windows_service_runtime import UPSTREAM_HOST  # noqa: PLC0415
+
+        return UPSTREAM_HOST
+    return "127.0.0.1"
+
+
 def _windows_services(projects: list[Project]) -> list[WindowsServiceOut]:
     """등록된 paas-* Windows Service를 프로젝트에 맞춰 분류한다.
 
@@ -98,16 +112,21 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
     }
     # 일반 프로젝트(컴포넌트 없음)의 업스트림 — 서버구성 화면의 URL 칸이 공개 주소가
     # 아니라 프록시가 실제로 전달하는 곳을 보여주기 위한 값이다.
+    #
+    # host_port를 읽는다. internal_port는 **컨테이너 내부** 포트(8000 등)라 프록시가
+    # 바라보는 주소가 아니고, 일반 프로젝트의 배포 레코드에는 채워지지도 않는다
+    # (composite 컴포넌트 재기동용으로만 저장된다) — 그걸 읽으면 항상 비어 보인다.
     upstreams = {
         (project_id, profile): port
         for project_id, profile, port in db.execute(
             select(
-                Deployment.project_id, Deployment.profile, Deployment.internal_port,
+                Deployment.project_id, Deployment.profile, Deployment.host_port,
             ).where(
                 Deployment.status == DeploymentStatus.running,
                 Deployment.component.is_(None),
             )
         ).all()
+        if port is not None
     }
     sites = []
     for p in projects:
@@ -147,7 +166,13 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
                 domain=domain_for(p.name, p.domain, profile),
                 path_prefix=path_prefix_for(org_name, p.name, p.domain, profile),
                 status=status,
-                internal_host="127.0.0.1" if upstreams.get((p.id, profile)) else None,
+                # 표기는 localhost로 한다 — 127.0.0.1은 "사용자 자기 PC"를 가리켜야
+                # 하는 자리(git 클라이언트 OAuth 콜백 등)에 남겨 두고, 서버 안쪽
+                # 업스트림과 헷갈리지 않게 한다. 둘은 같은 루프백 호스트라 가리키는
+                # 곳은 같다. 실제 바인드·프록시 설정 문자열은 127.0.0.1 그대로다
+                # (Windows에서 localhost는 ::1로 먼저 풀려, 앱이 127.0.0.1에만 듣는
+                #  지금 구성에서 프록시 대상까지 바꾸면 502가 난다).
+                internal_host=_upstream_host(settings) if upstreams.get((p.id, profile)) else None,
                 internal_port=upstreams.get((p.id, profile)),
                 redirect_count=len(project_rules),
                 redirects=[
