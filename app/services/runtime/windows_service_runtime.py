@@ -60,10 +60,16 @@ def _read_log_tail(log_path, n: int = 40) -> str:
 
 
 def allocate_port() -> int:
+    """비어 있는 포트를 찾는다 — 앱이 실제로 바인드할 이름(UPSTREAM_HOST)으로 확인한다.
+
+    127.0.0.1로 확인하면 안 된다. 앱에는 HOST=localhost를 넘기고 Windows에서 그건 ::1로
+    먼저 풀리는데, ::1에서 이미 쓰이는 포트가 127.0.0.1에서는 비어 보인다 — 그러면 이미
+    다른 배포가 쓰는 포트를 다시 내주고 두 번째 기동이 조용히 실패한다.
+    """
     settings = get_settings()
     for port in range(settings.port_range_start, settings.port_range_end + 1):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(("127.0.0.1", port)) != 0:
+            if s.connect_ex((UPSTREAM_HOST, port)) != 0:
                 return port
     raise RuntimeError("no free port in configured range")
 
