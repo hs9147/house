@@ -171,7 +171,7 @@ def test_module_bind_and_llm_context():
     pid = _create_project(c)
     r = c.post("/paas/api/v1/modules", json={
         "name": "mail", "type": "external_api",
-        "config": {"url": "https://cho-fam.web.app/api/mail", "api_key": "mk-1"},
+        "config": {"url": "https://cho-fam.com/api/mail", "api_key": "mk-1"},
     }, headers=ADMIN)
     assert r.status_code == 201
     assert r.json()["config"]["api_key"] == "•••"
