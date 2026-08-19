@@ -94,6 +94,7 @@ export default function Modules() {
                   </td>
                   {isAdmin() && (
                     <td>
+                      {m.type === 'mcp' && <McpCheckButton moduleId={m.id} />}
                       <button
                         className="small danger"
                         onClick={async () => {
@@ -937,5 +938,43 @@ function PlatformReportModal({ onClose }: { onClose: () => void }) {
         </div>
       </div>
     </Modal>
+  );
+}
+
+/**
+ * mcp 모듈 연결 확인 — tools/list를 한 번 찔러 결과를 그 자리에 보여준다.
+ *
+ * 등록만으로는 동작을 알 수 없다. 주소가 틀렸거나 전송 방식이 안 맞으면 등록은 성공한
+ * 채 조용히 죽어 있어서, 채팅에서 도구가 안 보일 때까지 아무도 모른다.
+ */
+function McpCheckButton({ moduleId }: { moduleId: number }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; error: string | null; tool_count: number } | null>(null);
+
+  const check = async () => {
+    setBusy(true);
+    try {
+      setResult(await api.checkMcpModule(moduleId));
+    } catch (e) {
+      setResult({ ok: false, error: (e as Error).message, tool_count: 0 });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginRight: 6 }}>
+      <button className="small secondary" disabled={busy} onClick={check}>
+        {busy ? '확인 중…' : '연결 확인'}
+      </button>
+      {result && (
+        <span
+          style={{ fontSize: 11, color: result.ok ? '#10b981' : '#ef4444', maxWidth: 320 }}
+          title={result.error ?? ''}
+        >
+          {result.ok ? `응답함 · 도구 ${result.tool_count}개` : `실패 — ${result.error ?? ''}`}
+        </span>
+      )}
+    </span>
   );
 }

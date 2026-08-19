@@ -88,3 +88,39 @@ def make_tool_executor(registry: dict[str, tuple[dict, str]]):
         except Exception as e:  # noqa: BLE001 — 도구 실패도 대화가 이어지도록 텍스트로 반환
             return f"tool call failed: {e}"
     return _execute
+
+
+def check_server(url: str, api_key: str | None = None) -> dict:
+    """MCP 서버가 실제로 응답하는지 확인한다 — tools/list를 한 번 찔러 본다.
+
+    등록만으로는 동작을 알 수 없어서 있는 함수다. 주소가 틀렸거나(이름 조회 실패),
+    전송 방식이 안 맞거나(이 클라이언트는 단일 JSON 응답만 다룬다 — /sse 엔드포인트는
+    여기서 통신이 안 된다), 서버가 stdio 전용이면 등록은 성공한 채 조용히 죽어 있다.
+
+    예외를 던지지 않는다 — 화면에서 여러 모듈을 한 번에 확인하므로, 하나가 실패해도
+    나머지 결과를 그대로 보여줘야 한다.
+    """
+    if not url:
+        return {"ok": False, "error": "url이 비어 있습니다.", "tool_count": 0, "tools": []}
+    hint = ""
+    if url.rstrip("/").endswith("/sse"):
+        # 이 클라이언트는 SSE 스트리밍을 다루지 않는다(모듈 docstring 참고).
+        hint = (
+            " 주소가 /sse로 끝납니다 — 이 클라이언트는 단일 JSON 응답(streamable-http)만"
+            " 다루므로 SSE 엔드포인트와는 통신할 수 없습니다."
+        )
+    try:
+        tools = list_tools(url, api_key)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"{type(e).__name__}: {str(e)[:200]}{hint}",
+            "tool_count": 0,
+            "tools": [],
+        }
+    return {
+        "ok": True,
+        "error": None,
+        "tool_count": len(tools),
+        "tools": [t.get("name", "") for t in tools][:20],
+    }
