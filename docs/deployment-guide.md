@@ -79,17 +79,17 @@ firebase deploy --only functions
 
 ```bash
 # 메일 발송
-curl -X POST https://cho-fam.web.app/api/mail/send \
+curl -X POST https://cho-fam.com/api/mail/send \
   -H "x-api-key: $SERVICE_KEY" -H "content-type: application/json" \
   -d '{"to":"user@example.com","templateKey":"welcome","dynamicData":{"name":"CHO"}}'
 
 # 토스 결제 승인
-curl -X POST https://cho-fam.web.app/api/payments/confirm \
+curl -X POST https://cho-fam.com/api/payments/confirm \
   -H "x-api-key: $SERVICE_KEY" -H "content-type: application/json" \
   -d '{"paymentKey":"pk-1","orderId":"order-1","amount":15000}'
 
 # 토스 지급대행 (셀러 등록 → 지급 요청)
-curl -X POST https://cho-fam.web.app/api/payout/request \
+curl -X POST https://cho-fam.com/api/payout/request \
   -H "x-api-key: $SERVICE_KEY" -H "content-type: application/json" \
   -d '{"refPayoutId":"p-1","sellerId":"...","amount":10000}'
 ```
@@ -418,7 +418,7 @@ npm run build
 ```bash
 curl -X POST $API/modules -H "x-api-key: $ADMIN" -H 'content-type: application/json' \
   -d '{"name":"chofam-mail","type":"external_api",
-       "config":{"url":"https://cho-fam.web.app/api/mail","api_key":"<발급 키>"}}'
+       "config":{"url":"https://cho-fam.com/api/mail","api_key":"<발급 키>"}}'
 curl -X POST $API/projects/1/modules/1/bind -H "x-api-key: $ADMIN" \
   -H 'content-type: application/json' -d '{"env_prefix":"MAIL"}'
 # 다음 배포부터 MAIL_URL, MAIL_API_KEY 자동 주입 → 코드에서 process.env/os.environ으로 사용
