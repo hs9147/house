@@ -201,6 +201,10 @@ class Settings(BaseSettings):
     # 찾고, 그것도 없으면 해당 형식만 "추출 불가"로 표시된다(docx류·pdf는 무관).
     soffice_path: str = ""
 
+    # 사내 문서 검색(services/docsearch.py)이 추출 텍스트를 캐시하는 자리. 파생 데이터라
+    # 언제든 지우고 다시 만들 수 있어서 플랫폼 DB가 아니라 모듈별 sqlite 파일로 둔다.
+    doc_index_dir: Path = Path("./data/doc-index")
+
     # --- 사내 MCP 서버 (api/mcp_servers.py) ---
     # DB 조회 MCP 서버(/mcp/db/{모듈})를 열어 줄 database 모듈 이름 목록(쉼표 구분).
     # 기본값은 빈 목록 = 전부 차단이다 — 어떤 DB를 LLM에게 읽히는지는 모듈 등록만으로

@@ -42,7 +42,7 @@ from ..models import (
 )
 from ..security import require_api_key
 from ..services import codemap as codemap_service
-from ..services import deployer, doctext, mcp_server, monitor, workspace
+from ..services import deployer, docsearch, doctext, mcp_server, monitor, workspace
 from ..services import modules as modules_service
 from ..services import storage as storage_service
 from ..services.build import COMPOSITE_COMPONENTS, BuildError, checkout
@@ -421,6 +421,43 @@ _STORAGE_READ_TOOLS = [
             "required": ["path"],
         },
     },
+    {
+        "name": "search_docs",
+        "description": (
+            "문서 **본문**을 검색한다(파일명이 아니다). 공백으로 끊은 낱말을 모두 포함하는"
+            " 문서를 찾아 경로와 일치 대목 발췌를 준다. 색인이 비어 있으면 reindex_docs를"
+            " 먼저 부른다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "description": f"기본 10, 최대 {_MAX_LIST}"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "reindex_docs",
+        "description": (
+            "바뀐 문서를 다시 추출해 검색 색인을 갱신한다. 한 번에 정해진 시간만 진행하므로"
+            " 응답의 done이 false면 remaining이 0이 될 때까지 다시 호출한다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "force": {"type": "boolean", "description": "바뀌지 않은 문서도 다시 추출"},
+            },
+        },
+    },
+    {
+        "name": "index_status",
+        "description": (
+            "검색 색인 커버리지 — 확장자별로 몇 건이 읽혔고 못 읽은 것은 왜인지."
+            " 검색 결과가 비어 있을 때 색인 문제인지 질의 문제인지 여기서 갈린다."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 _STORAGE_WRITE_TOOLS = [
@@ -517,6 +554,29 @@ def _storage_call(db: Session, actor: str, module: Module, name: str, args: dict
 
     if name == "list_files":
         return _dump(_file_listing(root, args))
+
+    if name == "index_status":
+        return _dump(docsearch.status(module.name))
+
+    if name == "reindex_docs":
+        result = docsearch.reindex(module.name, root, force=bool(args.get("force")))
+        audit.record(db, actor, "mcp.docs.reindex", module.name, result)
+        return _dump(result)
+
+    if name == "search_docs":
+        query = _str_arg(args, "query")
+        limit = _int_arg(args, "limit", 10, _MAX_LIST)
+        result = docsearch.search(module.name, query, limit)
+        if not result["hits"]:
+            # 색인이 비어 있는 것과 "찾지 못한 것"은 다른 문제다 — 구분해서 알려 준다.
+            indexed = docsearch.status(module.name)
+            if indexed["total"] == 0:
+                raise mcp_server.McpToolError(
+                    "색인이 비어 있습니다 — reindex_docs를 먼저 실행하세요.")
+            result["index"] = {"indexed": indexed["indexed"], "failed": indexed["failed"]}
+        audit.record(db, actor, "mcp.docs.search", module.name,
+                     {"query": query, "hits": len(result["hits"])})
+        return _dump(result)
 
     path = _str_arg(args, "path")
     try:
