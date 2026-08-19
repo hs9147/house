@@ -24,6 +24,7 @@ mcp 모듈의 api_key는 배포된 앱의 환경변수로도 주입되므로(ser
 """
 import json
 import re
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -41,7 +42,7 @@ from ..models import (
 )
 from ..security import require_api_key
 from ..services import codemap as codemap_service
-from ..services import deployer, mcp_server, monitor, workspace
+from ..services import deployer, doctext, mcp_server, monitor, workspace
 from ..services import modules as modules_service
 from ..services import storage as storage_service
 from ..services.build import COMPOSITE_COMPONENTS, BuildError, checkout
@@ -53,9 +54,18 @@ router = APIRouter(tags=["mcp"])
 _MAX_TAIL = 500
 _MAX_ROWS = 200
 _MAX_LIST = 50
-# 도구로 읽어 줄 파일 크기 상한. 컨텍스트에 그대로 들어가는 텍스트라 리포 읽기와 같은
-# 기준(workspace.MAX_CONTEXT_FILE_BYTES)을 쓴다.
-_MAX_READ_BYTES = workspace.MAX_CONTEXT_FILE_BYTES
+_MAX_FILE_LIST = 1000
+# 도구가 한 번에 돌려줄 텍스트 상한(문자 수) — 리포 파일 읽기와 같은 기준을 쓴다.
+# 초과분은 오류가 아니라 잘라서 준다: 100쪽 PDF를 "너무 큽니다"로 거절하면 읽을 방법이
+# 아예 없어지고, 문서는 본문만 뽑으면 원본보다 훨씬 작아지는 경우가 많다.
+_MAX_TEXT_CHARS = workspace.MAX_CONTEXT_FILE_BYTES
+
+
+def _truncate(text: str) -> str:
+    if len(text) <= _MAX_TEXT_CHARS:
+        return text
+    return (f"{text[:_MAX_TEXT_CHARS]}\n\n[…앞 {_MAX_TEXT_CHARS}자만 표시 — 전체 "
+            f"{len(text)}자]")
 
 
 def _dump(obj) -> str:
@@ -384,21 +394,36 @@ def _code_call(project: Project, name: str, args: dict) -> str:
 
 # --- 파일 저장소 서버 (/mcp/storage/{module}) ---
 
-_STORAGE_TOOLS = [
+_STORAGE_READ_TOOLS = [
     {
         "name": "list_files",
-        "description": "이 저장소 모듈의 파일 목록(이름·크기).",
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": (
+            "이 저장소 모듈의 파일 목록(경로·크기). glob으로 걸러 낸다(예: **/*.pdf,"
+            f" 규정*). 기본 {_MAX_LIST}건, 최대 {_MAX_FILE_LIST}건이며 잘리면 그렇다고 알린다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "glob": {"type": "string", "description": "경로 패턴(생략하면 전체)"},
+                "limit": {"type": "integer"},
+            },
+        },
     },
     {
         "name": "read_file",
-        "description": "저장소 파일 하나를 텍스트로 읽는다.",
+        "description": (
+            "저장소 파일 하나를 텍스트로 읽는다. pdf·docx·xlsx·pptx는 본문 텍스트를"
+            " 추출해서 준다(원본 바이트가 아니다)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {"path": {"type": "string"}},
             "required": ["path"],
         },
     },
+]
+
+_STORAGE_WRITE_TOOLS = [
     {
         "name": "write_file",
         "description": "저장소에 텍스트 파일을 쓴다(같은 경로면 덮어쓴다).",
@@ -431,14 +456,48 @@ async def storage_mcp_server(
 
     경로는 storage.resolve가 모듈 루트 안으로 가둔다 — 이 서버의 존재 이유가 그
     가둠이다(공개 filesystem MCP 서버는 호스트 디스크를 그대로 연다).
+
+    모듈 config에 `read_only: true`면 쓰기·삭제 도구를 아예 광고하지 않는다. 사내 문서
+    공유 폴더처럼 플랫폼이 만든 것이 아닌 디렉터리를 붙일 때 쓴다 — 목록에 없는 도구는
+    모델이 부르지도 않고, 불러도 unknown tool로 막힌다.
     """
     module = _typed_module(db, module_name, ModuleType.file_storage)
+    tools = list(_STORAGE_READ_TOOLS)
+    if not _read_only(module):
+        tools += _STORAGE_WRITE_TOOLS
     return mcp_server.dispatch(
         await mcp_server.read_payload(request),
         server_name=f"paas-storage-{module.name}",
-        tools=_STORAGE_TOOLS,
+        tools=tools,
         call=lambda name, args: _storage_call(db, key.name, module, name, args),
     )
+
+
+def _read_only(module: Module) -> bool:
+    return bool((module.config or {}).get("read_only"))
+
+
+def _file_listing(root: Path, args: dict) -> dict:
+    """glob으로 걸러 상한까지만. 사내 문서 폴더는 파일이 수천 개라 전체 목록은 컨텍스트를
+    통째로 먹는다 — 잘랐으면 잘랐다고 말해야 모델이 패턴을 좁힌다.
+
+    패턴은 전체 경로와 파일명 양쪽에 맞춰 본다(`규정*`이 하위 폴더 파일에도 걸리도록).
+    대소문자는 무시한다 — .PDF와 .pdf가 섞여 있는 폴더가 흔하다.
+    """
+    pattern = str(args.get("glob") or "").strip().lower()
+    limit = _int_arg(args, "limit", _MAX_LIST, _MAX_FILE_LIST)
+    files = storage_service.list_files(root)
+    if pattern:
+        files = [
+            f for f in files
+            if fnmatchcase(f["path"].lower(), pattern)
+            or fnmatchcase(f["path"].lower().rsplit("/", 1)[-1], pattern)
+        ]
+    return {
+        "total": len(files),
+        "truncated": len(files) > limit,
+        "files": files[:limit],
+    }
 
 
 def _typed_module(db: Session, module_name: str, expected: ModuleType) -> Module:
@@ -457,7 +516,7 @@ def _storage_call(db: Session, actor: str, module: Module, name: str, args: dict
     root = storage_service.root_for(module)
 
     if name == "list_files":
-        return _dump(storage_service.list_files(root))
+        return _dump(_file_listing(root, args))
 
     path = _str_arg(args, "path")
     try:
@@ -468,11 +527,12 @@ def _storage_call(db: Session, actor: str, module: Module, name: str, args: dict
     if name == "read_file":
         if not target.is_file():
             raise mcp_server.McpToolError(f"파일이 없습니다: {path}")
-        if target.stat().st_size > _MAX_READ_BYTES:
-            raise mcp_server.McpToolError(
-                f"파일이 너무 큽니다({target.stat().st_size} > {_MAX_READ_BYTES}바이트).")
+        try:
+            text = doctext.extract_text(target)
+        except doctext.ExtractError as e:
+            raise mcp_server.McpToolError(str(e))
         audit.record(db, actor, "mcp.storage.read", module.name, {"path": path})
-        return target.read_text(encoding="utf-8", errors="replace")
+        return _truncate(text)
 
     if name == "write_file":
         content = str(args.get("content") or "")

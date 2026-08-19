@@ -22,6 +22,20 @@ def _module(db: Session, module_name: str) -> Module:
     return row
 
 
+def _require_writable(module: Module) -> None:
+    """`read_only: true` 모듈은 쓰기·삭제를 막는다.
+
+    플랫폼이 만든 저장소가 아니라 이미 있는 디렉터리(사내 문서 공유 폴더 등)를 붙인
+    경우에 쓴다 — 그 폴더는 읽으러 붙인 것이고, 콘솔 파일 관리 화면에서 실수로 지워지는
+    일도 함께 막혀야 한다.
+    """
+    if (module.config or {}).get("read_only"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"module '{module.name}' is read-only",
+        )
+
+
 @router.get("/storage/{module_name}/files")
 def list_storage_files(
     module_name: str,
@@ -66,6 +80,7 @@ def upload_storage_file(
 ):
     """path를 주면 그 이름으로, 비우면 업로드한 파일명 그대로 저장한다."""
     module = _module(db, module_name)
+    _require_writable(module)
     rel = (path or file.filename or "").strip()
     if not rel:
         raise HTTPException(status_code=400, detail="file name required")
@@ -85,6 +100,7 @@ def delete_storage_file(
     key: ApiKey = Depends(require_api_key),
 ):
     module = _module(db, module_name)
+    _require_writable(module)
     try:
         storage_service.delete_file(storage_service.root_for(module), path)
     except storage_service.StorageError as e:

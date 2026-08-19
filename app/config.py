@@ -194,6 +194,13 @@ class Settings(BaseSettings):
     # 비우면 웹훅 자동 등록을 건너뛰고 infra/gitea/README.md의 수동 절차를 안내한다.
     platform_public_url: str = ""
 
+    # --- 문서 텍스트 추출 (services/doctext.py) ---
+    # 97-2003 바이너리 오피스 파일(.doc/.xls/.ppt)은 순수 파이썬으로 뽑을 수 없어
+    # LibreOffice에 맡긴다. 윈도우에서는 PATH에 없으므로 실행 파일 경로를 직접 지정한다
+    # (예: C:\Program Files\LibreOffice\program\soffice.exe). 비우면 PATH의 soffice를
+    # 찾고, 그것도 없으면 해당 형식만 "추출 불가"로 표시된다(docx류·pdf는 무관).
+    soffice_path: str = ""
+
     # --- 사내 MCP 서버 (api/mcp_servers.py) ---
     # DB 조회 MCP 서버(/mcp/db/{모듈})를 열어 줄 database 모듈 이름 목록(쉼표 구분).
     # 기본값은 빈 목록 = 전부 차단이다 — 어떤 DB를 LLM에게 읽히는지는 모듈 등록만으로

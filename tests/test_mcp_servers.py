@@ -249,6 +249,100 @@ def test_storage_server_cannot_escape_module_root(monkeypatch, fresh_settings, t
     assert not (tmp_path / "outside.txt").exists()
 
 
+def test_storage_read_only_module_hides_write_tools(monkeypatch, fresh_settings, tmp_path):
+    """사내 문서 공유 폴더처럼 플랫폼이 만들지 않은 디렉터리를 붙일 때 — 목록에 없는
+    도구는 모델이 부르지 않고, 불러도 막힌다."""
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    c = _client()
+    r = c.post(f"{API}/modules", json={
+        "name": "company-docs", "type": "file_storage",
+        "config": {"sub_folder": "docs", "read_only": True},
+    }, headers=ADMIN)
+    assert r.status_code == 201, r.text
+
+    path = "/mcp/storage/company-docs"
+    names = [t["name"] for t in _rpc(c, path, "tools/list")["result"]["tools"]]
+    assert names == ["list_files", "read_file"]
+    assert _call(c, path, "write_file", {"path": "x.md", "content": "x"})["error"]["code"] == -32601
+    assert _call(c, path, "delete_file", {"path": "x.md"})["error"]["code"] == -32601
+
+    # 콘솔 파일 관리 화면(HTTP 창구)에서도 실수로 지워지지 않아야 한다
+    up = c.post(f"{API}/storage/company-docs/files", files={"file": ("a.txt", b"x")}, headers=ADMIN)
+    assert up.status_code == 403
+    rm = c.delete(f"{API}/storage/company-docs/files?path=a.txt", headers=ADMIN)
+    assert rm.status_code == 403
+
+
+def test_storage_list_files_filters_and_caps(monkeypatch, fresh_settings, tmp_path):
+    """문서 폴더는 파일이 수천 개다 — 전체 목록을 그대로 내주면 컨텍스트가 통째로 찬다."""
+    c = _storage_client(monkeypatch, tmp_path)
+    root = tmp_path / "assets"
+    (root / "규정").mkdir(parents=True)
+    for i in range(5):
+        (root / f"보고서{i}.PDF").write_bytes(b"x")
+    (root / "규정" / "휴가규정.docx").write_bytes(b"x")
+    (root / "메모.txt").write_bytes(b"x")
+
+    import json
+
+    everything = json.loads(_text(_call(c, "/mcp/storage/assets", "list_files")))
+    assert everything["total"] == 7
+    assert everything["truncated"] is False
+
+    # 대소문자 무시 — .PDF와 .pdf가 섞인 폴더가 흔하다
+    pdfs = json.loads(_text(_call(c, "/mcp/storage/assets", "list_files", {"glob": "*.pdf"})))
+    assert pdfs["total"] == 5
+
+    # 파일명 패턴은 하위 폴더 파일에도 걸린다
+    rules = json.loads(_text(_call(c, "/mcp/storage/assets", "list_files", {"glob": "*규정*"})))
+    assert [f["path"] for f in rules["files"]] == ["규정/휴가규정.docx"]
+
+    capped = json.loads(
+        _text(_call(c, "/mcp/storage/assets", "list_files", {"glob": "*.pdf", "limit": 2})))
+    assert len(capped["files"]) == 2
+    assert capped["total"] == 5 and capped["truncated"] is True
+
+
+def test_storage_read_file_extracts_document_text(monkeypatch, fresh_settings, tmp_path):
+    """docx를 바이트째로 디코드하면 깨진 글자가 나온다 — 본문을 추출해서 준다."""
+    c = _storage_client(monkeypatch, tmp_path)
+    root = tmp_path / "assets"
+    root.mkdir(parents=True, exist_ok=True)
+    from tests.test_doctext import _docx
+
+    _docx(root / "규정.docx", [["매출 정산 규정"], ["분기 마감 후 5일"]])
+    text = _text(_call(c, "/mcp/storage/assets", "read_file", {"path": "규정.docx"}))
+    assert text == "매출 정산 규정\n분기 마감 후 5일"
+
+
+def test_storage_read_file_truncates_instead_of_refusing(monkeypatch, fresh_settings, tmp_path):
+    """100쪽 PDF를 "너무 큽니다"로 거절하면 읽을 방법이 아예 없어진다."""
+    c = _storage_client(monkeypatch, tmp_path)
+    root = tmp_path / "assets"
+    root.mkdir(parents=True, exist_ok=True)
+    from app.api import mcp_servers
+
+    (root / "긴문서.txt").write_text("가" * (mcp_servers._MAX_TEXT_CHARS + 500), encoding="utf-8")
+    text = _text(_call(c, "/mcp/storage/assets", "read_file", {"path": "긴문서.txt"}))
+    assert "만 표시" in text
+    assert str(mcp_servers._MAX_TEXT_CHARS + 500) in text
+
+
+def test_storage_read_file_reports_unreadable_format(monkeypatch, fresh_settings, tmp_path):
+    """추출 불가는 깨진 텍스트가 아니라 이유로 돌려준다."""
+    c = _storage_client(monkeypatch, tmp_path)
+    root = tmp_path / "assets"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "old.doc").write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 32)
+    from app.services import doctext
+
+    monkeypatch.setattr(doctext, "_soffice", lambda: None)
+    reply = _call(c, "/mcp/storage/assets", "read_file", {"path": "old.doc"})
+    assert reply["error"]["code"] == -32602
+    assert "97-2003" in reply["error"]["message"]
+
+
 def test_storage_server_rejects_wrong_module_type(monkeypatch, fresh_settings, tmp_path):
     c = _storage_client(monkeypatch, tmp_path)
     c.post(f"{API}/modules", json={

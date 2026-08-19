@@ -307,6 +307,17 @@ DELETE /paas/api/v1/previews/{id}
   읽기 전용, storage는 모듈 루트 안에 갇히고, db는 `PAAS_MCP_DB_MODULES` 허용 목록
   (기본 빈 목록 = 전부 차단) + SELECT 한 문장 + 행 수 상한 + 실행 SQL 감사 기록입니다.
   DB 드라이버(psycopg 등)는 선택 의존성이며, 없으면 무엇을 설치해야 하는지 알려 줍니다.
+- **서버 디스크의 사내 문서 폴더 붙이기**: `file_storage` 모듈의 `config.endpoint`에
+  절대 경로를 주면(`://`가 없으면 로컬 경로로 해석 — `services/storage.py`) 그 디렉터리가
+  저장소 루트가 되고, `/mcp/storage/{모듈}`로 바로 읽힙니다. 이미 있는 문서 폴더에는
+  `config.read_only: true`를 함께 주십시오 — 쓰기·삭제 도구를 아예 광고하지 않고, 콘솔
+  파일 관리 화면의 업로드·삭제도 403으로 막습니다. 목록은 `glob`으로 걸러 상한까지만
+  주며(잘리면 그렇다고 알립니다), 파일 내용은 **본문 텍스트를 추출**해서 줍니다
+  (`services/doctext.py`) — 형식은 확장자가 아니라 컨테이너 매직으로 판별합니다:
+  `docx·xlsx·pptx·hwpx`는 zip+XML이라 표준 라이브러리만으로, `pdf`는 `pypdf`(선택
+  의존성)로, 97-2003 바이너리(`doc·xls·ppt`)는 LibreOffice 변환(`PAAS_SOFFICE_PATH`)으로
+  처리하고, 평문은 utf-8 → cp949 순서로 디코드합니다(한국어 윈도우 txt·csv). 추출할 수
+  없으면 깨진 글자 대신 이유를 돌려줍니다(스캔 PDF면 OCR이 필요하다고 알립니다).
 
 ## 콘솔 UI (`console/`)
 
