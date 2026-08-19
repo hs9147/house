@@ -52,6 +52,25 @@ def test_initialize_and_unknown_method_and_tool():
     assert _rpc(c, "/mcp/ops", "tools/list", req_id=77)["id"] == 77
 
 
+def test_api_key_is_accepted_as_bearer_token():
+    """MCP 규약은 자격증명을 Authorization: Bearer로 싣는다(services/mcp_client.py) —
+    이 경로가 막히면 플랫폼의 MCP 클라이언트가 플랫폼의 MCP 서버에 붙지 못한다.
+    실제로 401이 나던 자리다(x-api-key로만 테스트해서 못 잡았다).
+    """
+    c = _client()
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    bearer = c.post(f"{API}/mcp/ops", headers={"authorization": "Bearer test-admin-key"}, json=body)
+    assert bearer.status_code == 200, bearer.text
+    assert bearer.json()["result"]["tools"]
+
+    assert c.post(f"{API}/mcp/ops", headers={"authorization": "Bearer nope"},
+                  json=body).status_code == 401
+    # JWT 모양(점 2개)은 그대로 OIDC 검증으로 간다 — 그 경로를 가로채지 않는다
+    jwt_shaped = c.post(f"{API}/mcp/ops", headers={"authorization": "Bearer aa.bb.cc"}, json=body)
+    assert jwt_shaped.status_code == 401
+    assert "api key" not in jwt_shaped.json()["detail"]
+
+
 def test_broken_body_answers_with_jsonrpc_error_not_500():
     c = _client()
     r = c.post(f"{API}/mcp/ops", headers=ADMIN, content=b"not json")

@@ -240,7 +240,16 @@ def require_api_key(
 ) -> ApiKey:
     settings = get_settings()
     if not x_api_key and authorization.lower().startswith("bearer "):
-        return authenticate_bearer(authorization[7:].strip())
+        token = authorization[7:].strip()
+        # JWT(헤더.페이로드.서명)면 OIDC 액세스 토큰이다. 그 모양이 아니면 발급 키·세션
+        # 토큰을 Bearer로 실어 보낸 것으로 본다 — MCP 규약이 자격증명을
+        # `Authorization: Bearer`로 싣기 때문이다(services/mcp_client.py). 사내 MCP
+        # 서버(api/mcp_servers.py)는 그 요청을 받는 쪽이라, 여기서 갈라 두지 않으면
+        # 플랫폼의 MCP 클라이언트가 플랫폼의 MCP 서버에 401로 막힌다(실측 확인).
+        # (플랫폼이 만드는 키에는 점이 없다 — secrets.token_urlsafe.)
+        if token.count(".") == 2:
+            return authenticate_bearer(token)
+        x_api_key = token
     if not x_api_key:
         raise HTTPException(status_code=401, detail="x-api-key header required")
     # 1. 관리자 API 키 일치 여부 검증
