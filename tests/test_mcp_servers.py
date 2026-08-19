@@ -244,7 +244,8 @@ def test_storage_server_write_list_read_delete(monkeypatch, fresh_settings, tmp_
     c = _storage_client(monkeypatch, tmp_path)
     path = "/mcp/storage/assets"
     names = [t["name"] for t in _rpc(c, path, "tools/list")["result"]["tools"]]
-    assert names == ["list_files", "read_file", "write_file", "delete_file"]
+    assert names == ["list_files", "read_file", "search_docs", "reindex_docs",
+                     "index_status", "write_file", "delete_file"]
 
     assert "wrote spec.md" in _text(
         _call(c, path, "write_file", {"path": "spec.md", "content": "# 규격\n"}))
@@ -282,7 +283,9 @@ def test_storage_read_only_module_hides_write_tools(monkeypatch, fresh_settings,
 
     path = "/mcp/storage/company-docs"
     names = [t["name"] for t in _rpc(c, path, "tools/list")["result"]["tools"]]
-    assert names == ["list_files", "read_file"]
+    # 검색·색인은 읽기 동작이라 그대로 남고, 쓰기·삭제만 빠진다
+    assert names == ["list_files", "read_file", "search_docs", "reindex_docs",
+                     "index_status"]
     assert _call(c, path, "write_file", {"path": "x.md", "content": "x"})["error"]["code"] == -32601
     assert _call(c, path, "delete_file", {"path": "x.md"})["error"]["code"] == -32601
 
@@ -360,6 +363,46 @@ def test_storage_read_file_reports_unreadable_format(monkeypatch, fresh_settings
     reply = _call(c, "/mcp/storage/assets", "read_file", {"path": "old.doc"})
     assert reply["error"]["code"] == -32602
     assert "97-2003" in reply["error"]["message"]
+
+
+def test_storage_search_docs_flow(monkeypatch, fresh_settings, tmp_path):
+    """색인 → 검색 → 커버리지. 파일명이 아니라 본문으로 찾는 것이 요점이다."""
+    monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
+    c = _storage_client(monkeypatch, tmp_path)
+    root = tmp_path / "assets"
+    root.mkdir(parents=True, exist_ok=True)
+    from tests.test_doctext import _docx
+
+    _docx(root / "A-2025-11.docx", [["반출 승인 절차"], ["담당: 총무팀"]])
+    (root / "메모.txt").write_text("휴가규정 개정", encoding="utf-8")
+    path = "/mcp/storage/assets"
+
+    import json
+
+    # 색인 전 검색 — "못 찾음"과 "색인이 없음"은 다른 문제다
+    empty = _call(c, path, "search_docs", {"query": "반출"})
+    assert "색인이 비어" in empty["error"]["message"]
+
+    built = json.loads(_text(_call(c, path, "reindex_docs")))
+    assert built["indexed"] == 2 and built["done"] is True
+
+    found = json.loads(_text(_call(c, path, "search_docs", {"query": "반출 승인"})))
+    assert [h["path"] for h in found["hits"]] == ["A-2025-11.docx"]
+    assert "반출 승인 절차" in found["hits"][0]["snippets"][0]
+
+    # 파일명으로는 알 수 없는 것을 찾는다
+    assert [h["path"] for h in json.loads(
+        _text(_call(c, path, "search_docs", {"query": "총무팀"})))["hits"]] == ["A-2025-11.docx"]
+
+    # 찾지 못한 경우에는 색인 상태를 함께 알려 준다(질의 문제인지 색인 문제인지 갈리게)
+    miss = json.loads(_text(_call(c, path, "search_docs", {"query": "없는말"})))
+    assert miss["hits"] == [] and miss["index"] == {"indexed": 2, "failed": 0}
+
+    report = json.loads(_text(_call(c, path, "index_status")))
+    assert report["total"] == 2 and report["by_suffix"][".docx"]["indexed"] == 1
+
+    actions = {row["action"] for row in c.get(f"{API}/audit", headers=ADMIN).json()}
+    assert {"mcp.docs.reindex", "mcp.docs.search"} <= actions
 
 
 def test_storage_server_rejects_wrong_module_type(monkeypatch, fresh_settings, tmp_path):
