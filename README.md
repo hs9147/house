@@ -244,6 +244,12 @@ GET  /paas/api/v1/storage/{module}/files/content    # ?path= 다운로드
 POST /paas/api/v1/storage/{module}/files            # multipart {file, path?} 업로드
 DELETE /paas/api/v1/storage/{module}/files          # ?path= 삭제
 
+POST /paas/api/v1/mcp/ops                           # 사내 MCP 서버 — 운영 조회(배포 상태·로그·라우팅·호스트·감사)
+POST /paas/api/v1/mcp/projects/{id}/code            # 사내 MCP 서버 — 프로젝트 코드 조회(파일·구조 개요)
+POST /paas/api/v1/mcp/storage/{module}              # 사내 MCP 서버 — file_storage 모듈 파일(루트 밖으로 못 나감)
+POST /paas/api/v1/mcp/db/{module}                   # 사내 MCP 서버 — database 모듈 조회(SELECT 전용)
+                                                #   PAAS_MCP_DB_MODULES에 이름이 있는 모듈만 열림(기본 전부 차단)
+
 POST /paas/api/v1/projects/{id}/preview             # {branch?, ttl_minutes=60} → {name}-pv{n}.{base_domain}
 GET  /paas/api/v1/projects/{id}/previews            # 조회 시 만료 프리뷰 자동 회수
 DELETE /paas/api/v1/previews/{id}
@@ -286,7 +292,32 @@ DELETE /paas/api/v1/previews/{id}
   **에이전트 기획의 솔루션 구성 단계**에서 바인딩된 MCP 서버의 도구를 모델에 넘겨
   직접 호출하게 합니다(서버 간 이름 충돌은 `{모듈명}__{도구명}`으로 구분, 응답하지 않는
   서버는 조용히 빠짐). 반대 방향 — 외부 빌드 도구가 붙는 MCP **서버**는
-  `/plan/projects/{id}/mcp`입니다.
+  `/plan/projects/{id}/mcp`입니다. 도구 목록(`tools/list`)은 60초 캐시로 감싸므로
+  솔루션 단계 매 턴마다 바인딩된 서버 전부에 왕복하지 않고, 응답하지 않는 서버의
+  타임아웃도 턴마다 다시 기다리지 않습니다.
+- **사내 MCP 서버 — 플랫폼이 가진 것을 도구로 노출**(`api/mcp_servers.py`): 운영
+  조회(`/mcp/ops`), 프로젝트 코드 조회(`/mcp/projects/{id}/code`), 파일 저장소
+  (`/mcp/storage/{모듈}`), DB 조회(`/mcp/db/{모듈}`) 네 개입니다. 공개 레지스트리의
+  동종 서버는 대부분 벤더 호스팅 원격 엔드포인트(소스·운영 데이터가 사외로 나감)이거나
+  stdio 전용(이 플랫폼 클라이언트로는 통신 불가)이라 사내에서 만든 것입니다. 이 주소를
+  `mcp` 타입 모듈로 등록해 프로젝트에 바인딩하면 기획 솔루션 구성 단계 대화가 도구로
+  씁니다 — 플랫폼 자신의 주소이므로 **사내에서 실제로 닿는 주소**를 넣습니다(공개
+  도메인이 이 플랫폼으로 라우팅되지 않는 구성이면 내부 주소, 예:
+  `http://localhost:7000/paas/api/v1/mcp/ops`). 위험은 도구 쪽에서 막습니다: ops·code는
+  읽기 전용, storage는 모듈 루트 안에 갇히고, db는 `PAAS_MCP_DB_MODULES` 허용 목록
+  (기본 빈 목록 = 전부 차단) + SELECT 한 문장 + 행 수 상한 + 실행 SQL 감사 기록입니다.
+  DB 드라이버(psycopg 등)는 선택 의존성이며, 없으면 무엇을 설치해야 하는지 알려 줍니다.
+- **서버 디스크의 사내 문서 폴더 붙이기**: `file_storage` 모듈의 `config.endpoint`에
+  절대 경로를 주면(`://`가 없으면 로컬 경로로 해석 — `services/storage.py`) 그 디렉터리가
+  저장소 루트가 되고, `/mcp/storage/{모듈}`로 바로 읽힙니다. 이미 있는 문서 폴더에는
+  `config.read_only: true`를 함께 주십시오 — 쓰기·삭제 도구를 아예 광고하지 않고, 콘솔
+  파일 관리 화면의 업로드·삭제도 403으로 막습니다. 목록은 `glob`으로 걸러 상한까지만
+  주며(잘리면 그렇다고 알립니다), 파일 내용은 **본문 텍스트를 추출**해서 줍니다
+  (`services/doctext.py`) — 형식은 확장자가 아니라 컨테이너 매직으로 판별합니다:
+  `docx·xlsx·pptx·hwpx`는 zip+XML이라 표준 라이브러리만으로, `pdf`는 `pypdf`(선택
+  의존성)로, 97-2003 바이너리(`doc·xls·ppt`)는 LibreOffice 변환(`PAAS_SOFFICE_PATH`)으로
+  처리하고, 평문은 utf-8 → cp949 순서로 디코드합니다(한국어 윈도우 txt·csv). 추출할 수
+  없으면 깨진 글자 대신 이유를 돌려줍니다(스캔 PDF면 OCR이 필요하다고 알립니다).
 
 ## 콘솔 UI (`console/`)
 

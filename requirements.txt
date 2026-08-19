@@ -14,3 +14,8 @@ python-multipart>=0.0.9
 # kubernetes>=30.0     # 2차(enterprise) 런타임에서 직접 apply할 때
 # psutil>=6.0          # 시스템 모니터링
 # nvidia-ml-py>=12.0   # GPU/VRAM 모니터링
+# psycopg[binary]>=3.1 # DB 조회 MCP 서버(/mcp/db/{모듈})가 PostgreSQL을 볼 때
+# pypdf>=4.0           # 문서 텍스트 추출(services/doctext.py)에서 PDF를 읽을 때.
+#                      # docx·xlsx·pptx는 표준 라이브러리만으로 읽으므로 이것만 있으면 된다.
+#                      # 97-2003 바이너리(.doc/.xls/.ppt)는 LibreOffice가 필요하다(PAAS_SOFFICE_PATH).
+

@@ -21,7 +21,7 @@ from ..schemas import (
 from ..security import require_admin, require_api_key
 from ..services import a2a as a2a_service
 from ..services import apisearch
-from ..services import mcp_search
+from ..services import mcp_client, mcp_search
 from ..services import modules as svc
 
 router = APIRouter(tags=["modules"])
@@ -330,6 +330,32 @@ def import_mcp_module(
     audit.record(db, admin.name, "module.import_mcp", mod_name, {"url": body.url})
     return {"id": row.id, "name": row.name, "type": row.type.value, "category": row.category,
             "config": svc.masked_config(row.config)}
+
+
+@router.post("/modules/{module_id}/mcp-check")
+def check_mcp_module(
+    module_id: int,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_admin),
+):
+    """이 MCP 모듈이 실제로 응답하는지 확인한다(tools/list 1회).
+
+    등록만으로는 동작을 알 수 없다 — 주소가 틀렸거나 전송 방식이 안 맞으면 등록은
+    성공한 채 조용히 죽어 있다. 확인 실패는 오류가 아니라 결과이므로 200으로 내려주고
+    본문의 ok/error로 구분한다(화면이 여러 모듈을 나열하며 표시한다).
+    """
+    row = db.get(Module, module_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="module not found")
+    if row.type != ModuleType.mcp:
+        raise HTTPException(status_code=400, detail=f"mcp 타입 모듈이 아닙니다: {row.type.value}")
+    config = svc.decrypt_config(row.config)
+    return {
+        "module_id": row.id,
+        "name": row.name,
+        "url": config.get("url", ""),
+        **mcp_client.check_server(config.get("url", ""), config.get("api_key") or None),
+    }
 
 
 @router.get("/modules/usage-report", response_model=PlatformModuleReportOut)

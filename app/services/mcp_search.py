@@ -8,60 +8,27 @@ _lock = threading.Lock()
 _cache: list[dict] | None = None
 _cached_at: float = 0.0
 
-BUILTIN_MCP_DIRECTORY = [
-    {
-        "id": "mcp-server-github",
-        "name": "GitHub MCP Server",
-        "category": "developer_tools",
-        "description": "GitHub Repository API, Pull Requests, Issues 및 커밋 탐색 도구",
-        "url": "http://mcp-github.internal:8000/sse",
-        "vendor": "GitHub",
-    },
-    {
-        "id": "mcp-server-postgres",
-        "name": "PostgreSQL MCP Server",
-        "category": "database",
-        "description": "PostgreSQL DB 스키마 조회, SQL 쿼리 실행 및 테이블 인스펙션 도구",
-        "url": "http://mcp-postgres.internal:8000/sse",
-        "vendor": "Postgres",
-    },
-    {
-        "id": "mcp-server-brave-search",
-        "name": "Brave Search MCP Server",
-        "category": "search",
-        "description": "Brave Web Search API를 활용한 실시간 웹 검색 및 뉴스 트렌드 수집 도구",
-        "url": "http://mcp-brave.internal:8000/sse",
-        "vendor": "Brave",
-    },
-    {
-        "id": "mcp-server-puppeteer",
-        "name": "Puppeteer Web Scraping MCP",
-        "category": "web_scraping",
-        "description": "웹 브라우저 자동화, 헤드리스 렌더링 및 동적 웹 스크래핑 도구",
-        "url": "http://mcp-puppeteer.internal:8000/sse",
-        "vendor": "Puppeteer",
-    },
-    {
-        "id": "mcp-server-slack",
-        "name": "Slack Messenger MCP Server",
-        "category": "communication",
-        "description": "Slack 채널 메시지 전송, 봇 알림 및 스레드 이벤트 수신기",
-        "url": "http://mcp-slack.internal:8000/sse",
-        "vendor": "Slack",
-    },
-    {
-        "id": "mcp-server-filesystem",
-        "name": "Local Filesystem MCP Server",
-        "category": "storage",
-        "description": "서버 로컬 파일 읽기/쓰기, 디렉토리 탐색 및 검색 인덱서",
-        "url": "http://mcp-filesystem.internal:8000/sse",
-        "vendor": "Anthropic",
-    },
-]
+# 비어 있는 것이 맞다.
+#
+# 여기에는 mcp-postgres.internal:8000 같은 주소가 7건 하드코딩돼 있었는데, 그 이름은
+# 어디에도 실재하지 않았다 — 가져와 등록한 모듈은 등록 직후부터 죽어 있었다. 게다가
+# 주소가 /sse로 끝나 있어, 실재했더라도 이 플랫폼의 클라이언트(services/mcp_client.py는
+# 단일 JSON 응답만 다룬다)로는 통신할 수 없었다. 널리 쓰이는 postgres·brave-search·
+# filesystem MCP 서버는 애초에 stdio 전용이라 URL이라는 개념이 없다.
+#
+# 실재하지 않는 주소를 목록으로 내주면 사용자는 "등록했는데 왜 안 되나"를 추적하게
+# 된다. 사내에서 실제로 띄운 MCP 서버가 있으면 그 주소를 여기 추가하거나, 모듈 등록
+# 화면에서 직접 입력한다. 등록 후에는 연결 확인(mcp_client.check_server)으로 실제
+# 응답 여부를 볼 수 있다.
+BUILTIN_MCP_DIRECTORY: list[dict] = []
 
 
 def _load_mcp_directory(force_refresh: bool = False) -> list[dict]:
-    """1일 1회(24시간) 유효성 탐색 및 MCP 디렉터리 동기화."""
+    """MCP 디렉터리 목록. 지금은 BUILTIN_MCP_DIRECTORY가 원천이다.
+
+    캐시 구조만 남겨 둔다 — 사내 레지스트리를 붙일 자리다. 연결 여부는 여기서 보지
+    않는다(그건 mcp_client.check_server가 한다).
+    """
     global _cache, _cached_at
     now = time.monotonic()
     with _lock:
@@ -76,7 +43,11 @@ def _load_mcp_directory(force_refresh: bool = False) -> list[dict]:
 
 
 def refresh_mcp_directory() -> dict:
-    """1일 1회 주기와 별도로 외부 MCP 수집 루트를 즉시 탐색하고 업데이트한다."""
+    """디렉터리 캐시를 비우고 다시 읽는다.
+
+    외부를 조회하지 않는다 — BUILTIN_MCP_DIRECTORY가 원천이므로 캐시 무효화가 전부다.
+    ("외부 수집 루트를 탐색한다"고 적혀 있었지만 실제로는 내장 목록을 복사할 뿐이었다.)
+    """
     items = _load_mcp_directory(force_refresh=True)
     return {
         "status": "updated",
@@ -86,7 +57,11 @@ def refresh_mcp_directory() -> dict:
 
 
 def search_mcp_servers(query: str = "") -> list[dict]:
-    """1일 1회 유효성 탐색이 보장된 MCP 디렉터리 키워드 검색."""
+    """MCP 디렉터리 키워드 검색.
+
+    여기 있는 항목이 실제로 응답한다는 보장은 없다 — 확인은 등록 후 연결 확인으로 한다.
+    ("유효성 탐색이 보장된"이라고 적혀 있었지만 아무것도 확인하지 않았다.)
+    """
     directory = _load_mcp_directory(force_refresh=False)
     query_lower = query.lower().strip()
     if not query_lower:

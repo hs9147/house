@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .env
 paas.db
+test-paas.db
 data/
 .venv/
 console/node_modules/

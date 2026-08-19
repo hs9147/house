@@ -274,6 +274,11 @@ export const api = {
   // 외부 MCP 디렉터리 검색 + mcp 모듈 자동 추가 (admin)
   searchMcpDirectory: (q?: string) =>
     request<McpDirectoryItem[]>('GET', `/mcp/search?q=${encodeURIComponent(q || '')}`),
+  // 등록된 mcp 모듈이 실제로 응답하는지 확인(tools/list 1회). 실패도 200으로 오고
+  // ok/error로 구분한다 — 여러 모듈을 나열하며 표시하기 때문이다.
+  checkMcpModule: (moduleId: number) =>
+    request<{ module_id: number; name: string; url: string; ok: boolean; error: string | null;
+              tool_count: number; tools: string[] }>('POST', `/modules/${moduleId}/mcp-check`),
   importMcpModule: (name: string, url: string, category?: string) =>
     request<ModuleOut>('POST', '/modules/import-mcp', { name, url, category: category || null }),
   createModule: (

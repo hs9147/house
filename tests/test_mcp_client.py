@@ -88,6 +88,80 @@ def test_build_openai_tools_skips_unreachable_server(monkeypatch):
     assert [t["function"]["name"] for t in tools] == ["up__ok"]
 
 
+def test_cached_list_tools_reuses_result_within_ttl(monkeypatch):
+    calls = []
+
+    def fake_post_rpc(url, headers, payload):
+        calls.append(url)
+        return {"result": {"tools": [{"name": "search"}]}}
+
+    monkeypatch.setattr(mcp_client, "_post_rpc", fake_post_rpc)
+    assert mcp_client.cached_list_tools("https://cache-a.example.com")[0]["name"] == "search"
+    assert mcp_client.cached_list_tools("https://cache-a.example.com")[0]["name"] == "search"
+    assert len(calls) == 1  # 두 번째는 캐시
+
+    mcp_client.clear_tools_cache()
+    mcp_client.cached_list_tools("https://cache-a.example.com")
+    assert len(calls) == 2
+
+
+def test_cached_list_tools_caches_failure_so_dead_server_is_not_retried(monkeypatch):
+    """죽은 서버의 타임아웃을 턴마다 다시 기다리지 않게, 실패도 캐시한다."""
+    calls = []
+
+    def boom(url, headers, payload):
+        calls.append(url)
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(mcp_client, "_post_rpc", boom)
+    assert mcp_client.cached_list_tools("https://cache-down.example.com") is None
+    assert mcp_client.cached_list_tools("https://cache-down.example.com") is None
+    assert len(calls) == 1
+
+
+def test_cached_list_tools_keys_on_api_key(monkeypatch):
+    """키가 다르면 권한이 다르므로 같은 URL이라도 도구 목록이 다를 수 있다."""
+    monkeypatch.setattr(
+        mcp_client, "_post_rpc",
+        lambda url, headers, payload: {"result": {"tools": [
+            {"name": headers.get("authorization", "anon")},
+        ]}},
+    )
+    first = mcp_client.cached_list_tools("https://cache-k.example.com", "key-1")
+    second = mcp_client.cached_list_tools("https://cache-k.example.com", "key-2")
+    assert first[0]["name"] == "Bearer key-1"
+    assert second[0]["name"] == "Bearer key-2"
+
+
+def test_build_openai_tools_uses_cache(monkeypatch):
+    calls = []
+
+    def fake_post_rpc(url, headers, payload):
+        calls.append(url)
+        return {"result": {"tools": [{"name": "search"}]}}
+
+    monkeypatch.setattr(mcp_client, "_post_rpc", fake_post_rpc)
+    servers = [{"name": "srv", "url": "https://cache-b.example.com", "api_key": None}]
+    for _ in range(3):
+        tools, _registry = mcp_client.build_openai_tools(servers)
+        assert [t["function"]["name"] for t in tools] == ["srv__search"]
+    assert len(calls) == 1
+
+
+def test_check_server_ignores_cache(monkeypatch):
+    """연결 확인은 "지금 응답하는지"를 봐야 하므로 캐시를 타면 안 된다."""
+    calls = []
+
+    def fake_post_rpc(url, headers, payload):
+        calls.append(url)
+        return {"result": {"tools": [{"name": "search"}]}}
+
+    monkeypatch.setattr(mcp_client, "_post_rpc", fake_post_rpc)
+    mcp_client.cached_list_tools("https://cache-c.example.com")
+    assert mcp_client.check_server("https://cache-c.example.com")["ok"] is True
+    assert len(calls) == 2
+
+
 def test_make_tool_executor_dispatches_to_correct_server(monkeypatch):
     calls = []
 
