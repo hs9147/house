@@ -49,6 +49,7 @@ from ..services import a2a as a2a_service
 from ..services import codemap as codemap_service
 from ..services import compliance as compliance_service
 from ..services import llm as llm_service
+from ..services import mcp_server
 from ..services import modules as modules_service
 from ..services import planning as planning_service
 from ..services import workspace
@@ -928,10 +929,6 @@ _MCP_TOOLS = [
 ]
 
 
-def _mcp_text(text: str) -> dict:
-    return {"content": [{"type": "text", "text": text}]}
-
-
 @router.post("/plan/projects/{project_id}/mcp")
 async def plan_mcp_server(
     project_id: int,
@@ -943,77 +940,54 @@ async def plan_mcp_server(
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
-    try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001
-        payload = {}
+    return mcp_server.dispatch(
+        await mcp_server.read_payload(request),
+        server_name=f"paas-plan-{project.name}",
+        tools=_MCP_TOOLS,
+        call=lambda name, args: _mcp_call(db, key.name, project, name, args),
+    )
 
-    method = payload.get("method")
-    req_id = payload.get("id")
-    params = payload.get("params") or {}
 
-    def _ok(result: dict) -> dict:
-        return {"jsonrpc": "2.0", "id": req_id, "result": result}
-
-    if method == "initialize":
-        return _ok({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": f"paas-plan-{project.name}", "version": "0.1.0"},
+def _mcp_call(db: Session, actor: str, project: Project, name: str, args: dict) -> str:
+    """도구 하나를 실행해 텍스트를 돌려준다. 실행할 수 없으면 McpToolError."""
+    if name == "get_constraints":
+        constraints = planning_service.build_constraints(db, project)
+        return planning_service.render_constraints_doc(constraints)
+    if name == "list_available_modules":
+        constraints = planning_service.build_constraints(db, project)
+        return json.dumps(constraints["bound_agents"], ensure_ascii=False)
+    if name == "report_build_progress":
+        note = str(args.get("note", ""))[:1000]
+        audit.record(db, actor, "plan.build.progress", project.name, {"note": note})
+        return "recorded"
+    if name == "read_artifact":
+        try:
+            stage = PlanStage(str(args.get("stage", "")))
+        except ValueError:
+            raise mcp_server.McpToolError(f"unknown stage: {args.get('stage')}")
+        content = _read_confirmed_artifact(db, project, stage)
+        if content is None:
+            raise mcp_server.McpToolError(f"확정된 산출물이 없습니다: {args.get('stage')}")
+        return content
+    if name == "list_tasks":
+        tasks = db.execute(
+            select(BuildTask).where(BuildTask.project_id == project.id).order_by(BuildTask.id)
+        ).scalars().all()
+        text = json.dumps(
+            [_task_out(t).model_dump() for t in tasks], ensure_ascii=False, indent=2)
+        # 최근 push에서 잡힌 위반은 작업 목록을 볼 때 함께 알린다 — 빌더가 폴링하지 않아도 안다.
+        warning = _latest_compliance_warning(db, project)
+        return f"{warning}\n\n{text}" if warning else text
+    if name == "check_compliance":
+        result = _compliance_out(db, project)
+        audit.record(db, actor, "plan.build.compliance", project.name, {
+            "status": "warning" if result.findings else "clean",
+            "summary": result.summary,
         })
-    if method == "tools/list":
-        return _ok({"tools": _MCP_TOOLS})
-    if method == "tools/call":
-        name = params.get("name")
-        args = params.get("arguments") or {}
-        if name == "get_constraints":
-            constraints = planning_service.build_constraints(db, project)
-            return _ok(_mcp_text(planning_service.render_constraints_doc(constraints)))
-        if name == "list_available_modules":
-            constraints = planning_service.build_constraints(db, project)
-            return _ok(_mcp_text(json.dumps(constraints["bound_agents"], ensure_ascii=False)))
-        if name == "report_build_progress":
-            note = str(args.get("note", ""))[:1000]
-            audit.record(db, key.name, "plan.build.progress", project.name, {"note": note})
-            return _ok(_mcp_text("recorded"))
-        if name == "read_artifact":
-            try:
-                stage = PlanStage(str(args.get("stage", "")))
-            except ValueError:
-                return _mcp_error(req_id, f"unknown stage: {args.get('stage')}")
-            content = _read_confirmed_artifact(db, project, stage)
-            if content is None:
-                return _mcp_error(req_id, f"확정된 산출물이 없습니다: {args.get('stage')}")
-            return _ok(_mcp_text(content))
-        if name == "list_tasks":
-            tasks = db.execute(
-                select(BuildTask).where(BuildTask.project_id == project.id).order_by(BuildTask.id)
-            ).scalars().all()
-            text = json.dumps(
-                [_task_out(t).model_dump() for t in tasks], ensure_ascii=False, indent=2)
-            # 최근 push에서 잡힌 위반은 작업 목록을 볼 때 함께 알린다 — 빌더가 폴링하지 않아도 안다.
-            warning = _latest_compliance_warning(db, project)
-            return _ok(_mcp_text(f"{warning}\n\n{text}" if warning else text))
-        if name in ("update_task", "submit_build_result", "request_clarification"):
-            return _mcp_build_report(db, key.name, project, name, args, _ok, req_id)
-        if name == "check_compliance":
-            result = _compliance_out(db, project)
-            audit.record(db, key.name, "plan.build.compliance", project.name, {
-                "status": "warning" if result.findings else "clean",
-                "summary": result.summary,
-            })
-            if not result.findings:
-                return _ok(_mcp_text("위반 없음 — 제약을 지켰습니다."))
-            return _ok(_mcp_text(result.builder_prompt))
-        return {"jsonrpc": "2.0", "id": req_id,
-                "error": {"code": -32601, "message": f"unknown tool: {name}"}}
-
-    return {"jsonrpc": "2.0", "id": req_id,
-            "error": {"code": -32601, "message": f"unknown method: {method}"}}
-
-
-def _mcp_error(req_id, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": message}}
+        if not result.findings:
+            return "위반 없음 — 제약을 지켰습니다."
+        return result.builder_prompt
+    return _mcp_build_report(db, actor, project, name, args)
 
 
 def _latest_compliance_warning(db: Session, project: Project) -> str:
@@ -1070,21 +1044,20 @@ def _read_confirmed_artifact(db: Session, project: Project, stage: PlanStage) ->
     return workspace.read_context_files(workdir, [artifact.repo_path]).get(artifact.repo_path)
 
 
-def _mcp_build_report(db: Session, actor: str, project: Project, tool: str, args: dict,
-                      ok, req_id) -> dict:
+def _mcp_build_report(db: Session, actor: str, project: Project, tool: str, args: dict) -> str:
     """외부 빌더의 쓰기 3종(작업 갱신·결과 제출·질의)을 한 자리에서 처리한다."""
     task = None
     task_id = args.get("task_id")
     if task_id is not None:
         task = db.get(BuildTask, int(task_id))
         if task is None or task.project_id != project.id:
-            return _mcp_error(req_id, f"task not found: {task_id}")
+            raise mcp_server.McpToolError(f"task not found: {task_id}")
 
     if tool == "update_task":
         if task is None:
-            return _mcp_error(req_id, "task_id가 필요합니다.")
+            raise mcp_server.McpToolError("task_id가 필요합니다.")
         _apply_task_update(db, actor, task, args.get("status"), args.get("note"), None)
-        return ok(_mcp_text(f"task {task.id} → {task.status.value}"))
+        return f"task {task.id} → {task.status.value}"
 
     if tool == "submit_build_result":
         sha = str(args.get("commit_sha", ""))[:40]
@@ -1093,12 +1066,12 @@ def _mcp_build_report(db: Session, actor: str, project: Project, tool: str, args
                      {"commit_sha": sha, "summary": summary})
         if task is not None:
             _apply_task_update(db, actor, task, BuildTaskStatus.done.value, summary, sha)
-        return ok(_mcp_text("recorded"))
+        return "recorded"
 
     # request_clarification — 질의를 기획 세션 대화에 남겨 다음 초안에 반영되게 한다.
     question = str(args.get("question", "")).strip()[:2000]
     if not question:
-        return _mcp_error(req_id, "question이 비어 있습니다.")
+        raise mcp_server.McpToolError("question이 비어 있습니다.")
     session = _latest_session(db, project.id)
     if session is not None:
         db.add(ChatMessage(session_id=session.id, role="user",
@@ -1107,7 +1080,7 @@ def _mcp_build_report(db: Session, actor: str, project: Project, tool: str, args
     audit.record(db, actor, "plan.build.clarification", project.name, {"question": question})
     if task is not None:
         _apply_task_update(db, actor, task, BuildTaskStatus.blocked.value, question, None)
-    return ok(_mcp_text("질의를 기획 세션에 전달했습니다."))
+    return "질의를 기획 세션에 전달했습니다."
 
 
 def _is_confirmed(db: Session, session_id: int, stage: PlanStage) -> bool:

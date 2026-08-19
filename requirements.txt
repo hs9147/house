@@ -14,3 +14,5 @@ python-multipart>=0.0.9
 # kubernetes>=30.0     # 2차(enterprise) 런타임에서 직접 apply할 때
 # psutil>=6.0          # 시스템 모니터링
 # nvidia-ml-py>=12.0   # GPU/VRAM 모니터링
+# psycopg[binary]>=3.1 # DB 조회 MCP 서버(/mcp/db/{모듈})가 PostgreSQL을 볼 때
+

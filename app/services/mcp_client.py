@@ -8,10 +8,19 @@ MCP 서버가 단일 JSON 응답(스트리밍 없는 streamable-http)으로 답�
 스키마를 만들고, 모델이 도구를 호출하면 다시 이 모듈로 실제 MCP 서버를 호출한다.
 """
 import itertools
+import threading
+import time
 
 import httpx
 
 _id_counter = itertools.count(1)
+
+# tools/list 캐시 TTL(초). 도구 스키마는 서버를 다시 띄울 때나 바뀌므로 짧게 잡아도
+# 충분하고, 이 정도면 한 대화 안에서 오가는 여러 턴은 캐시로 덮인다.
+_TOOLS_TTL = 60.0
+_tools_lock = threading.Lock()
+# (url, api_key) -> (조회시각, 도구목록 | None). None은 "조회 실패"를 캐시한 것.
+_tools_cache: dict[tuple[str, str], tuple[float, list[dict] | None]] = {}
 
 
 class McpError(RuntimeError):
@@ -41,6 +50,37 @@ def list_tools(url: str, api_key: str | None = None) -> list[dict]:
     return _rpc(url, api_key, "tools/list", {}).get("tools", [])
 
 
+def cached_list_tools(url: str, api_key: str | None = None) -> list[dict] | None:
+    """tools/list를 TTL 캐시로 감싼 것 — None은 조회 실패.
+
+    솔루션 구성 단계는 LLM을 부르기 전에 바인딩된 서버 전부의 도구 목록을 모은다
+    (services/planning.solution_tools). 캐시가 없으면 매 턴 서버 수만큼 동기 HTTP
+    왕복이 돌고, 죽은 서버가 하나 있으면 그 타임아웃(30초)을 턴마다 다시 기다린다 —
+    그래서 실패도 같이 캐시한다.
+
+    실제 응답 여부를 봐야 하는 연결 확인(check_server)은 캐시를 쓰지 않는다.
+    """
+    key = (url, api_key or "")
+    now = time.monotonic()
+    with _tools_lock:
+        hit = _tools_cache.get(key)
+        if hit is not None and (now - hit[0]) < _TOOLS_TTL:
+            return hit[1]
+    try:
+        tools: list[dict] | None = list_tools(url, api_key)
+    except Exception:  # noqa: BLE001 — 서버 하나의 장애가 채팅 전체를 막으면 안 됨
+        tools = None
+    with _tools_lock:
+        _tools_cache[key] = (now, tools)
+    return tools
+
+
+def clear_tools_cache() -> None:
+    """캐시 비우기 — 모듈 주소·키를 고친 직후와 테스트에서 쓴다."""
+    with _tools_lock:
+        _tools_cache.clear()
+
+
 def call_tool(url: str, api_key: str | None, name: str, arguments: dict) -> str:
     """도구를 실행하고 텍스트 결과를 반환한다 — content[].type=="text"만 이어붙인다."""
     result = _rpc(url, api_key, "tools/call", {"name": name, "arguments": arguments})
@@ -54,13 +94,13 @@ def build_openai_tools(servers: list[dict]) -> tuple[list[dict], dict[str, tuple
     함수명이 서버 간에 겹칠 수 있어 "{서버명}__{도구명}"으로 접두사를 붙인다.
     반환하는 registry는 실제 호출(make_tool_executor)에서 함수명 → (서버, 원래
     도구명)을 되찾는 역참조 테이블이다. 서버 하나가 응답하지 않아도(tools/list
-    실패) 나머지 서버의 도구는 계속 쓸 수 있도록 개별적으로 감싼다."""
+    실패) 나머지 서버의 도구는 계속 쓸 수 있게 서버별로 따로 조회한다
+    (cached_list_tools — 성공·실패 모두 짧게 캐시된다)."""
     tools: list[dict] = []
     registry: dict[str, tuple[dict, str]] = {}
     for server in servers:
-        try:
-            server_tools = list_tools(server["url"], server.get("api_key"))
-        except Exception:  # noqa: BLE001 — 서버 하나의 장애가 채팅 전체를 막으면 안 됨
+        server_tools = cached_list_tools(server["url"], server.get("api_key"))
+        if server_tools is None:
             continue
         for t in server_tools:
             fn_name = f"{server['name']}__{t['name']}"

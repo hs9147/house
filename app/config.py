@@ -194,6 +194,13 @@ class Settings(BaseSettings):
     # 비우면 웹훅 자동 등록을 건너뛰고 infra/gitea/README.md의 수동 절차를 안내한다.
     platform_public_url: str = ""
 
+    # --- 사내 MCP 서버 (api/mcp_servers.py) ---
+    # DB 조회 MCP 서버(/mcp/db/{모듈})를 열어 줄 database 모듈 이름 목록(쉼표 구분).
+    # 기본값은 빈 목록 = 전부 차단이다 — 어떤 DB를 LLM에게 읽히는지는 모듈 등록만으로
+    # 정해질 일이 아니라 명시적으로 고를 일이다. 목록에 있어도 SELECT 한 문장만
+    # 실행되고 행 수는 서버가 자른다.
+    mcp_db_modules: str = ""
+
     # --- 외부 API 디렉터리 검색 (services/apisearch.py) ---
     # 키워드로 공개 API를 검색해 external_api 모듈로 추가할 때 조회하는 머신리더블
     # OpenAPI 디렉터리. 기본은 apis.guru 공개 목록. 폐쇄망이라면 사내 미러 URL로 교체.
