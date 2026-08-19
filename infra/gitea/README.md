@@ -241,24 +241,67 @@ GITEA__server__DISABLE_SSH=true
 **SSO 비밀번호를 넣으면 반드시 실패한다** — 이게 "로그인이 유지되지 않는다"로 보이는
 가장 흔한 원인이다.
 
-#### 권장 — 브라우저 SSO로 인증 (토큰 수동 발급 없음)
+#### 권장 — 브라우저 SSO + 만료 자동 갱신 (git-credential-oauth + cache)
 
-Git Credential Manager(GCM)는 Gitea를 자동 인식해 **브라우저 OAuth 로그인**으로 처리한다.
-`git push` 시 브라우저가 열리고, 이미 SSO 세션이 있으면 클릭 한 번으로 끝난다 — 사용자가
-토큰을 만들 필요도, 어디에 붙여넣을지 고민할 필요도 없다. 발급된 토큰은 GCM이 OS 자격
-증명 저장소에 넣어 두므로 다음 push부터는 아무것도 묻지 않는다.
+헬퍼를 두 개 겹쳐 쓴다: **생성**은 `git-credential-oauth`, **저장**은 `cache`.
+`git push`할 때 브라우저가 한 번 열리고, 그 뒤로는 토큰이 만료돼도 **자동으로 다시
+발급받아 그대로 push가 진행된다**(브라우저도 다시 뜨지 않는다).
 
-서버 쪽에 등록할 것이 없다. Gitea 1.21+는 GCM용 OAuth 애플리케이션을 **기본으로 미리
-등록해 둔다**(`[oauth2] DEFAULT_APPLICATIONS`의 `git-credential-manager`, 이 리포의
-compose는 1.22를 쓴다). `[oauth2] ENABLED`도 기본값이 true여야 한다 — 끄면 GCM이
-OAuth를 못 찾고 비밀번호를 묻는 방식으로 되돌아간다.
+**왜 Git Credential Manager(GCM)가 아닌가 — "첫 push만 인증 오류" 증상의 정체.**
+Gitea의 OAuth 액세스 토큰은 기본 1시간이다(`[oauth2] ACCESS_TOKEN_EXPIRATION_TIME`).
+git은 만료를 다룰 장치를 이미 갖고 있다 — 자격 증명 프로토콜의 `password_expiry_utc`·
+`oauth_refresh_token`이고, `credential_fill()`은 만료된 비밀을 버리고 다음 헬퍼에게
+리프레시 토큰을 넘긴다. 그런데 **GCM은 그 두 필드를 git에 내보내지 않는다**(리프레시
+토큰을 자기 안에만 둔다). 그래서 흐름이 이렇게 된다:
+
+```
+마지막 성공 후 1시간 경과 → git이 저장해 둔 (이미 만료된) 토큰을 그대로 사용
+  → Gitea 401 → git이 그 자격 증명을 지우고(credential_reject) push는 실패로 끝난다
+  → 사용자가 다시 push → 저장소가 비었으니 새 토큰을 발급받아 성공
+```
+git은 401을 받은 뒤 같은 push 안에서 자격 증명을 다시 요청하지 않으므로(`http.c`),
+**클라이언트 쪽 자동 재시도는 존재하지 않는다.** 유일한 해법이 "만료 전에 갱신"이고,
+git-credential-oauth는 두 필드를 모두 내보내므로 그 처리가 git 쪽에서 자동으로 돈다.
 
 개발자 PC에서 한 번만:
 ```bash
-git config --global credential.helper manager     # 구버전 Git이면 manager-core
-# Windows: Git for Windows에 GCM이 함께 설치돼 있다
-# Linux/macOS: 별도 설치 필요 (https://github.com/git-ecosystem/git-credential-manager)
+# 1) 헬퍼 설치 — https://github.com/hickford/git-credential-oauth (단일 실행 파일)
+#    폐쇄망이면 릴리스 바이너리를 사내 배포 경로에 올려 두고 PATH에 넣는다.
+# 2) 저장(cache) → 생성(oauth) 순서로 등록한다. 순서가 바뀌면 저장된 토큰을 쓰지 않고
+#    매번 새로 발급받는다(git은 앞의 헬퍼부터 물어본다).
+git config --global --unset-all credential.helper
+git config --global --add credential.helper "cache --timeout 28800"   # 8시간
+git config --global --add credential.helper oauth
 ```
+> **Git 2.45 이상**을 쓴다(`git --version`). 그 아래는 리프레시 토큰 저장 지원이
+> 제한적이어서 만료마다 브라우저가 다시 뜬다.
+>
+> `cache` 타임아웃은 액세스 토큰 수명보다 **길게** 준다. 만료 판정은 타임아웃이 아니라
+> `password_expiry_utc`가 하므로 짧게 잡을 이유가 없고, 짧으면 리프레시 토큰까지 함께
+> 사라져 브라우저가 다시 뜬다. `cache`는 메모리 전용이라 재부팅·로그아웃 뒤 첫 push에서는
+> 브라우저가 한 번 열린다.
+
+**저장 헬퍼는 `cache`여야 한다.** 만료·리프레시 정보를 보존하는 것이 이것뿐이다.
+
+| 저장 헬퍼 | `password_expiry_utc`·`oauth_refresh_token` 보존 | |
+| --- | --- | --- |
+| `cache` | O | 메모리 전용 — 재부팅 시 소실 |
+| `store` | X | 저장 형식이 `proto://user:pass@host` 한 줄이라 담을 자리가 없다 |
+| `wincred` | X | username·password만 |
+| `manager`(GCM) | X | git에 만료를 알려주지 않는다(위 참고) |
+
+`git credential-cache --help`가 동작하지 않는 환경이면(유닉스 소켓이 없는 옛 Git for
+Windows 등) 이 방식을 쓸 수 없다 — [액세스 토큰 방식](#대안--액세스-토큰-브라우저-oauth를-못-쓰는-환경)으로 간다.
+
+**GCM에서 옮겨 올 때는 OS 자격 증명 저장소에 남은 항목을 지운다.** 지우지 않으면 GCM이
+없어도 그 항목이 계속 나와 같은 증상이 반복된다 — 아래 [자격 증명 초기화](#자격-증명-초기화)
+참고.
+
+서버 쪽에 등록할 것은 없다. Gitea 1.21+는 이 헬퍼용 OAuth 애플리케이션을 **기본으로 미리
+등록해 둔다**(`[oauth2] DEFAULT_APPLICATIONS`의 `git-credential-oauth` — 이 리포의
+`app.ini.example`에 이미 들어 있다). `[oauth2] ENABLED`도 기본값이 true여야 한다 — 끄면
+헬퍼가 OAuth를 못 찾고 비밀번호를 묻는 방식으로 되돌아간다.
+
 이후 평소처럼 clone/push하면 브라우저가 뜬다:
 ```bash
 git clone https://git.example.com/org/repo.git
@@ -267,24 +310,29 @@ git clone https://git.example.com/org/repo.git
 > 콘솔의 **프로젝트**·**에이전트 기획** 화면에 있는 `VS Code` 버튼을 쓰면 주소를 직접
 > 복사하지 않아도 된다 — VS Code가 열리며 clone 위치를 묻는다.
 
-**Gitea를 서브패스로 뒀다면 자동 인식이 안 된다.** GCM이 쓰는 Gitea 기본 엔드포인트는
-도메인 루트 기준(`/login/oauth/authorize`)이라, `https://host/gitea/`처럼 하위 경로에
-있으면 엉뚱한 주소를 부른다([GCM #1650](https://github.com/git-ecosystem/git-credential-manager/issues/1650)).
-이 경우 엔드포인트를 직접 지정한다(클라이언트 시크릿은 없다 — 공개 클라이언트다):
+**Gitea를 서브패스로 뒀다면 엔드포인트를 직접 지정한다.** 헬퍼의 내장 Gitea 설정은 도메인
+루트 기준(`{호스트}/login/oauth/authorize`)이라 `https://host/gitea/`처럼 하위 경로에 있으면
+엉뚱한 주소를 부른다(클라이언트 시크릿은 없다 — 공개 클라이언트다):
 ```bash
-git config --global credential.https://host.example.com.oauthClientId e90ee53c-94e2-48ac-9358-a874fb9e0662
-git config --global credential.https://host.example.com.oauthAuthorizeEndpoint /gitea/login/oauth/authorize
-git config --global credential.https://host.example.com.oauthTokenEndpoint    /gitea/login/oauth/access_token
-git config --global credential.https://host.example.com.oauthRedirectUri      http://127.0.0.1
+git config --global credential.https://host.example.com.oauthClientId a4792ccc-144e-407e-86c9-5e7d8d9c3269
+git config --global credential.https://host.example.com.oauthAuthURL  https://host.example.com/gitea/login/oauth/authorize
+git config --global credential.https://host.example.com.oauthTokenURL https://host.example.com/gitea/login/oauth/access_token
 ```
+> **클라이언트 ID와 옵션 이름은 헬퍼마다 다르다.** 위 값은 Gitea가 `git-credential-oauth`
+> 용으로 미리 등록해 두는 것이고(`a4792ccc-…`), GCM용은 `e90ee53c-…`다. 옵션 이름도
+> git-credential-oauth는 `oauthAuthURL`·`oauthTokenURL`, GCM은 `oauthAuthorizeEndpoint`·
+> `oauthTokenEndpoint`다. 남의 설정을 그대로 복사해 오면 **조용히 무시되고** 비밀번호를
+> 묻는 방식으로 되돌아간다.
+>
 > 토큰 엔드포인트는 `/login/oauth/token`이 **아니라** `/login/oauth/access_token`이다.
 > 여기를 틀리면 증상이 헷갈린다 — authorize는 맞는 주소라 **로그인·승인까지 정상으로
-> 보이고**, 그 뒤 GCM이 토큰을 받으러 갈 때 404가 나면서 `git push`가 응답을 기다리며
-> 멈춘다. 아래 "브라우저 승인까지 됐는데 push가 멈춘다" 참고.
+> 보이고**, 그 뒤 토큰을 받으러 갈 때 404가 나면서 `git push`가 응답을 기다리며 멈춘다.
+> 아래 "브라우저 승인까지 됐는데 push가 멈춘다" 참고.
 >
-> `oauthRedirectUri`는 `127.0.0.1`을 쓴다(`localhost` 아님). Gitea는 루프백 주소에 한해
-> 포트를 가리지 않는데, 그 처리가 `127.0.0.1`에만 적용된다 — GCM은 매번 임의 포트로
-> 대기하므로 이게 맞아야 콜백이 돌아온다.
+> 리다이렉트는 지정하지 않는다 — 헬퍼가 `127.0.0.1`의 임의 포트로 대기하고, Gitea에 미리
+> 등록된 리다이렉트가 `http://127.0.0.1`(포트 무관)이라 그대로 맞는다. Gitea가 포트를
+> 가리지 않는 처리는 `127.0.0.1`에만 적용되므로 `localhost`로 바꾸면 깨진다. 굳이
+> 지정하려면 옵션 이름이 `oauthRedirectURL`이다(GCM은 `oauthRedirectUri`).
 
 #### 승인했는데 `127.0.0.1`로 넘어가지 않는다 (code·state까지만 가고 끊김)
 
@@ -357,7 +405,7 @@ URL Rewrite의 **아웃바운드 규칙**에서 `Location`을 손대고 있다�
 **④ 브라우저와 GCM이 다른 머신** — `127.0.0.1`은 **브라우저가 도는 PC**를 가리킨다. SSH 원격
 개발·WSL·컨테이너 안에서 `git push`를 하면 GCM은 그쪽에서 대기하는데 브라우저는 내 PC에서
 열려, 리다이렉트가 엉뚱한 곳의 루프백으로 간다. 같은 머신에서 하거나
-[액세스 토큰 방식](#대안--액세스-토큰-gcm을-못-쓰는-환경)을 쓴다.
+[액세스 토큰 방식](#대안--액세스-토큰-브라우저-oauth를-못-쓰는-환경)을 쓴다.
 
 #### 브라우저 승인까지 됐는데 push가 멈춘다
 
@@ -373,24 +421,40 @@ URL Rewrite의 **아웃바운드 규칙**에서 `Location`을 손대고 있다�
    ```bash
    curl -s -o /dev/null -w '%{http_code}\n' -X POST https://host.example.com/gitea/login/oauth/access_token
    ```
-3. **GCM 로그로 확인** — 어느 URL에서 멈추는지 그대로 찍힌다:
+3. **헬퍼 로그로 확인** — 어느 URL에서 멈추는지 그대로 찍힌다:
    ```bash
+   # git-credential-oauth: 등록을 verbose로 바꿔 stderr를 본다(플래그는 -h로 확인)
+   git config --global --replace-all credential.helper "oauth -verbose" ; git push
+   # GCM을 쓰고 있다면
    GCM_TRACE=1 git push        # Windows PowerShell: $env:GCM_TRACE=1; git push
    ```
 4. 그래도 안 되면 위 `credential.*oauth*` 값을 모두 지우고
-   [액세스 토큰 방식](#대안--액세스-토큰-gcm을-못-쓰는-환경)으로 돌아간다 — 서브패스
-   자동 인식은 GCM의 미해결 이슈라 환경에 따라 걸릴 수 있다.
+   [액세스 토큰 방식](#대안--액세스-토큰-브라우저-oauth를-못-쓰는-환경)으로 돌아간다 —
+   서브패스에서의 엔드포인트 자동 인식은 헬퍼마다 사정이 다르고, 환경에 따라 걸릴 수 있다.
    ```bash
-   git config --global --unset-all credential.https://host.example.com.oauthClientId
-   git config --global --unset-all credential.https://host.example.com.oauthAuthorizeEndpoint
-   git config --global --unset-all credential.https://host.example.com.oauthTokenEndpoint
-   git config --global --unset-all credential.https://host.example.com.oauthRedirectUri
+   git config --global --get-regexp 'credential\..*oauth' \
+     | cut -d' ' -f1 | xargs -n1 git config --global --unset-all
    ```
 
-#### 대안 — 액세스 토큰 (GCM을 못 쓰는 환경)
+#### 첫 push만 인증 오류가 나고 바로 재시도하면 된다
 
-CI 러너나 GCM 설치가 불가능한 PC에서는 개인 액세스 토큰을 쓴다. 프로필 → Settings →
-Applications → Generate New Token, 스코프는 최소 `write:repository`.
+증상이 **주기적으로**(마지막 성공에서 1시간쯤 지난 뒤 첫 push) 나고, 재시도할 때
+브라우저가 뜨지 않는다면 만료된 OAuth 액세스 토큰을 헬퍼가 그대로 내놓은 것이다 —
+원인과 해결은 위 [권장 설정](#권장--브라우저-sso--만료-자동-갱신-git-credential-oauth--cache)에
+정리해 뒀다(요약: GCM은 만료 정보를 git에 넘기지 않으므로 `git-credential-oauth` + `cache`로
+바꾼다). 확인은 이 두 가지로 갈린다:
+
+- **1시간 안에 연속으로 push할 때는 멀쩡하다** → 만료 문제다(위 설정으로 해결).
+- **재시도할 때 아이디·비밀번호를 다시 묻는다** → 만료가 아니라 저장소에 남은 잘못된
+  자격 증명이다(아래 [자격 증명 초기화](#자격-증명-초기화)).
+
+#### 대안 — 액세스 토큰 (브라우저 OAuth를 못 쓰는 환경)
+
+CI 러너, 헬퍼 설치가 불가능한 PC, `credential-cache`가 없는 환경에서는 개인 액세스 토큰을
+쓴다. **이 토큰에는 만료가 없어서** 위의 갱신 문제 자체가 생기지 않는다 — 대가는 사람마다
+한 번 손으로 발급해야 하는 것이다(플랫폼이 대신 발급해 줄 수는 없다. Gitea의 토큰 생성
+API가 basic 인증을 요구해서 관리자 API 토큰으로는 대행이 막혀 있다).
+프로필 → Settings → Applications → Generate New Token, 스코프는 최소 `write:repository`.
 ```bash
 git clone https://git.example.com/org/repo.git
 #   Username: <Gitea 사용자명>
@@ -402,8 +466,12 @@ git clone https://git.example.com/org/repo.git
 > 이미 그렇게 받았다면 `git remote set-url origin https://git.example.com/org/repo.git`로
 > 정리한 뒤 위 방식으로 다시 인증한다.
 
+#### 자격 증명 초기화
+
 **이미 틀린 자격 증명이 캐시된 경우** — 한 번 잘못 입력하면 helper가 그걸 저장해 두고
-계속 재사용하므로, 토큰을 새로 발급해도 계속 실패한다. 저장된 항목을 먼저 지운다:
+계속 재사용하므로, 토큰을 새로 발급해도 계속 실패한다. GCM에서 다른 헬퍼로 옮길 때도
+같은 정리가 필요하다(GCM이 OS 저장소에 넣어 둔 만료된 액세스 토큰이 계속 나온다).
+저장된 항목을 먼저 지운다:
 ```powershell
 # Windows: 제어판 → 자격 증명 관리자 → Windows 자격 증명 →
 #          "git:http://git.example.com" 항목 제거
@@ -413,6 +481,8 @@ cmdkey /list | findstr git
 ```bash
 # 공통 — helper에게 직접 지우게 한다
 printf 'protocol=http\nhost=git.example.com\n\n' | git credential reject
+# cache 헬퍼를 쓰면 메모리에 남은 것까지 비운다(데몬 종료)
+git credential-cache exit
 ```
 
 > VS Code는 자체 자격 증명 저장소를 쓰지 않고 위 git credential helper를 그대로
@@ -503,7 +573,7 @@ gitea admin auth add-oauth \
 > 그 주소로 실제 접속하는 건 같은 PC의 브라우저이고, 인가 코드는 PC 안에서 GCM에게
 > 전달된다 — Gitea 서버가 `127.0.0.1`로 접속하는 일은 없다. 그래서 서버 방화벽과는
 > 무관하고, 반대로 **브라우저가 없는 환경(헤드리스 서버·CI 러너)에서는 이 방식이
-> 성립하지 않는다**(→ [액세스 토큰 방식](#대안--액세스-토큰-gcm을-못-쓰는-환경)).
+> 성립하지 않는다**(→ [액세스 토큰 방식](#대안--액세스-토큰-브라우저-oauth를-못-쓰는-환경)).
 
 **포트는 그대로 전달된다.** 등록값에 포트가 없는 건 GCM이 실행 시점에 빈 포트를 잡기
 때문이지, 포트가 빠진 채 리다이렉트된다는 뜻이 아니다. Gitea는 **비교할 때만** 포트를
@@ -538,7 +608,7 @@ gitea admin auth add-oauth \
 
 값을 고쳤으면 플랫폼을 재시작해야 반영된다(`.env`는 기동 시 읽는다).
 
-**d) 자동 계정 생성 허용** — 아래 [공통 설정](#c-공통-자동-계정-생성-설정) 참고.
+**d) 자동 계정 생성 허용** — 아래 [공통 설정](#c-공통--자동-계정-생성-설정) 참고.
 
 플랫폼이 노출하는 엔드포인트(설정 확인용):
 `/paas/.well-known/openid-configuration`, `/paas/oauth2/authorize`,

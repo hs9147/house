@@ -52,10 +52,23 @@ DISABLE_REGISTRATION = true
 [oauth2]
 ; 개발자가 git push할 때 토큰을 손으로 만들지 않고 브라우저 로그인으로 끝내는 경로가
 ; 여기에 달려 있다. Gitea 1.21+는 아래 DEFAULT_APPLICATIONS의 앱들을 기동 시 미리
-; 등록해 두므로, Git Credential Manager가 별도 서버 설정 없이 OAuth로 붙는다.
-; 끄면 GCM이 OAuth를 못 찾아 비밀번호를 묻는 방식으로 되돌아간다.
+; 등록해 두므로, 자격 증명 헬퍼가 별도 서버 설정 없이 OAuth로 붙는다.
+; 끄면 헬퍼가 OAuth를 못 찾아 비밀번호를 묻는 방식으로 되돌아간다.
 ENABLED = true
+; git-credential-oauth가 첫 항목인 것이 중요하다 — README가 권장하는 헬퍼이며, 미리
+; 등록되는 클라이언트 ID(a4792ccc-…)를 개발자 PC 설정에 그대로 넣는다.
+; (GCM용은 e90ee53c-…로 다르다. 섞어 넣으면 승인 화면에서 막힌다.)
 DEFAULT_APPLICATIONS = git-credential-oauth, git-credential-manager, tea
+;
+; 액세스 토큰 수명(초). 기본 3600(1시간)이며 **이 값은 건드리지 않아도 된다** —
+; git-credential-oauth는 만료(password_expiry_utc)와 리프레시 토큰을 git에 넘기므로
+; git이 만료 전에 알아서 갱신한다.
+;
+; 늘려야 하는 경우는 하나뿐이다: 만료 정보를 git에 넘기지 않는 헬퍼(Git Credential
+; Manager)를 계속 쓰는 경우. 그러면 마지막 성공에서 1시간 뒤 첫 push가 인증 오류로
+; 실패하고 재시도하면 성공하는 증상이 반복되는데, 이 값을 늘리면 그 빈도만 줄어든다
+; (없어지지는 않는다). 대가는 토큰이 유출됐을 때 유효한 창이 그만큼 길어지는 것이다.
+; ACCESS_TOKEN_EXPIRATION_TIME = 86400
 
 [oauth2_client]
 ; SSO(플랫폼 계정)로 처음 들어오는 사람의 Gitea 계정을 관리자가 미리 만들어 두지
