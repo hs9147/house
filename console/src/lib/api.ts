@@ -279,7 +279,7 @@ export const api = {
   importApiModule: (name: string, url: string, category?: string) =>
     request<ModuleOut>('POST', '/modules/import', { name, url, category: category || null }),
 
-  // 외부 MCP 디렉터리 검색 + mcp 모듈 자동 추가 (admin)
+  // 사내 MCP 서버 검색 + mcp 모듈 자동 추가 (admin) — 목록은 이 플랫폼이 노출하는 서버다
   searchMcpDirectory: (q?: string) =>
     request<McpDirectoryItem[]>('GET', `/mcp/search?q=${encodeURIComponent(q || '')}`),
   // 등록된 mcp 모듈이 실제로 응답하는지 확인(tools/list 1회). 실패도 200으로 오고

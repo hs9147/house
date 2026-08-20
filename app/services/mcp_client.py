@@ -1,4 +1,6 @@
-"""외부 MCP(Model Context Protocol) 서버 최소 클라이언트 — JSON-RPC 2.0 / HTTP.
+"""MCP(Model Context Protocol) 서버 최소 클라이언트 — JSON-RPC 2.0 / HTTP.
+
+대상은 사내 서버(api/mcp_servers.py)든 외부 서버든 같다 — 주소와 키만 다르다.
 
 MCP 서버가 단일 JSON 응답(스트리밍 없는 streamable-http)으로 답하는 경우만
 지원한다 — tools/list · tools/call 두 메서드만 다루고, resources/prompts, 세션

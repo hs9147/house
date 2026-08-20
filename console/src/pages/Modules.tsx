@@ -836,7 +836,7 @@ function CreateModuleModal({
             <option value="file_storage">file_storage — 파일 저장소 (Root/하위 폴더 지정)</option>
             <option value="internal_api">internal_api — 플랫폼 내 프로젝트</option>
             <option value="database">database — DB 연결</option>
-            <option value="mcp">mcp — 외부 MCP 서버</option>
+            <option value="mcp">mcp — MCP 서버 (사내·외부 공통)</option>
             <option value="llm">llm — 배포 앱이 쓸 LLM 엔드포인트</option>
           </select>
         </label>

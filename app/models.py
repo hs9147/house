@@ -344,7 +344,8 @@ class ModuleType(str, enum.Enum):
     internal_api = "internal_api"
     database = "database"
     file_storage = "file_storage"
-    # 외부 MCP(Model Context Protocol) 서버 — env 주입은 external_api와 같은 모양
+    # MCP(Model Context Protocol) 서버 — 사내(api/mcp_servers.py)든 외부든 같은 타입이다.
+    # env 주입은 external_api와 같은 모양
     # (URL/API_KEY)이지만, 타입을 분리해 두면 채팅 기능이 "이 프로젝트에 바인딩된
     # MCP 서버가 뭔지"를 category(자유 텍스트, 표시용일 뿐 동작에 안 씀)에 기대지
     # 않고 구조적으로 찾을 수 있다(services/mcp_client.py가 tools/list·tools/call로
