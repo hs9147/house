@@ -7,7 +7,7 @@ unicode61 토크나이저는 공백으로 끊은 토큰만 잡아 `규정`으로
 일치가 정확히 되고, 본문 6MB/5,000건 전체 스캔이 30ms였다(100MB급도 1초 안).
 
 **색인은 파생 데이터다.** 원본은 디스크의 문서이고 이 파일은 언제든 지우고 다시 만들 수
-있다. 그래서 플랫폼 DB(마이그레이션 대상)에 넣지 않고 모듈별 sqlite 파일로 분리한다.
+있다. 그래서 플랫폼 DB(마이그레이션 대상)에 넣지 않고 저장소별 sqlite 파일로 분리한다.
 
 **추출은 비싸다.** PDF 한 건에 수십~수백 ms가 든다. 그래서 색인은 한 번에 끝내지 않고
 호출마다 시간 예산만큼만 진행하고 남은 개수를 돌려준다 — MCP 클라이언트의 요청 타임아웃
@@ -50,14 +50,14 @@ CREATE TABLE IF NOT EXISTS docs (
 """
 
 
-def index_path(module_name: str) -> Path:
+def index_path(store_name: str) -> Path:
     directory = Path(get_settings().doc_index_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    return directory / f"{module_name}.db"
+    return directory / f"{store_name}.db"
 
 
-def _connect(module_name: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(index_path(module_name))
+def _connect(store_name: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(index_path(store_name))
     conn.row_factory = sqlite3.Row
     conn.execute(_SCHEMA)
     return conn
@@ -81,7 +81,7 @@ def _candidates(root: Path) -> list[tuple[str, int, float]]:
     return found
 
 
-def reindex(module_name: str, root: Path, *, force: bool = False,
+def reindex(store_name: str, root: Path, *, force: bool = False,
             budget_seconds: float = _DEFAULT_BUDGET) -> dict:
     """바뀐 파일만 다시 추출해 색인을 갱신한다.
 
@@ -91,7 +91,7 @@ def reindex(module_name: str, root: Path, *, force: bool = False,
     있다(비싼 것은 추출뿐이다).
     """
     started = time.monotonic()
-    conn = _connect(module_name)
+    conn = _connect(store_name)
     try:
         known = {
             row["path"]: (row["size"], row["mtime"])
@@ -144,13 +144,13 @@ def reindex(module_name: str, root: Path, *, force: bool = False,
         conn.close()
 
 
-def status(module_name: str) -> dict:
+def status(store_name: str) -> dict:
     """색인 커버리지 — 확장자별로 몇 건이 읽혔고 못 읽은 것은 왜인지.
 
     "붙였는데 검색이 안 된다"의 원인이 대개 추출 실패(스캔 PDF, 97-2003 바이너리)라서,
     실패 이유를 묶어 함께 돌려준다.
     """
-    conn = _connect(module_name)
+    conn = _connect(store_name)
     try:
         rows = conn.execute("SELECT path, body IS NOT NULL AS ok, error FROM docs").fetchall()
         by_suffix: dict[str, dict] = {}
@@ -184,14 +184,14 @@ def _like_pattern(term: str) -> str:
     return f"%{escaped}%"
 
 
-def search(module_name: str, query: str, limit: int = 10, *, width: int = 60,
+def search(store_name: str, query: str, limit: int = 10, *, width: int = 60,
            snippets_per_file: int = 3) -> dict:
     """공백으로 끊은 낱말을 **모두** 포함하는 문서를 찾아 발췌와 함께 돌려준다."""
     terms = [t for t in re.split(r"\s+", query.strip()) if t]
     if not terms:
         return {"query": query, "terms": [], "hits": [], "truncated": False}
 
-    conn = _connect(module_name)
+    conn = _connect(store_name)
     try:
         where = " AND ".join(["body LIKE ? ESCAPE '\\'"] * len(terms))
         rows = conn.execute(

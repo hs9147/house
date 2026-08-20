@@ -9,10 +9,14 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
   POST /mcp/ops                  운영 조회 — 배포 상태·로그·라우팅·호스트·감사(읽기 전용)
   POST /mcp/projects/{id}/code   프로젝트 코드 조회(읽기 전용)
   POST /mcp/docs                 사내 문서 본문 검색 — 저장소를 가로질러 한 번에(읽기 전용)
-  POST /mcp/storage/{module}     file_storage 모듈 파일 — 모듈 루트 밖으로 나갈 수 없다
+  POST /mcp/storage/{저장소}      저장소 파일 — 저장소 루트 밖으로 나갈 수 없다
   POST /mcp/db/{module}          database 모듈 조회 — SELECT 전용, 허용 목록에 있는 모듈만
 
-문서 검색이 두 곳에 있는 이유: /mcp/storage/{module}은 **그 저장소 안**을 다루는 도구
+저장소 목록은 모듈 레지스트리가 아니라 환경변수가 정한다(PAAS_STORAGE_ROOT ·
+PAAS_DOC_ROOTS, services/storage.py) — 디스크 경로는 서버를 설치한 사람이 아는
+사실이지 콘솔에서 등록할 일이 아니다.
+
+문서 검색이 두 곳에 있는 이유: /mcp/storage/{저장소}는 **그 저장소 안**을 다루는 도구
 묶음이고(목록·읽기·쓰기와 함께 검색), /mcp/docs는 "사내 문서에서 찾아라"는 하나의 일을
 위한 서버다 — 저장소 이름을 모르는 쪽에서 부르므로 전 저장소를 가로질러 찾고 결과에
 어느 저장소인지를 실어 준다.
@@ -499,12 +503,13 @@ async def docs_mcp_server(
 ):
     """사내 문서 검색 MCP 서버(JSON-RPC 2.0) — 읽기 전용.
 
-    대상은 등록된 file_storage 모듈 전부다. /mcp/storage/{module}에도 같은 검색이 있지만
-    그쪽은 저장소 하나를 다루는 도구 묶음이고, 여기는 **저장소 이름을 모르는 쪽**이 부르는
-    창구다 — 전 저장소를 가로질러 찾고 결과에 어느 저장소인지를 실어 준다.
+    대상은 환경변수가 정한 저장소 전부다(PAAS_STORAGE_ROOT + PAAS_DOC_ROOTS).
+    /mcp/storage/{저장소}에도 같은 검색이 있지만 그쪽은 저장소 하나를 다루는 도구
+    묶음이고, 여기는 **저장소 이름을 모르는 쪽**이 부르는 창구다 — 전 저장소를 가로질러
+    찾고 결과에 어느 저장소인지를 실어 준다.
 
     쓰기는 노출하지 않는다. 문서를 찾으러 붙는 서버라 고칠 일이 없고, 고쳐야 하면 그
-    저장소의 /mcp/storage/{module}로 간다(거기서도 read_only면 막힌다).
+    저장소의 /mcp/storage/{저장소}로 간다(사내 문서 폴더는 거기서도 막힌다).
     """
     return mcp_server.dispatch(
         await mcp_server.read_payload(request),
@@ -514,41 +519,38 @@ async def docs_mcp_server(
     )
 
 
-def _doc_sources(db: Session) -> list[Module]:
-    return list(db.execute(
-        select(Module).where(Module.type == ModuleType.file_storage).order_by(Module.name)
-    ).scalars())
+def _all_stores() -> list[storage_service.Store]:
+    try:
+        return storage_service.stores()
+    except storage_service.StorageError as e:
+        raise mcp_server.McpToolError(str(e))
 
 
-def _doc_source(db: Session, name: str) -> Module:
-    module = db.execute(
-        select(Module).where(Module.name == name, Module.type == ModuleType.file_storage)
-    ).scalar_one_or_none()
-    if module is None:
+def _doc_source(name: str) -> storage_service.Store:
+    found = next((s for s in _all_stores() if s.name == name), None)
+    if found is None:
         raise mcp_server.McpToolError(
             f"문서 저장소를 찾을 수 없습니다: {name} (list_sources로 이름을 확인하세요)")
-    return module
+    return found
 
 
 def _docs_call(db: Session, actor: str, name: str, args: dict) -> str:
     source_name = _str_arg(args, "source", required=False)
-    sources = [_doc_source(db, source_name)] if source_name else _doc_sources(db)
-    if not sources:
-        raise mcp_server.McpToolError(
-            "등록된 문서 저장소가 없습니다 — file_storage 모듈을 먼저 등록하세요"
-            "(사내 문서 폴더라면 config.endpoint에 절대 경로, read_only: true).")
+    sources = [_doc_source(source_name)] if source_name else _all_stores()
 
     if name == "list_sources":
         return _dump([
-            {"source": module.name,
-             "read_only": _read_only(module),
-             "index": {k: v for k, v in docsearch.status(module.name).items()
+            # root를 함께 준다 — "붙였는데 안 나온다"의 원인은 거의 언제나 경로이고,
+            # 경로를 감추면 그것을 확인할 방법이 없다(환경변수로 정하는 값이다).
+            {"source": store.name, "root": str(store.root),
+             "exists": store.root.is_dir(), "read_only": store.read_only,
+             "index": {k: v for k, v in docsearch.status(store.name).items()
                        if k in ("total", "indexed", "failed")}}
-            for module in sources
+            for store in sources
         ])
 
     if name == "index_status":
-        return _dump({module.name: docsearch.status(module.name) for module in sources})
+        return _dump({store.name: docsearch.status(store.name) for store in sources})
 
     if name == "reindex_docs":
         return _dump(_reindex_sources(db, actor, sources, force=bool(args.get("force"))))
@@ -563,22 +565,24 @@ def _docs_call(db: Session, actor: str, name: str, args: dict) -> str:
     limit = _int_arg(args, "limit", 10, _MAX_LIST)
     hits: list[dict] = []
     truncated = False
-    for module in sources:
+    for store in sources:
         if len(hits) >= limit:
             truncated = True
             break
-        found = docsearch.search(module.name, query, limit - len(hits))
+        found = docsearch.search(store.name, query, limit - len(hits))
         truncated = truncated or found["truncated"]
-        hits += [{"source": module.name, **hit} for hit in found["hits"]]
+        hits += [{"source": store.name, **hit} for hit in found["hits"]]
 
     result = {"query": query, "hits": hits, "truncated": truncated,
-              "searched": [module.name for module in sources]}
+              "searched": [store.name for store in sources]}
     if not hits:
         # 색인이 비어 있는 것과 "찾지 못한 것"은 다른 문제다 — 구분해서 알려 준다.
-        coverage = {m.name: docsearch.status(m.name) for m in sources}
+        coverage = {s.name: docsearch.status(s.name) for s in sources}
         if all(c["total"] == 0 for c in coverage.values()):
             raise mcp_server.McpToolError(
-                "색인이 비어 있습니다 — reindex_docs를 먼저 실행하세요.")
+                "색인이 비어 있습니다 — reindex_docs를 먼저 실행하세요."
+                " (그래도 비어 있으면 PAAS_DOC_ROOTS가 가리키는 폴더를 list_sources로"
+                " 확인하세요.)")
         result["index"] = {n: {"indexed": c["indexed"], "failed": c["failed"]}
                            for n, c in coverage.items()}
     audit.record(db, actor, "mcp.docs.search", source_name or "*",
@@ -586,7 +590,8 @@ def _docs_call(db: Session, actor: str, name: str, args: dict) -> str:
     return _dump(result)
 
 
-def _reindex_sources(db: Session, actor: str, sources: list[Module], *, force: bool) -> dict:
+def _reindex_sources(db: Session, actor: str, sources: list[storage_service.Store], *,
+                     force: bool) -> dict:
     """저장소들을 한 예산 안에서 순서대로 색인한다.
 
     예산을 나눠 주지 않고 남은 만큼 넘기는 이유: 앞 저장소가 이미 최신이면 거의 시간을
@@ -596,14 +601,13 @@ def _reindex_sources(db: Session, actor: str, sources: list[Module], *, force: b
 
     started = time.monotonic()
     per_source = {}
-    for module in sources:
+    for store in sources:
         remaining = _DOCS_REINDEX_BUDGET - (time.monotonic() - started)
         result = docsearch.reindex(
-            module.name, storage_service.root_for(module),
-            force=force, budget_seconds=max(0.0, remaining),
+            store.name, store.root, force=force, budget_seconds=max(0.0, remaining),
         )
-        audit.record(db, actor, "mcp.docs.reindex", module.name, result)
-        per_source[module.name] = result
+        audit.record(db, actor, "mcp.docs.reindex", store.name, result)
+        per_source[store.name] = result
     return {
         "sources": per_source,
         "done": all(r["done"] for r in per_source.values()),
@@ -611,10 +615,10 @@ def _reindex_sources(db: Session, actor: str, sources: list[Module], *, force: b
     }
 
 
-def _read_document(db: Session, actor: str, module: Module, path: str) -> str:
+def _read_document(db: Session, actor: str, store: storage_service.Store, path: str) -> str:
     """저장소 파일 하나를 본문 텍스트로 — /mcp/docs와 /mcp/storage가 같은 규칙을 쓴다."""
     try:
-        target = storage_service.resolve(storage_service.root_for(module), path)
+        target = storage_service.resolve(store.root, path)
     except storage_service.StorageError as e:
         raise mcp_server.McpToolError(str(e))
     if not target.is_file():
@@ -623,17 +627,17 @@ def _read_document(db: Session, actor: str, module: Module, path: str) -> str:
         text = doctext.extract_text(target)
     except doctext.ExtractError as e:
         raise mcp_server.McpToolError(str(e))
-    audit.record(db, actor, "mcp.storage.read", module.name, {"path": path})
+    audit.record(db, actor, "mcp.storage.read", store.name, {"path": path})
     return _truncate(text)
 
 
-# --- 파일 저장소 서버 (/mcp/storage/{module}) ---
+# --- 파일 저장소 서버 (/mcp/storage/{저장소}) ---
 
 _STORAGE_READ_TOOLS = [
     {
         "name": "list_files",
         "description": (
-            "이 저장소 모듈의 파일 목록(경로·크기). glob으로 걸러 낸다(예: **/*.pdf,"
+            "이 저장소의 파일 목록(경로·크기). glob으로 걸러 낸다(예: **/*.pdf,"
             f" 규정*). 기본 {_MAX_LIST}건, 최대 {_MAX_FILE_LIST}건이며 잘리면 그렇다고 알린다."
         ),
         "inputSchema": {
@@ -717,36 +721,43 @@ _STORAGE_WRITE_TOOLS = [
 ]
 
 
-@router.post("/mcp/storage/{module_name}")
+@router.post("/mcp/storage/{store_name}")
 async def storage_mcp_server(
-    module_name: str,
+    store_name: str,
     request: Request,
     db: Session = Depends(get_db),
     key: ApiKey = Depends(require_api_key),
 ):
-    """file_storage 모듈 파일 MCP 서버(JSON-RPC 2.0).
+    """저장소 파일 MCP 서버(JSON-RPC 2.0).
 
-    경로는 storage.resolve가 모듈 루트 안으로 가둔다 — 이 서버의 존재 이유가 그
+    경로는 storage.resolve가 저장소 루트 안으로 가둔다 — 이 서버의 존재 이유가 그
     가둠이다(공개 filesystem MCP 서버는 호스트 디스크를 그대로 연다).
 
-    모듈 config에 `read_only: true`면 쓰기·삭제 도구를 아예 광고하지 않는다. 사내 문서
-    공유 폴더처럼 플랫폼이 만든 것이 아닌 디렉터리를 붙일 때 쓴다 — 목록에 없는 도구는
-    모델이 부르지도 않고, 불러도 unknown tool로 막힌다.
+    PAAS_DOC_ROOTS로 붙인 사내 문서 폴더는 읽기 전용이라 쓰기·삭제 도구를 아예 광고하지
+    않는다 — 플랫폼이 만든 것이 아닌 디렉터리이기 때문이다. 목록에 없는 도구는 모델이
+    부르지도 않고, 불러도 unknown tool로 막힌다.
     """
-    module = _typed_module(db, module_name, ModuleType.file_storage)
+    store = _mcp_store(store_name)
     tools = list(_STORAGE_READ_TOOLS)
-    if not _read_only(module):
+    if not store.read_only:
         tools += _STORAGE_WRITE_TOOLS
     return mcp_server.dispatch(
         await mcp_server.read_payload(request),
-        server_name=f"paas-storage-{module.name}",
+        server_name=f"paas-storage-{store.name}",
         tools=tools,
-        call=lambda name, args: _storage_call(db, key.name, module, name, args),
+        call=lambda name, args: _storage_call(db, key.name, store, name, args),
     )
 
 
-def _read_only(module: Module) -> bool:
-    return bool((module.config or {}).get("read_only"))
+def _mcp_store(store_name: str) -> storage_service.Store:
+    try:
+        found = storage_service.store(store_name)
+    except storage_service.StorageError as e:
+        # 요청이 아니라 서버 환경변수가 잘못돼 있다 — JSON-RPC 이전 단계라 HTTP로 알린다.
+        raise HTTPException(status_code=500, detail=str(e))
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"storage '{store_name}' not found")
+    return found
 
 
 def _file_listing(root: Path, args: dict) -> dict:
@@ -784,43 +795,44 @@ def _typed_module(db: Session, module_name: str, expected: ModuleType) -> Module
     return row
 
 
-def _storage_call(db: Session, actor: str, module: Module, name: str, args: dict) -> str:
-    root = storage_service.root_for(module)
+def _storage_call(db: Session, actor: str, store: storage_service.Store, name: str,
+                  args: dict) -> str:
+    root = store.root
 
     if name == "list_files":
         return _dump(_file_listing(root, args))
 
     if name == "index_status":
-        return _dump(docsearch.status(module.name))
+        return _dump(docsearch.status(store.name))
 
     if name == "reindex_docs":
-        result = docsearch.reindex(module.name, root, force=bool(args.get("force")))
-        audit.record(db, actor, "mcp.docs.reindex", module.name, result)
+        result = docsearch.reindex(store.name, root, force=bool(args.get("force")))
+        audit.record(db, actor, "mcp.docs.reindex", store.name, result)
         return _dump(result)
 
     if name == "search_docs":
         query = _str_arg(args, "query")
         limit = _int_arg(args, "limit", 10, _MAX_LIST)
-        result = docsearch.search(module.name, query, limit)
+        result = docsearch.search(store.name, query, limit)
         if not result["hits"]:
             # 색인이 비어 있는 것과 "찾지 못한 것"은 다른 문제다 — 구분해서 알려 준다.
-            indexed = docsearch.status(module.name)
+            indexed = docsearch.status(store.name)
             if indexed["total"] == 0:
                 raise mcp_server.McpToolError(
                     "색인이 비어 있습니다 — reindex_docs를 먼저 실행하세요.")
             result["index"] = {"indexed": indexed["indexed"], "failed": indexed["failed"]}
-        audit.record(db, actor, "mcp.docs.search", module.name,
+        audit.record(db, actor, "mcp.docs.search", store.name,
                      {"query": query, "hits": len(result["hits"])})
         return _dump(result)
 
     path = _str_arg(args, "path")
     try:
-        target = storage_service.resolve(root, path)
+        storage_service.resolve(root, path)
     except storage_service.StorageError as e:
         raise mcp_server.McpToolError(str(e))
 
     if name == "read_file":
-        return _read_document(db, actor, module, path)
+        return _read_document(db, actor, store, path)
 
     if name == "write_file":
         content = str(args.get("content") or "")
@@ -828,7 +840,7 @@ def _storage_call(db: Session, actor: str, module: Module, name: str, args: dict
             saved = storage_service.write_file(root, path, content.encode("utf-8"))
         except storage_service.StorageError as e:
             raise mcp_server.McpToolError(str(e))
-        audit.record(db, actor, "mcp.storage.write", module.name,
+        audit.record(db, actor, "mcp.storage.write", store.name,
                      {"path": saved, "bytes": len(content.encode("utf-8"))})
         return f"wrote {saved}"
 
@@ -839,7 +851,7 @@ def _storage_call(db: Session, actor: str, module: Module, name: str, args: dict
         raise mcp_server.McpToolError(str(e))
     except FileNotFoundError:
         raise mcp_server.McpToolError(f"파일이 없습니다: {path}")
-    audit.record(db, actor, "mcp.storage.delete", module.name, {"path": path})
+    audit.record(db, actor, "mcp.storage.delete", store.name, {"path": path})
     return f"deleted {path}"
 
 

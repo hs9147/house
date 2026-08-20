@@ -256,20 +256,20 @@ def test_code_server_unknown_project_is_404(monkeypatch, fresh_settings, tmp_pat
 
 # --- 파일 저장소 서버 ---
 
-def _storage_client(monkeypatch, tmp_path, name="assets"):
-    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path))
+def _storage_client(monkeypatch, tmp_path):
+    """쓰기가 열려 있는 저장소는 내부 저장소 하나뿐이고 이름은 'internal'이다.
+
+    (사내 문서 폴더는 PAAS_DOC_ROOTS로 붙고 읽기 전용이다 — 아래 별도 테스트.)
+    """
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "assets"))
+    monkeypatch.setenv("PAAS_DOC_ROOTS", "")
     get_settings.cache_clear()
-    c = _client()
-    r = c.post(f"{API}/modules", json={
-        "name": name, "type": "file_storage", "config": {"sub_folder": name},
-    }, headers=ADMIN)
-    assert r.status_code == 201, r.text
-    return c
+    return _client()
 
 
 def test_storage_server_write_list_read_delete(monkeypatch, fresh_settings, tmp_path):
     c = _storage_client(monkeypatch, tmp_path)
-    path = "/mcp/storage/assets"
+    path = "/mcp/storage/internal"
     names = [t["name"] for t in _rpc(c, path, "tools/list")["result"]["tools"]]
     assert names == ["list_files", "read_file", "search_docs", "reindex_docs",
                      "index_status", "write_file", "delete_file"]
@@ -286,27 +286,24 @@ def test_storage_server_write_list_read_delete(monkeypatch, fresh_settings, tmp_
     assert {"mcp.storage.write", "mcp.storage.read", "mcp.storage.delete"} <= actions
 
 
-def test_storage_server_cannot_escape_module_root(monkeypatch, fresh_settings, tmp_path):
+def test_storage_server_cannot_escape_store_root(monkeypatch, fresh_settings, tmp_path):
     """이 서버의 존재 이유가 이 가둠이다 — 공개 filesystem MCP는 호스트 디스크를 그대로 연다."""
     c = _storage_client(monkeypatch, tmp_path)
-    path = "/mcp/storage/assets"
+    path = "/mcp/storage/internal"
     for escape in ("../outside.txt", "/etc/passwd"):
         reply = _call(c, path, "write_file", {"path": escape, "content": "x"})
         assert reply["error"]["code"] == -32602, escape
     assert not (tmp_path / "outside.txt").exists()
 
 
-def test_storage_read_only_module_hides_write_tools(monkeypatch, fresh_settings, tmp_path):
-    """사내 문서 공유 폴더처럼 플랫폼이 만들지 않은 디렉터리를 붙일 때 — 목록에 없는
+def test_doc_root_store_hides_write_tools(monkeypatch, fresh_settings, tmp_path):
+    """PAAS_DOC_ROOTS로 붙인 사내 문서 폴더는 플랫폼이 만든 것이 아니다 — 목록에 없는
     도구는 모델이 부르지 않고, 불러도 막힌다."""
-    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path))
+    (tmp_path / "company-docs").mkdir()
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
+    monkeypatch.setenv("PAAS_DOC_ROOTS", str(tmp_path / "company-docs"))
     get_settings.cache_clear()
     c = _client()
-    r = c.post(f"{API}/modules", json={
-        "name": "company-docs", "type": "file_storage",
-        "config": {"sub_folder": "docs", "read_only": True},
-    }, headers=ADMIN)
-    assert r.status_code == 201, r.text
 
     path = "/mcp/storage/company-docs"
     names = [t["name"] for t in _rpc(c, path, "tools/list")["result"]["tools"]]
@@ -335,20 +332,20 @@ def test_storage_list_files_filters_and_caps(monkeypatch, fresh_settings, tmp_pa
 
     import json
 
-    everything = json.loads(_text(_call(c, "/mcp/storage/assets", "list_files")))
+    everything = json.loads(_text(_call(c, "/mcp/storage/internal", "list_files")))
     assert everything["total"] == 7
     assert everything["truncated"] is False
 
     # 대소문자 무시 — .PDF와 .pdf가 섞인 폴더가 흔하다
-    pdfs = json.loads(_text(_call(c, "/mcp/storage/assets", "list_files", {"glob": "*.pdf"})))
+    pdfs = json.loads(_text(_call(c, "/mcp/storage/internal", "list_files", {"glob": "*.pdf"})))
     assert pdfs["total"] == 5
 
     # 파일명 패턴은 하위 폴더 파일에도 걸린다
-    rules = json.loads(_text(_call(c, "/mcp/storage/assets", "list_files", {"glob": "*규정*"})))
+    rules = json.loads(_text(_call(c, "/mcp/storage/internal", "list_files", {"glob": "*규정*"})))
     assert [f["path"] for f in rules["files"]] == ["규정/휴가규정.docx"]
 
     capped = json.loads(
-        _text(_call(c, "/mcp/storage/assets", "list_files", {"glob": "*.pdf", "limit": 2})))
+        _text(_call(c, "/mcp/storage/internal", "list_files", {"glob": "*.pdf", "limit": 2})))
     assert len(capped["files"]) == 2
     assert capped["total"] == 5 and capped["truncated"] is True
 
@@ -361,7 +358,7 @@ def test_storage_read_file_extracts_document_text(monkeypatch, fresh_settings, t
     from tests.test_doctext import _docx
 
     _docx(root / "규정.docx", [["매출 정산 규정"], ["분기 마감 후 5일"]])
-    text = _text(_call(c, "/mcp/storage/assets", "read_file", {"path": "규정.docx"}))
+    text = _text(_call(c, "/mcp/storage/internal", "read_file", {"path": "규정.docx"}))
     assert text == "매출 정산 규정\n분기 마감 후 5일"
 
 
@@ -373,7 +370,7 @@ def test_storage_read_file_truncates_instead_of_refusing(monkeypatch, fresh_sett
     from app.api import mcp_servers
 
     (root / "긴문서.txt").write_text("가" * (mcp_servers._MAX_TEXT_CHARS + 500), encoding="utf-8")
-    text = _text(_call(c, "/mcp/storage/assets", "read_file", {"path": "긴문서.txt"}))
+    text = _text(_call(c, "/mcp/storage/internal", "read_file", {"path": "긴문서.txt"}))
     assert "만 표시" in text
     assert str(mcp_servers._MAX_TEXT_CHARS + 500) in text
 
@@ -387,7 +384,7 @@ def test_storage_read_file_reports_unreadable_format(monkeypatch, fresh_settings
     from app.services import doctext
 
     monkeypatch.setattr(doctext, "_soffice", lambda: None)
-    reply = _call(c, "/mcp/storage/assets", "read_file", {"path": "old.doc"})
+    reply = _call(c, "/mcp/storage/internal", "read_file", {"path": "old.doc"})
     assert reply["error"]["code"] == -32602
     assert "97-2003" in reply["error"]["message"]
 
@@ -402,7 +399,7 @@ def test_storage_search_docs_flow(monkeypatch, fresh_settings, tmp_path):
 
     _docx(root / "A-2025-11.docx", [["반출 승인 절차"], ["담당: 총무팀"]])
     (root / "메모.txt").write_text("휴가규정 개정", encoding="utf-8")
-    path = "/mcp/storage/assets"
+    path = "/mcp/storage/internal"
 
     import json
 
@@ -432,17 +429,22 @@ def test_storage_search_docs_flow(monkeypatch, fresh_settings, tmp_path):
     assert {"mcp.docs.reindex", "mcp.docs.search"} <= actions
 
 
-def test_storage_server_rejects_wrong_module_type(monkeypatch, fresh_settings, tmp_path):
+def test_storage_server_rejects_unknown_store(monkeypatch, fresh_settings, tmp_path):
     c = _storage_client(monkeypatch, tmp_path)
-    c.post(f"{API}/modules", json={
-        "name": "paydb", "type": "database", "config": {"dsn": "sqlite:///x.db"},
-    }, headers=ADMIN)
-    r = c.post(f"{API}/mcp/storage/paydb", headers=ADMIN,
-               json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    assert r.status_code == 400
     r = c.post(f"{API}/mcp/storage/nope", headers=ADMIN,
                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert r.status_code == 404
+
+
+def test_storage_server_reports_broken_doc_roots(monkeypatch, fresh_settings, tmp_path):
+    """환경변수가 잘못된 것은 요청 잘못이 아니다 — 어느 항목이 문제인지 그대로 말한다."""
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PAAS_DOC_ROOTS", "=/srv/docs")
+    get_settings.cache_clear()
+    r = _client().post(f"{API}/mcp/storage/internal", headers=ADMIN,
+                       json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert r.status_code == 500
+    assert "'=/srv/docs'" in r.json()["detail"]
 
 
 # --- DB 조회 서버 ---
@@ -560,27 +562,27 @@ def test_db_server_reports_missing_driver(monkeypatch, fresh_settings, tmp_path)
 # --- 사내 문서 검색 서버 (/mcp/docs) ---
 
 def _docs_client(monkeypatch, tmp_path, sources=("company-docs",)):
-    """저장소 여러 개에 문서를 흩어 놓는다 — 가로질러 찾는 것이 이 서버의 이유다."""
-    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path))
+    """문서 폴더 여러 개에 문서를 흩어 놓는다 — 가로질러 찾는 것이 이 서버의 이유다.
+
+    내부 저장소(PAAS_STORAGE_ROOT)도 검색 대상이라 문서 폴더 밖에 따로 둔다 — 안에
+    두면 같은 파일이 두 저장소에 걸쳐 두 번 색인된다.
+    """
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
-    get_settings.cache_clear()
-    c = _client()
     for name in sources:
-        r = c.post(f"{API}/modules", json={
-            "name": name, "type": "file_storage",
-            "config": {"sub_folder": name, "read_only": True},
-        }, headers=ADMIN)
-        assert r.status_code == 201, r.text
-        (tmp_path / name).mkdir(parents=True, exist_ok=True)
-    return c
+        (tmp_path / "shared" / name).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("PAAS_DOC_ROOTS",
+                       ",".join(str(tmp_path / "shared" / n) for n in sources))
+    get_settings.cache_clear()
+    return _client()
 
 
 def test_docs_server_searches_across_every_source(monkeypatch, fresh_settings, tmp_path):
     c = _docs_client(monkeypatch, tmp_path, ("hr-docs", "fin-docs"))
     from tests.test_doctext import _docx
 
-    _docx(tmp_path / "hr-docs" / "휴가규정.docx", [["휴가 규정"], ["담당: 총무팀"]])
-    (tmp_path / "fin-docs" / "정산.txt").write_text("매출 정산 규정 총무팀 확인", encoding="utf-8")
+    _docx(tmp_path / "shared" / "hr-docs" / "휴가규정.docx", [["휴가 규정"], ["담당: 총무팀"]])
+    (tmp_path / "shared" / "fin-docs" / "정산.txt").write_text("매출 정산 규정 총무팀 확인", encoding="utf-8")
 
     import json
 
@@ -590,7 +592,7 @@ def test_docs_server_searches_across_every_source(monkeypatch, fresh_settings, t
 
     built = json.loads(_text(_call(c, "/mcp/docs", "reindex_docs")))
     assert built["done"] is True
-    assert set(built["sources"]) == {"hr-docs", "fin-docs"}
+    assert set(built["sources"]) == {"internal", "hr-docs", "fin-docs"}
 
     hits = json.loads(_text(_call(c, "/mcp/docs", "search_docs", {"query": "총무팀"})))["hits"]
     # 어느 저장소인지가 결과에 실려 온다 — 그래야 read_doc을 부를 수 있다
@@ -607,7 +609,7 @@ def test_docs_server_reads_a_hit(monkeypatch, fresh_settings, tmp_path):
     c = _docs_client(monkeypatch, tmp_path)
     from tests.test_doctext import _docx
 
-    _docx(tmp_path / "company-docs" / "규정.docx", [["반출 승인 절차"], ["담당: 총무팀"]])
+    _docx(tmp_path / "shared" / "company-docs" / "규정.docx", [["반출 승인 절차"], ["담당: 총무팀"]])
     _call(c, "/mcp/docs", "reindex_docs")
     text = _text(_call(c, "/mcp/docs", "read_doc",
                        {"source": "company-docs", "path": "규정.docx"}))
@@ -620,7 +622,7 @@ def test_docs_server_reads_a_hit(monkeypatch, fresh_settings, tmp_path):
 
 def test_docs_server_distinguishes_empty_index_from_no_match(monkeypatch, fresh_settings, tmp_path):
     c = _docs_client(monkeypatch, tmp_path)
-    (tmp_path / "company-docs" / "메모.txt").write_text("휴가 규정", encoding="utf-8")
+    (tmp_path / "shared" / "company-docs" / "메모.txt").write_text("휴가 규정", encoding="utf-8")
 
     empty = _call(c, "/mcp/docs", "search_docs", {"query": "휴가"})
     assert "색인이 비어" in empty["error"]["message"]
@@ -632,16 +634,22 @@ def test_docs_server_distinguishes_empty_index_from_no_match(monkeypatch, fresh_
     assert miss["hits"] == [] and miss["index"]["company-docs"] == {"indexed": 1, "failed": 0}
 
 
-def test_docs_server_without_any_source_says_what_to_do(fresh_settings):
-    c = _client()
-    reply = _call(c, "/mcp/docs", "search_docs", {"query": "규정"})
-    assert "file_storage 모듈을 먼저 등록" in reply["error"]["message"]
+def test_docs_server_points_at_the_env_var_when_nothing_is_indexed(
+        monkeypatch, fresh_settings, tmp_path):
+    """색인이 비었을 때 원인은 둘이다 — 아직 안 돌렸거나, 폴더 설정이 틀렸거나."""
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
+    monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("PAAS_DOC_ROOTS", "")
+    get_settings.cache_clear()
+    reply = _call(_client(), "/mcp/docs", "search_docs", {"query": "규정"})
+    assert "reindex_docs" in reply["error"]["message"]
+    assert "PAAS_DOC_ROOTS" in reply["error"]["message"]
 
 
 def test_docs_server_lists_sources_with_coverage(monkeypatch, fresh_settings, tmp_path):
     c = _docs_client(monkeypatch, tmp_path)
-    (tmp_path / "company-docs" / "메모.txt").write_text("휴가 규정", encoding="utf-8")
-    (tmp_path / "company-docs" / "구버전.doc").write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 32)
+    (tmp_path / "shared" / "company-docs" / "메모.txt").write_text("휴가 규정", encoding="utf-8")
+    (tmp_path / "shared" / "company-docs" / "구버전.doc").write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 32)
     from app.services import doctext
 
     monkeypatch.setattr(doctext, "_soffice", lambda: None)
@@ -649,9 +657,14 @@ def test_docs_server_lists_sources_with_coverage(monkeypatch, fresh_settings, tm
 
     import json
 
-    sources = json.loads(_text(_call(c, "/mcp/docs", "list_sources")))
-    assert sources == [{"source": "company-docs", "read_only": True,
-                        "index": {"total": 2, "indexed": 1, "failed": 1}}]
+    sources = {row["source"]: row for row in
+               json.loads(_text(_call(c, "/mcp/docs", "list_sources")))}
+    assert sources["company-docs"] == {
+        "source": "company-docs", "root": str(tmp_path / "shared" / "company-docs"),
+        "exists": True, "read_only": True,
+        "index": {"total": 2, "indexed": 1, "failed": 1}}
+    # 내부 저장소도 같은 창구로 검색된다(쓰기가 열려 있다는 것만 다르다)
+    assert sources["internal"]["read_only"] is False
     status = json.loads(_text(_call(c, "/mcp/docs", "index_status")))
     assert "97-2003" in " ".join(status["company-docs"]["failure_reasons"])
 
@@ -661,5 +674,5 @@ def test_docs_server_appears_in_the_internal_directory(monkeypatch, fresh_settin
     c = _docs_client(monkeypatch, tmp_path)
     items = {i["id"]: i for i in c.get(f"{API}/mcp/search", headers=ADMIN).json()}
     assert items["paas-docs"]["url"] == "http://localhost:7000/paas/api/v1/mcp/docs"
-    # 저장소가 없을 때 목록에 오르지 않는 것은 test_mcp_search.py에서 확인한다
-    # (같은 테스트 안에서는 DB가 공유돼 "아무것도 없는 상태"를 만들 수 없다).
+    # 저장소마다 전용 서버도 함께 올라간다
+    assert items["paas-storage-company-docs"]["url"].endswith("/mcp/storage/company-docs")

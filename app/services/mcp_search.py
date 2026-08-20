@@ -5,9 +5,10 @@
 stdio 전용이라 URL이라는 개념 자체가 없었다. 그래서 **실재하는 것만 내주도록** 바꿨다 —
 플랫폼이 직접 띄우는 사내 MCP 서버(api/mcp_servers.py)다.
 
-목록은 고정 표가 아니라 **지금 등록된 것에서 만든다**: 저장소 서버는 file_storage 모듈이
-있어야 열 수 있고, DB 서버는 허용 목록에 있는 모듈만, 코드 서버는 프로젝트마다 주소가
-다르다. 없는 대상을 목록에 올리면 예전과 같은 실수를 반복하게 된다.
+목록은 고정 표가 아니라 **지금 있는 것에서 만든다**: 저장소 서버는 환경변수가 정한
+저장소마다(PAAS_STORAGE_ROOT · PAAS_DOC_ROOTS), DB 서버는 허용 목록에 있는 모듈만,
+코드 서버는 프로젝트마다 주소가 다르다. 없는 대상을 목록에 올리면 예전과 같은 실수를
+반복하게 된다.
 """
 from datetime import datetime, timezone
 
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..models import Module, ModuleType, Project
+from . import storage
 
 # 코드 서버는 프로젝트 수만큼 생기므로 목록이 길어진다 — 키워드로 좁히도록 상한을 둔다.
 MAX_PROJECT_ENTRIES = 50
@@ -61,21 +63,23 @@ def list_internal_servers(db: Session) -> list[dict]:
         "ops", "/mcp/ops",
     )]
 
-    storage_modules = list(db.execute(
-        select(Module).where(Module.type == ModuleType.file_storage).order_by(Module.name)
-    ).scalars())
-    if storage_modules:
-        # 저장소가 하나라도 있어야 검색할 대상이 있다 — 없으면 목록에 올리지 않는다.
+    entries.append(_entry(
+        "paas-docs", "paas-docs",
+        "사내 문서 본문 검색 — 열려 있는 문서 저장소를 가로질러 한 번에 찾는다(읽기 전용)",
+        "docs", "/mcp/docs",
+    ))
+    # 저장소 목록은 환경변수가 정한다 — 설정이 잘못돼 있으면 저장소 항목만 빠지고
+    # 나머지 서버는 그대로 나간다(디렉터리 전체가 500으로 죽으면 더 나쁘다).
+    try:
+        found = storage.stores()
+    except storage.StorageError:
+        found = []
+    for store in found:
         entries.append(_entry(
-            "paas-docs", "paas-docs",
-            "사내 문서 본문 검색 — 등록된 문서 저장소를 가로질러 한 번에 찾는다(읽기 전용)",
-            "docs", "/mcp/docs",
-        ))
-    for module in storage_modules:
-        entries.append(_entry(
-            f"paas-storage-{module.name}", f"paas-storage-{module.name}",
-            f"파일 저장소 '{module.name}' — 목록·읽기·쓰기와 그 저장소 안 문서 검색",
-            "storage", f"/mcp/storage/{module.name}",
+            f"paas-storage-{store.name}", f"paas-storage-{store.name}",
+            f"파일 저장소 '{store.name}' — 목록·읽기{'' if store.read_only else '·쓰기'}와"
+            " 그 저장소 안 문서 검색",
+            "storage", f"/mcp/storage/{store.name}",
         ))
 
     allowed = {n.strip() for n in settings.mcp_db_modules.split(",") if n.strip()}

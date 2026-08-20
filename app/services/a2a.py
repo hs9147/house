@@ -15,7 +15,6 @@ from .modules import decrypt_config, binding_env
 # 타입별 호출 가능한 능력(verb). capability.* / scope.* 는 분류 태그일 뿐이라 여기 넣지 않는다 —
 # 도구로 노출되는 것은 이 목록뿐이다.
 SKILLS_BY_TYPE = {
-    "file_storage": ["read_file", "write_file", "list_dir"],
     "database": ["execute_query", "inspect_schema"],
     "external_api": ["invoke_api", "fetch_data"],
     "llm": ["chat_completion"],

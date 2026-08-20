@@ -92,14 +92,24 @@ class Settings(BaseSettings):
     # POST /admin/rotate-secrets 로 전체 재암호화 → 구 키 제거.
     fernet_keys_old: str = ""
 
-    # Git 작업 디렉토리 / 빌드 로그 저장소 / 파일 저장소 Root (환경변수: PAAS_STORAGE_ROOT)
+    # Git 작업 디렉토리 / 빌드 로그 저장소
     work_dir: Path = Path("./data/workspaces")
     build_log_dir: Path = Path("./data/build-logs")
     # 빌드 단계(docker build, npm/pip install 등) subprocess 하나에 허용하는 최대 시간.
     # 없으면 응답 없는 명령(네트워크 문제로 멈춘 npm install 등)이 배포를 "진행중"에
     # 영원히 묶어 둔다 — 초과 시 그 단계를 실패로 끝낸다.
     build_timeout_seconds: int = 600
+    # 내부 저장소 — 플랫폼이 쓰기까지 하는 유일한 저장소 경로. 콘솔 파일 관리 화면과
+    # /storage 창구, /mcp/storage/internal이 여기를 본다. (services/storage.py)
     storage_root: str = "./data/storage"
+    # 사내 문서 폴더(읽기 전용). 쉼표로 여러 개 지정하고, 각 항목은 `이름=경로` 또는
+    # 경로만 쓴다. 이름은 소문자·숫자·하이픈만 쓴다(URL 조각이자 색인 파일 이름이고,
+    # 모듈로 가져올 때 모듈 이름이 된다). 경로만 주면 마지막 폴더 이름에서 만들어 보고
+    # ("Company Docs" → company-docs), 만들 수 없으면(한글 폴더 등) 직접 쓰라고 알려 준다:
+    #   PAAS_DOC_ROOTS=rules=D:\공유\사내규정,D:\shared\contracts
+    # 플랫폼이 만든 저장소가 아니라 **이미 있는 공유 폴더**를 붙이는 자리라 쓰기는 열지
+    # 않는다 — 읽고 찾기만 한다(/mcp/docs로 본문 검색, /mcp/storage/{이름}으로 열람).
+    doc_roots: str = ""
     powershell_start_dir: str = ""
     # /exec가 쓰는 상주 PowerShell 세션의 로컬 TCP 브로커 포트. paas 프로세스가 재시작돼도
     # 이 고정 포트로 다시 붙어 같은 세션(cd·변수 등 상태)을 잇는다 — services/ps_broker.py.
