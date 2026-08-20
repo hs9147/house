@@ -224,14 +224,27 @@ def unbind_module(
 
 @router.get("/modules/search")
 def search_external_apis(
-    keyword: str,
+    keyword: str = "",
+    category: str = "",
     _: ApiKey = Depends(require_admin),
 ):
-    """키워드로 외부 API 디렉터리를 검색한다(요청 3). 아웃바운드 조회이므로 admin 전용.
+    """키워드·카테고리로 외부 API 디렉터리를 검색한다. 아웃바운드 조회이므로 admin 전용.
 
+    두 조건은 AND이고 각각 비우면 그 조건은 걸지 않는다(category 기본값 = 전체).
+    category="기타"는 카테고리가 없는 항목만 고른다.
     반환된 항목은 POST /modules/import로 external_api 모듈에 추가할 수 있다."""
     try:
-        return {"results": apisearch.search_apis(keyword)}
+        return {"results": apisearch.search_apis(keyword, category)}
+    except apisearch.ApiSearchError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/modules/search/categories")
+def list_api_categories(_: ApiKey = Depends(require_admin)):
+    """검색 화면의 카테고리 선택지 — 디렉터리에 실제로 있는 값만 내려간다."""
+    try:
+        return {"categories": apisearch.list_categories(),
+                "uncategorized_label": apisearch.UNCATEGORIZED}
     except apisearch.ApiSearchError as e:
         raise HTTPException(status_code=502, detail=str(e))
 

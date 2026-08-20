@@ -227,7 +227,10 @@ POST /paas/api/v1/modules                           # external_api | internal_ap
                                                 #   + category?(예: news, llm — API 카테고리별 그룹핑)
                                                 #   + organization_id?(지정 시 해당 조직 프로젝트에만 노출)
                                                 # config의 api_key/dsn/secret 등은 Fernet 암호화 저장
-GET  /paas/api/v1/modules/search?keyword=           # 외부 API 디렉터리 키워드 검색 (admin, 아웃바운드 조회)
+GET  /paas/api/v1/modules/search?keyword=&category=  # 외부 API 디렉터리 검색 (admin, 아웃바운드 조회)
+                                                #   두 조건은 AND, 각각 비우면 안 건다(카테고리 기본=전체)
+                                                #   category=기타 → 카테고리가 없는 항목만
+GET  /paas/api/v1/modules/search/categories        # 카테고리 선택지 + 개수 (디렉터리에 실제로 있는 값)
 GET  /paas/api/v1/mcp/search?q=                     # 사내 MCP 서버 검색 — 이 플랫폼이 노출하는 것만
 POST /paas/api/v1/modules/import-mcp                # 검색 결과를 mcp 모듈로 원클릭 등록
 POST /paas/api/v1/modules/import                    # 검색 결과를 external_api 모듈로 자동 추가 (admin, 이름 정규화)

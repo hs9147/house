@@ -1,6 +1,7 @@
 import { getKey, logout } from './auth';
 import type {
   ApiKeyIssued,
+  ApiCategory,
   ApiSearchResult,
   AuditRow,
   BuildProfile,
@@ -266,8 +267,15 @@ export const api = {
   getPlatformModuleReport: () =>
     request<PlatformModuleReportOut>('GET', '/modules/usage-report'),
   // 외부 API 디렉터리 검색 + external_api 모듈 자동 추가 (admin)
-  searchApis: (keyword: string) =>
-    request<{ results: ApiSearchResult[] }>('GET', '/modules/search', undefined, { keyword }),
+  searchApis: (keyword: string, category?: string) =>
+    request<{ results: ApiSearchResult[] }>('GET', '/modules/search', undefined, {
+      keyword,
+      // 빈 값이면 조건을 안 건다(= 전체). 서버 기본값과 같은 뜻이라 굳이 보내지 않는다.
+      ...(category ? { category } : {}),
+    }),
+  listApiCategories: () =>
+    request<{ categories: ApiCategory[]; uncategorized_label: string }>(
+      'GET', '/modules/search/categories'),
   importApiModule: (name: string, url: string, category?: string) =>
     request<ModuleOut>('POST', '/modules/import', { name, url, category: category || null }),
 

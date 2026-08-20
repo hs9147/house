@@ -305,18 +305,29 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
 
 function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [keyword, setKeyword] = useState('');
+  const [category, setCategory] = useState('');   // '' = 전체(기본값)
+  const [categories, setCategories] = useState<import('../lib/types').ApiCategory[]>([]);
   const [results, setResults] = useState<ApiSearchResult[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [added, setAdded] = useState<Record<string, string>>({});
 
+  // 선택지는 디렉터리에서 받아 온다 — 화면에 적어 두면 실제로는 고를 수 없는 값이 남는다.
+  useEffect(() => {
+    api
+      .listApiCategories()
+      .then((res) => setCategories(res.categories))
+      .catch(() => setCategories([]));   // 목록을 못 받아도 키워드 검색은 되어야 한다
+  }, []);
+
   const search = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!keyword.trim()) return;
+    // 키워드·카테고리 둘 다 비면 서버가 빈 목록을 준다 — 미리 막는다.
+    if (!keyword.trim() && !category) return;
     setBusy(true);
     setError('');
     try {
-      const res = await api.searchApis(keyword.trim());
+      const res = await api.searchApis(keyword.trim(), category);
       setResults(res.results);
     } catch (err) {
       setError((err as Error).message);
@@ -340,7 +351,9 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   return (
     <Modal title="외부 API 검색 → 모듈 추가" onClose={onClose}>
       <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
-        공개 API 디렉터리를 키워드로 검색해 external_api 모듈로 추가합니다. 추가 후
+        공개 API 디렉터리를 키워드·카테고리로 검색해 external_api 모듈로 추가합니다.
+        카테고리 기본값은 전체이고, 카테고리가 없는 API는 <span className="mono">기타</span>로
+        고릅니다. 추가 후
         설정의 <span className="mono">url</span>·<span className="mono">api_key</span>는 새 모듈
         수정에서 채웁니다.
       </p>
@@ -351,7 +364,19 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
           placeholder="예: payment, weather, calendar"
           style={{ flex: 1 }}
         />
-        <button type="submit" disabled={busy || !keyword.trim()}>
+        <select
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          title="카테고리 조건 — 기본은 전체입니다"
+        >
+          <option value="">전체</option>
+          {categories.map((c) => (
+            <option key={c.name} value={c.name}>
+              {c.name} ({c.count})
+            </option>
+          ))}
+        </select>
+        <button type="submit" disabled={busy || (!keyword.trim() && !category)}>
           {busy ? '검색 중...' : '검색'}
         </button>
       </form>

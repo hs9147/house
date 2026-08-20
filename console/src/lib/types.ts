@@ -322,6 +322,12 @@ export interface CodeMapOut {
 }
 
 // 외부 API 디렉터리 검색 결과(요청 3)
+/** 외부 API 디렉터리에 실제로 있는 카테고리와 그 개수(고정 표가 아니다). */
+export interface ApiCategory {
+  name: string;
+  count: number;
+}
+
 export interface ApiSearchResult {
   id: string;
   title: string;
