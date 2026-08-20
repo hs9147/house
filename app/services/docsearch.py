@@ -13,10 +13,12 @@ unicode61 토크나이저는 공백으로 끊은 토큰만 잡아 `규정`으로
 호출마다 시간 예산만큼만 진행하고 남은 개수를 돌려준다 — MCP 클라이언트의 요청 타임아웃
 (30초)을 넘기지 않으면서 여러 번 불러 수렴시킨다.
 """
+import os
 import re
 import sqlite3
 import time
 from pathlib import Path
+from stat import S_ISREG
 
 from ..config import get_settings
 from . import docready, doctext
@@ -34,7 +36,23 @@ SKIP_SUFFIXES = {
     ".mp3", ".mp4", ".avi", ".mov", ".wmv", ".mkv", ".wav", ".flac",
     ".zip", ".7z", ".rar", ".gz", ".tar", ".iso",
     ".exe", ".dll", ".msi", ".bin", ".dat", ".db", ".lnk", ".tmp",
+    # 오피스가 남기는 백업·잠금 부산물 — 본문의 사본이거나 사용자 이름 몇 바이트다.
+    ".wbk", ".xlk", ".bak", ".laccdb", ".ldb",
+    # 메일 보관 파일. 문서가 아니고 크기도 GB 단위다.
+    ".pst", ".ost",
 }
+# 이름 앞자리만 보고 거르는 것들.
+#   ~$규정.docx  워드·엑셀·파워포인트가 **문서를 열고 있는 동안** 만드는 잠금 파일.
+#                162바이트짜리 바이너리에 연 사람의 계정명만 들어 있다.
+#   ~WRL0001.tmp 워드 임시 파일.
+#   .DS_Store    맥에서 공유 폴더를 열면 생긴다. ._규정.docx(리소스 포크)도 같이 걸린다.
+# 걸러 두지 않으면 색인이 이것들을 열어 보다 실패하고, index_status의 실패 목록이
+# 이걸로 덮여 진짜 문제(스캔 PDF, 97-2003 파일)가 묻힌다.
+SKIP_PREFIXES = ("~$", ".")
+SKIP_NAMES = {"desktop.ini", "thumbs.db"}
+# 들어가지도 않을 폴더(소문자 비교). 지운 파일이 통째로 들어 있는 휴지통을 훑는 것만으로
+# 색인 예산을 다 쓴다.
+SKIP_DIR_NAMES = {"$recycle.bin", "system volume information", "found.000"}
 _DEFAULT_BUDGET = 20.0
 
 _SCHEMA = """
@@ -63,26 +81,54 @@ def _connect(store_name: str) -> sqlite3.Connection:
     return conn
 
 
-def _candidates(root: Path) -> list[tuple[str, int, float]]:
-    """색인 대상 파일 목록 — (상대경로, 크기, mtime). stat만 하므로 싸다."""
+def skip_dir(name: str) -> bool:
+    """들어가지 않을 폴더. 점으로 시작하는 폴더에는 .ready 캐시가 들어갈 수 있는데,
+    그걸 색인하면 **자기 캐시를 다시 색인**해 문서마다 결과가 둘씩 나온다."""
+    return name.startswith(".") or name.lower() in SKIP_DIR_NAMES
+
+
+def skip_file(name: str) -> bool:
+    """열어 보기 전에 이름만으로 거를 수 있는 것."""
+    return (name.startswith(SKIP_PREFIXES)
+            or name.lower() in SKIP_NAMES
+            or Path(name).suffix.lower() in SKIP_SUFFIXES)
+
+
+def _candidates(root: Path) -> tuple[list[tuple[str, int, float]], int]:
+    """색인 대상 파일 목록 — (상대경로, 크기, mtime)과 못 읽은 폴더 수.
+
+    rglob이 아니라 os.walk을 쓰는 이유는 **가지치기**다. 걸러야 할 폴더는 목록에서 빼는
+    것으로는 부족하고 들어가지 않아야 한다 — 휴지통에는 지운 파일이 통째로 들어 있어서
+    훑는 것만으로 색인 예산을 다 쓴다.
+
+    읽을 수 없는 폴더는 세어서 돌려준다. 조용히 빼면 문서가 통째로 빠졌는데도 "그 폴더에
+    문서가 없다"와 구분되지 않는다 — 공유 폴더는 하위 폴더마다 권한이 다른 일이 흔하다.
+    """
     found: list[tuple[str, int, float]] = []
+    unreadable = 0
     if not root.is_dir():
-        return found
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() in SKIP_SUFFIXES:
-            continue
-        # 점으로 시작하는 폴더는 문서가 아니다(.ready 캐시, .git 등). .ready가 어쩌다
-        # 저장소 안에 놓이면 **자기 캐시를 다시 색인**해 문서마다 결과가 둘씩 나온다.
-        if any(part.startswith(".") for part in path.relative_to(root).parts[:-1]):
-            continue
-        try:
-            stat = path.stat()
-        except OSError:  # 권한·잠긴 파일은 조용히 건너뛴다(다음 색인에서 다시 시도)
-            continue
-        if stat.st_size > MAX_FILE_BYTES:
-            continue
-        found.append((path.relative_to(root).as_posix(), stat.st_size, stat.st_mtime))
-    return found
+        return found, unreadable
+
+    def note(_error: OSError) -> None:
+        nonlocal unreadable
+        unreadable += 1
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=note):
+        dirnames[:] = [d for d in dirnames if not skip_dir(d)]
+        for name in filenames:
+            if skip_file(name):
+                continue
+            path = Path(dirpath) / name
+            try:
+                info = path.stat()
+            except OSError:  # 권한·잠긴 파일은 건너뛴다(다음 색인에서 다시 시도)
+                continue
+            if not S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
+                continue
+            found.append((path.relative_to(root).as_posix(), info.st_size, info.st_mtime))
+    # 순서를 고정한다 — 예산이 모자라 중간에 멈춰도 다음 호출이 같은 자리에서 이어진다.
+    found.sort()
+    return found, unreadable
 
 
 def reindex(store_name: str, root: Path, *, force: bool = False,
@@ -101,7 +147,7 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
             row["path"]: (row["size"], row["mtime"])
             for row in conn.execute("SELECT path, size, mtime FROM docs")
         }
-        candidates = _candidates(root)
+        candidates, unreadable = _candidates(root)
         todo = [
             item for item in candidates
             if force or known.get(item[0]) != (item[1], item[2])
@@ -142,11 +188,16 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
             docready.forget(store_name, rel)
         remaining = len(todo) - (indexed + failed)
         conn.commit()
-        return {
+        result = {
             "files": len(candidates), "indexed": indexed, "failed": failed,
             "skipped": len(candidates) - len(todo), "removed": len(gone),
             "remaining": remaining, "done": remaining == 0,
         }
+        if unreadable:
+            # 권한이 막힌 폴더가 있으면 알린다 — 조용히 빼면 문서가 통째로 빠졌는데도
+            # "그 폴더에 문서가 없다"와 구분되지 않는다.
+            result["unreadable_dirs"] = unreadable
+        return result
     finally:
         conn.close()
 

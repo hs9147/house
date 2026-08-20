@@ -21,6 +21,13 @@ def docs(monkeypatch, tmp_path, fresh_settings):
     return root
 
 
+@pytest.fixture
+def ready_index(monkeypatch, tmp_path, fresh_settings):
+    """색인 자리만 옮긴다 — 문서 폴더는 테스트가 직접 만든다."""
+    monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
+    get_settings.cache_clear()
+
+
 def test_reindex_and_search_finds_text_inside_words(docs):
     """FTS5가 못 하는 것 — "규정"으로 "휴가규정"·"매출정산규정"을 찾는다."""
     result = docsearch.reindex("m1", docs)
@@ -208,3 +215,76 @@ def test_missing_root_is_not_an_error(monkeypatch, tmp_path, fresh_settings):
     result = docsearch.reindex("s5", tmp_path / "없는폴더")
     assert result == {"files": 0, "indexed": 0, "failed": 0, "skipped": 0,
                       "removed": 0, "remaining": 0, "done": True}
+
+
+# --- 공유 폴더의 부산물 걸러 내기 ---
+
+def test_office_lock_files_are_not_indexed(tmp_path, ready_index):
+    """~$규정.docx는 워드가 문서를 여는 동안 만드는 잠금 파일이다 — 계정명 몇 바이트가
+    든 바이너리라 열어 보면 반드시 실패하고, 그 실패가 index_status를 덮어 진짜 문제를
+    가린다."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "규정.txt").write_text("연차 규정", encoding="utf-8")
+    # 워드가 실제로 만드는 모양: 앞 글자가 잘린 이름 + 계정명이 든 바이너리
+    (docs / "~$정.docx").write_bytes(b"\x28" + "hong.gildong".encode("utf-16-le"))
+    (docs / "~$기원가표.xlsx").write_bytes(b"\x20" + b"\x00" * 32)
+
+    result = docsearch.reindex("s", docs)
+    assert result["files"] == 1 and result["failed"] == 0
+    assert list(docsearch.status("s")["by_suffix"]) == [".txt"]
+
+
+def test_hidden_and_system_leftovers_are_not_indexed(tmp_path, ready_index):
+    """맥에서 공유 폴더를 열면 .DS_Store와 ._원본 리소스 포크가 남는다."""
+    docs = tmp_path / "docs"
+    (docs / "규정").mkdir(parents=True)
+    (docs / "규정" / "연차.txt").write_text("연차 규정", encoding="utf-8")
+    (docs / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    (docs / "규정" / "._연차.txt").write_bytes(b"\x00\x05\x16\x07")
+    (docs / "desktop.ini").write_text("[.ShellClassInfo]", encoding="utf-8")
+    (docs / "규정.wbk").write_bytes(b"\xd0\xcf\x11\xe0")  # 워드 백업 사본
+
+    assert docsearch.reindex("s", docs)["files"] == 1
+    assert [h["path"] for h in docsearch.search("s", "연차")["hits"]] == ["규정/연차.txt"]
+
+
+def test_recycle_bin_is_not_walked_into(tmp_path, ready_index):
+    """휴지통에는 지운 파일이 통째로 들어 있다 — 훑는 것만으로 색인 예산을 다 쓴다."""
+    docs = tmp_path / "docs"
+    bin_dir = docs / "$RECYCLE.BIN" / "S-1-5-21"
+    bin_dir.mkdir(parents=True)
+    for i in range(5):
+        (bin_dir / f"지운문서{i}.txt").write_text("연차 규정", encoding="utf-8")
+    (docs / "규정.txt").write_text("연차 규정", encoding="utf-8")
+
+    assert docsearch.reindex("s", docs)["files"] == 1
+    assert [h["path"] for h in docsearch.search("s", "연차")["hits"]] == ["규정.txt"]
+
+
+def test_unreadable_folders_are_counted_not_swallowed(tmp_path, monkeypatch, ready_index):
+    """공유 폴더는 하위 폴더마다 권한이 다른 일이 흔하다 — 조용히 빼면 문서가 통째로
+    빠졌는데도 "그 폴더에 문서가 없다"와 구분되지 않는다."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "규정.txt").write_text("연차 규정", encoding="utf-8")
+
+    real_walk = docsearch.os.walk
+
+    def walk_with_denied(top, onerror=None, **kwargs):
+        for entry in real_walk(top, onerror=onerror, **kwargs):
+            yield entry
+        onerror(PermissionError(13, "액세스가 거부되었습니다", str(top / "비밀")))
+
+    monkeypatch.setattr(docsearch.os, "walk", walk_with_denied)
+    result = docsearch.reindex("s", docs)
+    assert result["files"] == 1
+    assert result["unreadable_dirs"] == 1
+
+
+def test_a_clean_folder_reports_no_unreadable_key(tmp_path, ready_index):
+    """문제가 없을 때 없는 항목을 굳이 내보내지 않는다 — 응답을 읽는 쪽이 헷갈린다."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "규정.txt").write_text("연차 규정", encoding="utf-8")
+    assert "unreadable_dirs" not in docsearch.reindex("s", docs)
