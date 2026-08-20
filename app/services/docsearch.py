@@ -13,13 +13,15 @@ unicode61 토크나이저는 공백으로 끊은 토큰만 잡아 `규정`으로
 호출마다 시간 예산만큼만 진행하고 남은 개수를 돌려준다 — MCP 클라이언트의 요청 타임아웃
 (30초)을 넘기지 않으면서 여러 번 불러 수렴시킨다.
 """
+import os
 import re
 import sqlite3
 import time
 from pathlib import Path
+from stat import S_ISREG
 
 from ..config import get_settings
-from . import doctext
+from . import docready, doctext
 
 # 한 문서에서 색인에 담을 최대 글자 수. 뒷부분은 검색되지 않는 대신 색인 크기와 스캔
 # 시간이 문서 수에 비례해서만 늘어난다(120,000자 ≈ 60쪽 분량).
@@ -34,7 +36,23 @@ SKIP_SUFFIXES = {
     ".mp3", ".mp4", ".avi", ".mov", ".wmv", ".mkv", ".wav", ".flac",
     ".zip", ".7z", ".rar", ".gz", ".tar", ".iso",
     ".exe", ".dll", ".msi", ".bin", ".dat", ".db", ".lnk", ".tmp",
+    # 오피스가 남기는 백업·잠금 부산물 — 본문의 사본이거나 사용자 이름 몇 바이트다.
+    ".wbk", ".xlk", ".bak", ".laccdb", ".ldb",
+    # 메일 보관 파일. 문서가 아니고 크기도 GB 단위다.
+    ".pst", ".ost",
 }
+# 이름 앞자리만 보고 거르는 것들.
+#   ~$규정.docx  워드·엑셀·파워포인트가 **문서를 열고 있는 동안** 만드는 잠금 파일.
+#                162바이트짜리 바이너리에 연 사람의 계정명만 들어 있다.
+#   ~WRL0001.tmp 워드 임시 파일.
+#   .DS_Store    맥에서 공유 폴더를 열면 생긴다. ._규정.docx(리소스 포크)도 같이 걸린다.
+# 걸러 두지 않으면 색인이 이것들을 열어 보다 실패하고, index_status의 실패 목록이
+# 이걸로 덮여 진짜 문제(스캔 PDF, 97-2003 파일)가 묻힌다.
+SKIP_PREFIXES = ("~$", ".")
+SKIP_NAMES = {"desktop.ini", "thumbs.db"}
+# 들어가지도 않을 폴더(소문자 비교). 지운 파일이 통째로 들어 있는 휴지통을 훑는 것만으로
+# 색인 예산을 다 쓴다.
+SKIP_DIR_NAMES = {"$recycle.bin", "system volume information", "found.000"}
 _DEFAULT_BUDGET = 20.0
 
 _SCHEMA = """
@@ -63,22 +81,81 @@ def _connect(store_name: str) -> sqlite3.Connection:
     return conn
 
 
-def _candidates(root: Path) -> list[tuple[str, int, float]]:
-    """색인 대상 파일 목록 — (상대경로, 크기, mtime). stat만 하므로 싸다."""
+def skip_dir(name: str) -> bool:
+    """들어가지 않을 폴더. 점으로 시작하는 폴더에는 .ready 캐시가 들어갈 수 있는데,
+    그걸 색인하면 **자기 캐시를 다시 색인**해 문서마다 결과가 둘씩 나온다."""
+    return name.startswith(".") or name.lower() in SKIP_DIR_NAMES
+
+
+def skip_file(name: str) -> bool:
+    """열어 보기 전에 이름만으로 거를 수 있는 것."""
+    return (name.startswith(SKIP_PREFIXES)
+            or name.lower() in SKIP_NAMES
+            or Path(name).suffix.lower() in SKIP_SUFFIXES)
+
+
+def _candidates(root: Path) -> tuple[list[tuple[str, int, float]], list[str]]:
+    """색인 대상 파일 목록 — (상대경로, 크기, mtime)과 **훑지 못한 폴더 경로들**.
+
+    rglob이 아니라 os.walk을 쓰는 이유는 **가지치기**다. 걸러야 할 폴더는 목록에서 빼는
+    것으로는 부족하고 들어가지 않아야 한다 — 휴지통에는 지운 파일이 통째로 들어 있어서
+    훑는 것만으로 색인 예산을 다 쓴다.
+
+    훑지 못한 폴더는 세지 말고 **어디인지** 돌려줘야 한다. "목록에 없다"를 그대로 "지웠다"로
+    받으면, 네트워크 드라이브가 잠깐 끊기거나 하위 폴더 권한이 막힌 것만으로 그 아래
+    문서가 색인에서 통째로 사라진다(그리고 다시 붙었을 때 수천 건을 다시 추출해야 한다).
+    호출자는 이 목록으로 "못 본 것"과 "없어진 것"을 갈라 낸다.
+    """
     found: list[tuple[str, int, float]] = []
+    unreadable: list[str] = []
     if not root.is_dir():
-        return found
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() in SKIP_SUFFIXES:
-            continue
+        # 루트 자체가 안 보인다 — 드라이브가 끊겼거나 경로가 틀렸다. 빈 목록을 "전부
+        # 지워졌다"로 읽으면 안 되므로 루트를 못 읽은 폴더로 올린다.
+        return found, [str(root)]
+
+    def note(error: OSError) -> None:
+        unreadable.append(str(getattr(error, "filename", "") or root))
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=note):
+        dirnames[:] = [d for d in dirnames if not skip_dir(d)]
+        for name in filenames:
+            if skip_file(name):
+                continue
+            path = Path(dirpath) / name
+            try:
+                info = path.stat()
+            except OSError:  # 권한·잠긴 파일은 건너뛴다(다음 색인에서 다시 시도)
+                continue
+            if not S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
+                continue
+            found.append((path.relative_to(root).as_posix(), info.st_size, info.st_mtime))
+    # 순서를 고정한다 — 예산이 모자라 중간에 멈춰도 다음 호출이 같은 자리에서 이어진다.
+    found.sort()
+    return found, unreadable
+
+
+def _vanished(known: dict, candidates: list, root: Path,
+              unreadable: list[str]) -> list[str]:
+    """색인에는 있는데 디스크에서 **정말로 사라진** 것.
+
+    훑지 못한 폴더 아래는 제외한다 — 못 본 것과 없어진 것은 다르다. 이 구분이 없으면
+    공유 드라이브가 잠깐 끊긴 사이에 색인이 통째로 비워지고, 다시 붙었을 때 수천 건을
+    처음부터 다시 추출해야 한다(문서 하나에 수십~수백 ms다).
+    """
+    missing = set(known) - {item[0] for item in candidates}
+    if not unreadable:
+        return sorted(missing)
+
+    blocked: list[str] = []
+    for raw in unreadable:
         try:
-            stat = path.stat()
-        except OSError:  # 권한·잠긴 파일은 조용히 건너뛴다(다음 색인에서 다시 시도)
-            continue
-        if stat.st_size > MAX_FILE_BYTES:
-            continue
-        found.append((path.relative_to(root).as_posix(), stat.st_size, stat.st_mtime))
-    return found
+            rel = Path(raw).resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            return []  # 어디인지 특정할 수 없으면 아무것도 지우지 않는다
+        if rel == Path("."):
+            return []  # 루트를 통째로 못 읽었다
+        blocked.append(rel.as_posix() + "/")
+    return sorted(rel for rel in missing if not rel.startswith(tuple(blocked)))
 
 
 def reindex(store_name: str, root: Path, *, force: bool = False,
@@ -97,7 +174,7 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
             row["path"]: (row["size"], row["mtime"])
             for row in conn.execute("SELECT path, size, mtime FROM docs")
         }
-        candidates = _candidates(root)
+        candidates, unreadable = _candidates(root)
         todo = [
             item for item in candidates
             if force or known.get(item[0]) != (item[1], item[2])
@@ -110,7 +187,9 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
             body: str | None = None
             error: str | None = None
             try:
-                body = doctext.extract_text(root / rel)
+                # 추출은 한 번만 하고 두 곳에 쓴다 — 색인에는 평문, .ready에는 마크다운.
+                markdown, body = doctext.extract(root / rel)
+                docready.write(store_name, rel, root / rel, markdown)
             except doctext.ExtractError as e:
                 error = str(e)
             except OSError as e:  # 색인 중 파일이 사라지거나 잠긴 경우
@@ -130,16 +209,22 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
             else:
                 indexed += 1
 
-        gone = set(known) - {item[0] for item in candidates}
+        gone = _vanished(known, candidates, root, unreadable)
         for rel in gone:
             conn.execute("DELETE FROM docs WHERE path = ?", (rel,))
+            docready.forget(store_name, rel)
         remaining = len(todo) - (indexed + failed)
         conn.commit()
-        return {
+        result = {
             "files": len(candidates), "indexed": indexed, "failed": failed,
             "skipped": len(candidates) - len(todo), "removed": len(gone),
             "remaining": remaining, "done": remaining == 0,
         }
+        if unreadable:
+            # 훑지 못한 폴더가 있으면 알린다. 그 아래 문서는 색인에 그대로 남겨 두므로
+            # (지운 것이 아니라 못 본 것이다) files 수치는 실제보다 작게 나온다.
+            result["unreadable_dirs"] = len(unreadable)
+        return result
     finally:
         conn.close()
 

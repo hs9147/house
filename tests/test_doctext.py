@@ -82,6 +82,30 @@ def _xlsx_shared(path, rows: list[list[str]]):
     })
 
 
+def _xlsx_named(path, sheet_name, rows):
+    """시트 이름이 있는 형 — workbook.xml의 <sheet name=…>에서만 알 수 있다."""
+    strings, cells_xml = [], []
+    for value in (v for row in rows for v in row):
+        if isinstance(value, str) and value not in strings:
+            strings.append(value)
+    sheet = "".join(
+        f'<row r="{i}">' + "".join(
+            (f'<c t="s"><v>{strings.index(v)}</v></c>' if isinstance(v, str)
+             else f'<c t="n"><v>{v}</v></c>')
+            for v in row
+        ) + "</row>"
+        for i, row in enumerate(rows, start=1)
+    )
+    assert cells_xml == []
+    return _zip(path, {
+        "xl/workbook.xml":
+            f"<workbook {_SHEET_NS}><sheets><sheet name=\"{sheet_name}\" sheetId=\"1\"/></sheets></workbook>",
+        "xl/sharedStrings.xml": f"<sst {_SHEET_NS}>" + "".join(
+            f"<si><t>{s}</t></si>" for s in strings) + "</sst>",
+        "xl/worksheets/sheet1.xml": f"<worksheet {_SHEET_NS}><sheetData>{sheet}</sheetData></worksheet>",
+    })
+
+
 def _pdf(path, text: str | None):
     """최소 PDF. text=None이면 그리는 것이 없는(=스캔 이미지 같은) PDF."""
     content = f"BT /F1 12 Tf 20 100 Td ({text}) Tj ET\n".encode() if text else b"\n"
@@ -271,3 +295,93 @@ def test_soffice_path_setting_is_used(monkeypatch, fresh_settings):
     monkeypatch.setattr(doctext.shutil, "which", lambda name: seen.setdefault("name", name))
     doctext._soffice()
     assert seen["name"] == "/opt/libreoffice/soffice"
+
+
+# --- 구조 보존(마크다운) ---
+
+def _docx_rich(path, blocks):
+    """blocks: ("h1"|"p", 텍스트) 또는 ("tbl", 행들[, 병합]) — 실제 파일과 같은 모양."""
+    out = []
+    for block in blocks:
+        kind = block[0]
+        if kind == "tbl":
+            rows, merges = block[1], (block[2] if len(block) > 2 else {})
+            out.append("<w:tbl>")
+            for r, row in enumerate(rows):
+                out.append("<w:tr>")
+                for c, cell in enumerate(row):
+                    span = merges.get((r, c))
+                    pr = f'<w:tcPr><w:gridSpan w:val="{span}"/></w:tcPr>' if span else ""
+                    out.append(f"<w:tc>{pr}<w:p><w:r><w:t>{cell}</w:t></w:r></w:p></w:tc>")
+                out.append("</w:tr>")
+            out.append("</w:tbl>")
+        else:
+            style = f'<w:pPr><w:pStyle w:val="Heading{kind[1]}"/></w:pPr>' if kind != "p" else ""
+            out.append(f"<w:p>{style}<w:r><w:t>{block[1]}</w:t></w:r></w:p>")
+    return _zip(path, {
+        "word/document.xml":
+            f"<w:document {OOXML_NS}><w:body>{''.join(out)}</w:body></w:document>"})
+
+
+def test_docx_table_keeps_rows_and_columns(tmp_path):
+    """평문으로 뽑으면 셀이 한 줄씩 나열돼 어느 값이 어느 열인지 복원할 수 없다."""
+    path = _docx_rich(tmp_path / "a.docx", [
+        ("h1", "원가 산정 지침"),
+        ("p", "2026년 1분기부터 적용한다."),
+        ("h2", "1. 재료비"),
+        ("tbl", [["구분", "산정 기준"], ["국내 자재", "직전 분기 평균 매입가"]]),
+    ])
+    assert doctext.extract_markdown(path) == (
+        "# 원가 산정 지침\n\n"
+        "2026년 1분기부터 적용한다.\n\n"
+        "## 1. 재료비\n\n"
+        "| 구분 | 산정 기준 |\n"
+        "|---|---|\n"
+        "| 국내 자재 | 직전 분기 평균 매입가 |"
+    )
+    # 색인용 평문에는 표시 문자가 남지 않는다 — 발췌에 파이프가 섞이면 값이 안 보인다
+    assert doctext.extract_text(path).splitlines() == [
+        "원가 산정 지침", "2026년 1분기부터 적용한다.", "1. 재료비",
+        "구분\t산정 기준", "국내 자재\t직전 분기 평균 매입가"]
+
+
+def test_horizontally_merged_table_falls_back_to_inline_html(tmp_path):
+    """마크다운 표는 행마다 칸 수가 같아야 해서 colspan을 담을 수 없다 — 억지로 넣으면
+    열이 어긋나 값이 다른 열로 읽힌다. GFM이 인라인 HTML을 허용하므로 그 표만 넘긴다."""
+    path = _docx_rich(tmp_path / "a.docx", [
+        ("tbl", [["직급", "임률", "비고"], ["기사", "38,000", ""]], {(0, 1): 2}),
+    ])
+    md = doctext.extract_markdown(path)
+    assert md.startswith("<table>")
+    assert '<th colspan="2">임률</th>' in md
+    # 평문 투영에서는 태그가 사라진다(td·tr·th가 질의에 걸리면 전 문서가 오탐이다)
+    plain = doctext.extract_text(path)
+    assert plain.splitlines() == ["직급\t임률\t비고", "기사\t38,000"]
+    assert "<" not in plain and "td" not in plain
+
+
+def test_cell_pipes_are_escaped_so_columns_do_not_shift(tmp_path):
+    path = _docx_rich(tmp_path / "a.docx", [("tbl", [["구분", "값"], ["범위", "a|b"]])])
+    assert "| 범위 | a\\|b |" in doctext.extract_markdown(path)
+    assert doctext.extract_text(path).splitlines()[-1] == "범위\ta|b"
+
+
+def test_xlsx_becomes_a_table_with_the_sheet_name(tmp_path):
+    path = _xlsx_named(tmp_path / "a.xlsx", "분기원가",
+                       [["항목", "금액"], ["재료비", 1500]])
+    assert doctext.extract_markdown(path) == (
+        "## 분기원가\n\n| 항목 | 금액 |\n|---|---|\n| 재료비 | 1500 |")
+    assert doctext.extract_text(path).splitlines() == ["분기원가", "항목\t금액", "재료비\t1500"]
+
+
+def test_xlsx_without_a_sheet_name_does_not_invent_one(tmp_path):
+    """없는 이름을 지어내면 검색에 잡히는 가짜 낱말이 생긴다."""
+    path = _xlsx_shared(tmp_path / "a.xlsx", [["항목", "금액"], ["재료비", 1500]])
+    assert doctext.extract_markdown(path).startswith("| 항목 |")
+
+
+def test_plain_files_are_never_stripped(tmp_path):
+    """공유 폴더에 있는 .md나 파이프가 든 csv를 벗기면 원문을 망가뜨린다."""
+    path = tmp_path / "표.csv"
+    path.write_text("# 제목\n| 항목 | 금액 |\n|---|---|\n", encoding="utf-8")
+    assert doctext.extract_text(path) == "# 제목\n| 항목 | 금액 |\n|---|---|\n"

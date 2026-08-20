@@ -359,7 +359,8 @@ def test_storage_read_file_extracts_document_text(monkeypatch, fresh_settings, t
 
     _docx(root / "규정.docx", [["매출 정산 규정"], ["분기 마감 후 5일"]])
     text = _text(_call(c, "/mcp/storage/internal", "read_file", {"path": "규정.docx"}))
-    assert text == "매출 정산 규정\n분기 마감 후 5일"
+    # 마크다운이므로 단락 사이가 빈 줄이다 — 줄바꿈 하나는 같은 문단의 이어짐을 뜻한다
+    assert text == "매출 정산 규정\n\n분기 마감 후 5일"
 
 
 def test_storage_read_file_truncates_instead_of_refusing(monkeypatch, fresh_settings, tmp_path):
@@ -613,7 +614,7 @@ def test_docs_server_reads_a_hit(monkeypatch, fresh_settings, tmp_path):
     _call(c, "/mcp/docs", "reindex_docs")
     text = _text(_call(c, "/mcp/docs", "read_doc",
                        {"source": "company-docs", "path": "규정.docx"}))
-    assert text == "반출 승인 절차\n담당: 총무팀"
+    assert text == "반출 승인 절차\n\n담당: 총무팀"
 
     escaped = _call(c, "/mcp/docs", "read_doc",
                     {"source": "company-docs", "path": "../밖.txt"})
