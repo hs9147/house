@@ -251,6 +251,8 @@ DELETE /paas/api/v1/storage/{module}/files          # ?path= 삭제
 
 POST /paas/api/v1/mcp/ops                           # 사내 MCP 서버 — 운영 조회(배포 상태·로그·라우팅·호스트·감사)
 POST /paas/api/v1/mcp/projects/{id}/code            # 사내 MCP 서버 — 프로젝트 코드 조회(파일·구조 개요)
+POST /paas/api/v1/mcp/docs                          # 사내 MCP 서버 — 사내 문서 본문 검색(저장소를 가로질러)
+                                                #   list_sources·search_docs·read_doc·reindex_docs·index_status
 POST /paas/api/v1/mcp/storage/{module}              # 사내 MCP 서버 — file_storage 모듈 파일(루트 밖으로 못 나감)
                                                 #   list_files·read_file + search_docs·reindex_docs·index_status
                                                 #   config.read_only=true면 쓰기·삭제 도구는 광고하지 않음
@@ -346,7 +348,11 @@ DELETE /paas/api/v1/previews/{id}
   의존성)로, 97-2003 바이너리(`doc·xls·ppt`)는 LibreOffice 변환(`PAAS_SOFFICE_PATH`)으로
   처리하고, 평문은 utf-8 → cp949 순서로 디코드합니다(한국어 윈도우 txt·csv). 추출할 수
   없으면 깨진 글자 대신 이유를 돌려줍니다(스캔 PDF면 OCR이 필요하다고 알립니다).
-- **문서 본문 검색**(`services/docsearch.py`): `search_docs`는 파일명이 아니라 **본문**을
+- **문서 본문 검색**(`services/docsearch.py`): 저장소 하나를 다루는
+  `/mcp/storage/{모듈}`과, 저장소를 가로질러 한 번에 찾는 **`/mcp/docs`** 두 곳에 있습니다 —
+  뒤쪽은 저장소 이름을 모르는 쪽이 부르는 창구라 결과에 어느 저장소인지를 실어 주고
+  (`source`), `list_sources`로 대상과 색인 커버리지를 함께 봅니다. `search_docs`는 파일명이
+  아니라 **본문**을
   찾습니다 — 공백으로 끊은 낱말을 모두 포함하는 문서를 골라 일치 대목 발췌와 함께 줍니다.
   색인은 `reindex_docs`로 만들고(`PAAS_DOC_INDEX_DIR`, 모듈별 sqlite 파일), 크기·mtime이
   같은 파일은 건너뛰는 증분이며 **추출 실패도 캐시**합니다(97-2003 파일 하나를 LibreOffice로

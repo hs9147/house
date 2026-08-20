@@ -61,12 +61,20 @@ def list_internal_servers(db: Session) -> list[dict]:
         "ops", "/mcp/ops",
     )]
 
-    for module in db.execute(
+    storage_modules = list(db.execute(
         select(Module).where(Module.type == ModuleType.file_storage).order_by(Module.name)
-    ).scalars():
+    ).scalars())
+    if storage_modules:
+        # 저장소가 하나라도 있어야 검색할 대상이 있다 — 없으면 목록에 올리지 않는다.
+        entries.append(_entry(
+            "paas-docs", "paas-docs",
+            "사내 문서 본문 검색 — 등록된 문서 저장소를 가로질러 한 번에 찾는다(읽기 전용)",
+            "docs", "/mcp/docs",
+        ))
+    for module in storage_modules:
         entries.append(_entry(
             f"paas-storage-{module.name}", f"paas-storage-{module.name}",
-            f"파일 저장소 '{module.name}' — 목록·읽기·문서 본문 검색(모듈 루트 밖으로 못 나감)",
+            f"파일 저장소 '{module.name}' — 목록·읽기·쓰기와 그 저장소 안 문서 검색",
             "storage", f"/mcp/storage/{module.name}",
         ))
 

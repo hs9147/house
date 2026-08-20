@@ -61,8 +61,15 @@ def test_keyword_search_narrows(monkeypatch, tmp_path, fresh_settings):
     c.post(f"{API}/modules", json={
         "name": "company-docs", "type": "file_storage", "config": {"sub_folder": "docs"},
     }, headers=ADMIN)
+    # "저장소"는 문서 검색 서버 설명에도 들어 있어 둘 다 걸린다
     hits = c.get(f"{API}/mcp/search", params={"q": "저장소"}, headers=ADMIN).json()
-    assert [i["id"] for i in hits] == ["paas-storage-company-docs"]
+    assert [i["id"] for i in hits] == ["paas-docs", "paas-storage-company-docs"]
+    # 카테고리로 좁히면 하나씩 갈린다
+    assert [i["id"] for i in c.get(f"{API}/mcp/search", params={"q": "storage"},
+                                   headers=ADMIN).json()] == ["paas-storage-company-docs"]
+    # (모듈 이름이 company-docs라 "docs"로는 둘 다 걸린다 — 설명의 낱말로 좁힌다)
+    assert [i["id"] for i in c.get(f"{API}/mcp/search", params={"q": "가로질러"},
+                                   headers=ADMIN).json()] == ["paas-docs"]
     assert c.get(f"{API}/mcp/search", params={"q": "없는말"}, headers=ADMIN).json() == []
 
 

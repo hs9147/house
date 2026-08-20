@@ -1,4 +1,4 @@
-"""사내 MCP 서버 4종 — 운영 조회·코드 조회·파일 저장소·DB 조회(SELECT 전용)."""
+"""사내 MCP 서버 5종 — 운영 조회·코드 조회·문서 검색·파일 저장소·DB 조회(SELECT 전용)."""
 import subprocess
 
 from fastapi.testclient import TestClient
@@ -555,3 +555,111 @@ def test_db_server_reports_missing_driver(monkeypatch, fresh_settings, tmp_path)
     reply = _call(c, "/mcp/db/paydb", "list_tables")
     assert "드라이버가 설치되지 않았습니다" in reply["error"]["message"]
     assert mcp_servers is not None
+
+
+# --- 사내 문서 검색 서버 (/mcp/docs) ---
+
+def _docs_client(monkeypatch, tmp_path, sources=("company-docs",)):
+    """저장소 여러 개에 문서를 흩어 놓는다 — 가로질러 찾는 것이 이 서버의 이유다."""
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
+    get_settings.cache_clear()
+    c = _client()
+    for name in sources:
+        r = c.post(f"{API}/modules", json={
+            "name": name, "type": "file_storage",
+            "config": {"sub_folder": name, "read_only": True},
+        }, headers=ADMIN)
+        assert r.status_code == 201, r.text
+        (tmp_path / name).mkdir(parents=True, exist_ok=True)
+    return c
+
+
+def test_docs_server_searches_across_every_source(monkeypatch, fresh_settings, tmp_path):
+    c = _docs_client(monkeypatch, tmp_path, ("hr-docs", "fin-docs"))
+    from tests.test_doctext import _docx
+
+    _docx(tmp_path / "hr-docs" / "휴가규정.docx", [["휴가 규정"], ["담당: 총무팀"]])
+    (tmp_path / "fin-docs" / "정산.txt").write_text("매출 정산 규정 총무팀 확인", encoding="utf-8")
+
+    import json
+
+    names = [t["name"] for t in _rpc(c, "/mcp/docs", "tools/list")["result"]["tools"]]
+    assert names == ["list_sources", "search_docs", "read_doc", "reindex_docs", "index_status"]
+    assert _rpc(c, "/mcp/docs", "initialize")["result"]["serverInfo"]["name"] == "paas-docs"
+
+    built = json.loads(_text(_call(c, "/mcp/docs", "reindex_docs")))
+    assert built["done"] is True
+    assert set(built["sources"]) == {"hr-docs", "fin-docs"}
+
+    hits = json.loads(_text(_call(c, "/mcp/docs", "search_docs", {"query": "총무팀"})))["hits"]
+    # 어느 저장소인지가 결과에 실려 온다 — 그래야 read_doc을 부를 수 있다
+    assert {(h["source"], h["path"]) for h in hits} == {
+        ("hr-docs", "휴가규정.docx"), ("fin-docs", "정산.txt")}
+
+    only = json.loads(_text(_call(c, "/mcp/docs", "search_docs",
+                                  {"query": "규정", "source": "fin-docs"})))
+    assert [h["source"] for h in only["hits"]] == ["fin-docs"]
+    assert only["searched"] == ["fin-docs"]
+
+
+def test_docs_server_reads_a_hit(monkeypatch, fresh_settings, tmp_path):
+    c = _docs_client(monkeypatch, tmp_path)
+    from tests.test_doctext import _docx
+
+    _docx(tmp_path / "company-docs" / "규정.docx", [["반출 승인 절차"], ["담당: 총무팀"]])
+    _call(c, "/mcp/docs", "reindex_docs")
+    text = _text(_call(c, "/mcp/docs", "read_doc",
+                       {"source": "company-docs", "path": "규정.docx"}))
+    assert text == "반출 승인 절차\n담당: 총무팀"
+
+    escaped = _call(c, "/mcp/docs", "read_doc",
+                    {"source": "company-docs", "path": "../밖.txt"})
+    assert escaped["error"]["code"] == -32602
+
+
+def test_docs_server_distinguishes_empty_index_from_no_match(monkeypatch, fresh_settings, tmp_path):
+    c = _docs_client(monkeypatch, tmp_path)
+    (tmp_path / "company-docs" / "메모.txt").write_text("휴가 규정", encoding="utf-8")
+
+    empty = _call(c, "/mcp/docs", "search_docs", {"query": "휴가"})
+    assert "색인이 비어" in empty["error"]["message"]
+
+    _call(c, "/mcp/docs", "reindex_docs")
+    import json
+
+    miss = json.loads(_text(_call(c, "/mcp/docs", "search_docs", {"query": "없는말"})))
+    assert miss["hits"] == [] and miss["index"]["company-docs"] == {"indexed": 1, "failed": 0}
+
+
+def test_docs_server_without_any_source_says_what_to_do(fresh_settings):
+    c = _client()
+    reply = _call(c, "/mcp/docs", "search_docs", {"query": "규정"})
+    assert "file_storage 모듈을 먼저 등록" in reply["error"]["message"]
+
+
+def test_docs_server_lists_sources_with_coverage(monkeypatch, fresh_settings, tmp_path):
+    c = _docs_client(monkeypatch, tmp_path)
+    (tmp_path / "company-docs" / "메모.txt").write_text("휴가 규정", encoding="utf-8")
+    (tmp_path / "company-docs" / "구버전.doc").write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 32)
+    from app.services import doctext
+
+    monkeypatch.setattr(doctext, "_soffice", lambda: None)
+    _call(c, "/mcp/docs", "reindex_docs")
+
+    import json
+
+    sources = json.loads(_text(_call(c, "/mcp/docs", "list_sources")))
+    assert sources == [{"source": "company-docs", "read_only": True,
+                        "index": {"total": 2, "indexed": 1, "failed": 1}}]
+    status = json.loads(_text(_call(c, "/mcp/docs", "index_status")))
+    assert "97-2003" in " ".join(status["company-docs"]["failure_reasons"])
+
+
+def test_docs_server_appears_in_the_internal_directory(monkeypatch, fresh_settings, tmp_path):
+    monkeypatch.setenv("PAAS_MCP_INTERNAL_BASE_URL", "http://localhost:7000/paas")
+    c = _docs_client(monkeypatch, tmp_path)
+    items = {i["id"]: i for i in c.get(f"{API}/mcp/search", headers=ADMIN).json()}
+    assert items["paas-docs"]["url"] == "http://localhost:7000/paas/api/v1/mcp/docs"
+    # 저장소가 없을 때 목록에 오르지 않는 것은 test_mcp_search.py에서 확인한다
+    # (같은 테스트 안에서는 DB가 공유돼 "아무것도 없는 상태"를 만들 수 없다).
