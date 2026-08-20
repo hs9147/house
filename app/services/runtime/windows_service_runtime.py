@@ -158,7 +158,8 @@ class WindowsServiceRuntime(Runtime):
                 f"(배포 시 자동 생성됨 — PORT/HOST 환경변수로 리슨 포트·바인드 주소 전달): {start_script}"
             )
 
-        host_port = allocate_port()
+        # 포트는 플랫폼 대장이 정한다(services/ports.py). 값이 없을 때만 직접 찾는다.
+        host_port = spec.host_port or allocate_port()
         old_slot = self._current_slot(spec.unit_name)
         slot = "b" if old_slot == "a" else "a"
         name = f"{spec.unit_name}-{slot}"

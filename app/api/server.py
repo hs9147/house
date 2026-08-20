@@ -24,6 +24,7 @@ from ..schemas import (
 )
 from ..security import require_api_key
 from ..services import deployer
+from ..services import ports as ports_service  # server_config의 지역변수 ports와 구분
 from ..services.build import COMPOSITE_COMPONENTS
 from ..services.proxy import domain_for, get_proxy, path_prefix_for
 from ..services.proxy.base import site_name
@@ -32,17 +33,11 @@ router = APIRouter(tags=["server"])
 
 
 def _upstream_host(settings) -> str:
-    """프록시가 실제로 쓰는 업스트림 호스트 이름 — 런타임이 정한다.
+    """프록시가 실제로 쓰는 업스트림 호스트 이름 — 화면이 설정 파일과 다른 문자열을
+    보여주면 안 되므로, 포트 배정·프록시 설정과 같은 한 곳에서 가져온다."""
+    from ..services.runtime import upstream_host  # noqa: PLC0415
 
-    windows_service는 localhost로 통일했고(그 모듈의 UPSTREAM_HOST), docker 런타임은
-    포트를 127.0.0.1에 명시적으로 바인드하므로 그쪽은 127.0.0.1이 맞다. 화면이 설정
-    파일과 다른 문자열을 보여주면 안 되므로 여기서 갈라 준다.
-    """
-    if settings.runtime_backend == "windows_service":
-        from ..services.runtime.windows_service_runtime import UPSTREAM_HOST  # noqa: PLC0415
-
-        return UPSTREAM_HOST
-    return "127.0.0.1"
+    return upstream_host(settings)
 
 
 def _windows_services(projects: list[Project]) -> list[WindowsServiceOut]:
@@ -206,6 +201,23 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
             if settings.tier == "small" and settings.runtime_backend == "windows_service"
             else []
         ),
+    )
+
+
+@router.get("/ports")
+def port_usage(
+    probe_range: bool = False,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """포트 사용현황 — 배정 대장(services/ports.py)과 실제 리슨 상태.
+
+    `probe_range=true`면 설정 범위 전체를 훑어 **대장에 없는 점유**까지 찾는다. 포트 수만큼
+    접속을 시도하므로(기본 범위가 900개다) 기본은 끄고, 대장과 실제가 어긋나는지 확인할
+    때만 켠다.
+    """
+    return ports_service.usage(
+        db, probe_host=_upstream_host(get_settings()), probe_range=probe_range,
     )
 
 

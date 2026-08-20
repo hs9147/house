@@ -33,6 +33,10 @@ class RuntimeSpec:
     # 이 배포가 외부에서 열리는 서브패스(/apps/{조직}/{프로젝트}/[dev/]). dev 서버는
     # 자기 공개 경로를 알아야 그 접두사가 붙은 요청을 받을 수 있어 런타임이 넘겨준다.
     base_path: str = "/"
+    # 플랫폼이 배정한 호스트 포트(services/ports.py의 대장). 1차(small)에서만 값이 있고,
+    # 런타임은 이 값을 그대로 쓴다 — 비어 있으면 예전처럼 런타임이 직접 빈 포트를 찾는다
+    # (런타임을 단독으로 부르는 경로와 2차/k8s를 위해 남겨 둔 폴백).
+    host_port: int | None = None
 
     @property
     def unit_name(self) -> str:

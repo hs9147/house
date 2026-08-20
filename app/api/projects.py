@@ -24,6 +24,7 @@ from ..models import (
     ModuleBinding,
     Organization,
     PlanArtifact,
+    PortAllocation,
     PreviewSession,
     Project,
     ProjectType,
@@ -252,7 +253,8 @@ def delete_project(
     if session_ids:
         for model in (ChatMessage, PlanArtifact):
             db.execute(sa_delete(model).where(model.session_id.in_(session_ids)))
-    for model in (ChatSession, Deployment, EnvVar, ModuleBinding, RedirectRule, PreviewSession):
+    for model in (ChatSession, Deployment, EnvVar, ModuleBinding, RedirectRule,
+                  PreviewSession, PortAllocation):
         db.execute(sa_delete(model).where(model.project_id == project_id))
     db.delete(project)
     db.commit()

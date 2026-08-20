@@ -13,7 +13,7 @@ EXPECTED_TABLES = {
     "llm_providers", "chat_sessions", "chat_messages", "build_tasks",
     "modules", "module_bindings", "preview_sessions", "payments",
     "redirect_rules", "user_accounts", "user_sessions", "user_organizations",
-    "plan_artifacts", "alembic_version",
+    "plan_artifacts", "port_allocations", "alembic_version",
 }
 
 
