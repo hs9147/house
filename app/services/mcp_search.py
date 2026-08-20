@@ -41,6 +41,17 @@ def internal_base_url() -> str:
     return ""
 
 
+def is_internal_server_url(url: str) -> bool:
+    """이 플랫폼 자신이 노출하는 MCP 서버 주소인가.
+
+    사내 서버는 다른 엔드포인트와 같은 API 키를 요구하는데(api/mcp_servers.py), 목록에서
+    가져와 등록할 때는 붙여 넣을 키가 따로 없다 — 그래서 이 판정으로 갈라 전용 키를
+    발급해 준다. 주소는 목록이 내준 것(_entry)이므로 기준 주소로 시작하는지만 본다.
+    """
+    base = internal_base_url()
+    return bool(base) and url.startswith(f"{base}/api/v1/mcp/")
+
+
 def _entry(server_id: str, name: str, description: str, category: str, path: str) -> dict:
     base = internal_base_url()
     return {

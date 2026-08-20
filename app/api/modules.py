@@ -266,12 +266,23 @@ def import_mcp_module(
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
-    """검색된 MCP 서버를 mcp 타입 모듈로 자동 추가한다."""
+    """검색된 MCP 서버를 mcp 타입 모듈로 자동 추가한다.
+
+    **사내 서버면 전용 API 키를 함께 발급한다.** 사내 MCP 서버는 다른 엔드포인트와 같은
+    키를 요구하는데(api/mcp_servers.py), 키 없이 등록하면 등록은 성공한 채 연결 확인이
+    401로 떨어지고 바인딩된 앱도 붙지 못한다 — 원클릭 등록이 동작하지 않는 모듈을
+    만들어 내는 셈이다.
+
+    발급하는 키는 **비관리자**다. mcp 모듈의 api_key는 바인딩된 앱의 환경변수로도
+    주입되므로(services/modules.binding_env), 관리자 키를 넣으면 관리자 권한이 앱 env로
+    새어 나간다.
+    """
     mod_name = apisearch.normalize_module_name(body.name)
     if db.execute(select(Module).where(Module.name == mod_name)).scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"module '{mod_name}' already exists")
 
-    config = {"url": body.url, "api_key": ""}
+    issued = _issue_module_key(db, admin, mod_name) if mcp_search.is_internal_server_url(body.url) else ""
+    config = {"url": body.url, "api_key": issued}
     row = Module(
         name=mod_name,
         type=ModuleType.mcp,
@@ -280,9 +291,29 @@ def import_mcp_module(
     )
     db.add(row)
     db.commit()
-    audit.record(db, admin.name, "module.import_mcp", mod_name, {"url": body.url})
+    audit.record(db, admin.name, "module.import_mcp", mod_name,
+                 {"url": body.url, "key_issued": bool(issued)})
     return {"id": row.id, "name": row.name, "type": row.type.value, "category": row.category,
-            "config": svc.masked_config(row.config)}
+            "config": svc.masked_config(row.config),
+            # 화면이 "키를 따로 넣을 필요가 없다"를 말할 수 있어야 한다
+            "key_issued": bool(issued)}
+
+
+def _issue_module_key(db: Session, admin: ApiKey, module_name: str) -> str:
+    """이 모듈 전용 비관리자 키. 이름을 모듈에 맞춰 두어 키 목록에서 회수할 수 있게 한다."""
+    from ..security import hash_key, issue_key  # noqa: PLC0415 — 순환 import 회피
+
+    key_name = f"mcp-{module_name}"[:64]
+    raw = issue_key()
+    row = db.execute(select(ApiKey).where(ApiKey.name == key_name)).scalar_one_or_none()
+    if row is None:
+        db.add(ApiKey(name=key_name, key_hash=hash_key(raw), is_admin=False))
+    else:
+        # 같은 이름의 모듈을 지웠다 다시 가져온 경우다 — 옛 키는 갈아 끼운다.
+        row.key_hash = hash_key(raw)
+        row.is_admin = False
+    audit.record(db, admin.name, "key.issue", key_name, {"is_admin": False, "for": module_name})
+    return raw
 
 
 @router.post("/modules/{module_id}/mcp-check")
@@ -303,12 +334,19 @@ def check_mcp_module(
     if row.type != ModuleType.mcp:
         raise HTTPException(status_code=400, detail=f"mcp 타입 모듈이 아닙니다: {row.type.value}")
     config = svc.decrypt_config(row.config)
-    return {
-        "module_id": row.id,
-        "name": row.name,
-        "url": config.get("url", ""),
-        **mcp_client.check_server(config.get("url", ""), config.get("api_key") or None),
-    }
+    url, api_key = config.get("url", ""), config.get("api_key") or None
+    result = mcp_client.check_server(url, api_key)
+    if not result["ok"] and "401" in (result["error"] or "") and not api_key:
+        # 401을 그대로 내주면 "주소가 틀렸나"를 먼저 의심하게 된다 — 원인은 키가 없는
+        # 것이고, 사내 서버는 다시 가져오기만 하면 전용 키가 발급된다.
+        result["error"] += (
+            " — 이 모듈에 API 키가 없습니다."
+            + (" 사내 MCP 서버는 인증이 필요합니다. 모듈을 지우고 '사내 MCP 검색'에서"
+               " 다시 가져오면 전용 키가 함께 발급됩니다."
+               if mcp_search.is_internal_server_url(url)
+               else " 모듈 수정에서 config.api_key에 키를 넣으세요.")
+        )
+    return {"module_id": row.id, "name": row.name, "url": url, **result}
 
 
 @router.get("/modules/usage-report", response_model=PlatformModuleReportOut)
