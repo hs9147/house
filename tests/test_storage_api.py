@@ -146,6 +146,29 @@ def test_quoted_windows_paths_are_accepted(monkeypatch, fresh_settings):
         assert str(found[0].root).endswith("D:\\1.계약품의"), raw
 
 
+def test_spaces_inside_a_path_survive(monkeypatch, tmp_path, fresh_settings):
+    """공유 폴더 이름에 공백은 흔하다("cost db", "2026 1분기").
+
+    항목·이름·경로의 **양끝** 공백만 다듬고 안쪽은 건드리지 않는다 — `=` 옆을 띄워
+    적어도 되고, 폴더 이름의 공백은 그대로 남아야 한다.
+    """
+    docs = tmp_path / "cost db" / "2026 1분기"
+    docs.mkdir(parents=True)
+    (docs / "원가표.txt").write_text("재료비 12500", encoding="utf-8")
+
+    for raw in (f"costdb={tmp_path / 'cost db'}",
+                f" costdb = {tmp_path / 'cost db'} ",
+                f'costdb="{tmp_path / "cost db"}"'):
+        monkeypatch.setenv("PAAS_DOC_ROOTS", raw)
+        get_settings.cache_clear()
+        found = [s for s in storage.stores() if s.name != "internal"]
+        assert [s.name for s in found] == ["costdb"], raw
+        assert found[0].root == tmp_path / "cost db", raw
+        # 공백이 든 하위 경로까지 그대로 열린다
+        assert [f["path"] for f in storage.list_files(found[0].root)] == [
+            "2026 1분기/원가표.txt"], raw
+
+
 def test_a_korean_folder_asks_for_an_explicit_name(monkeypatch, fresh_settings):
     """이름은 URL 조각이자 모듈 이름이 된다 — 만들 수 없으면 쓰라고 말한다.
 
