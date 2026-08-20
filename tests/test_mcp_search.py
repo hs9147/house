@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from app.config import get_settings
 from app.main import create_app
+from app.services import mcp_client
 
 ADMIN = {"x-api-key": "test-admin-key"}
 API = "/paas/api/v1"
@@ -92,17 +93,83 @@ def test_backchannel_url_is_the_fallback_base(monkeypatch, tmp_path, fresh_setti
     assert ops["url"] == "http://10.0.0.5:7000/paas/api/v1/mcp/ops"
 
 
-def test_import_registers_an_internal_server_as_a_module(monkeypatch, tmp_path, fresh_settings):
-    c = _client(monkeypatch, tmp_path)
+def _import_ops(c) -> dict:
     ops = next(i for i in c.get(f"{API}/mcp/search", headers=ADMIN).json() if i["id"] == "paas-ops")
     created = c.post(f"{API}/modules/import-mcp", headers=ADMIN,
                      json={"id": ops["id"], "name": ops["name"], "url": ops["url"],
                            "category": ops["category"]})
     assert created.status_code == 201, created.text
+    return created.json()
+
+
+def test_import_registers_an_internal_server_as_a_module(monkeypatch, tmp_path, fresh_settings):
+    c = _client(monkeypatch, tmp_path)
+    _import_ops(c)
     modules = {m["name"]: m for m in c.get(f"{API}/modules", headers=ADMIN).json()}
     assert modules["paas-ops"]["type"] == "mcp"
     # 사내 주소라 유출 판정도 internal이다
     assert modules["paas-ops"]["egress"]["scope"] == "internal"
+
+
+def test_imported_internal_server_gets_a_key_that_actually_opens_it(
+        monkeypatch, tmp_path, fresh_settings):
+    """키 없이 등록하면 등록은 성공한 채 연결 확인이 401로 떨어진다 — 원클릭 등록이
+    동작하지 않는 모듈을 만들어 내는 셈이다(실제로 그랬다)."""
+    c = _client(monkeypatch, tmp_path)
+    created = _import_ops(c)
+    assert created["key_issued"] is True
+    assert created["config"]["api_key"] == "•••"  # 값은 가려서 내보낸다
+
+    sent: dict[str, str] = {}
+
+    def post_rpc(url, headers, payload):
+        """mcp_client의 HTTP 경계를 이 앱으로 되돌린다 — 발급된 키가 실제로 통하는지 본다."""
+        sent.update(headers)
+        res = c.post(url.replace("http://localhost:7000/paas", "/paas"),
+                     headers=headers, json=payload)
+        res.raise_for_status()
+        return res.json()
+
+    monkeypatch.setattr(mcp_client, "_post_rpc", post_rpc)
+    body = c.post(f"{API}/modules/{created['id']}/mcp-check", headers=ADMIN).json()
+    assert body["ok"] is True, body["error"]
+    assert body["tool_count"] > 0
+
+    # 발급 키는 **비관리자**여야 한다 — mcp 모듈의 api_key는 바인딩된 앱의 환경변수로도
+    # 주입되므로, 관리자 키를 넣으면 관리자 권한이 앱 env로 새어 나간다.
+    raw = sent["authorization"].removeprefix("Bearer ")
+    assert c.get(f"{API}/audit", headers={"x-api-key": raw}).status_code == 403
+
+
+def test_external_server_import_does_not_issue_a_key(monkeypatch, tmp_path, fresh_settings):
+    """사외 서버의 자격증명을 플랫폼이 지어낼 수는 없다 — 빈 채로 두고 사용자가 넣는다."""
+    c = _client(monkeypatch, tmp_path)
+    created = c.post(f"{API}/modules/import-mcp", headers=ADMIN, json={
+        "id": "vendor", "name": "vendor-mcp", "url": "https://mcp.vendor.com/v1",
+        "category": "etc"}).json()
+    assert created["key_issued"] is False
+
+
+def test_a_keyless_module_says_why_it_is_401(monkeypatch, tmp_path, fresh_settings):
+    """401을 그대로 내주면 "주소가 틀렸나"를 먼저 의심하게 된다."""
+    c = _client(monkeypatch, tmp_path)
+    created = _import_ops(c)
+    # 예전 방식으로 등록된 모듈(키 없음)을 재현한다
+    c.put(f"{API}/modules/{created['id']}", headers=ADMIN, json={
+        "name": "paas-ops", "type": "mcp",
+        "config": {"url": created["config"]["url"], "api_key": ""}})
+
+    def post_rpc(url, headers, payload):
+        res = c.post(url.replace("http://localhost:7000/paas", "/paas"),
+                     headers=headers, json=payload)
+        res.raise_for_status()
+        return res.json()
+
+    monkeypatch.setattr(mcp_client, "_post_rpc", post_rpc)
+    body = c.post(f"{API}/modules/{created['id']}/mcp-check", headers=ADMIN).json()
+    assert body["ok"] is False
+    assert "API 키가 없습니다" in body["error"]
+    assert "다시 가져오면" in body["error"]
 
 
 def test_refresh_reports_the_current_count(monkeypatch, tmp_path, fresh_settings):
