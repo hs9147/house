@@ -40,6 +40,7 @@ import type {
   ServerConfigOut,
   StatusSnapshot,
   StorageListing,
+  StorageStore,
   UserAccountOut,
   UserOrgOut,
 } from './types';
@@ -301,19 +302,6 @@ export const api = {
       category: category || null,
       organization_id: organization_id ?? null,
     }),
-  uploadFileStorageModule: (
-    zipFile: File,
-    name: string,
-    category?: string,
-    organization_id?: number,
-  ) => {
-    const fd = new FormData();
-    fd.append('zip_file', zipFile);
-    fd.append('name', name);
-    if (category) fd.append('category', category);
-    if (organization_id) fd.append('organization_id', String(organization_id));
-    return requestMultipart<ModuleOut>('/modules/upload-storage', fd);
-  },
   deleteModule: (id: number) => request<void>('DELETE', `/modules/${id}`),
 
   me: () =>
@@ -326,19 +314,20 @@ export const api = {
     request<UserAccountOut>('POST', `/auth/accounts/${id}/organizations/modify`, { organization_id, action }),
   rejectAccount: (id: number) => request<void>('DELETE', `/auth/accounts/${id}`),
 
-  // 파일 저장소 — 로컬 경로는 노출되지 않고 /storage/{모듈} 창구로만 다룬다
-  listStorageFiles: (module: string) =>
-    request<StorageListing>('GET', `/storage/${module}/files`),
-  uploadStorageFile: (module: string, file: File, path?: string) => {
+  // 파일 저장소 — 목록은 환경변수(PAAS_STORAGE_ROOT·PAAS_DOC_ROOTS)가 정한다
+  listStorageStores: () => request<StorageStore[]>('GET', '/storage/stores'),
+  listStorageFiles: (store: string) =>
+    request<StorageListing>('GET', `/storage/${store}/files`),
+  uploadStorageFile: (store: string, file: File, path?: string) => {
     const fd = new FormData();
     fd.append('file', file);
     if (path) fd.append('path', path);
-    return requestMultipart<{ path: string }>(`/storage/${module}/files`, fd);
+    return requestMultipart<{ path: string }>(`/storage/${store}/files`, fd);
   },
-  deleteStorageFile: (module: string, path: string) =>
-    request<void>('DELETE', `/storage/${module}/files`, undefined, { path }),
-  downloadStorageFile: (module: string, path: string) =>
-    requestBlob(`/storage/${module}/files/content`, { path }),
+  deleteStorageFile: (store: string, path: string) =>
+    request<void>('DELETE', `/storage/${store}/files`, undefined, { path }),
+  downloadStorageFile: (store: string, path: string) =>
+    requestBlob(`/storage/${store}/files/content`, { path }),
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),
   bindModule: (projectId: number, moduleId: number, env_prefix: string) =>

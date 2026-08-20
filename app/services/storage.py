@@ -1,39 +1,126 @@
-"""파일 저장소 — 로컬 경로를 감추고 URL로만 다루게 하는 계층.
+"""파일 저장소 — 환경변수로 정한 디렉터리를 이름 뒤에 감춘다.
 
-file_storage 모듈이 실제로 어느 디렉터리에 얹혀 있는지는 플랫폼 내부 사정이다.
-배포된 앱도 콘솔도 `{P}_URL`이 가리키는 /storage/{모듈} 창구만 쓴다.
+저장소는 모듈 레지스트리에 등록하는 것이 아니라 **환경변수로 정한다**:
+
+  PAAS_STORAGE_ROOT  내부 저장소 한 곳(쓰기 가능). 이름은 `internal`.
+  PAAS_DOC_ROOTS     사내 문서 폴더(읽기 전용, 쉼표 구분). `이름=경로` 또는 경로만.
+
+왜 모듈이 아니게 됐나: 저장소가 어느 디렉터리에 얹혀 있는지는 서버를 설치한 사람이
+이미 아는 사실이지 콘솔에서 등록할 일이 아니었다. 모듈로 두면 같은 폴더가 이름만 달리
+두 번 등록되거나, 존재하지 않는 경로가 등록돼도 열어 보기 전까지 아무도 모른다.
+접근은 사내 MCP 서버(/mcp/docs, /mcp/storage/{저장소})와 /storage 창구가 맡는다.
 """
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import get_settings
-from ..models import Module
+
+# 내부 저장소(PAAS_STORAGE_ROOT)의 이름. 문서 폴더가 이 이름을 다시 쓰면 거부한다.
+INTERNAL_STORE = "internal"
 
 
 class StorageError(Exception):
-    """경로 탈출 등 저장소 규약 위반."""
+    """경로 탈출·저장소 설정 오류 등 저장소 규약 위반."""
 
 
-def root_for(module: Module) -> Path:
-    """모듈이 얹힌 실제 디렉터리. 호출자 밖으로 새어 나가면 안 된다.
+@dataclass(frozen=True)
+class Store:
+    """이름이 붙은 저장소 하나. root는 호출자 밖으로 새어 나가도 되는 값이 아니다 —
+    운영자에게 되비추는 자리(list_sources·/storage/stores)에서만 보여 준다."""
 
-    endpoint가 URL이거나 비어 있으면 PAAS_STORAGE_ROOT를 쓴다 — 로컬 경로만
-    저장소 루트가 될 수 있다.
+    name: str
+    root: Path
+    read_only: bool
+
+
+# 저장소 이름은 URL 조각(/mcp/storage/{이름})이자 색인 파일 이름이고, 모듈로 가져올 때
+# 모듈 이름이 되기도 한다 — 그래서 모듈 이름과 같은 규칙(ModuleCreate)을 쓴다. 한글을
+# 허용하지 않는 이유가 하나 더 있다: 이 플랫폼은 IIS/ARR 서브패스 뒤에 놓이는데, 경로에
+# 한글이 들어가면 인코딩이 한 번 더 겹치는 자리가 생긴다.
+_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+
+
+# 곧은 따옴표와 굽은 따옴표 모두. 굽은 쪽은 문서·메신저에서 경로를 복사해 오면 붙는다.
+_QUOTES = "\"'\u201c\u201d\u2018\u2019"
+
+
+def _unquote(value: str) -> str:
+    """윈도우 경로를 따옴표로 감싸 적는 습관을 받아 준다.
+
+    벗기지 않으면 따옴표가 경로의 일부가 되어 없는 폴더를 가리키고, 목록에는
+    exists: false로만 나온다 — "폴더가 비었다"와 구분되지 않아 원인을 찾기 어렵다.
+    윈도우 파일 이름에는 따옴표를 쓸 수 없으므로 벗겨서 잃는 것도 없다.
     """
-    from .modules import decrypt_config  # noqa: PLC0415 — 순환 import 회피
+    value = value.strip()
+    while len(value) >= 2 and value[0] in _QUOTES and value[-1] in _QUOTES:
+        value = value[1:-1].strip()
+    return value
 
-    cfg = decrypt_config(module.config or {})
+
+def _leaf(path: str) -> str:
+    """경로의 마지막 조각. 윈도우 경로(D:\\공유\\규정)를 리눅스에서 파싱할 때도 맞아야
+    한다 — Path().name은 posix에서 역슬래시를 구분자로 보지 않는다."""
+    return re.split(r"[\\/]+", path.rstrip("/\\"))[-1]
+
+
+def _slug(leaf: str) -> str:
+    """폴더 이름에서 저장소 이름을 만든다("Company Docs" → "company-docs")."""
+    return re.sub(r"[^a-z0-9]+", "-", leaf.lower()).strip("-")
+
+
+def _check_name(name: str, entry: str) -> str:
+    if not _NAME_RE.match(name):
+        raise StorageError(
+            f"PAAS_DOC_ROOTS 항목에서 저장소 이름을 정할 수 없습니다: {entry!r}"
+            " — `이름=경로` 형식으로 이름을 직접 지정하세요"
+            " (소문자·숫자·하이픈, 예: rules=D:\\공유\\사내규정).")
+    return name
+
+
+def stores() -> list[Store]:
+    """지금 열 수 있는 저장소 전부 — 내부 저장소 하나 + 사내 문서 폴더들.
+
+    설정이 잘못돼 있으면 조용히 빼지 않고 StorageError를 낸다: 목록에서 사라지는 것과
+    "그 폴더에 문서가 없다"는 구분이 되지 않아 원인을 찾는 데 시간을 다 쓰게 된다.
+    """
     settings = get_settings()
-    endpoint = str(cfg.get("endpoint") or "")
-    base = endpoint if endpoint and "://" not in endpoint else (settings.storage_root or "./data/storage")
-    sub = str(cfg.get("sub_folder") or cfg.get("bucket") or "").strip("/\\")
-    return (Path(base) / sub).resolve()
+    found = [Store(
+        INTERNAL_STORE,
+        Path(settings.storage_root or "./data/storage").resolve(),
+        read_only=False,
+    )]
+    seen = {INTERNAL_STORE}
+    for entry in settings.doc_roots.split(","):
+        entry = _unquote(entry)
+        if not entry:
+            continue
+        name, sep, path = entry.partition("=")
+        if sep:
+            name, path = _unquote(name), _unquote(path)
+        else:
+            path, name = entry, _slug(_leaf(entry))
+        if not path:
+            raise StorageError(f"PAAS_DOC_ROOTS 항목에 경로가 없습니다: {entry!r}")
+        _check_name(name, entry)
+        if name in seen:
+            raise StorageError(
+                f"PAAS_DOC_ROOTS의 저장소 이름이 겹칩니다: {name!r}"
+                f" ({INTERNAL_STORE}은 내부 저장소가 쓰는 이름입니다)")
+        seen.add(name)
+        found.append(Store(name, Path(path).resolve(), read_only=True))
+    return found
 
 
-def url_for(module_name: str) -> str:
-    """모듈 저장소의 공개 주소. 바인딩된 앱에 {P}_URL로 주입된다."""
+def store(name: str) -> Store | None:
+    return next((s for s in stores() if s.name == name), None)
+
+
+def url_for(store_name: str) -> str:
+    """저장소의 공개 창구 주소 — 콘솔 파일 관리 화면이 쓰는 주소다."""
     settings = get_settings()
     base = settings.platform_public_url.rstrip("/") or f"https://{settings.base_domain}"
-    return f"{base}/paas/api/v1/storage/{module_name}"
+    return f"{base}/paas/api/v1/storage/{store_name}"
 
 
 def resolve(root: Path, rel: str) -> Path:

@@ -223,7 +223,7 @@ GET  /paas/api/v1/plan/projects/{id}/compliance     # LLM·모듈 사용 검증 
 POST /paas/api/v1/plan/projects/{id}/mcp            # 외부 빌드 도구용 MCP 서버(JSON-RPC 2.0)
 POST /paas/api/v1/projects/{id}/review              # {provider_id, diff? , base_ref?} → 심각도 분류 findings
 
-POST /paas/api/v1/modules                           # external_api | internal_api | database | file_storage | mcp
+POST /paas/api/v1/modules                           # external_api | internal_api | database | mcp | llm
                                                 #   + category?(예: news, llm — API 카테고리별 그룹핑)
                                                 #   + organization_id?(지정 시 해당 조직 프로젝트에만 노출)
                                                 # config의 api_key/dsn/secret 등은 Fernet 암호화 저장
@@ -244,16 +244,19 @@ GET  /paas/api/v1/a2a/agents                        # 등재된 에이전트 카
 GET  /paas/api/v1/a2a/agents/{name}/card            # 단일 카드
 POST /paas/api/v1/a2a/agents/{name}/task            # {capability, input} → 대상 에이전트로 중계
 
-GET  /paas/api/v1/storage/{module}/files            # file_storage 모듈의 파일 목록 + 창구 URL
-GET  /paas/api/v1/storage/{module}/files/content    # ?path= 다운로드
-POST /paas/api/v1/storage/{module}/files            # multipart {file, path?} 업로드
-DELETE /paas/api/v1/storage/{module}/files          # ?path= 삭제
+GET  /paas/api/v1/storage/stores                    # 열려 있는 저장소 목록(이름·경로·읽기 전용 여부)
+GET  /paas/api/v1/storage/{저장소}/files             # 파일 목록 + 창구 URL
+GET  /paas/api/v1/storage/{저장소}/files/content     # ?path= 다운로드
+POST /paas/api/v1/storage/{저장소}/files             # multipart {file, path?} 업로드 (읽기 전용이면 403)
+DELETE /paas/api/v1/storage/{저장소}/files           # ?path= 삭제 (읽기 전용이면 403)
 
 POST /paas/api/v1/mcp/ops                           # 사내 MCP 서버 — 운영 조회(배포 상태·로그·라우팅·호스트·감사)
 POST /paas/api/v1/mcp/projects/{id}/code            # 사내 MCP 서버 — 프로젝트 코드 조회(파일·구조 개요)
-POST /paas/api/v1/mcp/storage/{module}              # 사내 MCP 서버 — file_storage 모듈 파일(루트 밖으로 못 나감)
+POST /paas/api/v1/mcp/docs                          # 사내 MCP 서버 — 사내 문서 본문 검색(저장소를 가로질러)
+                                                #   list_sources·search_docs·read_doc·reindex_docs·index_status
+POST /paas/api/v1/mcp/storage/{저장소}              # 사내 MCP 서버 — 저장소 파일(루트 밖으로 못 나감)
                                                 #   list_files·read_file + search_docs·reindex_docs·index_status
-                                                #   config.read_only=true면 쓰기·삭제 도구는 광고하지 않음
+                                                #   PAAS_DOC_ROOTS로 붙인 폴더는 읽기 전용 — 쓰기·삭제 도구를 광고하지 않음
 POST /paas/api/v1/mcp/db/{module}                   # 사내 MCP 서버 — database 모듈 조회(SELECT 전용)
                                                 #   PAAS_MCP_DB_MODULES에 이름이 있는 모듈만 열림(기본 전부 차단)
 
@@ -271,13 +274,26 @@ DELETE /paas/api/v1/previews/{id}
   전달되므로, 외부 빌더는 카드에서 본 이름으로만 게이트웨이를 통해 다른 에이전트를 호출합니다.
   현재 카드는 자체 규약입니다 — 표준 A2A 클라이언트가 붙으려면 `/.well-known/agent-card.json`
   공개와 JSON-RPC `message/send` 수용이 남아 있습니다(미구현).
-- **파일 저장소는 URL로만 다룹니다**: `file_storage` 모듈이 실제로 어느 디렉터리에
-  얹혀 있는지는 플랫폼 내부 사정입니다. 바인딩된 앱에는 로컬 경로 대신
-  `{PREFIX}_URL`(= `/paas/api/v1/storage/{모듈}`)만 주입되고, 콘솔의 **파일 관리** 화면도
-  같은 창구를 씁니다. 저장소 루트는 `PAAS_STORAGE_ROOT`이며 경로 탈출과 절대 경로는
-  거부됩니다(`services/storage.py`). 사내망 전제라 앱마다 별도 자격증명을 발급하지 않는
-  대신, 업로드·다운로드·삭제는 모두 호출 주체(`x-api-key`의 키 이름 또는 OIDC
-  `preferred_username`)와 함께 감사 로그에 남습니다.
+- **파일 저장소는 환경변수로 정하고, MCP와 창구로 다룹니다**: 저장소는 모듈로 등록하지
+  않습니다 — `PAAS_STORAGE_ROOT`가 내부 저장소 하나(이름 `internal`, 쓰기 가능),
+  `PAAS_DOC_ROOTS`가 사내 문서 폴더(읽기 전용)를 정합니다. 디스크 경로는 서버를 설치한
+  사람이 이미 아는 사실이지 콘솔에서 등록할 일이 아니고, 모듈로 두면 같은 폴더가 이름만
+  달리 두 번 등록되거나 존재하지 않는 경로가 등록돼도 열어 보기 전까지 아무도 모릅니다.
+  `PAAS_DOC_ROOTS`는 쉼표로 여러 개를 받고 각 항목은 `이름=경로` 또는 경로만 씁니다
+  (경로만 주면 마지막 폴더 이름이 저장소 이름이 됩니다):
+
+  ```
+  PAAS_STORAGE_ROOT=D:\paas\data\storage
+  PAAS_DOC_ROOTS=규정=D:\공유\사내규정,D:\공유\계약서
+  ```
+
+  접근 창구는 셋입니다 — LLM은 `/mcp/docs`(본문 검색)와 `/mcp/storage/{저장소}`,
+  사람은 콘솔의 **파일 관리** 화면(= `/paas/api/v1/storage/{저장소}`)입니다. 경로 탈출과
+  절대 경로는 모두 거부됩니다(`services/storage.py`). 사내망 전제라 앱마다 별도
+  자격증명을 발급하지 않는 대신, 업로드·다운로드·삭제는 모두 호출 주체(`x-api-key`의 키
+  이름 또는 OIDC `preferred_username`)와 함께 감사 로그에 남습니다. 설정이 잘못돼 있으면
+  조용히 빼지 않고 어느 항목이 문제인지 그대로 알려 줍니다 — 목록에서 사라지면 "그 폴더에
+  문서가 없다"와 구분되지 않습니다.
 - 내부 LLM 프로바이더(`project://llm-main`)를 쓰면 소스가 사내망을 벗어나지 않습니다.
 - internal_api 모듈과 `project://` LLM 프로바이더의 URL은 티어에 따라 자동
   해석됩니다(small: target 프로젝트의 실제 배포 URL과 동일한 서브패스 —
@@ -311,12 +327,13 @@ DELETE /paas/api/v1/previews/{id}
   씁니다 — 플랫폼 자신의 주소이므로 **사내에서 실제로 닿는 주소**를 넣습니다(공개
   도메인이 이 플랫폼으로 라우팅되지 않는 구성이면 내부 주소, 예:
   `http://localhost:7000/paas/api/v1/mcp/ops`). 위험은 도구 쪽에서 막습니다: ops·code는
-  읽기 전용, storage는 모듈 루트 안에 갇히고, db는 `PAAS_MCP_DB_MODULES` 허용 목록
+  읽기 전용, storage는 저장소 루트 안에 갇히고, db는 `PAAS_MCP_DB_MODULES` 허용 목록
   (기본 빈 목록 = 전부 차단) + SELECT 한 문장 + 행 수 상한 + 실행 SQL 감사 기록입니다.
   DB 드라이버(psycopg 등)는 선택 의존성이며, 없으면 무엇을 설치해야 하는지 알려 줍니다.
   이 서버들은 **사내 MCP 검색**(`GET /mcp/search`, 콘솔 모듈 화면의 "사내 MCP 검색")에
-  그대로 나와 원클릭으로 모듈 등록됩니다. 목록은 고정 표가 아니라 **지금 등록된 것에서**
-  만듭니다 — 저장소 서버는 file_storage 모듈이 있어야, DB 서버는 `PAAS_MCP_DB_MODULES`
+  그대로 나와 원클릭으로 모듈 등록됩니다. 목록은 고정 표가 아니라 **지금 있는 것에서**
+  만듭니다 — 저장소 서버는 `PAAS_STORAGE_ROOT`·`PAAS_DOC_ROOTS`가 연 저장소마다,
+  DB 서버는 `PAAS_MCP_DB_MODULES`
   허용 목록에 있어야, 코드 서버는 프로젝트마다 하나씩 나옵니다(없는 대상을 목록에 올리면
   "등록했는데 왜 안 되나"를 추적하게 됩니다). 주소의 기준은 `PAAS_MCP_INTERNAL_BASE_URL`
   (비우면 백채널 주소 → 공개 주소 순)이며, **플랫폼이 자기 자신에게 닿는 주소**여야
@@ -335,18 +352,21 @@ DELETE /paas/api/v1/previews/{id}
   > 대상에 넘겨 **호출자의 `x-api-key`·`cookie`·`authorization`이 사외 API로 나가던 것**
   > (허용 목록만 넘기도록 변경), A2A 게이트웨이가 호출자 신원(`x-paas-calling-agent`,
   > 대개 이메일)을 사외 대상에도 붙이던 것(사내 대상에만 붙이도록 변경).
-- **서버 디스크의 사내 문서 폴더 붙이기**: `file_storage` 모듈의 `config.endpoint`에
-  절대 경로를 주면(`://`가 없으면 로컬 경로로 해석 — `services/storage.py`) 그 디렉터리가
-  저장소 루트가 되고, `/mcp/storage/{모듈}`로 바로 읽힙니다. 이미 있는 문서 폴더에는
-  `config.read_only: true`를 함께 주십시오 — 쓰기·삭제 도구를 아예 광고하지 않고, 콘솔
-  파일 관리 화면의 업로드·삭제도 403으로 막습니다. 목록은 `glob`으로 걸러 상한까지만
+- **서버 디스크의 사내 문서 폴더 붙이기**: `PAAS_DOC_ROOTS`에 절대 경로를 적으면 그
+  디렉터리가 저장소가 되고 `/mcp/storage/{저장소}`로 바로 읽힙니다. 이렇게 붙인 폴더는
+  **항상 읽기 전용**입니다 — 플랫폼이 만든 것이 아니므로 쓰기·삭제 도구를 아예 광고하지
+  않고, 콘솔 파일 관리 화면의 업로드·삭제도 403으로 막습니다. 목록은 `glob`으로 걸러 상한까지만
   주며(잘리면 그렇다고 알립니다), 파일 내용은 **본문 텍스트를 추출**해서 줍니다
   (`services/doctext.py`) — 형식은 확장자가 아니라 컨테이너 매직으로 판별합니다:
   `docx·xlsx·pptx·hwpx`는 zip+XML이라 표준 라이브러리만으로, `pdf`는 `pypdf`(선택
   의존성)로, 97-2003 바이너리(`doc·xls·ppt`)는 LibreOffice 변환(`PAAS_SOFFICE_PATH`)으로
   처리하고, 평문은 utf-8 → cp949 순서로 디코드합니다(한국어 윈도우 txt·csv). 추출할 수
   없으면 깨진 글자 대신 이유를 돌려줍니다(스캔 PDF면 OCR이 필요하다고 알립니다).
-- **문서 본문 검색**(`services/docsearch.py`): `search_docs`는 파일명이 아니라 **본문**을
+- **문서 본문 검색**(`services/docsearch.py`): 저장소 하나를 다루는
+  `/mcp/storage/{모듈}`과, 저장소를 가로질러 한 번에 찾는 **`/mcp/docs`** 두 곳에 있습니다 —
+  뒤쪽은 저장소 이름을 모르는 쪽이 부르는 창구라 결과에 어느 저장소인지를 실어 주고
+  (`source`), `list_sources`로 대상과 색인 커버리지를 함께 봅니다. `search_docs`는 파일명이
+  아니라 **본문**을
   찾습니다 — 공백으로 끊은 낱말을 모두 포함하는 문서를 골라 일치 대목 발췌와 함께 줍니다.
   색인은 `reindex_docs`로 만들고(`PAAS_DOC_INDEX_DIR`, 모듈별 sqlite 파일), 크기·mtime이
   같은 파일은 건너뛰는 증분이며 **추출 실패도 캐시**합니다(97-2003 파일 하나를 LibreOffice로
@@ -380,8 +400,8 @@ npm run build        # tsc 타입체크 + vite build → dist/
   입력/조직 소속 자동 생성/zip·폴더 업로드 3가지 방식 선택, dev/release 배포·롤백·중지·배포
   이력·로그 3초 폴링·환경변수·모듈 바인딩·프리뷰), 코드 확인(읽기 전용 파일 트리·내용 뷰어 —
   수정 경로 없음 — 구현은 외부 개발도구), 모듈 레지스트리(카테고리·조직 범위 표시 + admin은 "외부 API
-  검색"으로 공개 디렉터리에서 external_api 자동 추가), 파일 관리(file_storage 모듈의
-  창구 URL 표시 + 목록·업로드·다운로드·삭제), 계정 승인(가입 신청 승인/거절), LLM 프로바이더,
+  검색"으로 공개 디렉터리에서 external_api 자동 추가), 파일 관리(환경변수가 연 저장소의
+  경로·창구 URL 표시 + 목록·다운로드, 쓰기 가능한 저장소만 업로드·삭제), 계정 승인(가입 신청 승인/거절), LLM 프로바이더,
   대화식 코드 편집(diff 뷰 + 승인/거절 + 브랜치 리뷰 + 프로젝트 선택 시 카테고리별 사용 가능
   자원 패널 + 코드 구조 트리 확대/축소), 서버구성(런타임/
   프록시 백엔드 표시, 프로젝트×프로필별 도메인·상태·배포/중지, 리다이렉트/재작성 규칙

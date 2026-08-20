@@ -396,7 +396,15 @@ LLM 채팅 → diff 제안 → 승인(`POST /changes/{id}/apply`)으로만 가�
 | external_api | 결제 API, CHO-FAM 메일 API | `{PREFIX}_URL`, `{PREFIX}_API_KEY` |
 | internal_api | 플랫폼에 배포된 다른 프로젝트 | `{PREFIX}_URL` — 1차: Caddy 도메인, 2차: K8s Service DNS로 자동 해석 |
 | database | PostgreSQL, SQLite | `{PREFIX}_DSN` |
-| file_storage | 로컬 볼륨, SeaweedFS | `{PREFIX}_BUCKET`, `{PREFIX}_ENDPOINT` |
+| ~~file_storage~~ | 로컬 볼륨, SeaweedFS | (폐기 — 아래 주 참고) |
+
+> **file_storage 타입은 폐기됐다.** 저장소 경로는 모듈로 등록하는 것이 아니라
+> `PAAS_STORAGE_ROOT`(내부 저장소)·`PAAS_DOC_ROOTS`(사내 문서 폴더, 읽기 전용)
+> 환경변수가 정하고, 접근은 `/storage` 창구와 사내 MCP 서버(`/mcp/docs`,
+> `/mcp/storage/{저장소}`)가 맡는다. 디스크 경로는 서버를 설치한 사람이 이미 아는
+> 사실이지 콘솔에서 등록할 일이 아니었고, 모듈로 두면 같은 폴더가 이름만 달리 두 번
+> 등록되거나 존재하지 않는 경로가 등록돼도 열어 보기 전까지 아무도 모른다. 따라서
+> 저장소는 바인딩 대상이 아니며 `{PREFIX}_URL`·`{PREFIX}_BUCKET` 주입도 없다.
 
 - 자격증명은 전부 기존 EnvVar 암호화 경로 재사용 — 새 보안 표면을 만들지 않는다.
 - internal_api 모듈은 **서비스 디스커버리를 겸한다**: 프로젝트 간 호출을 도메인 하드코딩 없이
@@ -407,7 +415,8 @@ LLM 채팅 → diff 제안 → 승인(`POST /changes/{id}/apply`)으로만 가�
   바인딩 여부와 무관하게 미리 볼 수 있도록 `GET /projects/{id}/resources`를 추가했다. Module에
   `category`(자유 텍스트 — "news", "llm" 등 API를 카테고리별로 묶는 용도)와 `organization_id`
   (지정 시 해당 조직 프로젝트에만 노출 — "조직별 DB" 같은 조직 전용 자원)를 추가해, 콘솔 채팅
-  화면이 API(카테고리별)·서버내 공유 파일(file_storage)·DB(조직별 포함)를 아이템화해 보여준다.
+  화면이 API(카테고리별)·DB(조직별 포함)를 아이템화해 보여준다(서버내 공유 파일은 위
+  주석대로 모듈이 아니라 환경변수로 정하므로 이 리스팅에 나오지 않는다).
   실제 LLM 프롬프트 컨텍스트(`context_for_llm`)는 기존대로 **바인딩된 모듈만** 주입한다 —
   이 리스팅은 사용자가 무엇을 바인딩할지 판단하기 위한 참고용이며, LLM이 실제로 배포 시
   주입되지 않는 미바인딩 자원을 코드에서 참조하도록 유도하지 않기 위해 컨텍스트 주입 범위는

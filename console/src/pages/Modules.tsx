@@ -12,7 +12,6 @@ const TYPE_HINTS: Record<string, string> = {
   external_api: '{"url": "https://...", "api_key": "..."}',
   internal_api: '{"target_project": "다른-프로젝트명"}',
   database: '{"dsn": "postgresql://user:pw@host/db"}',
-  file_storage: '{"endpoint": "http://...", "bucket": "..."}',
   mcp: '{"url": "https://mcp.example.com", "api_key": "..."}',
   llm: '{"url": "https://api.example.com/v1", "api_key": "...", "model": "gpt-4o"}',
 };
@@ -595,132 +594,6 @@ function GroupedApiConfigForm({
   );
 }
 
-function FileStorageConfigForm({
-  config,
-  onChange,
-  storageMode,
-  setStorageMode,
-  zipFile,
-  setZipFile,
-}: {
-  config: Record<string, unknown>;
-  onChange: (newConfig: Record<string, unknown>) => void;
-  storageMode: 'folder' | 'zip';
-  setStorageMode: (mode: 'folder' | 'zip') => void;
-  zipFile: File | null;
-  setZipFile: (file: File | null) => void;
-}) {
-  const [rootPath, setRootPath] = useState<string>(String(config.endpoint ?? './data/storage'));
-  const [subFolder, setSubFolder] = useState<string>(String(config.sub_folder ?? config.bucket ?? 'uploads'));
-
-  const update = (root: string, sub: string) => {
-    onChange({
-      endpoint: root.trim(),
-      sub_folder: sub.trim(),
-      bucket: sub.trim(),
-    });
-  };
-
-  const rootClean = rootPath.trim().replace(/[/\\]+$/, '');
-  const subClean = subFolder.trim().replace(/^[/\\]+/, '');
-  const fullPath = subClean ? `${rootClean}/${subClean}` : rootClean;
-  const zipFolderName = zipFile ? zipFile.name.replace(/\.[^/.]+$/, '').trim() : '';
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 4 }}>
-      {/* 방식 선택 라디오 */}
-      <div className="panel" style={{ padding: 10, margin: 0, backgroundColor: 'rgba(255,255,255,0.03)' }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: '#9ca3af', marginBottom: 8, display: 'block' }}>
-          저장소 구성 방식
-        </span>
-        <div className="row" style={{ gap: 16 }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13 }}>
-            <input
-              type="radio"
-              name="storageMode"
-              checked={storageMode === 'folder'}
-              onChange={() => setStorageMode('folder')}
-            />
-            📂 하위 폴더 직접 지정
-          </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13 }}>
-            <input
-              type="radio"
-              name="storageMode"
-              checked={storageMode === 'zip'}
-              onChange={() => setStorageMode('zip')}
-            />
-            📦 ZIP 파일 업로드 (파일명 폴더 자동 생성)
-          </label>
-        </div>
-      </div>
-
-      {storageMode === 'folder' ? (
-        <>
-          <div className="panel" style={{ padding: 12, margin: 0, backgroundColor: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)' }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: '#38bdf8', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-              💾 Root 경로 (환경변수 PAAS_STORAGE_ROOT 반영)
-            </div>
-            <label className="field">
-              저장소 Root 경로
-              <input
-                value={rootPath}
-                onChange={(e) => {
-                  setRootPath(e.target.value);
-                  update(e.target.value, subFolder);
-                }}
-                placeholder="./data/storage 또는 /mnt/nas/storage"
-              />
-            </label>
-          </div>
-
-          <div className="panel" style={{ padding: 12, margin: 0, backgroundColor: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)' }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: '#f59e0b', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-              📂 하위 폴더 지정
-            </div>
-            <label className="field">
-              Root 경로 하위 폴더 명칭 <span style={{ color: '#ef4444' }}>*</span>
-              <input
-                value={subFolder}
-                onChange={(e) => {
-                  setSubFolder(e.target.value);
-                  update(rootPath, e.target.value);
-                }}
-                placeholder="uploads 또는 shared-data"
-                required={storageMode === 'folder'}
-              />
-            </label>
-            <div style={{ marginTop: 8, padding: 8, borderRadius: 4, background: 'rgba(0,0,0,0.3)', fontSize: 12 }}>
-              <span style={{ color: '#9ca3af' }}>최종 자동 결합 경로: </span>
-              <span style={{ color: '#38bdf8', fontWeight: 600, fontFamily: 'monospace' }}>{fullPath}</span>
-            </div>
-          </div>
-        </>
-      ) : (
-        <div className="panel" style={{ padding: 12, margin: 0, backgroundColor: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)' }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: '#10b981', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-            📦 ZIP 압축 파일 선택 (Root 경로에 파일명으로 폴더 자동 생성)
-          </div>
-          <input
-            type="file"
-            accept=".zip"
-            onChange={(e) => setZipFile(e.target.files?.[0] ?? null)}
-            required={storageMode === 'zip'}
-          />
-          {zipFile && (
-            <div style={{ marginTop: 10, padding: 8, borderRadius: 4, background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.3)', fontSize: 12 }}>
-              <span style={{ color: '#a7f3d0' }}>생성될 폴더 경로: </span>
-              <span style={{ color: '#10b981', fontWeight: 600, fontFamily: 'monospace' }}>
-                {rootClean}/{zipFolderName}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function CreateModuleModal({
   onClose,
   onCreated,
@@ -735,8 +608,6 @@ function CreateModuleModal({
   const [organizationId, setOrganizationId] = useState('');
   const [configObj, setConfigObj] = useState<Record<string, unknown>>({ url: '' });
   const [configJson, setConfigJson] = useState(TYPE_HINTS.external_api);
-  const [storageMode, setStorageMode] = useState<'folder' | 'zip'>('folder');
-  const [zipFile, setZipFile] = useState<File | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -745,38 +616,12 @@ function CreateModuleModal({
     setBusy(true);
     setError('');
 
-    if (type === 'file_storage' && storageMode === 'zip') {
-      if (!zipFile) {
-        setError('업로드할 ZIP 파일을 선택해 주세요.');
-        setBusy(false);
-        return;
-      }
-      try {
-        await api.uploadFileStorageModule(
-          zipFile,
-          name.trim(),
-          category.trim() || undefined,
-          organizationId ? Number(organizationId) : undefined,
-        );
-        onCreated();
-      } catch (err) {
-        setError((err as Error).message);
-        setBusy(false);
-      }
-      return;
-    }
-
     let finalConfig: Record<string, unknown> = {};
 
-    if (type === 'external_api' || type === 'file_storage') {
+    if (type === 'external_api') {
       finalConfig = configObj;
-      if (type === 'external_api' && !finalConfig.url) {
+      if (!finalConfig.url) {
         setError('API Endpoint URL은 필수 입력 항목입니다.');
-        setBusy(false);
-        return;
-      }
-      if (type === 'file_storage' && !finalConfig.sub_folder) {
-        setError('하위 폴더 지정은 필수 항목입니다.');
         setBusy(false);
         return;
       }
@@ -825,15 +670,10 @@ function CreateModuleModal({
             onChange={(e) => {
               const newType = e.target.value;
               setType(newType);
-              if (newType === 'file_storage') {
-                setConfigObj({ endpoint: './data/storage', sub_folder: 'uploads' });
-              } else {
-                setConfigJson(TYPE_HINTS[newType] || '{}');
-              }
+              setConfigJson(TYPE_HINTS[newType] || '{}');
             }}
           >
             <option value="external_api">external_api — 외부 API (환경변수 그룹 관리)</option>
-            <option value="file_storage">file_storage — 파일 저장소 (Root/하위 폴더 지정)</option>
             <option value="internal_api">internal_api — 플랫폼 내 프로젝트</option>
             <option value="database">database — DB 연결</option>
             <option value="mcp">mcp — MCP 서버 (사내·외부 공통)</option>
@@ -863,15 +703,6 @@ function CreateModuleModal({
         {/* 타입별 맞춤형 환경변수 및 폴더 지정 폼 */}
         {type === 'external_api' ? (
           <GroupedApiConfigForm config={configObj} onChange={setConfigObj} />
-        ) : type === 'file_storage' ? (
-          <FileStorageConfigForm
-            config={configObj}
-            onChange={setConfigObj}
-            storageMode={storageMode}
-            setStorageMode={setStorageMode}
-            zipFile={zipFile}
-            setZipFile={setZipFile}
-          />
         ) : (
           <label className="field">
             설정 (JSON)

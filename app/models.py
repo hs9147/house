@@ -343,7 +343,8 @@ class ModuleType(str, enum.Enum):
     external_api = "external_api"
     internal_api = "internal_api"
     database = "database"
-    file_storage = "file_storage"
+    # (file_storage는 없다 — 저장소 경로는 PAAS_STORAGE_ROOT·PAAS_DOC_ROOTS 환경변수가
+    #  정하고 접근은 /storage 창구와 사내 MCP 서버가 맡는다. services/storage.py 참고.)
     # MCP(Model Context Protocol) 서버 — 사내(api/mcp_servers.py)든 외부든 같은 타입이다.
     # env 주입은 external_api와 같은 모양
     # (URL/API_KEY)이지만, 타입을 분리해 두면 채팅 기능이 "이 프로젝트에 바인딩된

@@ -6,7 +6,6 @@
                  프로젝트의 실제 배포 URL과 동일한 규칙, path_prefix_for 참고.
                  2차: http://paas-{target}.{ns}.svc)
   database     : PAY_DSN
-  file_storage : PAY_URL (플랫폼 /storage/{모듈} 창구 — 로컬 경로는 노출하지 않는다), PAY_BUCKET
   mcp          : PAY_URL, PAY_API_KEY (배포된 앱 코드가 직접 쓸 수도 있고, 플랫폼
                  채팅이 services/mcp_client.py로 같은 서버의 도구를 호출하기도 함)
   llm          : PAY_URL, PAY_API_KEY, PAY_MODEL (배포된 앱 코드가 직접 호출할 LLM
@@ -83,17 +82,6 @@ def binding_env(
 
     if t == ModuleType.database:
         return {f"{p}_DSN": cfg.get("dsn", "")}
-
-    if t == ModuleType.file_storage:
-        # 저장소가 실제로 어느 디렉터리에 얹혀 있는지는 플랫폼 내부 사정이다 —
-        # 앱에는 /storage/{모듈} 창구 URL만 준다.
-        from . import storage  # noqa: PLC0415 — 순환 import 회피
-
-        env = {f"{p}_URL": storage.url_for(module.name)}
-        bucket = str(cfg.get("sub_folder") or cfg.get("bucket") or "").strip("/\\")
-        if bucket:
-            env[f"{p}_BUCKET"] = bucket
-        return env
 
     if t == ModuleType.mcp:
         env = {f"{p}_URL": cfg.get("url", "")}
@@ -173,6 +161,4 @@ def _injected_keys_for(module_type: str, env_prefix: str) -> list[str]:
         return [f"{p}_URL"]
     if module_type == "database":
         return [f"{p}_DSN"]
-    if module_type == "file_storage":
-        return [f"{p}_URL", f"{p}_BUCKET"]
     return [f"{p}_URL"]

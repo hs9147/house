@@ -90,10 +90,9 @@ def test_credentials_in_url_are_flagged(fresh_settings):
 
 
 def test_local_modules_have_nothing_to_leak(fresh_settings):
-    for module in (_module("files", ModuleType.file_storage, {"sub_folder": "x"}),
-                   _module("db", ModuleType.database, {"dsn": "postgres://u:p@10.0.0.2/x"})):
-        report = egress.inspect_module(module)
-        assert report["scope"] == "local" and report["secured"] is True
+    report = egress.inspect_module(
+        _module("db", ModuleType.database, {"dsn": "postgres://u:p@10.0.0.2/x"}))
+    assert report["scope"] == "local" and report["secured"] is True
 
 
 def test_missing_url_is_unknown_not_secured(fresh_settings):

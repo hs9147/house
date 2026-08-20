@@ -69,19 +69,6 @@ def test_internal_api_env_uses_target_projects_organization(fresh_settings):
         db.commit()
 
 
-def test_file_storage_env_exposes_url_not_local_path():
-    """저장소가 어느 디렉터리에 얹혀 있는지는 앱에 노출되지 않는다 — 창구 URL만 준다."""
-    m = _module(ModuleType.file_storage,
-                {"endpoint": "/srv/paas/data", "bucket": "assets"})
-    m.name = "assets-store"
-    env = svc.binding_env(m, "FS")
-    assert env == {
-        "FS_URL": "https://apps.test/paas/api/v1/storage/assets-store",
-        "FS_BUCKET": "assets",
-    }
-    assert "/srv/paas/data" not in str(env)
-
-
 def test_available_resources_global_and_org_scope():
     from app.db import Base, engine
     from app.models import Organization, Project, ProjectType
@@ -96,7 +83,7 @@ def test_available_resources_global_and_org_scope():
         db.add_all([
             Module(name="news-api", type=ModuleType.external_api, category="news", config={}),
             Module(name="llm-main", type=ModuleType.internal_api, category="llm", config={}),
-            Module(name="shared-files", type=ModuleType.file_storage, config={}),
+            Module(name="mcp-ops", type=ModuleType.mcp, config={}),
             Module(name="shop-db", type=ModuleType.database, organization_id=org.id, config={}),
         ])
         db.commit()
@@ -109,10 +96,10 @@ def test_available_resources_global_and_org_scope():
         db.commit()
 
         shop_resources = {r["name"] for r in svc.available_resources(db, shop_project)}
-        assert shop_resources == {"news-api", "llm-main", "shared-files", "shop-db"}
+        assert shop_resources == {"news-api", "llm-main", "mcp-ops", "shop-db"}
 
         other_resources = {r["name"] for r in svc.available_resources(db, other_project)}
-        assert other_resources == {"news-api", "llm-main", "shared-files"}
+        assert other_resources == {"news-api", "llm-main", "mcp-ops"}
 
         news = next(r for r in svc.available_resources(db, shop_project) if r["name"] == "news-api")
         assert news == {"id": news["id"], "name": "news-api", "type": "external_api",

@@ -94,7 +94,7 @@ def inspect_module(module: Module, settings=None) -> dict:
     """이 모듈로 나가는 플랫폼 호출을 점검한다.
 
     scope
-      local    — 주소로 나가지 않는다(파일 저장소·DB 등). 나갈 것이 없으니 유출도 없다.
+      local    — 플랫폼이 HTTP로 나가지 않는다(DB 등). 나갈 것이 없으니 유출도 없다.
       internal — 사내 주소. 망을 벗어나지 않는다.
       external — 사외 주소. 무엇이 실려 나가는지가 문제가 된다.
       unknown  — 주소가 없거나 해석되지 않는다.
@@ -102,7 +102,7 @@ def inspect_module(module: Module, settings=None) -> dict:
     settings = settings or get_settings()
     url = _target_url(module)
 
-    if module.type in (ModuleType.database, ModuleType.file_storage):
+    if module.type == ModuleType.database:
         return {"scope": "local", "host": None, "secured": True, "findings": [],
                 "platform_sends": []}
     if not url:

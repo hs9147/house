@@ -34,28 +34,18 @@ function captureFetch() {
 describe('파일 업로드는 multipart로 나간다', () => {
   // 회귀: FormData를 JSON 경로로 보내면 JSON.stringify(FormData)가 "{}"로 직렬화되어
   // 파일이 통째로 사라진다. 서버는 422로 거절하고 원인이 드러나지 않는다.
-  it('uploadFileStorageModule이 FormData를 그대로 싣는다', async () => {
+  it('uploadStorageFile이 FormData를 그대로 싣는다', async () => {
     const calls = captureFetch();
-    await api.uploadFileStorageModule(new File(['zip-bytes'], 'assets.zip'), 'assets');
+    await api.uploadStorageFile('internal', new File(['png'], 'logo.png'), 'img/logo.png');
 
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe('/paas/api/v1/modules/upload-storage');
     expect(calls[0].init.body).toBeInstanceOf(FormData);
 
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers['content-type']).toBeUndefined(); // 브라우저가 boundary와 함께 직접 설정한다
 
     const fd = calls[0].init.body as FormData;
-    expect(fd.get('name')).toBe('assets');
-    expect(fd.get('zip_file')).toBeInstanceOf(File);
-  });
-
-  it('uploadStorageFile도 FormData를 그대로 싣는다', async () => {
-    const calls = captureFetch();
-    await api.uploadStorageFile('assets', new File(['png'], 'logo.png'), 'img/logo.png');
-
-    const fd = calls[0].init.body as FormData;
-    expect(calls[0].url).toBe('/paas/api/v1/storage/assets/files');
+    expect(calls[0].url).toBe('/paas/api/v1/storage/internal/files');
     expect(fd.get('path')).toBe('img/logo.png');
     expect(fd.get('file')).toBeInstanceOf(File);
   });

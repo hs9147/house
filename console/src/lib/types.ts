@@ -118,8 +118,17 @@ export interface StorageFile {
   size: number;
 }
 
+export interface StorageStore {
+  name: string;
+  root: string;
+  read_only: boolean;
+  exists: boolean;
+  url: string;
+}
+
 export interface StorageListing {
-  module: string;
+  store: string;
+  read_only: boolean;
   url: string;
   files: StorageFile[];
 }
