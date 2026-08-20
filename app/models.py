@@ -113,6 +113,32 @@ class Deployment(Base):
     project: Mapped[Project] = relationship(back_populates="deployments")
 
 
+class PortAllocation(Base):
+    """호스트 포트 배정 대장 — 어느 프로젝트·프로필·컴포넌트가 어느 포트를 쓰는지.
+
+    배정을 기록으로 남기는 이유는 services/ports.py에 적어 뒀다(요약: 동시 배포가 같은
+    포트를 고르는 경쟁, 멈춘 배포의 포트를 남에게 넘기는 망각, "8123을 누가 쓰는가"에
+    답할 곳이 없는 불투명).
+
+    port에 unique를 걸어 경쟁이 삽입 충돌로 드러나게 하고, (프로젝트·프로필·컴포넌트)에도
+    unique를 걸어 한 주인이 포트를 여러 개 쥐지 않게 한다. component가 NULL이면 SQLite가
+    NULL끼리는 서로 다르다고 보아 뒤쪽 제약이 안 걸리므로, 없을 때는 빈 문자열을 쓴다.
+    """
+
+    __tablename__ = "port_allocations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    port: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
+    profile: Mapped[BuildProfile] = mapped_column(Enum(BuildProfile))
+    component: Mapped[str] = mapped_column(String(16), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "profile", "component", name="uq_port_owner"),
+    )
+
+
 class EnvVar(Base):
     __tablename__ = "env_vars"
 

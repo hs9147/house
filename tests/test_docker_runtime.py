@@ -68,6 +68,21 @@ def test_start_publishes_host_port_on_loopback_only(monkeypatch, tmp_path, fresh
     assert kwargs["ports"] == {"8000/tcp": ("127.0.0.1", endpoint.port)}
 
 
+def test_start_uses_the_port_assigned_by_the_registry(monkeypatch, tmp_path, fresh_settings):
+    """대장(services/ports.py)이 정한 포트를 그대로 쓴다 — 런타임이 다시 고르면 대장과
+    실제가 어긋나고, 그 순간 프록시는 아무도 없는 포트를 가리킨다."""
+    fake = _env(monkeypatch, tmp_path, fresh_settings)
+    monkeypatch.setattr(dr, "allocate_port",
+                        lambda: (_ for _ in ()).throw(AssertionError("직접 고르면 안 된다")))
+
+    spec = RuntimeSpec("shop", "img:latest", 8000, BuildProfile.release, "shop.apps.test",
+                       host_port=9250)
+    endpoint = DockerRuntime().start(spec)
+
+    assert endpoint.port == 9250
+    assert fake.containers.run_kwargs[0]["ports"] == {"8000/tcp": ("127.0.0.1", 9250)}
+
+
 def test_blue_green_switch_also_binds_loopback(monkeypatch, tmp_path, fresh_settings):
     fake = _env(monkeypatch, tmp_path, fresh_settings)
     DockerRuntime().start(_spec())
