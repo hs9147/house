@@ -38,7 +38,7 @@ export default function Modules() {
               외부 API 검색
             </button>
             <button className="secondary" onClick={() => setShowMcpSearch(true)}>
-              외부 MCP 검색
+              사내 MCP 검색
             </button>
           </>
         )}
@@ -64,7 +64,10 @@ export default function Modules() {
               {rows.map((m) => (
                 <tr key={m.id}>
                   <td>{m.name}</td>
-                  <td><StatusPill value={m.type} /></td>
+                  <td>
+                    <StatusPill value={m.type} />
+                    <EgressBadge verdict={m.egress} />
+                  </td>
                   <td className="mutedtext">{m.category || '—'}</td>
                   <td>
                     <StatusPill value={m.organization_id ? 'org' : 'global'} />
@@ -144,6 +147,45 @@ export default function Modules() {
   );
 }
 
+/**
+ * 아웃바운드 검증 배지 — 이 모듈로 나가는 **플랫폼 호출**에 내부 정보가 실리는지
+ * (app/services/egress.py). 배포된 앱이 {PREFIX}_URL로 직접 부르는 것은 판정 범위가
+ * 아니라서, 문구에도 "플랫폼이 보내는 것"이라고 못 박는다 — 없는 보증을 주면 안 된다.
+ */
+function EgressBadge({ verdict }: { verdict?: import('../lib/types').EgressVerdict }) {
+  if (!verdict) return null;
+  const chip = (bg: string, color: string, text: string, title: string) => (
+    <span
+      title={title}
+      style={{
+        fontSize: 11, padding: '2px 6px', borderRadius: 4, marginLeft: 6,
+        background: bg, color, border: `1px solid ${color}55`,
+      }}
+    >
+      {text}
+    </span>
+  );
+  const sends = verdict.platform_sends.length
+    ? `플랫폼이 보내는 것: ${verdict.platform_sends.join(', ')}`
+    : '플랫폼이 대상에게 보내는 부가 정보 없음';
+
+  if (verdict.scope === 'local') return null;
+  if (verdict.scope === 'unknown') {
+    return chip('rgba(148,163,184,0.15)', '#94a3b8', '주소 없음', verdict.findings.join('\n'));
+  }
+  if (verdict.scope === 'internal') {
+    return chip('rgba(96,165,250,0.15)', '#60a5fa', '🏠 사내',
+      `${verdict.host} — 사내 주소라 데이터가 망을 벗어나지 않습니다.\n${sends}`);
+  }
+  if (!verdict.secured) {
+    return chip('rgba(245,158,11,0.15)', '#f59e0b', '⚠ 점검 필요',
+      `${verdict.host}\n${verdict.findings.join('\n')}`);
+  }
+  return chip('rgba(16,185,129,0.15)', '#10b981', '🔒 Secured',
+    `${verdict.host} — 플랫폼이 이 대상으로 보내는 호출에 내부 정보가 실리지 않음을 확인했습니다.\n`
+    + `${sends}\n(배포된 앱이 직접 호출하는 것은 이 검증 범위가 아닙니다.)`);
+}
+
 function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<import('../lib/types').McpDirectoryItem[] | null>(null);
@@ -185,13 +227,13 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   };
 
   return (
-    <Modal title="외부 MCP 서버 디렉터리 검색 및 원클릭 등록" onClose={onClose}>
+    <Modal title="사내 MCP 서버 검색 및 원클릭 등록" onClose={onClose}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <form className="row" onSubmit={searchSubmit}>
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="키워드 검색 (예: github, postgres, slack, brave, puppeteer)..."
+            placeholder="키워드 검색 (예: 운영, 저장소, 코드, 데이터베이스)..."
             style={{ flex: 1 }}
             autoFocus
           />
@@ -205,7 +247,7 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
         <div style={{ maxHeight: 400, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
           {results && results.length === 0 && (
             <div className="mutedtext" style={{ padding: 20, textAlign: 'center' }}>
-              검색 조건에 맞는 MCP 서버가 없습니다.
+              검색 조건에 맞는 사내 MCP 서버가 없습니다.
             </div>
           )}
           {results &&
@@ -232,17 +274,25 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
                     </span>
                   </div>
                   <div style={{ fontSize: 12, color: '#d1d5db', marginBottom: 4 }}>{r.description}</div>
-                  <div style={{ fontSize: 11, color: '#6b7280', fontFamily: 'monospace' }}>{r.url}</div>
+                  <div style={{ fontSize: 11, color: '#6b7280', fontFamily: 'monospace' }}>{r.url || r.path}</div>
                 </div>
                 <div>
                   {added[r.id] ? (
                     <span style={{ color: '#10b981', fontSize: 12, fontWeight: 600 }}>
                       ✓ 추가됨 ({added[r.id]})
                     </span>
-                  ) : (
+                  ) : r.url ? (
                     <button className="small" onClick={() => importMcp(r)}>
                       + 모듈로 등록
                     </button>
+                  ) : (
+                    <span
+                      className="mutedtext"
+                      style={{ fontSize: 11 }}
+                      title="PAAS_MCP_INTERNAL_BASE_URL(없으면 백채널 주소)을 설정해야 등록할 수 있습니다 — 플랫폼이 자기 자신에게 닿는 주소입니다"
+                    >
+                      기준 주소 미설정
+                    </span>
                   )}
                 </div>
               </div>

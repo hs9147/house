@@ -21,6 +21,7 @@ from ..schemas import (
 from ..security import require_admin, require_api_key
 from ..services import a2a as a2a_service
 from ..services import apisearch
+from ..services import egress
 from ..services import mcp_client, mcp_search
 from ..services import modules as svc
 
@@ -118,7 +119,10 @@ def list_modules(db: Session = Depends(get_db), _: ApiKey = Depends(require_api_
     rows = db.execute(select(Module).order_by(Module.id)).scalars()
     return [
         {"id": m.id, "name": m.name, "type": m.type.value, "category": m.category,
-         "organization_id": m.organization_id, "config": svc.masked_config(m.config)}
+         "organization_id": m.organization_id, "config": svc.masked_config(m.config),
+         # 이 모듈로 나가는 플랫폼 호출에 내부 정보가 실리는지 — 볼 때마다 계산한다
+         # (주소를 바꾸면 즉시 반영돼야 하므로 플래그로 굳히지 않는다).
+         "egress": egress.inspect_module(m)}
         for m in rows
     ]
 
@@ -246,10 +250,11 @@ def refresh_external_api_directory(
 
 @router.post("/modules/search/refresh-mcp")
 def refresh_mcp_directory(
+    db: Session = Depends(get_db),
     _: ApiKey = Depends(require_admin),
 ):
-    """외부 MCP 수집 루트를 1일 1회 주기 외에 즉시 재탐색하고 업데이트한다."""
-    return mcp_search.refresh_mcp_directory()
+    """사내 MCP 서버 목록을 다시 만든다(현재 개수·기준 주소 확인용)."""
+    return mcp_search.refresh_mcp_directory(db)
 
 
 @router.post("/modules/import", status_code=201)
@@ -302,9 +307,13 @@ def project_resources(
 
 
 @router.get("/mcp/search")
-def search_mcp_directory(q: str = "", _: ApiKey = Depends(require_api_key)):
-    """외부 MCP 서버 디렉터리 키워드 검색."""
-    return mcp_search.search_mcp_servers(q)
+def search_mcp_directory(
+    q: str = "",
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """사내 MCP 서버 검색 — 이 플랫폼이 실제로 노출하는 서버만 나온다."""
+    return mcp_search.search_mcp_servers(db, q)
 
 
 @router.post("/modules/import-mcp", status_code=201)

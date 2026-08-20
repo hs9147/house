@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .. import audit
 from ..models import Module, Project
+from . import egress
 from .modules import decrypt_config, binding_env
 
 # 타입별 호출 가능한 능력(verb). capability.* / scope.* 는 분류 태그일 뿐이라 여기 넣지 않는다 —
@@ -113,11 +114,12 @@ def execute_task(
     if not target_url:
         raise ValueError(f"Target A2A Agent '{module.name}' has no endpoint URL configured")
 
-    headers = {
-        "content-type": "application/json",
-        "x-paas-a2a-gateway": "true",
-        "x-paas-calling-agent": caller,
-    }
+    headers = {"content-type": "application/json"}
+    # 호출자 신원(대개 이메일 또는 발급 키 이름)은 **사내 대상에만** 싣는다. 사외 API에
+    # 붙이면 그 자체가 사내 정보 유출이고, 대상 쪽 로그에 그대로 남는다.
+    if egress.is_internal_url(target_url):
+        headers["x-paas-a2a-gateway"] = "true"
+        headers["x-paas-calling-agent"] = caller
     api_key = cfg.get("api_key") or cfg.get("secret_key")
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"

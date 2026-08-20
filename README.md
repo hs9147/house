@@ -228,6 +228,8 @@ POST /paas/api/v1/modules                           # external_api | internal_ap
                                                 #   + organization_id?(지정 시 해당 조직 프로젝트에만 노출)
                                                 # config의 api_key/dsn/secret 등은 Fernet 암호화 저장
 GET  /paas/api/v1/modules/search?keyword=           # 외부 API 디렉터리 키워드 검색 (admin, 아웃바운드 조회)
+GET  /paas/api/v1/mcp/search?q=                     # 사내 MCP 서버 검색 — 이 플랫폼이 노출하는 것만
+POST /paas/api/v1/modules/import-mcp                # 검색 결과를 mcp 모듈로 원클릭 등록
 POST /paas/api/v1/modules/import                    # 검색 결과를 external_api 모듈로 자동 추가 (admin, 이름 정규화)
 POST /paas/api/v1/projects/{id}/modules/{mid}/bind  # {env_prefix: "PAY"} → 배포 시 PAY_URL 등 자동 주입
 GET  /paas/api/v1/projects/{id}/modules             # LLM 컨텍스트용 A2A Agent Card 목록
@@ -286,7 +288,7 @@ DELETE /paas/api/v1/previews/{id}
   (기본 apis.guru, `PAAS_API_DIRECTORY_URL`로 사내 미러 교체 가능)를 검색해 선택 결과를
   external_api 모듈로 바로 추가합니다(admin 전용 — 아웃바운드 메타데이터 조회이므로).
   이름은 모듈 규약으로 자동 정규화(`services/apisearch.py`).
-- **mcp 모듈 — 외부 MCP(Model Context Protocol) 서버**: `config: {url, api_key?}`로
+- **mcp 모듈 — MCP(Model Context Protocol) 서버**: `config: {url, api_key?}`로
   등록하면 다른 모듈처럼 배포 앱에 `{PREFIX}_URL`/`{PREFIX}_API_KEY`가 주입되고,
   가용 모듈 제약에 실려 외부 빌더가 게이트웨이 경유로 쓸 수 있게 됩니다.
   `services/mcp_client.py`(JSON-RPC 2.0 tools/list·tools/call, 단일 JSON 응답
@@ -309,6 +311,27 @@ DELETE /paas/api/v1/previews/{id}
   읽기 전용, storage는 모듈 루트 안에 갇히고, db는 `PAAS_MCP_DB_MODULES` 허용 목록
   (기본 빈 목록 = 전부 차단) + SELECT 한 문장 + 행 수 상한 + 실행 SQL 감사 기록입니다.
   DB 드라이버(psycopg 등)는 선택 의존성이며, 없으면 무엇을 설치해야 하는지 알려 줍니다.
+  이 서버들은 **사내 MCP 검색**(`GET /mcp/search`, 콘솔 모듈 화면의 "사내 MCP 검색")에
+  그대로 나와 원클릭으로 모듈 등록됩니다. 목록은 고정 표가 아니라 **지금 등록된 것에서**
+  만듭니다 — 저장소 서버는 file_storage 모듈이 있어야, DB 서버는 `PAAS_MCP_DB_MODULES`
+  허용 목록에 있어야, 코드 서버는 프로젝트마다 하나씩 나옵니다(없는 대상을 목록에 올리면
+  "등록했는데 왜 안 되나"를 추적하게 됩니다). 주소의 기준은 `PAAS_MCP_INTERNAL_BASE_URL`
+  (비우면 백채널 주소 → 공개 주소 순)이며, **플랫폼이 자기 자신에게 닿는 주소**여야
+  합니다 — 셋 다 없으면 주소 없이 경로만 나가고 등록은 막힙니다.
+- **아웃바운드 검증과 `Secured` 배지**(`services/egress.py`): 모듈 목록의 각 항목에
+  `egress`가 함께 실려 나가고, 콘솔이 배지로 표시합니다 — `🏠 사내`(사내 주소라 망을
+  벗어나지 않음) / `🔒 Secured`(사외지만 플랫폼이 보내는 호출에 내부 정보가 없음을 확인) /
+  `⚠ 점검 필요`(주소에 자격증명이 박혔거나, 사외인데 http). 판정은 저장하지 않고 볼 때마다
+  계산합니다 — 주소를 바꾸면 즉시 반영돼야 하는데 플래그로 굳히면 "검증됨"이 남습니다.
+  공개 도메인처럼 생긴 사내 주소는 `PAAS_INTERNAL_DOMAINS`에 접미사를 적어야 사내로 봅니다.
+  > **판정 범위는 플랫폼이 보내는 것뿐입니다.** 배포된 앱은 바인딩으로 `{PREFIX}_URL`을
+  > 받아 직접 호출하므로 앱이 무엇을 보내는지는 이 검증으로 알 수 없습니다. 배지 설명
+  > 문구도 그 범위로만 적혀 있습니다.
+  >
+  > 이 검증을 붙이면서 실제 유출 두 곳을 고쳤습니다: 모듈 프록시가 들어온 헤더를 통째로
+  > 대상에 넘겨 **호출자의 `x-api-key`·`cookie`·`authorization`이 사외 API로 나가던 것**
+  > (허용 목록만 넘기도록 변경), A2A 게이트웨이가 호출자 신원(`x-paas-calling-agent`,
+  > 대개 이메일)을 사외 대상에도 붙이던 것(사내 대상에만 붙이도록 변경).
 - **서버 디스크의 사내 문서 폴더 붙이기**: `file_storage` 모듈의 `config.endpoint`에
   절대 경로를 주면(`://`가 없으면 로컬 경로로 해석 — `services/storage.py`) 그 디렉터리가
   저장소 루트가 되고, `/mcp/storage/{모듈}`로 바로 읽힙니다. 이미 있는 문서 폴더에는
