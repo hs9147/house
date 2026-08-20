@@ -131,6 +131,21 @@ def test_bare_windows_path_takes_its_last_folder_as_the_name(monkeypatch, fresh_
     assert [s.name for s in storage.stores()] == ["internal", "company-docs"]
 
 
+def test_quoted_windows_paths_are_accepted(monkeypatch, fresh_settings):
+    """윈도우 경로는 따옴표로 감싸 적는 습관이 있다 — 벗기지 않으면 따옴표가 경로의
+    일부가 되어 없는 폴더를 가리키고, 목록에는 exists: false로만 나와서 "폴더가 비었다"와
+    구분되지 않는다. 문서에서 복사하면 붙는 굽은 따옴표도 같이 벗긴다."""
+    for raw in (r'contract="D:\1.계약품의"',
+                'contract=\u201cD:\\1.계약품의\u201d',
+                r'"contract=D:\1.계약품의"',
+                r" contract = 'D:\1.계약품의' "):
+        monkeypatch.setenv("PAAS_DOC_ROOTS", raw)
+        get_settings.cache_clear()
+        found = [s for s in storage.stores() if s.name != "internal"]
+        assert [s.name for s in found] == ["contract"], raw
+        assert str(found[0].root).endswith("D:\\1.계약품의"), raw
+
+
 def test_a_korean_folder_asks_for_an_explicit_name(monkeypatch, fresh_settings):
     """이름은 URL 조각이자 모듈 이름이 된다 — 만들 수 없으면 쓰라고 말한다.
 

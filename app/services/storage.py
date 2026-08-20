@@ -41,6 +41,23 @@ class Store:
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 
 
+# 곧은 따옴표와 굽은 따옴표 모두. 굽은 쪽은 문서·메신저에서 경로를 복사해 오면 붙는다.
+_QUOTES = "\"'\u201c\u201d\u2018\u2019"
+
+
+def _unquote(value: str) -> str:
+    """윈도우 경로를 따옴표로 감싸 적는 습관을 받아 준다.
+
+    벗기지 않으면 따옴표가 경로의 일부가 되어 없는 폴더를 가리키고, 목록에는
+    exists: false로만 나온다 — "폴더가 비었다"와 구분되지 않아 원인을 찾기 어렵다.
+    윈도우 파일 이름에는 따옴표를 쓸 수 없으므로 벗겨서 잃는 것도 없다.
+    """
+    value = value.strip()
+    while len(value) >= 2 and value[0] in _QUOTES and value[-1] in _QUOTES:
+        value = value[1:-1].strip()
+    return value
+
+
 def _leaf(path: str) -> str:
     """경로의 마지막 조각. 윈도우 경로(D:\\공유\\규정)를 리눅스에서 파싱할 때도 맞아야
     한다 — Path().name은 posix에서 역슬래시를 구분자로 보지 않는다."""
@@ -75,12 +92,12 @@ def stores() -> list[Store]:
     )]
     seen = {INTERNAL_STORE}
     for entry in settings.doc_roots.split(","):
-        entry = entry.strip()
+        entry = _unquote(entry)
         if not entry:
             continue
         name, sep, path = entry.partition("=")
         if sep:
-            name, path = name.strip(), path.strip()
+            name, path = _unquote(name), _unquote(path)
         else:
             path, name = entry, _slug(_leaf(entry))
         if not path:
