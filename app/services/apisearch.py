@@ -104,25 +104,68 @@ def _entry_to_result(api_id: str, entry: dict) -> dict | None:
     }
 
 
-def search_apis(keyword: str, limit: int = 30) -> list[dict]:
-    """키워드가 id·제목·설명·카테고리에 포함된 API를 반환한다(대소문자 무시)."""
+# 카테고리가 비어 있는 항목을 고르는 값. 디렉터리에 실제로 그런 항목이 많아서
+# (x-apisguru-categories가 없는 스펙) "전체" 아니면 못 고르는 상태였다.
+UNCATEGORIZED = "기타"
+
+
+def list_categories() -> list[dict]:
+    """디렉터리에 실제로 있는 카테고리와 그 개수. 목록 끝에 "기타"(카테고리 없음)를 붙인다.
+
+    고정 표를 두지 않는 이유: 목록은 외부 디렉터리가 정하고 갱신될 때마다 바뀐다 —
+    화면에만 적어 두면 실제로는 고를 수 없는 값이 남는다.
+    """
+    counts: dict[str, int] = {}
+    uncategorized = 0
+    for api_id, entry in _load_directory().items():
+        result = _entry_to_result(api_id, entry)
+        if result is None:
+            continue
+        if not result["categories"]:
+            uncategorized += 1
+            continue
+        for name in result["categories"]:
+            counts[name] = counts.get(name, 0) + 1
+    items = [{"name": name, "count": counts[name]} for name in sorted(counts)]
+    if uncategorized:
+        items.append({"name": UNCATEGORIZED, "count": uncategorized})
+    return items
+
+
+def search_apis(keyword: str, category: str = "", limit: int = 30) -> list[dict]:
+    """키워드·카테고리로 API를 찾는다. 두 조건은 AND, 각각 비우면 그 조건은 안 건다.
+
+    category가 UNCATEGORIZED("기타")면 카테고리가 없는 항목만 고른다 — 그 항목들은
+    카테고리 이름으로는 영영 걸리지 않아서 따로 고를 값이 필요하다.
+    둘 다 비면 빈 목록이다(디렉터리 전체를 쏟아내지 않는다).
+    """
     kw = keyword.strip().lower()
-    if not kw:
+    cat = category.strip()
+    if not kw and not cat:
         return []
     directory = _load_directory()
     results: list[dict] = []
     for api_id, entry in directory.items():
         r = _entry_to_result(api_id, entry)
-        if r is None:
+        if r is None or not _matches_category(r, cat):
             continue
         haystack = " ".join([
             r["id"], r["title"], r["description"], " ".join(r["categories"]),
         ]).lower()
-        if kw in haystack:
-            results.append(r)
+        if kw and kw not in haystack:
+            continue
+        results.append(r)
         if len(results) >= limit:
             break
     return results
+
+
+def _matches_category(result: dict, category: str) -> bool:
+    if not category:
+        return True
+    if category == UNCATEGORIZED:
+        return not result["categories"]
+    return any(c.lower() == category.lower() for c in result["categories"])
 
 
 def normalize_module_name(raw: str) -> str:

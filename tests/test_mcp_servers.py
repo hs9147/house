@@ -85,7 +85,7 @@ def test_ops_tools_list():
     names = [t["name"] for t in _rpc(c, "/mcp/ops", "tools/list")["result"]["tools"]]
     assert names == [
         "list_routes", "get_deploy_status", "list_deployments", "tail_app_log",
-        "host_snapshot", "search_audit",
+        "host_snapshot", "list_ports", "search_audit",
     ]
 
 
@@ -167,6 +167,33 @@ def test_ops_search_audit_filters(monkeypatch, fresh_settings, tmp_path):
     # limit은 상한으로 잘린다(1..50)
     capped = json.loads(_text(_call(c, "/mcp/ops", "search_audit", {"limit": 9999})))
     assert len(capped) <= 50
+
+
+def test_ops_list_ports_shows_the_registry(monkeypatch, fresh_settings):
+    """포트 사용현황은 화면(GET /ports)과 도구가 같은 대장을 읽는다."""
+    monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
+    from app.db import SessionLocal
+    from app.models import BuildProfile
+    from app.services import ports
+
+    monkeypatch.setattr(ports, "is_listening", lambda host, port, timeout=0.2: False)
+    c = _client()
+    pid = _project(c)
+    session = SessionLocal()
+    try:
+        assigned = ports.allocate(session, pid, BuildProfile.release)
+    finally:
+        session.close()
+
+    import json
+
+    body = json.loads(_text(_call(c, "/mcp/ops", "list_ports")))
+    assert body["allocated"] == 1
+    assert body["allocations"][0] == {
+        "port": assigned, "project": "shop-web", "project_id": pid,
+        "profile": "release", "component": None, "listening": False, "in_range": True,
+    }
+    assert body["range"]["start"] == c.get(f"{API}/ports", headers=ADMIN).json()["range"]["start"]
 
 
 def test_ops_host_snapshot_returns_runtime_facts(monkeypatch, fresh_settings):

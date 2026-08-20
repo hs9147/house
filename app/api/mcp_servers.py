@@ -42,7 +42,7 @@ from ..models import (
 )
 from ..security import require_api_key
 from ..services import codemap as codemap_service
-from ..services import deployer, docsearch, doctext, mcp_server, monitor, workspace
+from ..services import deployer, docsearch, doctext, mcp_server, monitor, ports, workspace
 from ..services import modules as modules_service
 from ..services import storage as storage_service
 from ..services.build import COMPOSITE_COMPONENTS, BuildError, checkout
@@ -151,6 +151,17 @@ _OPS_TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "list_ports",
+        "description": (
+            "호스트 포트 사용현황 — 배정 대장(어느 프로젝트·프로필이 어느 포트를 쓰는지)과"
+            " 실제 리슨 여부. probe_range=true면 범위 전체를 훑어 대장에 없는 점유까지 찾는다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"probe_range": {"type": "boolean"}},
+        },
+    },
+    {
         "name": "search_audit",
         "description": "감사 이벤트 검색 — 누가(actor) 언제 무엇(action)을 어디에(target) 했는지.",
         "inputSchema": {
@@ -201,6 +212,14 @@ def _ops_call(db: Session, name: str, args: dict) -> str:
     if name == "host_snapshot":
         return _dump(monitor.snapshot())
 
+    if name == "list_ports":
+        from ..services.runtime import upstream_host  # noqa: PLC0415
+
+        return _dump(ports.usage(
+            db, probe_host=upstream_host(get_settings()),
+            probe_range=bool(args.get("probe_range")),
+        ))
+
     if name == "search_audit":
         query = select(AuditEvent)
         if args.get("actor"):
@@ -225,7 +244,9 @@ def _ops_call(db: Session, name: str, args: dict) -> str:
         org_name = project.organization.name if project.organization else None
         # 프록시가 실제로 전달하는 곳(업스트림 포트)은 running 배포 행의 host_port다 —
         # internal_port는 컨테이너 내부 포트라 일반 프로젝트에는 채워지지도 않는다.
-        ports = {
+        # 이름을 running_ports로 둔다 — 모듈 상단의 ports(services/ports.py)를 가리면
+        # 같은 함수의 list_ports 분기가 UnboundLocalError로 죽는다(실제로 그랬다).
+        running_ports = {
             profile: port
             for profile, port in db.execute(
                 select(Deployment.profile, Deployment.host_port).where(
@@ -247,7 +268,7 @@ def _ops_call(db: Session, name: str, args: dict) -> str:
                 "status": _runtime_status(runtime, project, profile),
                 "domain": domain_for(project.name, project.domain, profile),
                 "path_prefix": path_prefix_for(org_name, project.name, project.domain, profile),
-                "internal_port": ports.get(profile),
+                "internal_port": running_ports.get(profile),
                 "last_deployment": None if latest is None else {
                     "id": latest.id, "status": latest.status.value, "git_sha": latest.git_sha,
                     "created_at": latest.created_at, "finished_at": latest.finished_at,

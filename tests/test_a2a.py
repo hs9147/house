@@ -141,7 +141,9 @@ def test_relay_attaches_target_credential_and_never_returns_it(monkeypatch):
     assert r.status_code == 200
 
     assert seen["headers"]["authorization"] == "Bearer mk-1"
-    assert seen["headers"]["x-paas-calling-agent"] == "bootstrap-admin"
+    # 호출자 신원은 **사내 대상에만** 싣는다(services/egress). 이 모듈은 사외 주소라
+    # 붙지 않는다 — 붙이면 이메일·계정명이 대상 벤더의 로그에 남는다.
+    assert "x-paas-calling-agent" not in seen["headers"]
     assert seen["json"]["capability"] == "invoke_api"
     assert seen["json"]["params"] == {"to": "x@y.z"}
     assert "mk-1" not in r.text

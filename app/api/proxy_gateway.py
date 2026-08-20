@@ -9,6 +9,7 @@ from .. import audit
 from ..db import get_db
 from ..models import ApiKey, LlmProvider, Module
 from ..security import decrypt_value, require_api_key
+from ..services import egress
 from ..services import llm as llm_service
 from ..services import modules as modules_service
 
@@ -58,9 +59,10 @@ async def proxy_module_call(
         raise HTTPException(status_code=400, detail=f"Module '{module_name}' does not have a valid target endpoint URL")
 
     full_target_url = f"{target_url.rstrip('/')}/{path.lstrip('/')}"
-    headers = dict(request.headers)
-    headers.pop("host", None)
-    headers.pop("content-length", None)
+    # 들어온 헤더를 통째로 넘기면 **호출자의 자격증명이 대상에게 그대로 나간다** —
+    # x-api-key(플랫폼 키·세션 토큰), cookie(로그인 세션), authorization(OIDC 토큰).
+    # 대상이 사외 API면 그게 곧 사내 정보 유출이다. 그래서 허용 목록만 넘긴다.
+    headers = egress.forward_headers(request.headers)
 
     api_key = cfg.get("api_key") or cfg.get("secret_key")
     if api_key:

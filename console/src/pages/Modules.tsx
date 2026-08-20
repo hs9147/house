@@ -38,7 +38,7 @@ export default function Modules() {
               외부 API 검색
             </button>
             <button className="secondary" onClick={() => setShowMcpSearch(true)}>
-              외부 MCP 검색
+              사내 MCP 검색
             </button>
           </>
         )}
@@ -64,7 +64,10 @@ export default function Modules() {
               {rows.map((m) => (
                 <tr key={m.id}>
                   <td>{m.name}</td>
-                  <td><StatusPill value={m.type} /></td>
+                  <td>
+                    <StatusPill value={m.type} />
+                    <EgressBadge verdict={m.egress} />
+                  </td>
                   <td className="mutedtext">{m.category || '—'}</td>
                   <td>
                     <StatusPill value={m.organization_id ? 'org' : 'global'} />
@@ -144,6 +147,45 @@ export default function Modules() {
   );
 }
 
+/**
+ * 아웃바운드 검증 배지 — 이 모듈로 나가는 **플랫폼 호출**에 내부 정보가 실리는지
+ * (app/services/egress.py). 배포된 앱이 {PREFIX}_URL로 직접 부르는 것은 판정 범위가
+ * 아니라서, 문구에도 "플랫폼이 보내는 것"이라고 못 박는다 — 없는 보증을 주면 안 된다.
+ */
+function EgressBadge({ verdict }: { verdict?: import('../lib/types').EgressVerdict }) {
+  if (!verdict) return null;
+  const chip = (bg: string, color: string, text: string, title: string) => (
+    <span
+      title={title}
+      style={{
+        fontSize: 11, padding: '2px 6px', borderRadius: 4, marginLeft: 6,
+        background: bg, color, border: `1px solid ${color}55`,
+      }}
+    >
+      {text}
+    </span>
+  );
+  const sends = verdict.platform_sends.length
+    ? `플랫폼이 보내는 것: ${verdict.platform_sends.join(', ')}`
+    : '플랫폼이 대상에게 보내는 부가 정보 없음';
+
+  if (verdict.scope === 'local') return null;
+  if (verdict.scope === 'unknown') {
+    return chip('rgba(148,163,184,0.15)', '#94a3b8', '주소 없음', verdict.findings.join('\n'));
+  }
+  if (verdict.scope === 'internal') {
+    return chip('rgba(96,165,250,0.15)', '#60a5fa', '🏠 사내',
+      `${verdict.host} — 사내 주소라 데이터가 망을 벗어나지 않습니다.\n${sends}`);
+  }
+  if (!verdict.secured) {
+    return chip('rgba(245,158,11,0.15)', '#f59e0b', '⚠ 점검 필요',
+      `${verdict.host}\n${verdict.findings.join('\n')}`);
+  }
+  return chip('rgba(16,185,129,0.15)', '#10b981', '🔒 Secured',
+    `${verdict.host} — 플랫폼이 이 대상으로 보내는 호출에 내부 정보가 실리지 않음을 확인했습니다.\n`
+    + `${sends}\n(배포된 앱이 직접 호출하는 것은 이 검증 범위가 아닙니다.)`);
+}
+
 function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<import('../lib/types').McpDirectoryItem[] | null>(null);
@@ -185,13 +227,13 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   };
 
   return (
-    <Modal title="외부 MCP 서버 디렉터리 검색 및 원클릭 등록" onClose={onClose}>
+    <Modal title="사내 MCP 서버 검색 및 원클릭 등록" onClose={onClose}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <form className="row" onSubmit={searchSubmit}>
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="키워드 검색 (예: github, postgres, slack, brave, puppeteer)..."
+            placeholder="키워드 검색 (예: 운영, 저장소, 코드, 데이터베이스)..."
             style={{ flex: 1 }}
             autoFocus
           />
@@ -205,7 +247,7 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
         <div style={{ maxHeight: 400, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
           {results && results.length === 0 && (
             <div className="mutedtext" style={{ padding: 20, textAlign: 'center' }}>
-              검색 조건에 맞는 MCP 서버가 없습니다.
+              검색 조건에 맞는 사내 MCP 서버가 없습니다.
             </div>
           )}
           {results &&
@@ -232,17 +274,25 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
                     </span>
                   </div>
                   <div style={{ fontSize: 12, color: '#d1d5db', marginBottom: 4 }}>{r.description}</div>
-                  <div style={{ fontSize: 11, color: '#6b7280', fontFamily: 'monospace' }}>{r.url}</div>
+                  <div style={{ fontSize: 11, color: '#6b7280', fontFamily: 'monospace' }}>{r.url || r.path}</div>
                 </div>
                 <div>
                   {added[r.id] ? (
                     <span style={{ color: '#10b981', fontSize: 12, fontWeight: 600 }}>
                       ✓ 추가됨 ({added[r.id]})
                     </span>
-                  ) : (
+                  ) : r.url ? (
                     <button className="small" onClick={() => importMcp(r)}>
                       + 모듈로 등록
                     </button>
+                  ) : (
+                    <span
+                      className="mutedtext"
+                      style={{ fontSize: 11 }}
+                      title="PAAS_MCP_INTERNAL_BASE_URL(없으면 백채널 주소)을 설정해야 등록할 수 있습니다 — 플랫폼이 자기 자신에게 닿는 주소입니다"
+                    >
+                      기준 주소 미설정
+                    </span>
                   )}
                 </div>
               </div>
@@ -255,18 +305,29 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
 
 function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [keyword, setKeyword] = useState('');
+  const [category, setCategory] = useState('');   // '' = 전체(기본값)
+  const [categories, setCategories] = useState<import('../lib/types').ApiCategory[]>([]);
   const [results, setResults] = useState<ApiSearchResult[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [added, setAdded] = useState<Record<string, string>>({});
 
+  // 선택지는 디렉터리에서 받아 온다 — 화면에 적어 두면 실제로는 고를 수 없는 값이 남는다.
+  useEffect(() => {
+    api
+      .listApiCategories()
+      .then((res) => setCategories(res.categories))
+      .catch(() => setCategories([]));   // 목록을 못 받아도 키워드 검색은 되어야 한다
+  }, []);
+
   const search = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!keyword.trim()) return;
+    // 키워드·카테고리 둘 다 비면 서버가 빈 목록을 준다 — 미리 막는다.
+    if (!keyword.trim() && !category) return;
     setBusy(true);
     setError('');
     try {
-      const res = await api.searchApis(keyword.trim());
+      const res = await api.searchApis(keyword.trim(), category);
       setResults(res.results);
     } catch (err) {
       setError((err as Error).message);
@@ -290,7 +351,9 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   return (
     <Modal title="외부 API 검색 → 모듈 추가" onClose={onClose}>
       <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
-        공개 API 디렉터리를 키워드로 검색해 external_api 모듈로 추가합니다. 추가 후
+        공개 API 디렉터리를 키워드·카테고리로 검색해 external_api 모듈로 추가합니다.
+        카테고리 기본값은 전체이고, 카테고리가 없는 API는 <span className="mono">기타</span>로
+        고릅니다. 추가 후
         설정의 <span className="mono">url</span>·<span className="mono">api_key</span>는 새 모듈
         수정에서 채웁니다.
       </p>
@@ -301,7 +364,19 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
           placeholder="예: payment, weather, calendar"
           style={{ flex: 1 }}
         />
-        <button type="submit" disabled={busy || !keyword.trim()}>
+        <select
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          title="카테고리 조건 — 기본은 전체입니다"
+        >
+          <option value="">전체</option>
+          {categories.map((c) => (
+            <option key={c.name} value={c.name}>
+              {c.name} ({c.count})
+            </option>
+          ))}
+        </select>
+        <button type="submit" disabled={busy || (!keyword.trim() && !category)}>
           {busy ? '검색 중...' : '검색'}
         </button>
       </form>
@@ -761,7 +836,7 @@ function CreateModuleModal({
             <option value="file_storage">file_storage — 파일 저장소 (Root/하위 폴더 지정)</option>
             <option value="internal_api">internal_api — 플랫폼 내 프로젝트</option>
             <option value="database">database — DB 연결</option>
-            <option value="mcp">mcp — 외부 MCP 서버</option>
+            <option value="mcp">mcp — MCP 서버 (사내·외부 공통)</option>
             <option value="llm">llm — 배포 앱이 쓸 LLM 엔드포인트</option>
           </select>
         </label>

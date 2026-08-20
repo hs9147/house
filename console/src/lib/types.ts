@@ -79,6 +79,20 @@ export interface ModuleOut {
   category: string | null;
   organization_id: number | null;
   config: Record<string, unknown>;
+  egress: EgressVerdict;
+}
+
+/**
+ * 이 모듈로 나가는 **플랫폼 호출**에 내부 정보가 실리는지(services/egress.py).
+ * 배포된 앱이 {PREFIX}_URL로 직접 부르는 것까지는 판정 범위가 아니다 — 배지 문구도
+ * 그 범위로만 적는다.
+ */
+export interface EgressVerdict {
+  scope: 'local' | 'internal' | 'external' | 'unknown';
+  host: string | null;
+  secured: boolean;
+  findings: string[];
+  platform_sends: string[];
 }
 
 // 계정 승인 — 가입은 신청일 뿐이고 관리자가 승인해야 로그인할 수 있다
@@ -308,6 +322,12 @@ export interface CodeMapOut {
 }
 
 // 외부 API 디렉터리 검색 결과(요청 3)
+/** 외부 API 디렉터리에 실제로 있는 카테고리와 그 개수(고정 표가 아니다). */
+export interface ApiCategory {
+  name: string;
+  count: number;
+}
+
 export interface ApiSearchResult {
   id: string;
   title: string;
@@ -445,6 +465,8 @@ export interface McpDirectoryItem {
   description: string;
   url: string;
   vendor: string;
+  /** 기준 주소(PAAS_MCP_INTERNAL_BASE_URL)가 없을 때 url은 비고 경로만 온다. */
+  path: string;
 }
 
 export interface ModuleUsageItem {

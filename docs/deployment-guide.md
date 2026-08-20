@@ -424,7 +424,8 @@ curl -X POST $API/projects/1/modules/1/bind -H "x-api-key: $ADMIN" \
 # 다음 배포부터 MAIL_URL, MAIL_API_KEY 자동 주입 → 코드에서 process.env/os.environ으로 사용
 ```
 
-**외부 MCP 서버 연결**은 타입만 `mcp`로 등록하면 된다 — 배포 앱에 URL/키가 env로
+**MCP 서버 연결**(사내·외부 공통)은 타입만 `mcp`로 등록하면 된다. 사내 서버는 모듈
+화면의 "사내 MCP 검색"에서 원클릭으로 등록할 수 있다 — 배포 앱에 URL/키가 env로
 주입되는 건 다른 모듈과 같지만, **이 모듈을 프로젝트에 바인딩해 두면 채팅
 (`/chat/sessions/{id}/messages`)에서 모델이 그 서버의 도구를 직접 호출**할 수
 있게 된다(OpenAI 호환 tools= 프로토콜, `services/mcp_client.py`):

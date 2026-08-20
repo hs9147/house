@@ -1,6 +1,7 @@
 import { getKey, logout } from './auth';
 import type {
   ApiKeyIssued,
+  ApiCategory,
   ApiSearchResult,
   AuditRow,
   BuildProfile,
@@ -266,12 +267,19 @@ export const api = {
   getPlatformModuleReport: () =>
     request<PlatformModuleReportOut>('GET', '/modules/usage-report'),
   // 외부 API 디렉터리 검색 + external_api 모듈 자동 추가 (admin)
-  searchApis: (keyword: string) =>
-    request<{ results: ApiSearchResult[] }>('GET', '/modules/search', undefined, { keyword }),
+  searchApis: (keyword: string, category?: string) =>
+    request<{ results: ApiSearchResult[] }>('GET', '/modules/search', undefined, {
+      keyword,
+      // 빈 값이면 조건을 안 건다(= 전체). 서버 기본값과 같은 뜻이라 굳이 보내지 않는다.
+      ...(category ? { category } : {}),
+    }),
+  listApiCategories: () =>
+    request<{ categories: ApiCategory[]; uncategorized_label: string }>(
+      'GET', '/modules/search/categories'),
   importApiModule: (name: string, url: string, category?: string) =>
     request<ModuleOut>('POST', '/modules/import', { name, url, category: category || null }),
 
-  // 외부 MCP 디렉터리 검색 + mcp 모듈 자동 추가 (admin)
+  // 사내 MCP 서버 검색 + mcp 모듈 자동 추가 (admin) — 목록은 이 플랫폼이 노출하는 서버다
   searchMcpDirectory: (q?: string) =>
     request<McpDirectoryItem[]>('GET', `/mcp/search?q=${encodeURIComponent(q || '')}`),
   // 등록된 mcp 모듈이 실제로 응답하는지 확인(tools/list 1회). 실패도 200으로 오고

@@ -23,6 +23,13 @@ FAKE_DIRECTORY = {
             "x-apisguru-categories": ["productivity"],
         }, "swaggerUrl": "https://api.apis.guru/v2/specs/google/calendar/v3/swagger.json"}},
     },
+    # x-apisguru-categories가 아예 없는 항목 — 실제 디렉터리에 흔하다
+    "acme.io": {
+        "preferred": "1.0",
+        "versions": {"1.0": {"info": {
+            "title": "Acme", "description": "billing widgets",
+        }, "swaggerUrl": "https://api.apis.guru/v2/specs/acme.io/1.0/swagger.json"}},
+    },
 }
 
 
@@ -53,6 +60,57 @@ def test_search_filters_by_keyword(monkeypatch):
     assert apisearch.search_apis("productivity")[0]["title"] == "Calendar API"
     assert apisearch.search_apis("nonexistent-kw") == []
     assert apisearch.search_apis("  ") == []
+
+
+def test_search_filters_by_category(monkeypatch):
+    _stub_directory(monkeypatch)
+    assert [h["id"] for h in apisearch.search_apis("", "financial")] == ["stripe.com"]
+    # 키워드와 AND — 둘 다 맞아야 걸린다
+    assert apisearch.search_apis("payment", "financial")[0]["id"] == "stripe.com"
+    assert apisearch.search_apis("payment", "productivity") == []
+    # 대소문자는 가리지 않는다
+    assert apisearch.search_apis("", "FINANCIAL")[0]["id"] == "stripe.com"
+
+
+def test_uncategorized_entries_are_selectable(monkeypatch):
+    """카테고리가 없는 항목은 카테고리 이름으로는 영영 걸리지 않는다 — 고를 값이 필요하다."""
+    _stub_directory(monkeypatch)
+    assert [h["id"] for h in apisearch.search_apis("", apisearch.UNCATEGORIZED)] == ["acme.io"]
+    # "기타"를 골라도 키워드는 그대로 걸린다
+    assert apisearch.search_apis("widget", apisearch.UNCATEGORIZED)[0]["id"] == "acme.io"
+    assert apisearch.search_apis("calendar", apisearch.UNCATEGORIZED) == []
+
+
+def test_no_condition_returns_nothing(monkeypatch):
+    """기본값은 전체지만, 아무 조건도 없으면 디렉터리를 통째로 쏟아내지 않는다."""
+    _stub_directory(monkeypatch)
+    assert apisearch.search_apis("", "") == []
+    assert apisearch.search_apis("   ", "  ") == []
+
+
+def test_category_list_comes_from_the_directory(monkeypatch):
+    _stub_directory(monkeypatch)
+    items = apisearch.list_categories()
+    assert items == [
+        {"name": "financial", "count": 1},
+        {"name": "productivity", "count": 1},
+        {"name": "기타", "count": 1},
+    ]
+
+
+def test_category_endpoints(monkeypatch):
+    _stub_directory(monkeypatch)
+    c = TestClient(create_app())
+    body = c.get("/paas/api/v1/modules/search/categories", headers=ADMIN).json()
+    assert body["uncategorized_label"] == "기타"
+    assert [i["name"] for i in body["categories"]] == ["financial", "productivity", "기타"]
+
+    hits = c.get("/paas/api/v1/modules/search",
+                 params={"category": "financial"}, headers=ADMIN).json()["results"]
+    assert [h["id"] for h in hits] == ["stripe.com"]
+    # 카테고리만으로도 검색된다(keyword 없이)
+    assert c.get("/paas/api/v1/modules/search",
+                 params={"category": "기타"}, headers=ADMIN).json()["results"][0]["id"] == "acme.io"
 
 
 def test_search_endpoint_admin_only(monkeypatch):

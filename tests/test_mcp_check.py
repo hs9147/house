@@ -66,9 +66,29 @@ def test_check_rejects_non_mcp_module(fresh_settings):
     assert r.status_code == 400
 
 
-def test_builtin_directory_has_no_fabricated_entries():
+def test_directory_only_offers_this_platforms_own_servers(monkeypatch, tmp_path, fresh_settings):
     """실재하지 않는 주소를 목록으로 내주면 "등록했는데 왜 안 되나"를 추적하게 된다 —
-    .internal 주소 7건이 하드코딩돼 있었다."""
-    from app.services.mcp_search import BUILTIN_MCP_DIRECTORY
+    예전에는 .internal 주소 7건이 하드코딩돼 있었고 그 중 무엇도 실재하지 않았다.
 
-    assert not [it for it in BUILTIN_MCP_DIRECTORY if ".internal" in it.get("url", "")]
+    지금 목록은 이 플랫폼이 직접 노출하는 서버에서만 만들어지므로, 모든 항목의 주소가
+    설정된 기준 주소로 시작해야 한다."""
+    from app.db import SessionLocal
+    from app.main import create_app
+    from app.services import mcp_search
+
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PAAS_MCP_INTERNAL_BASE_URL", "http://localhost:7000/paas")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    create_app()
+    session = SessionLocal()
+    try:
+        entries = mcp_search.list_internal_servers(session)
+    finally:
+        session.close()
+
+    assert entries, "적어도 운영 조회 서버는 항상 있어야 한다"
+    for item in entries:
+        assert item["url"].startswith("http://localhost:7000/paas/api/v1/mcp/"), item
+        assert item["path"].startswith("/paas/api/v1/mcp/"), item

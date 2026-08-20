@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..models import BuildProfile, Deployment, DeploymentStatus, EnvVar, Project, RedirectRule
 from ..security import decrypt_value
-from . import proxy
+from . import ports, proxy
 from .build import (
     COMPOSITE_COMPONENTS,
     PROFILES,
@@ -29,6 +29,7 @@ from .build import (
     internal_port,
     write_start_script,
 )
+from .runtime import upstream_host
 from .runtime.base import Endpoint, Runtime, RuntimeSpec
 
 _locks: dict[int, threading.Lock] = defaultdict(threading.Lock)
@@ -101,6 +102,15 @@ def make_spec(
 
     settings = get_settings()
     port = internal_port_override if internal_port_override is not None else internal_port(project.type, profile)
+    # 호스트 포트는 대장에서 받는다(services/ports.py) — 런타임이 그때그때 빈 포트를
+    # 고르면 동시 배포가 같은 포트를 집고, 멈춘 배포의 포트가 남에게 넘어간다.
+    # 2차(k8s)는 호스트 포트를 쓰지 않으므로 배정하지 않는다.
+    host_port = None
+    if settings.tier == "small":
+        host_port = ports.allocate(
+            db, project.id, profile, component or "",
+            probe_host=upstream_host(settings),
+        )
     return RuntimeSpec(
         project_name=project.name,
         image_tag=image_tag,
@@ -116,6 +126,7 @@ def make_spec(
         gpu=project.type.value == "llm" and gpu_allowed(),
         health_check_path=project.health_check_path,
         component=component,
+        host_port=host_port,
     )
 
 

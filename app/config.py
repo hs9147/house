@@ -205,7 +205,18 @@ class Settings(BaseSettings):
     # 언제든 지우고 다시 만들 수 있어서 플랫폼 DB가 아니라 모듈별 sqlite 파일로 둔다.
     doc_index_dir: Path = Path("./data/doc-index")
 
+    # 사내 도메인 접미사(쉼표 구분). 사설 IP·localhost·단일 라벨 이름은 자동으로 사내로
+    # 보지만, 공개 도메인처럼 보이는 사내 주소(예: corp.example.com)는 여기 적어야
+    # 아웃바운드 검증(services/egress.py)이 "망을 벗어나지 않는다"고 판정한다.
+    internal_domains: str = ""
+
     # --- 사내 MCP 서버 (api/mcp_servers.py) ---
+    # 사내 MCP 서버 주소의 기준. 플랫폼이 **자기 자신에게** 닿는 주소여야 한다
+    # (예: http://localhost:7000/paas). 공개 도메인이 이 플랫폼으로 라우팅되지 않는
+    # 서브패스 구성이 있어 브라우저 주소를 그대로 쓸 수 없다. 비우면 백채널 주소
+    # → 공개 주소 순으로 떨어지고, 둘 다 없으면 목록에 주소가 비어 나가 등록이 막힌다.
+    mcp_internal_base_url: str = ""
+
     # DB 조회 MCP 서버(/mcp/db/{모듈})를 열어 줄 database 모듈 이름 목록(쉼표 구분).
     # 기본값은 빈 목록 = 전부 차단이다 — 어떤 DB를 LLM에게 읽히는지는 모듈 등록만으로
     # 정해질 일이 아니라 명시적으로 고를 일이다. 목록에 있어도 SELECT 한 문장만

@@ -62,7 +62,8 @@ class DockerRuntime(Runtime):
                 )
         client = _docker_client()
         factor = PROFILES[spec.profile].resource_factor
-        host_port = allocate_port()
+        # 포트는 플랫폼 대장이 정한다(services/ports.py). 값이 없을 때만 직접 찾는다.
+        host_port = spec.host_port or allocate_port()
         old = self._find(client, spec.unit_name)
         slot = "b" if (old and old.name.endswith("-a")) else "a"
 
