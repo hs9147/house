@@ -4,7 +4,7 @@ import time
 import pytest
 
 from app.config import get_settings
-from app.services import docsearch
+from app.services import docready, docsearch
 from tests.test_doctext import _docx, _pdf, _xlsx_inline
 
 
@@ -214,7 +214,81 @@ def test_missing_root_is_not_an_error(monkeypatch, tmp_path, fresh_settings):
     get_settings.cache_clear()
     result = docsearch.reindex("s5", tmp_path / "없는폴더")
     assert result == {"files": 0, "indexed": 0, "failed": 0, "skipped": 0,
-                      "removed": 0, "remaining": 0, "done": True}
+                      "removed": 0, "remaining": 0, "done": True,
+                      # 빈 폴더와 "폴더가 안 보인다"는 다른 상황이다
+                      "unreadable_dirs": 1}
+
+
+# --- 못 본 것과 없어진 것을 가른다 ---
+
+def test_an_unreachable_root_does_not_wipe_the_index(tmp_path, ready_index):
+    """네트워크 드라이브가 잠깐 끊긴 것을 "전부 지워졌다"로 받으면, 다시 붙었을 때
+    수천 건을 처음부터 다시 추출해야 한다(문서 하나에 수십~수백 ms다)."""
+    root = tmp_path / "share"
+    root.mkdir()
+    (root / "규정.txt").write_text("연차 규정", encoding="utf-8")
+    (root / "계약.txt").write_text("계약 규정", encoding="utf-8")
+    docsearch.reindex("s", root)
+    assert docsearch.status("s")["total"] == 2
+
+    root.rename(tmp_path / "share-떨어짐")           # 드라이브가 사라진 상황
+    result = docsearch.reindex("s", root)
+    assert result["removed"] == 0 and result["unreadable_dirs"] == 1
+    assert docsearch.status("s")["total"] == 2
+    assert docready.path_for("s", "규정.txt").exists()
+
+    (tmp_path / "share-떨어짐").rename(root)         # 다시 붙으면
+    result = docsearch.reindex("s", root)
+    assert result["skipped"] == 2 and result["indexed"] == 0  # 다시 추출하지 않는다
+
+
+def test_documents_under_an_unreadable_folder_are_kept(tmp_path, monkeypatch, ready_index):
+    """공유 폴더는 하위 폴더마다 권한이 다른 일이 흔하다 — 못 읽은 폴더 아래를 지우면
+    그 부서 문서가 통째로 검색에서 사라진다."""
+    root = tmp_path / "share"
+    (root / "인사").mkdir(parents=True)
+    (root / "인사" / "연차.txt").write_text("연차 규정", encoding="utf-8")
+    (root / "계약.txt").write_text("계약 규정", encoding="utf-8")
+    docsearch.reindex("s", root)
+
+    real_walk = docsearch.os.walk
+
+    def walk_denied(top, onerror=None, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, onerror=onerror, **kwargs):
+            if dirpath.endswith("인사"):
+                onerror(PermissionError(13, "액세스가 거부되었습니다", dirpath))
+                continue
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(docsearch.os, "walk", walk_denied)
+    result = docsearch.reindex("s", root)
+    assert result["removed"] == 0 and result["unreadable_dirs"] == 1
+    assert [h["path"] for h in docsearch.search("s", "연차")["hits"]] == ["인사/연차.txt"]
+
+
+def test_a_deletion_elsewhere_is_still_pruned_while_one_folder_is_blocked(
+        tmp_path, monkeypatch, ready_index):
+    """막힌 폴더 하나 때문에 정리를 통째로 멈추면 지운 문서가 영원히 남는다."""
+    root = tmp_path / "share"
+    (root / "인사").mkdir(parents=True)
+    (root / "인사" / "연차.txt").write_text("연차 규정", encoding="utf-8")
+    (root / "계약.txt").write_text("계약 규정", encoding="utf-8")
+    docsearch.reindex("s", root)
+
+    (root / "계약.txt").unlink()
+    real_walk = docsearch.os.walk
+
+    def walk_denied(top, onerror=None, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, onerror=onerror, **kwargs):
+            if dirpath.endswith("인사"):
+                onerror(PermissionError(13, "액세스가 거부되었습니다", dirpath))
+                continue
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(docsearch.os, "walk", walk_denied)
+    result = docsearch.reindex("s", root)
+    assert result["removed"] == 1                       # 계약.txt는 정말 지워졌다
+    assert [h["path"] for h in docsearch.search("s", "규정")["hits"]] == ["인사/연차.txt"]
 
 
 # --- 공유 폴더의 부산물 걸러 내기 ---

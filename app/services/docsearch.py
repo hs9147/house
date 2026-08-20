@@ -94,24 +94,27 @@ def skip_file(name: str) -> bool:
             or Path(name).suffix.lower() in SKIP_SUFFIXES)
 
 
-def _candidates(root: Path) -> tuple[list[tuple[str, int, float]], int]:
-    """색인 대상 파일 목록 — (상대경로, 크기, mtime)과 못 읽은 폴더 수.
+def _candidates(root: Path) -> tuple[list[tuple[str, int, float]], list[str]]:
+    """색인 대상 파일 목록 — (상대경로, 크기, mtime)과 **훑지 못한 폴더 경로들**.
 
     rglob이 아니라 os.walk을 쓰는 이유는 **가지치기**다. 걸러야 할 폴더는 목록에서 빼는
     것으로는 부족하고 들어가지 않아야 한다 — 휴지통에는 지운 파일이 통째로 들어 있어서
     훑는 것만으로 색인 예산을 다 쓴다.
 
-    읽을 수 없는 폴더는 세어서 돌려준다. 조용히 빼면 문서가 통째로 빠졌는데도 "그 폴더에
-    문서가 없다"와 구분되지 않는다 — 공유 폴더는 하위 폴더마다 권한이 다른 일이 흔하다.
+    훑지 못한 폴더는 세지 말고 **어디인지** 돌려줘야 한다. "목록에 없다"를 그대로 "지웠다"로
+    받으면, 네트워크 드라이브가 잠깐 끊기거나 하위 폴더 권한이 막힌 것만으로 그 아래
+    문서가 색인에서 통째로 사라진다(그리고 다시 붙었을 때 수천 건을 다시 추출해야 한다).
+    호출자는 이 목록으로 "못 본 것"과 "없어진 것"을 갈라 낸다.
     """
     found: list[tuple[str, int, float]] = []
-    unreadable = 0
+    unreadable: list[str] = []
     if not root.is_dir():
-        return found, unreadable
+        # 루트 자체가 안 보인다 — 드라이브가 끊겼거나 경로가 틀렸다. 빈 목록을 "전부
+        # 지워졌다"로 읽으면 안 되므로 루트를 못 읽은 폴더로 올린다.
+        return found, [str(root)]
 
-    def note(_error: OSError) -> None:
-        nonlocal unreadable
-        unreadable += 1
+    def note(error: OSError) -> None:
+        unreadable.append(str(getattr(error, "filename", "") or root))
 
     for dirpath, dirnames, filenames in os.walk(root, onerror=note):
         dirnames[:] = [d for d in dirnames if not skip_dir(d)]
@@ -129,6 +132,30 @@ def _candidates(root: Path) -> tuple[list[tuple[str, int, float]], int]:
     # 순서를 고정한다 — 예산이 모자라 중간에 멈춰도 다음 호출이 같은 자리에서 이어진다.
     found.sort()
     return found, unreadable
+
+
+def _vanished(known: dict, candidates: list, root: Path,
+              unreadable: list[str]) -> list[str]:
+    """색인에는 있는데 디스크에서 **정말로 사라진** 것.
+
+    훑지 못한 폴더 아래는 제외한다 — 못 본 것과 없어진 것은 다르다. 이 구분이 없으면
+    공유 드라이브가 잠깐 끊긴 사이에 색인이 통째로 비워지고, 다시 붙었을 때 수천 건을
+    처음부터 다시 추출해야 한다(문서 하나에 수십~수백 ms다).
+    """
+    missing = set(known) - {item[0] for item in candidates}
+    if not unreadable:
+        return sorted(missing)
+
+    blocked: list[str] = []
+    for raw in unreadable:
+        try:
+            rel = Path(raw).resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            return []  # 어디인지 특정할 수 없으면 아무것도 지우지 않는다
+        if rel == Path("."):
+            return []  # 루트를 통째로 못 읽었다
+        blocked.append(rel.as_posix() + "/")
+    return sorted(rel for rel in missing if not rel.startswith(tuple(blocked)))
 
 
 def reindex(store_name: str, root: Path, *, force: bool = False,
@@ -182,7 +209,7 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
             else:
                 indexed += 1
 
-        gone = set(known) - {item[0] for item in candidates}
+        gone = _vanished(known, candidates, root, unreadable)
         for rel in gone:
             conn.execute("DELETE FROM docs WHERE path = ?", (rel,))
             docready.forget(store_name, rel)
@@ -194,9 +221,9 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
             "remaining": remaining, "done": remaining == 0,
         }
         if unreadable:
-            # 권한이 막힌 폴더가 있으면 알린다 — 조용히 빼면 문서가 통째로 빠졌는데도
-            # "그 폴더에 문서가 없다"와 구분되지 않는다.
-            result["unreadable_dirs"] = unreadable
+            # 훑지 못한 폴더가 있으면 알린다. 그 아래 문서는 색인에 그대로 남겨 두므로
+            # (지운 것이 아니라 못 본 것이다) files 수치는 실제보다 작게 나온다.
+            result["unreadable_dirs"] = len(unreadable)
         return result
     finally:
         conn.close()
