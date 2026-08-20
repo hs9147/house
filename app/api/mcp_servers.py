@@ -52,7 +52,7 @@ from ..models import (
 )
 from ..security import require_api_key
 from ..services import codemap as codemap_service
-from ..services import deployer, docsearch, doctext, mcp_server, monitor, ports, workspace
+from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, workspace
 from ..services import modules as modules_service
 from ..services import storage as storage_service
 from ..services.build import COMPOSITE_COMPONENTS, BuildError, checkout
@@ -616,18 +616,25 @@ def _reindex_sources(db: Session, actor: str, sources: list[storage_service.Stor
 
 
 def _read_document(db: Session, actor: str, store: storage_service.Store, path: str) -> str:
-    """저장소 파일 하나를 본문 텍스트로 — /mcp/docs와 /mcp/storage가 같은 규칙을 쓴다."""
+    """저장소 파일 하나를 마크다운 본문으로 — /mcp/docs와 /mcp/storage가 같은 규칙을 쓴다.
+
+    .ready 캐시를 거친다(services/docready.py): 색인이 이미 만들어 둔 것이면 파일 읽기
+    한 번이고, 없거나 원본이 바뀌었으면 지금 추출해서 남긴다.
+    """
     try:
         target = storage_service.resolve(store.root, path)
     except storage_service.StorageError as e:
         raise mcp_server.McpToolError(str(e))
     if not target.is_file():
         raise mcp_server.McpToolError(f"파일이 없습니다: {path}")
+    # 캐시 키는 호출자가 적어 준 문자열이 아니라 해석된 상대 경로다 — "a/b.txt"와
+    # "./a/b.txt"가 같은 캐시를 쓴다.
+    rel = target.relative_to(store.root).as_posix()
     try:
-        text = doctext.extract_text(target)
+        text = docready.read(store.name, rel, target)
     except doctext.ExtractError as e:
         raise mcp_server.McpToolError(str(e))
-    audit.record(db, actor, "mcp.storage.read", store.name, {"path": path})
+    audit.record(db, actor, "mcp.storage.read", store.name, {"path": rel})
     return _truncate(text)
 
 

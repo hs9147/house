@@ -212,7 +212,9 @@ class Settings(BaseSettings):
     soffice_path: str = ""
 
     # 사내 문서 검색(services/docsearch.py)이 추출 텍스트를 캐시하는 자리. 파생 데이터라
-    # 언제든 지우고 다시 만들 수 있어서 플랫폼 DB가 아니라 모듈별 sqlite 파일로 둔다.
+    # 언제든 지우고 다시 만들 수 있어서 플랫폼 DB가 아니라 저장소별 sqlite 파일로 둔다.
+    # 같은 자리 아래 `.ready/{저장소}/…`에 LLM이 읽을 마크다운도 남는다
+    # (services/docready.py) — 열어 보면 모델이 실제로 보는 것을 그대로 확인할 수 있다.
     doc_index_dir: Path = Path("./data/doc-index")
 
     # 사내 도메인 접미사(쉼표 구분). 사설 IP·localhost·단일 라벨 이름은 자동으로 사내로

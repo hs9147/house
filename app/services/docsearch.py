@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 from ..config import get_settings
-from . import doctext
+from . import docready, doctext
 
 # 한 문서에서 색인에 담을 최대 글자 수. 뒷부분은 검색되지 않는 대신 색인 크기와 스캔
 # 시간이 문서 수에 비례해서만 늘어난다(120,000자 ≈ 60쪽 분량).
@@ -71,6 +71,10 @@ def _candidates(root: Path) -> list[tuple[str, int, float]]:
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix.lower() in SKIP_SUFFIXES:
             continue
+        # 점으로 시작하는 폴더는 문서가 아니다(.ready 캐시, .git 등). .ready가 어쩌다
+        # 저장소 안에 놓이면 **자기 캐시를 다시 색인**해 문서마다 결과가 둘씩 나온다.
+        if any(part.startswith(".") for part in path.relative_to(root).parts[:-1]):
+            continue
         try:
             stat = path.stat()
         except OSError:  # 권한·잠긴 파일은 조용히 건너뛴다(다음 색인에서 다시 시도)
@@ -110,7 +114,9 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
             body: str | None = None
             error: str | None = None
             try:
-                body = doctext.extract_text(root / rel)
+                # 추출은 한 번만 하고 두 곳에 쓴다 — 색인에는 평문, .ready에는 마크다운.
+                markdown, body = doctext.extract(root / rel)
+                docready.write(store_name, rel, root / rel, markdown)
             except doctext.ExtractError as e:
                 error = str(e)
             except OSError as e:  # 색인 중 파일이 사라지거나 잠긴 경우
@@ -133,6 +139,7 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
         gone = set(known) - {item[0] for item in candidates}
         for rel in gone:
             conn.execute("DELETE FROM docs WHERE path = ?", (rel,))
+            docready.forget(store_name, rel)
         remaining = len(todo) - (indexed + failed)
         conn.commit()
         return {
