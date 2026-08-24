@@ -1,0 +1,97 @@
+CHO-FAM SOURCE VIEWING LICENSE 1.0
+Copyright (c) 2026 hs9147, CHO-FAM.
+All rights reserved.
+
+IMPORTANT: This is a source-available viewing license. It is not an open-source
+license and must not be represented as one.
+
+1. DEFINITIONS
+
+"CHO-FAM" means the copyright holder identified as "hs9147, CHO-FAM" in
+this license.
+
+"Software" means the source code, object code, documentation, data, designs,
+and other materials made available in the repository containing this license,
+excluding Third-Party Materials.
+
+"Third-Party Materials" means materials identified as being owned or licensed
+by a person other than CHO-FAM.
+
+2. LIMITED PERMISSION
+
+Subject to this license, CHO-FAM grants you a personal, limited, revocable,
+non-exclusive, non-transferable, and non-sublicensable permission to:
+
+(a) view the Software through the repository hosting service;
+
+(b) download one copy solely for internal, non-commercial evaluation of the
+Software or CHO-FAM's technical capabilities; and
+
+(c) conduct good-faith security research on a private copy, provided that you
+do not access another person's data or service without authorization and you
+privately report a discovered vulnerability to CHO-FAM before public disclosure.
+
+3. RESTRICTIONS
+
+Except where mandatory law expressly permits otherwise, you may not:
+
+(a) use the Software or any substantial part of it to provide a product,
+service, hosted service, paid evaluation, consultancy deliverable, or other
+commercial benefit;
+
+(b) copy, publish, distribute, sublicense, sell, lease, or otherwise provide
+the Software or a substantial part of it to another person;
+
+(c) modify, translate, adapt, or create derivative works of the Software;
+
+(d) remove or alter copyright, attribution, trademark, or license notices;
+
+(e) use the Software or repository contents as training data for a machine
+learning or generative artificial intelligence model; or
+
+(f) use CHO-FAM names, logos, product names, or trademarks in a manner that
+suggests sponsorship, affiliation, or endorsement.
+
+The rights necessary for the repository hosting service to display the
+repository and provide its platform features are governed separately by that
+service's terms. This license does not limit rights that cannot lawfully be
+limited.
+
+4. THIRD-PARTY MATERIALS
+
+Third-Party Materials remain subject to their respective license terms. If a
+third-party license grants broader rights, those broader rights apply only to
+the applicable Third-Party Materials and not to CHO-FAM's Software.
+
+5. TERMINATION
+
+This permission terminates automatically if you breach this license. Upon
+termination, you must stop using the Software and delete all copies in your
+possession or control, except copies retained solely where required by law.
+
+6. NO WARRANTY
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE SOFTWARE IS PROVIDED
+"AS IS" WITHOUT WARRANTIES OF ANY KIND, WHETHER EXPRESS, IMPLIED, OR
+STATUTORY, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, TITLE, AND NON-INFRINGEMENT.
+
+7. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, CHO-FAM WILL NOT BE LIABLE
+FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR EXEMPLARY DAMAGES,
+OR FOR LOSS OF DATA, PROFITS, REVENUE, BUSINESS, OR GOODWILL, ARISING FROM OR
+RELATED TO THE SOFTWARE. THIS SECTION DOES NOT EXCLUDE LIABILITY THAT CANNOT
+LAWFULLY BE EXCLUDED.
+
+8. GOVERNING LAW AND DISPUTES
+
+This license is governed by the laws of the Republic of Korea, without regard
+to conflict-of-law rules. Subject to mandatory jurisdiction rules, the courts
+having jurisdiction over CHO-FAM's principal place of business will have
+exclusive jurisdiction over disputes arising from this license.
+
+9. COMMERCIAL OR OTHER USE
+
+For permission beyond this license, contact CHO-FAM through:
+https://cho-fam.com/
