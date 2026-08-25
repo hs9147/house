@@ -30,6 +30,7 @@ from ..security import (
     issue_session_token,
     require_admin,
     require_api_key,
+    resolve_token,
     rotate_token,
     validate_email_domain,
     verify_password,
@@ -478,47 +479,104 @@ def exec_powershell_cmd(
         raise HTTPException(status_code=500, detail=f"PowerShell execution failed: {e}")
 
 
-@router.websocket("/system/powershell/ws")
-async def powershell_websocket_terminal(websocket: WebSocket):
-    """admin 전용 실시간 PowerShell WebSocket 터미널.
+# 브라우저는 WebSocket 핸드셰이크에 임의 헤더를 붙일 수 없다. 쿼리스트링으로 받으면
+# IIS/ARR 접근 로그에 관리자 키가 그대로 남으므로, 표준으로 보낼 수 있는 자리인
+# 서브프로토콜로 받는다: new WebSocket(url, ["paas-terminal", "paas-key." + key]).
+# 서버는 비밀값이 아닌 "paas-terminal" 쪽을 골라 되돌려 준다.
+WS_SUBPROTOCOL = "paas-terminal"
+WS_KEY_PREFIX = "paas-key."
 
-    연결마다 상주 데몬을 하나 띄워 그 연결 동안 세션 상태(cd·변수)를 유지하고, 명령 실행은
-    asyncio.to_thread로 돌려 이벤트 루프를 블로킹하지 않는다. 연결 종료 시 데몬을 정리한다.
+
+@router.websocket("/system/powershell/ws")
+async def powershell_websocket_terminal(
+    websocket: WebSocket,
+    db: Session = Depends(get_db),
+):
+    """admin 전용 실시간 터미널 — 셸을 PTY에 붙여 바이트를 그대로 중계한다.
+
+    예전에는 명령 한 줄을 받아 끝날 때까지 기다렸다가 출력을 통째로 돌려줬다. 그래서
+    되묻는 명령(Read-Host, git commit, python REPL)이 멈추고, Ctrl+C가 없고, 30초를 넘는
+    작업은 진행 상황을 볼 수 없었다. PTY로 바꾸면 그 셋이 한 번에 풀린다
+    (services/pty_terminal.py — Server 2016은 ConPTY가 없어 winpty 백엔드를 쓴다).
+
+    **인증은 accept 전에 끝낸다.** 셸을 열어 두고 나중에 확인하면 이미 늦다 — 이 엔드포인트는
+    관리자 셸을 그대로 내주므로 판정은 REST와 같은 경로(security.resolve_token)를 쓴다.
+
+    프로토콜: 클라이언트→서버는 JSON({"type":"input"|"resize"}), 서버→클라이언트는 터미널
+    출력 그대로. 입력을 JSON으로 감싸는 이유는 키 입력과 창 크기 변경을 구분해야 하는데,
+    키 입력에는 어떤 바이트든 올 수 있어 구분자를 둘 자리가 없기 때문이다.
     """
     import asyncio  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
     import os  # noqa: PLC0415
-    from ..services import powershell_daemon  # noqa: PLC0415
-    await websocket.accept()
+
+    from ..services import pty_terminal  # noqa: PLC0415
+
+    offered = [p.strip() for p in
+               websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
+    token = next((p[len(WS_KEY_PREFIX):] for p in offered if p.startswith(WS_KEY_PREFIX)), "")
+    key = resolve_token(db, token) if token else None
+    if key is None or not key.is_admin:
+        await websocket.close(code=1008)  # policy violation
+        return
+
+    await websocket.accept(subprotocol=WS_SUBPROTOCOL if WS_SUBPROTOCOL in offered else None)
     settings = get_settings()
     cwd_dir = os.path.abspath(settings.powershell_start_dir) if settings.powershell_start_dir else None
-    start_info = f"WorkDir: {cwd_dir or os.getcwd()}"
 
-    daemon = powershell_daemon.PowerShellDaemon(cwd=cwd_dir)
     try:
-        await websocket.send_text(f"Windows PowerShell Interactive Console Connected ({start_info}).\nType commands or click Disconnect to end session.\n\nPS > ")
-        while True:
-            cmd = await websocket.receive_text()
-            cmd_str = cmd.strip()
-            if not cmd_str:
-                await websocket.send_text("PS > ")
-                continue
-            if cmd_str.lower() in ["exit", "quit"]:
-                await websocket.send_text("PowerShell Session Closed.\n")
-                await websocket.close()
-                break
+        terminal = await asyncio.to_thread(
+            pty_terminal.PtyTerminal,
+            [settings.pty_shell],
+            cwd=cwd_dir,
+            backend=pty_terminal.backend_code(settings.pty_backend),
+        )
+    except pty_terminal.PtyUnavailable as e:
+        # 빈 화면만 남기지 않는다 — 무엇을 하면 되는지 터미널에 그대로 찍어 준다.
+        await websocket.send_text(f"\r\n[터미널을 열 수 없습니다] {e}\r\n")
+        await websocket.close()
+        return
 
+    audit.record(db, key.name, "powershell.ws_open", "terminal",
+                 {"shell": settings.pty_shell, "backend": settings.pty_backend or "auto"})
+
+    async def pump_output() -> None:
+        """PTY 읽기는 블로킹이라 스레드에서 돌린다 — 이벤트 루프를 잡으면 입력이 막힌다."""
+        while True:
+            chunk = await asyncio.to_thread(terminal.read)
+            if not chunk:
+                break
+            await websocket.send_text(chunk)
+
+    async def pump_input() -> None:
+        while True:
+            raw = await websocket.receive_text()
             try:
-                result = await asyncio.to_thread(daemon.run, cmd_str, 30.0)
-                out = result.output
-            except TimeoutError:
-                out = "(timed out after 30s)"
-            if not out.strip():
-                out = "(completed)"
-            await websocket.send_text(f"{out}\n\nPS > ")
-    except Exception:
-        pass
+                message = _json.loads(raw)
+            except ValueError:
+                continue  # 규약에 없는 프레임은 무시한다(셸에 흘려보내지 않는다)
+            kind = message.get("type")
+            if kind == "input":
+                terminal.write(str(message.get("data", "")))
+            elif kind == "resize":
+                try:
+                    terminal.resize(int(message["cols"]), int(message["rows"]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+
+    output_task = asyncio.create_task(pump_output())
+    input_task = asyncio.create_task(pump_input())
+    try:
+        # 둘 중 하나라도 끝나면 세션이 끝난 것이다(셸 종료 또는 연결 끊김).
+        await asyncio.wait({output_task, input_task}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        await asyncio.to_thread(daemon.stop)
+        # **셸을 먼저 끝낸다.** 출력 펌프는 블로킹 읽기 안에 있어서 cancel로는 깨울 수
+        # 없고, 셸이 죽어야 그 읽기가 돌아온다 — 순서를 뒤집으면 출력이 없는 채로
+        # 끊긴 세션에서 스레드가 그대로 묶인다. close는 kill·waitpid뿐이라 짧다.
+        terminal.close()
+        for task in (output_task, input_task):
+            task.cancel()
+        # 연결이 끊기면 셸도 끝낸다 — 남겨 두면 셸 프로세스가 계속 쌓인다.
 
 
 def _server_log_dir():

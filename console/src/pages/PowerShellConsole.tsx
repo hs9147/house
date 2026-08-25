@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import Async from '../components/Async';
+import PtyTerminal from '../components/PtyTerminal';
 import { api } from '../lib/api';
 import { useApi } from '../lib/hooks';
 
@@ -7,7 +8,7 @@ const PS_HISTORY_STORAGE_KEY = 'paas_powershell_cmd_history';
 
 export default function PowerShellConsole() {
   const me = useApi(() => api.me());
-  const [activeTab, setActiveTab] = useState<'console' | 'server_logs'>('console');
+  const [activeTab, setActiveTab] = useState<'terminal' | 'console' | 'server_logs'>('terminal');
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [inputCmd, setInputCmd] = useState('');
@@ -237,10 +238,16 @@ export default function PowerShellConsole() {
       {/* Tab Nav Selector: PowerShell 콘솔 -> 서버 로그 순서 */}
       <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', paddingBottom: 8 }}>
         <button
+          className={activeTab === 'terminal' ? 'primary small' : 'secondary small'}
+          onClick={() => setActiveTab('terminal')}
+        >
+          ▶ 터미널
+        </button>
+        <button
           className={activeTab === 'console' ? 'primary small' : 'secondary small'}
           onClick={() => setActiveTab('console')}
         >
-          ⚡ PowerShell 콘솔
+          ⚡ 명령 실행 (한 줄)
         </button>
         <button
           className={activeTab === 'server_logs' ? 'primary small' : 'secondary small'}
@@ -253,7 +260,10 @@ export default function PowerShellConsole() {
         </button>
       </div>
 
-      {/* TAB 1: PowerShell 콘솔 (Prompt Format UI) */}
+      {/* TAB 0: PTY 터미널 — 되묻는 명령·Ctrl+C·실시간 출력이 되는 쪽 */}
+      {activeTab === 'terminal' && <PtyTerminal />}
+
+      {/* TAB 1: 한 줄 실행 — PTY 백엔드(pywinpty)가 없는 서버를 위한 경로로도 남긴다 */}
       {activeTab === 'console' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {/* Quick Command Shortcuts */}

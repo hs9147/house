@@ -96,10 +96,38 @@ curl -X POST https://<플랫폼>/paas/api/v1/system/powershell/exec \
 - admin 키 필요. 반환: `returncode`(네이티브 명령의 `$LASTEXITCODE`, 순수 cmdlet이면 null일 수 있음),
   `output`(에코·프롬프트가 걸러진 명령 출력).
 
-### 4.3 WebSocket 터미널
+### 4.3 WebSocket 터미널 (PTY)
 
-`WebSocket /paas/api/v1/system/powershell/ws` — 텍스트로 명령 전송, 텍스트로 결과 수신.
-`exit`/`quit`로 세션 종료. 연결이 끊기면 그 연결의 데몬은 자동 정리된다.
+`WebSocket /paas/api/v1/system/powershell/ws` — 셸을 **의사 터미널(PTY)**에 붙여 키 입력과
+화면 출력을 바이트로 그대로 중계한다(`services/pty_terminal.py`). 콘솔의 "터미널" 탭이
+xterm.js로 이 소켓에 붙는다.
+
+예전에는 명령 한 줄을 받아 끝날 때까지 기다렸다가 출력을 통째로 돌려주는 방식이었다.
+그래서 **되묻는 명령**(`Read-Host`, `git commit`, `python` REPL)이 그대로 멈추고,
+**Ctrl+C**가 없고, **30초를 넘는 작업**은 진행 상황을 볼 수 없었다. PTY로 바꾸면 셋 다
+풀린다.
+
+**인증은 accept 전에 끝낸다.** 이 엔드포인트는 관리자 셸을 그대로 내주므로, 판정은 REST와
+같은 경로(`security.resolve_token`)를 쓰고 관리자 키만 통과시킨다. 브라우저는 WebSocket
+핸드셰이크에 임의 헤더를 붙일 수 없어 키를 **서브프로토콜**로 싣는다 — 쿼리스트링으로
+보내면 IIS/ARR 접근 로그에 관리자 키가 그대로 남는다.
+
+```js
+new WebSocket(url, ['paas-terminal', 'paas-key.' + key])   // 서버는 'paas-terminal'을 되돌려 준다
+```
+
+프로토콜: **보낼 때** JSON — `{"type":"input","data":"ls\r"}` / `{"type":"resize","cols":120,"rows":30}`.
+**받을 때**는 터미널 출력 그대로. 키 입력에는 어떤 바이트든 올 수 있어 구분자를 둘 자리가
+없으므로 보내는 쪽만 감싼다. 규약에 없는 프레임은 셸로 흘려보내지 않고 버린다.
+
+**백엔드.** 윈도우는 `pywinpty`(선택 의존성), POSIX는 표준 라이브러리 `pty`를 쓴다.
+pywinpty 휠에는 ConPTY와 winpty 백엔드가 모두 들어 있는데 **ConPTY는 Windows 10 1809 /
+Server 2019부터**다 — Server 2016이면 `PAAS_PTY_BACKEND=winpty`로 못 박아야 할 수 있다.
+백엔드를 못 열면 빈 화면을 남기지 않고 무엇을 설치하면 되는지 터미널에 찍어 준다.
+
+> **IIS/ARR 뒤에서는 WebSocket 통과가 전제다.** IIS에 "WebSocket Protocol" 기능
+> (`Install-WindowsFeature Web-WebSockets`)이 설치돼 있어야 하고 앱풀이 통합 모드여야 한다.
+> 안 되면 터미널 탭만 연결에 실패하고 나머지 기능은 그대로 동작한다.
 
 ## 5. 설정
 
@@ -108,6 +136,8 @@ curl -X POST https://<플랫폼>/paas/api/v1/system/powershell/exec \
 | 시작 디렉터리 | `PAAS_POWERSHELL_START_DIR` | (빈 값=프로세스 CWD) | 데몬이 기동할 작업 디렉터리 |
 | 브로커 포트 | `PAAS_PS_BROKER_PORT` | `47231` | `/exec` 공유 데몬이 붙는 로컬 TCP 포트. paas가 재시작해도 이 고정 포트로 다시 붙어 세션을 잇는다 |
 | 실행기 | — (`powershell_daemon.POWERSHELL_EXE`) | `powershell.exe` | 분리의 단일 지점. 필요 시 이 상수에서 조정 |
+| 터미널 셸 | `PAAS_PTY_SHELL` | `powershell.exe` | "터미널" 탭이 띄울 셸(`pwsh.exe`·`cmd.exe`로 교체 가능) |
+| PTY 백엔드 | `PAAS_PTY_BACKEND` | (빈 값=자동) | `conpty` \| `winpty`. Server 2016은 ConPTY가 없어 `winpty` |
 
 ## 6. 수명주기
 

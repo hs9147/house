@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     # /exec가 쓰는 상주 PowerShell 세션의 로컬 TCP 브로커 포트. paas 프로세스가 재시작돼도
     # 이 고정 포트로 다시 붙어 같은 세션(cd·변수 등 상태)을 잇는다 — services/ps_broker.py.
     ps_broker_port: int = 47231
+    # 콘솔 터미널(WebSocket PTY)이 쓰는 pywinpty 백엔드: conpty | winpty | (빈 값=자동).
+    # ConPTY는 Windows 10 1809 / Server 2019부터다 — **Server 2016이면 winpty**로 못
+    # 박아야 할 수 있다. 자동 선택으로 먼저 열어 보고, 안 되면 여기서 지정한다.
+    pty_backend: str = ""
+    # 터미널이 띄울 셸. 다른 셸(pwsh.exe, cmd.exe)로 바꿀 수 있다.
+    pty_shell: str = "powershell.exe"
 
     # 플랫폼(paas) 리포지토리 루트. 비우면 소스 트리에서 자동 계산한다.
     # SW 업데이트의 git pull 위치로 쓰인다. (환경변수: PAAS_REPO_ROOT)
