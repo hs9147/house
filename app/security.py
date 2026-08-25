@@ -252,18 +252,31 @@ def require_api_key(
         x_api_key = token
     if not x_api_key:
         raise HTTPException(status_code=401, detail="x-api-key header required")
+    key = resolve_token(db, x_api_key)
+    if key is None:
+        raise HTTPException(status_code=401, detail="invalid api key")
+    return key
+
+
+def resolve_token(db: Session, token: str) -> ApiKey | None:
+    """토큰 하나를 주체로 해석한다. 통하지 않으면 None.
+
+    require_api_key와 WebSocket 인증(api/system.py의 PowerShell 터미널)이 **같은** 판정을
+    쓰기 위해 따로 뺐다 — 인증 경로가 둘로 갈리면 한쪽만 고쳐 놓고 뚫린 채로 남는다.
+    """
+    settings = get_settings()
     # 1. 관리자 API 키 일치 여부 검증
-    if settings.admin_api_key and hmac.compare_digest(x_api_key, settings.admin_api_key):
+    if settings.admin_api_key and hmac.compare_digest(token, settings.admin_api_key):
         return ApiKey(name="bootstrap-admin", key_hash="", is_admin=True)
 
     # 2. DB hash_key 일치 검증
-    row = db.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(x_api_key))).scalar_one_or_none()
+    row = db.execute(select(ApiKey).where(ApiKey.key_hash == hash_key(token))).scalar_one_or_none()
     if row is not None:
         return row
 
     # 3. 로그인 세션 토큰 (사람 계정) — 만료된 토큰은 통과시키지 않는다.
     session = db.execute(
-        select(UserSession).where(UserSession.token_hash == hash_key(x_api_key))
+        select(UserSession).where(UserSession.token_hash == hash_key(token))
     ).scalar_one_or_none()
     if session is not None:
         expires = session.expires_at
@@ -272,13 +285,13 @@ def require_api_key(
         if expires <= utcnow():
             db.delete(session)
             db.commit()
-            raise HTTPException(status_code=401, detail="session expired")
+            return None
         return ApiKey(name=session.email, key_hash="", is_admin=session.is_admin)
 
     # 계정명·길이 기반 인정은 두지 않는다 — 계정명은 감사 로그와 콘솔에 그대로 노출되는
     # 공개 식별자라 비밀값이 아니다. 인증은 관리자 키(1), 발급된 키의 해시(2),
     # 로그인 세션 토큰(3)으로만 성립한다.
-    raise HTTPException(status_code=401, detail="invalid api key")
+    return None
 
 
 def require_admin(key: ApiKey = Depends(require_api_key)) -> ApiKey:

@@ -346,3 +346,52 @@ def test_spawn_broker_requests_breakaway_and_no_shared_io(monkeypatch):
     assert "--port" in args and "47231" in args
     assert kwargs["creationflags"] & psd._CREATE_BREAKAWAY_FROM_JOB
     assert "stdin" not in kwargs and "stdout" not in kwargs and "stderr" not in kwargs
+
+
+# --- WebSocket 터미널 인증 ---
+
+WS_URL = "/paas/api/v1/system/powershell/ws"
+
+
+def test_websocket_terminal_refuses_anonymous_connections(fresh_settings):
+    """이 엔드포인트는 관리자 셸을 그대로 내준다 — 인증 없이 붙을 수 있으면
+    플랫폼에 닿는 누구나 서비스 계정 권한으로 명령을 실행할 수 있다(실제로 그랬다)."""
+    c = TestClient(create_app())
+    with pytest.raises(Exception):  # WebSocketDisconnect (close 1008)
+        with c.websocket_connect(WS_URL) as ws:
+            ws.receive_text()
+
+
+def test_websocket_terminal_refuses_a_wrong_key(fresh_settings):
+    c = TestClient(create_app())
+    with pytest.raises(Exception):
+        with c.websocket_connect(
+            WS_URL, subprotocols=["paas-terminal", "paas-key.틀린키"]
+        ) as ws:
+            ws.receive_text()
+
+
+def test_websocket_terminal_refuses_a_non_admin_key(fresh_settings):
+    """발급 키는 앱 환경변수로도 나가는 값이다 — 그것으로 셸이 열리면 안 된다."""
+    c = TestClient(create_app())
+    issued = c.post("/paas/api/v1/keys", headers=ADMIN,
+                    json={"name": "worker", "is_admin": False})
+    assert issued.status_code == 201, issued.text
+    raw = issued.json()["key"]
+    with pytest.raises(Exception):
+        with c.websocket_connect(
+            WS_URL, subprotocols=["paas-terminal", f"paas-key.{raw}"]
+        ) as ws:
+            ws.receive_text()
+
+
+def test_websocket_terminal_accepts_an_admin_key(fresh_settings):
+    """키는 서브프로토콜로 받는다 — 쿼리스트링이면 IIS/ARR 접근 로그에 그대로 남는다."""
+    c = TestClient(create_app())
+    with c.websocket_connect(
+        WS_URL, subprotocols=["paas-terminal", "paas-key.test-admin-key"]
+    ) as ws:
+        assert "PowerShell" in ws.receive_text()
+    # 셸을 연 주체가 감사 로그에 남는다
+    actions = {r["action"] for r in c.get("/paas/api/v1/audit", headers=ADMIN).json()}
+    assert "powershell.ws_open" in actions
