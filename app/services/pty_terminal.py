@@ -18,6 +18,7 @@ OpenConsole.exe와 winpty.dll · winpty-agent.exe가 함께 들어 있다). ConP
 from __future__ import annotations
 
 import os
+import time
 
 # 셸을 못 띄웠을 때 사용자에게 그대로 보여 줄 안내. 여기서 조용히 실패하면 화면에는
 # 빈 터미널만 남아서 "왜 아무것도 안 나오지"가 된다.
@@ -30,6 +31,9 @@ INSTALL_HINT = (
 # pywinpty의 backend 인자 값(winpty/enums.py의 Backend). 이름으로 받아 숫자로 옮긴다 —
 # 설정 파일에 0/1을 적게 하면 어느 쪽인지 알 수 없다.
 BACKENDS = {"conpty": 0, "winpty": 1}
+# 열린 직후 셸이 죽는지 보려면 잠깐 기다려야 한다 — 너무 짧으면 exec 실패를 놓치고,
+# 길면 진단 요청이 그만큼 늘어진다.
+PROBE_SETTLE_SECONDS = 0.3
 
 
 class PtyUnavailable(RuntimeError):
@@ -45,6 +49,41 @@ def backend_code(name: str) -> int | None:
         raise PtyUnavailable(
             f"알 수 없는 PTY 백엔드: {name} ({' 또는 '.join(BACKENDS)})")
     return BACKENDS[name]
+
+
+def probe(shell: str, backend: str) -> dict:
+    """터미널을 열 수 있는 상태인지 실제로 한 번 열어 보고 닫는다.
+
+    WebSocket이 프록시에 막히면 브라우저는 이유를 알려주지 않는다(닫힘 코드 1006뿐이다).
+    같은 것을 REST로 물어보면 **서버가 준비됐는지**와 **길이 막혔는지**를 가를 수 있다 —
+    여기가 ok인데 소켓이 안 열리면 원인은 서버가 아니라 그 사이(IIS/ARR의 WebSocket)다.
+
+    import 여부만 보지 않고 실제로 셸을 띄우는 이유: Server 2016에서 ConPTY 자동 선택이
+    실패하는 것처럼, 설치는 됐는데 열리지 않는 경우가 이 기능의 주된 실패 모양이다.
+    """
+    info: dict = {"shell": shell, "backend": backend or "auto", "ok": False, "error": ""}
+    try:
+        terminal = PtyTerminal([shell], cols=80, rows=24, backend=backend_code(backend))
+    except PtyUnavailable as e:
+        info["error"] = str(e)
+        return info
+    try:
+        # 열자마자 끝났는지 본다. POSIX에서 셸 경로가 틀리면 fork는 성공하고 자식의
+        # exec만 실패하므로(종료코드 127), 여기서 보지 않으면 "열렸다"고 답하게 된다 —
+        # 셸 경로 오타는 이 기능에서 가장 흔한 실패다.
+        time.sleep(PROBE_SETTLE_SECONDS)
+        status = terminal.exit_status()
+        if status is None:
+            info["ok"] = True
+        else:
+            info["error"] = (
+                f"셸이 즉시 종료했습니다(종료코드 {status})."
+                + (f" '{shell}'을 실행할 수 없습니다 — 경로를 확인하세요."
+                   if status == 127 else "")
+            )
+    finally:
+        terminal.close()
+    return info
 
 
 class PtyTerminal:
@@ -75,6 +114,10 @@ class PtyTerminal:
         """브라우저 창 크기가 바뀌면 셸에도 알려야 한다 — 모르면 줄바꿈이 어긋난다."""
         self._impl.resize(cols, rows)
 
+    def exit_status(self) -> int | None:
+        """셸이 이미 끝났으면 종료코드, 살아 있으면 None."""
+        return self._impl.exit_status()
+
     def close(self) -> None:
         """연결이 끊기면 셸도 끝낸다 — 남겨 두면 셸 프로세스가 계속 쌓인다."""
         self._impl.close()
@@ -104,6 +147,14 @@ class _WinPty:
 
     def resize(self, cols, rows):
         self._proc.setwinsize(rows, cols)
+
+    def exit_status(self):
+        try:
+            if self._proc.isalive():
+                return None
+            return self._proc.exitstatus
+        except Exception:  # noqa: BLE001 — 이미 사라진 경우
+            return -1
 
     def close(self):
         try:
@@ -151,9 +202,25 @@ class _PosixPty:
 
         fcntl.ioctl(self._fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
+    def exit_status(self):
+        try:
+            pid, status = os.waitpid(self._pid, os.WNOHANG)
+        except OSError:
+            return -1  # 이미 거둬졌다
+        if pid == 0:
+            return None  # 아직 살아 있다
+        self._reaped = True
+        return os.waitstatus_to_exitcode(status)
+
     def close(self):
         import signal  # noqa: PLC0415
 
+        if getattr(self, "_reaped", False):
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            return
         for step in (lambda: os.kill(self._pid, signal.SIGKILL),
                      lambda: os.waitpid(self._pid, 0),
                      lambda: os.close(self._fd)):

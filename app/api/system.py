@@ -487,6 +487,29 @@ WS_SUBPROTOCOL = "paas-terminal"
 WS_KEY_PREFIX = "paas-key."
 
 
+@router.get("/system/terminal/preflight")
+def terminal_preflight(_: ApiKey = Depends(require_admin)):
+    """터미널이 안 열릴 때 원인을 서버 쪽에서 먼저 가른다.
+
+    WebSocket 핸드셰이크가 프록시에 막히면 브라우저는 이유를 알려주지 않는다 — 닫힘
+    코드 1006 하나뿐이고, 그건 "서버가 PTY를 못 연다"와 "IIS가 업그레이드를 안 넘긴다"를
+    구분하지 못한다. 여기가 ok인데 소켓이 안 열리면 원인은 서버가 아니라 그 사이다
+    (IIS의 WebSocket Protocol 기능이 꺼져 있는 경우가 대부분).
+    """
+    from ..services import pty_terminal  # noqa: PLC0415
+
+    settings = get_settings()
+    result = pty_terminal.probe(settings.pty_shell, settings.pty_backend)
+    result["hint"] = (
+        "서버는 준비됐습니다 — 그래도 터미널이 안 열리면 IIS/ARR이 WebSocket을 넘기지"
+        " 않는 것입니다(Install-WindowsFeature Web-WebSockets 후 iisreset)."
+        if result["ok"] else
+        "이 서버에서 셸을 열지 못했습니다. Windows Server 2016은 ConPTY가 없으므로"
+        " PAAS_PTY_BACKEND=winpty를 지정해 보세요."
+    )
+    return result
+
+
 @router.websocket("/system/powershell/ws")
 async def powershell_websocket_terminal(
     websocket: WebSocket,

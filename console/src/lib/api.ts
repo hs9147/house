@@ -434,6 +434,10 @@ export const api = {
     request<{ name: string; email: string; key: string; is_admin: boolean }>('POST', '/auth/register', body),
 
   // PowerShell 터미널 & 서버 로그
+  terminalPreflight: () =>
+    request<{ shell: string; backend: string; ok: boolean; error: string; hint: string }>(
+      'GET', '/system/terminal/preflight'),
+
   execPowerShell: (command: string) =>
     request<{ command: string; returncode: number; output: string }>('POST', '/system/powershell/exec', { command }),
   listServerLogs: () =>
