@@ -14,6 +14,11 @@ python-multipart>=0.0.9
 # kubernetes>=30.0     # 2차(enterprise) 런타임에서 직접 apply할 때
 # psutil>=6.0          # 시스템 모니터링
 # nvidia-ml-py>=12.0   # GPU/VRAM 모니터링
+# pywinpty>=2.0        # 콘솔 터미널(WebSocket PTY)의 윈도우 백엔드. 없으면 터미널 탭만
+#                      # 비활성화되고 나머지는 그대로 동작한다(POSIX는 표준 라이브러리로
+#                      # 열므로 불필요). 휠에 ConPTY와 winpty 백엔드가 모두 들어 있는데,
+#                      # ConPTY는 Windows 10 1809 / Server 2019부터다 — **Server 2016**이면
+#                      # PAAS_PTY_BACKEND=winpty로 못 박아야 할 수 있다.
 # psycopg[binary]>=3.1 # DB 조회 MCP 서버(/mcp/db/{모듈})가 PostgreSQL을 볼 때
 # pypdf>=4.0           # 문서 텍스트 추출(services/doctext.py)에서 PDF를 읽을 때.
 #                      # docx·xlsx·pptx는 표준 라이브러리만으로 읽으므로 이것만 있으면 된다.

@@ -3,6 +3,7 @@
 powershell.exe가 있는 환경(주로 Windows)에서만 실제 실행을 검증한다. 브로커
 중계·재연결 로직(paas 재시작 생존)은 가짜 REPL로 비-Windows에서도 검증한다.
 """
+import json
 import shutil
 import socket as _socket_module
 import sys
@@ -11,7 +12,9 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
+from app.config import get_settings
 from app.main import create_app
 
 ADMIN = {"x-api-key": "test-admin-key"}
@@ -357,18 +360,20 @@ def test_websocket_terminal_refuses_anonymous_connections(fresh_settings):
     """이 엔드포인트는 관리자 셸을 그대로 내준다 — 인증 없이 붙을 수 있으면
     플랫폼에 닿는 누구나 서비스 계정 권한으로 명령을 실행할 수 있다(실제로 그랬다)."""
     c = TestClient(create_app())
-    with pytest.raises(Exception):  # WebSocketDisconnect (close 1008)
+    with pytest.raises(WebSocketDisconnect):  # close 1008
         with c.websocket_connect(WS_URL) as ws:
-            ws.receive_text()
+            _recv(ws)
 
 
 def test_websocket_terminal_refuses_a_wrong_key(fresh_settings):
     c = TestClient(create_app())
-    with pytest.raises(Exception):
+    with pytest.raises(WebSocketDisconnect):
         with c.websocket_connect(
-            WS_URL, subprotocols=["paas-terminal", "paas-key.틀린키"]
+            # 서브프로토콜은 HTTP 헤더라 ASCII만 실린다 — 플랫폼 키는
+            # secrets.token_urlsafe라 언제나 ASCII다.
+            WS_URL, subprotocols=["paas-terminal", "paas-key.wrong-key"]
         ) as ws:
-            ws.receive_text()
+            _recv(ws)
 
 
 def test_websocket_terminal_refuses_a_non_admin_key(fresh_settings):
@@ -378,20 +383,136 @@ def test_websocket_terminal_refuses_a_non_admin_key(fresh_settings):
                     json={"name": "worker", "is_admin": False})
     assert issued.status_code == 201, issued.text
     raw = issued.json()["key"]
-    with pytest.raises(Exception):
+    with pytest.raises(WebSocketDisconnect):
         with c.websocket_connect(
             WS_URL, subprotocols=["paas-terminal", f"paas-key.{raw}"]
         ) as ws:
-            ws.receive_text()
+            _recv(ws)
 
 
-def test_websocket_terminal_accepts_an_admin_key(fresh_settings):
+ADMIN_SUBPROTOCOLS = ["paas-terminal", "paas-key.test-admin-key"]
+skip_no_posix_pty = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX PTY 전용 (윈도우는 pywinpty 경로)")
+
+
+_MARK = "MARK-끝"
+
+
+def _recv(ws, timeout: float = 5.0) -> str:
+    """타임아웃이 있는 receive_text.
+
+    TestClient의 receive_text에는 타임아웃이 없어서, 구현이 깨지면 테스트가 **실패하지
+    않고 매달린다** — CI에서는 "한참 뒤에 전체가 죽는" 형태로만 드러나 원인을 찾기 어렵다.
+    데몬 스레드로 읽어 시간을 재고, 넘기면 그 자리에서 실패시킨다.
+    """
+    box: dict[str, object] = {}
+
+    def read():
+        try:
+            box["value"] = ws.receive_text()
+        except BaseException as e:  # noqa: BLE001 — 끊김도 그대로 올린다
+            box["error"] = e
+
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if "error" in box:
+        raise box["error"]
+    if "value" not in box:
+        raise AssertionError(f"{timeout}초 안에 터미널 출력이 오지 않았다")
+    return str(box["value"])
+
+
+def _drain_to_mark(ws, tries: int = 400) -> str:
+    """표식 명령을 하나 흘려보내고 그 결과가 보일 때까지 모은다.
+
+    찾는 문자열이 나올 때까지 기다리면, 기능이 깨졌을 때 테스트가 **실패하지 않고
+    매달린다**(receive_text에는 타임아웃이 없다). 표식은 셸이 살아 있는 한 무슨 일이
+    있어도 오므로, 기대한 것이 없으면 그 자리에서 실패한다.
+    """
+    ws.send_text(json.dumps({"type": "input", "data": f"echo {_MARK}\n"}))
+    seen = ""
+    for _ in range(tries):
+        seen += _recv(ws)
+        if seen.count(_MARK) >= 2:  # 입력 에코 + 실행 결과
+            return seen
+    raise AssertionError(f"표식을 못 봤다: {seen[-300:]!r}")
+
+
+def _run(ws, script: str) -> str:
+    ws.send_text(json.dumps({"type": "input", "data": script}))
+    return _drain_to_mark(ws)
+
+
+@skip_no_posix_pty
+def test_websocket_terminal_accepts_an_admin_key(monkeypatch, fresh_settings):
     """키는 서브프로토콜로 받는다 — 쿼리스트링이면 IIS/ARR 접근 로그에 그대로 남는다."""
+    monkeypatch.setenv("PAAS_PTY_SHELL", "/bin/sh")
+    get_settings.cache_clear()
     c = TestClient(create_app())
-    with c.websocket_connect(
-        WS_URL, subprotocols=["paas-terminal", "paas-key.test-admin-key"]
-    ) as ws:
-        assert "PowerShell" in ws.receive_text()
+    with c.websocket_connect(WS_URL, subprotocols=ADMIN_SUBPROTOCOLS) as ws:
+        assert "hello-pty" in _run(ws, "echo hello-pty\n")
     # 셸을 연 주체가 감사 로그에 남는다
     actions = {r["action"] for r in c.get("/paas/api/v1/audit", headers=ADMIN).json()}
     assert "powershell.ws_open" in actions
+
+
+@skip_no_posix_pty
+def test_websocket_terminal_carries_an_interactive_prompt(monkeypatch, fresh_settings):
+    """예전 줄 단위 구현이 못 하던 것 — 되묻는 명령이 그대로 멈춰 있었다."""
+    monkeypatch.setenv("PAAS_PTY_SHELL", "/bin/sh")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    with c.websocket_connect(WS_URL, subprotocols=ADMIN_SUBPROTOCOLS) as ws:
+        # read는 입력이 올 때까지 멈춰 있다 — 예전 줄 단위 구현이 여기서 걸려 있었다.
+        ws.send_text(json.dumps({"type": "input", "data": "read x; echo got=$x\n"}))
+        ws.send_text(json.dumps({"type": "input", "data": "응답값\n"}))
+        assert "got=응답값" in _drain_to_mark(ws)
+
+
+@skip_no_posix_pty
+def test_websocket_terminal_applies_resize(monkeypatch, fresh_settings):
+    """창 크기를 셸이 모르면 줄바꿈이 어긋난다 — resize가 실제로 전달돼야 한다."""
+    monkeypatch.setenv("PAAS_PTY_SHELL", "/bin/sh")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    with c.websocket_connect(WS_URL, subprotocols=ADMIN_SUBPROTOCOLS) as ws:
+        ws.send_text(json.dumps({"type": "resize", "cols": 81, "rows": 41}))
+        assert "41 81" in _run(ws, "stty size\n")
+
+
+@skip_no_posix_pty
+def test_websocket_terminal_ignores_frames_outside_the_protocol(monkeypatch, fresh_settings):
+    """규약에 없는 프레임을 셸에 흘려보내면 붙은 쪽이 의도치 않게 명령을 실행시킨다."""
+    monkeypatch.setenv("PAAS_PTY_SHELL", "/bin/sh")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    with c.websocket_connect(WS_URL, subprotocols=ADMIN_SUBPROTOCOLS) as ws:
+        ws.send_text("echo 날것으로-보낸-명령\n")            # JSON이 아니다
+        assert "날것으로-보낸-명령" not in _drain_to_mark(ws)
+
+
+def test_websocket_terminal_says_what_to_install_when_there_is_no_backend(
+        monkeypatch, fresh_settings):
+    """빈 화면만 남기지 않는다 — 무엇을 하면 되는지 터미널에 찍어 준다."""
+    from app.services import pty_terminal
+
+    def unavailable(*args, **kwargs):
+        raise pty_terminal.PtyUnavailable(pty_terminal.INSTALL_HINT)
+
+    monkeypatch.setattr(pty_terminal, "PtyTerminal", unavailable)
+    c = TestClient(create_app())
+    with c.websocket_connect(WS_URL, subprotocols=ADMIN_SUBPROTOCOLS) as ws:
+        message = _recv(ws)
+    assert "pip install pywinpty" in message
+    assert "PAAS_PTY_BACKEND=winpty" in message  # Server 2016은 ConPTY가 없다
+
+
+def test_unknown_pty_backend_is_rejected_by_name(fresh_settings):
+    from app.services import pty_terminal
+
+    assert pty_terminal.backend_code("") is None
+    assert pty_terminal.backend_code("winpty") == 1
+    assert pty_terminal.backend_code("conpty") == 0
+    with pytest.raises(pty_terminal.PtyUnavailable, match="알 수 없는"):
+        pty_terminal.backend_code("openssh")

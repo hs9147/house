@@ -56,6 +56,18 @@ function apiUrl(path: string): string {
   return UNVERSIONED_PATHS.has(path) ? `${PAAS_PREFIX}${path}` : `${API_BASE}${path}`;
 }
 
+// 터미널은 WebSocket이라 fetch 경로(x-api-key 헤더)를 쓸 수 없다. 브라우저는 WebSocket
+// 핸드셰이크에 임의 헤더를 붙일 수 없어서 키를 **서브프로토콜**로 싣는다 — 쿼리스트링으로
+// 보내면 IIS/ARR 접근 로그에 관리자 키가 그대로 남는다. 서버는 비밀값이 아닌
+// 'paas-terminal' 쪽을 골라 되돌려 준다(app/api/system.py의 WS_KEY_PREFIX).
+export const TERMINAL_SUBPROTOCOL = 'paas-terminal';
+
+export function openTerminalSocket(): WebSocket {
+  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${scheme}//${window.location.host}${API_BASE}/system/powershell/ws`;
+  return new WebSocket(url, [TERMINAL_SUBPROTOCOL, `paas-key.${getKey()}`]);
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, detail: string) {
