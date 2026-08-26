@@ -11,13 +11,15 @@
 관리가 새로 생기고 명령 감사가 끊긴다.
 
 **백엔드.** pywinpty는 ConPTY와 winpty 두 가지를 모두 들고 다닌다(휠에 conpty.dll ·
-OpenConsole.exe와 winpty.dll · winpty-agent.exe가 함께 들어 있다). ConPTY는 Windows 10
-1809 / Server 2019부터라 **Server 2016에서는 winpty 백엔드**가 필요하다 — 기본값은
-자동 선택이고, 자동 선택이 어긋나면 PAAS_PTY_BACKEND로 못 박는다.
+OpenConsole.exe와 winpty.dll · winpty-agent.exe가 함께 들어 있다 — 3.0 기준이고, 2.x
+휠에는 winpty만 있다). ConPTY는 Windows 10 1809 / Server 2019부터라 **Server 2016에서는
+winpty 백엔드**가 필요하다. 이건 물어볼 것이 아니라 빌드 번호로 아는 것이므로
+default_backend_code()가 정하고, 그 판정이 어긋나면 PAAS_PTY_BACKEND로 못 박는다.
 """
 from __future__ import annotations
 
 import os
+import sys
 import time
 
 # 셸을 못 띄웠을 때 사용자에게 그대로 보여 줄 안내. 여기서 조용히 실패하면 화면에는
@@ -31,6 +33,8 @@ INSTALL_HINT = (
 # pywinpty의 backend 인자 값(winpty/enums.py의 Backend). 이름으로 받아 숫자로 옮긴다 —
 # 설정 파일에 0/1을 적게 하면 어느 쪽인지 알 수 없다.
 BACKENDS = {"conpty": 0, "winpty": 1}
+# ConPTY가 들어온 윈도우 빌드(10 1809 / Server 2019). 그 아래에는 ConPTY 자체가 없다.
+CONPTY_MIN_BUILD = 17763
 # 열린 직후 셸이 죽는지 보려면 잠깐 기다려야 한다 — 너무 짧으면 exec 실패를 놓치고,
 # 길면 진단 요청이 그만큼 늘어진다.
 PROBE_SETTLE_SECONDS = 0.3
@@ -40,11 +44,28 @@ class PtyUnavailable(RuntimeError):
     """이 서버에서는 PTY를 열 수 없다(백엔드 미설치·미지원)."""
 
 
+def default_backend_code() -> int | None:
+    """설정이 비었을 때 쓸 백엔드. 고를 이유가 없으면 None(=pywinpty에 맡긴다).
+
+    **Server 2016에서는 맡기면 안 된다.** ConPTY는 빌드 17763(10 1809 / Server 2019)부터
+    존재하는데, 자동 선택이 그걸 고르면 셸이 열리자마자 죽는다 — WebSocket은 101로 붙고
+    화면에는 "세션이 끝났습니다"만 남아서, 겉보기로는 연결 문제와 구분되지 않는다.
+    빌드 번호는 확실히 알 수 있으니 사람에게 묻지 말고 여기서 정한다.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        build = sys.getwindowsversion().build  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — 값을 못 읽으면 멋대로 정하지 않고 맡긴다
+        return None
+    return BACKENDS["winpty"] if build < CONPTY_MIN_BUILD else None
+
+
 def backend_code(name: str) -> int | None:
-    """설정값 → pywinpty backend 코드. 비었으면 None(=pywinpty가 알아서 고른다)."""
+    """설정값 → pywinpty backend 코드. 비었으면 이 OS에 맞는 기본값을 고른다."""
     name = (name or "").strip().lower()
     if not name:
-        return None
+        return default_backend_code()
     if name not in BACKENDS:
         raise PtyUnavailable(
             f"알 수 없는 PTY 백엔드: {name} ({' 또는 '.join(BACKENDS)})")
@@ -82,7 +103,7 @@ def probe(shell: str, backend: str) -> dict:
     실패하는 것처럼, 설치는 됐는데 열리지 않는 경우가 이 기능의 주된 실패 모양이다.
     """
     info: dict = {"shell": shell, "backend": backend or "auto", "ok": False, "error": "",
-                  "websocket_library": websocket_library()}
+                  "resolved_backend": "", "websocket_library": websocket_library()}
     if not info["websocket_library"]:
         info["error"] = (
             "이 서버에 WebSocket 구현이 없습니다 — HTTP는 정상이지만 터미널 소켓만"
@@ -91,7 +112,18 @@ def probe(shell: str, backend: str) -> dict:
         )
         return info
     try:
-        terminal = PtyTerminal([shell], cols=80, rows=24, backend=backend_code(backend))
+        resolved = backend_code(backend)
+    except PtyUnavailable as e:
+        info["error"] = str(e)
+        return info
+    # 실제로 무엇이 골라졌는지 함께 답한다 — "auto"만 보여 주면 Server 2016에서 무엇이
+    # 쓰였는지 알 수 없어, 백엔드가 원인일 때 그 사실이 드러나지 않는다. POSIX는 표준
+    # 라이브러리로 열어 고를 백엔드가 없으므로 비워 둔다(화면에서도 빠진다).
+    names = {code: name for name, code in BACKENDS.items()}
+    if os.name == "nt":
+        info["resolved_backend"] = names.get(resolved, "pywinpty 자동")
+    try:
+        terminal = PtyTerminal([shell], cols=80, rows=24, backend=resolved)
     except PtyUnavailable as e:
         info["error"] = str(e)
         return info

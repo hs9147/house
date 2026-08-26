@@ -435,8 +435,16 @@ export const api = {
 
   // PowerShell 터미널 & 서버 로그
   terminalPreflight: () =>
-    request<{ shell: string; backend: string; ok: boolean; error: string; hint: string }>(
-      'GET', '/system/terminal/preflight'),
+    request<{
+      shell: string;
+      backend: string;
+      // 설정이 'auto'일 때 실제로 골라진 백엔드 — Server 2016에서 무엇이 쓰였는지가
+      // 여기서만 드러난다.
+      resolved_backend: string;
+      ok: boolean;
+      error: string;
+      hint: string;
+    }>('GET', '/system/terminal/preflight'),
 
   execPowerShell: (command: string) =>
     request<{ command: string; returncode: number; output: string }>('POST', '/system/powershell/exec', { command }),

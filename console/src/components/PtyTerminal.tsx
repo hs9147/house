@@ -20,6 +20,10 @@ import { api, openTerminalSocket } from '../lib/api';
 // 아무 말도 하지 않고 CONNECTING에 머물기 때문에, 말해 주지 않으면 "연결 중"만 남는다.
 const HANDSHAKE_TIMEOUT_MS = 8000;
 
+// 열린 지 이보다 빨리 끝난 세션은 사용자가 나간 것이 아니라 셸이 뜨지 못한 것으로 본다
+// (app/api/system.py의 SHORT_SESSION_SECONDS와 같은 기준).
+const SHORT_SESSION_MS = 3000;
+
 export default function PtyTerminal() {
   const holder = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<'연결 중' | '연결됨' | '끊김'>('연결 중');
@@ -56,9 +60,11 @@ export default function PtyTerminal() {
     let disposed = false;
 
     let everOpened = false;
+    let openedAt = 0;
     socket.onopen = () => {
       if (disposed) return;
       everOpened = true;
+      openedAt = Date.now();
       setStatus('연결됨');
       setDiagnosis(''); // 늦게라도 열렸으면 앞서 띄운 지연 경고는 더 이상 사실이 아니다
       sendResize(); // 셸이 창 크기를 모르면 줄바꿈이 어긋난다
@@ -71,18 +77,26 @@ export default function PtyTerminal() {
     socket.onclose = (e) => {
       if (disposed) return;
       setStatus('끊김');
-      if (everOpened) {
+      // 열린 지 한참 뒤에 끝났으면 사용자가 나간 것이다(exit·logoff). 열자마자 끝났으면
+      // 나간 것이 아니라 **셸이 뜨지 못한 것**이다 — 둘을 같은 문구로 덮으면 화면에는
+      // "세션이 끝났습니다"만 남고, 서버는 이유를 알면서도 말해 줄 자리가 없어진다.
+      if (everOpened && Date.now() - openedAt >= SHORT_SESSION_MS) {
         term.write('\r\n\x1b[33m[세션이 끝났습니다 — 다시 열려면 새로고침하세요]\x1b[0m\r\n');
         return;
       }
-      // 한 번도 열리지 못했다 = 핸드셰이크 단계에서 막혔다. 원인을 서버에 물어본다.
-      term.write(`\r\n\x1b[31m[연결하지 못했습니다 — 닫힘 코드 ${e.code}]\x1b[0m\r\n`);
+      term.write(
+        everOpened
+          ? '\r\n\x1b[31m[셸이 열리자마자 끝났습니다 — 서버에 이유를 물어봅니다]\x1b[0m\r\n'
+          : `\r\n\x1b[31m[연결하지 못했습니다 — 닫힘 코드 ${e.code}]\x1b[0m\r\n`,
+      );
       api
         .terminalPreflight()
         .then((r) => {
           setDiagnosis(r.ok ? r.hint : `${r.error} ${r.hint}`);
           term.write(
-            `\x1b[33m서버 점검: 셸 ${r.shell} / 백엔드 ${r.backend} → ${r.ok ? 'OK' : r.error}\x1b[0m\r\n` +
+            `\x1b[33m서버 점검: 셸 ${r.shell} / 백엔드 ${r.backend}` +
+              `${r.resolved_backend ? ` (실제: ${r.resolved_backend})` : ''}` +
+              ` → ${r.ok ? 'OK' : r.error}\x1b[0m\r\n` +
               `\x1b[33m${r.hint}\x1b[0m\r\n`,
           );
         })
