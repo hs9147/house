@@ -1,6 +1,7 @@
-"""SW 업데이트 엔드포인트 — git pull → 콘솔 빌드 → 서비스 재시작(실제 실행은 목킹)."""
+"""SW 업데이트 엔드포인트 — git pull → 의존성 설치 → 콘솔 빌드 → 재시작(실행은 목킹)."""
 import shutil
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -48,8 +49,14 @@ def test_sw_update_schedules_git_pull_and_restart():
             assert "콘솔 빌드 실패" in script
             # 분리된 프로세스라 stdout이 어디에도 닿지 않는다 — 로그로 남겨야 읽을 수 있다
             assert "Start-Transcript" in script and "sw-update.log" in script
-            # 파이썬 의존성은 여전히 건드리지 않는다(가상환경 위치가 설치본마다 다르다)
-            assert "pip install" not in script
+            # 파이썬 의존성도 설치한다. "어느 venv인가"는 sys.executable로 답이 정해진다 —
+            # 지금 도는 프로세스의 인터프리터가 곧 서비스가 쓰는 인터프리터다.
+            assert "-m pip install -r " in script
+            assert sys.executable.replace("'", "''") in script
+            # 재시작 전에 설치해야 새 의존성이 다음 기동에 반영된다
+            assert script.index("-m pip install") < script.index("Restart-Service")
+            # 실패해도 재시작까지는 간다 — 대신 실패를 말한다(적재 중인 .pyd는 못 덮는다)
+            assert "pip install 실패" in script
     finally:
         app.dependency_overrides.clear()
 

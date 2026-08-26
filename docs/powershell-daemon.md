@@ -126,7 +126,15 @@ Server 2019부터**다 — Server 2016이면 `PAAS_PTY_BACKEND=winpty`로 못 �
 백엔드를 못 열면 빈 화면을 남기지 않고 무엇을 설치하면 되는지 터미널에 찍어 준다.
 
 > **안 열릴 때.** `GET /system/terminal/preflight`(admin)가 서버 쪽 준비 상태를 답한다
-> (실제로 셸을 띄웠다 닫는다). 거기가 ok인데도 안 열리면 원인은 그 사이다 —
+> (실제로 셸을 띄웠다 닫는다).
+>
+> **먼저 `websocket_library`를 본다.** uvicorn은 `websockets`·`wsproto` 중 하나가 있어야
+> 업그레이드를 받는다. 없으면 **HTTP는 전부 정상인데 WebSocket만 404**가 나고, 밖에서는
+> 프록시 문제와 구분되지 않는다 — 실제로 이것 때문에 IIS만 뒤졌다. 비어 있으면
+> `pip install "uvicorn[standard]"` 후 재시작한다(SW 업데이트가 대신 해 준다). 값이
+> 있는데도 404면 기동 명령에 `--ws none`이 붙어 있는지 본다(nssm 서비스 인자).
+>
+> 거기가 ok인데도 안 열리면 원인은 그 사이다 —
 > `infra/ws-check.ps1`로 **백엔드 직접**과 **IIS 경유**를 각각 찔러 보면 갈린다:
 > 직접 OK·IIS 실패면 프록시, 둘 다 403이면 키나 `Sec-WebSocket-Protocol` 전달 문제다.
 >
@@ -175,8 +183,9 @@ paas가 nssm 등으로 **Job Object**에 묶여 있으면, paas 서비스가 sto
 
 ### SW 업데이트가 하는 일
 
-`POST /system/sw-update` → `git pull` → **콘솔 재빌드**(`npm install` + `npm run build`) →
-서비스 재시작. 출력은 `logs/sw-update.log`에 남고 콘솔 "서버 로그" 탭에서 읽는다.
+`POST /system/sw-update` → `git pull` → **파이썬 의존성 설치**(`pip install -r requirements.txt`)
+→ **콘솔 재빌드**(`npm install` + `npm run build`) → 서비스 재시작. 출력은
+`logs/sw-update.log`에 남고 콘솔 "서버 로그" 탭에서 읽는다.
 
 콘솔을 여기서 빌드하는 이유: 배포되는 *프로젝트*의 환경설정은 배포 파이프라인의
 책임이지만(start.cmd·이미지 빌드), **콘솔은 플랫폼 자신이라 그런 파이프라인이 없다** —
@@ -185,8 +194,22 @@ paas가 nssm 등으로 **Job Object**에 묶여 있으면, paas 서비스가 sto
 서빙돼** 업데이트가 안 된 것이 드러나지 않는다.
 
 콘솔 소스가 없거나 npm이 없는 설치본에서는 건너뛰고, 빌드가 실패해도 서비스 재시작까지는
-진행한다(대신 로그에 실패를 남긴다). 파이썬 의존성(`pip install`)은 여전히 하지 않는다 —
-서비스 계정의 가상환경 위치가 설치본마다 달라 잘못된 인터프리터에 설치하면 조용히 어긋난다.
+진행한다(대신 로그에 실패를 남긴다).
+
+**어느 파이썬에 설치하나 — 물어볼 필요가 없다.** 예전에는 "서비스 계정의 가상환경 위치가
+설치본마다 달라 잘못된 인터프리터에 설치하면 조용히 어긋난다"는 이유로 `pip install`을
+하지 않았다. 그 위험은 `sys.executable`을 쓰면 사라진다: 지금 도는 백엔드 프로세스의
+인터프리터가 곧 서비스가 쓰는 인터프리터이고, 그건 이 프로세스만 확실히 안다(서비스가
+`.venv\Scripts\uvicorn.exe`로 떠 있어도 그 venv의 `python.exe`가 나온다). 그래서 손으로
+`.venv`를 찾아 활성화할 필요가 없다.
+
+의존성이 늘었는데 아무도 설치하지 않으면 기능이 **조용히** 죽는다. 실제로
+`uvicorn[standard]`가 빠진 채로 돌아 HTTP는 전부 정상인데 콘솔 터미널의 WebSocket만
+404가 났다(§4.3).
+
+윈도우에서는 이미 적재된 확장 모듈(`.pyd`)을 덮어쓰려 하면 실패할 수 있다 — 새 패키지
+설치는 문제없고, 실패해도 로그에 남기고 재시작까지는 진행한다. 재시작 **전에** 설치하므로
+새 의존성은 다음 기동에 반영된다.
 
 - **자기 재시작 / SW 업데이트**(`run_detached_script`): `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
   CREATE_BREAKAWAY_FROM_JOB`로 fire-and-forget 실행. paas 프로세스가 내려가도 `git pull` ·
