@@ -121,9 +121,16 @@ new WebSocket(url, ['paas-terminal', 'paas-key.' + key])   // 서버는 'paas-te
 없으므로 보내는 쪽만 감싼다. 규약에 없는 프레임은 셸로 흘려보내지 않고 버린다.
 
 **백엔드.** 윈도우는 `pywinpty`(선택 의존성), POSIX는 표준 라이브러리 `pty`를 쓴다.
-pywinpty 휠에는 ConPTY와 winpty 백엔드가 모두 들어 있는데 **ConPTY는 Windows 10 1809 /
-Server 2019부터**다 — Server 2016이면 `PAAS_PTY_BACKEND=winpty`로 못 박아야 할 수 있다.
+pywinpty 3.x 휠에는 ConPTY와 winpty가 모두 들어 있는데(2.x는 winpty만) **ConPTY는
+Windows 10 1809 / Server 2019(빌드 17763)부터**다. 그래서 빌드가 그보다 낮으면
+**플랫폼이 알아서 winpty로 내린다**(`default_backend_code()`) — 물어볼 것이 아니라
+빌드 번호로 아는 것이기 때문이다. 판정이 어긋나면 `PAAS_PTY_BACKEND`로 못 박는다.
 백엔드를 못 열면 빈 화면을 남기지 않고 무엇을 설치하면 되는지 터미널에 찍어 준다.
+
+> **101로 붙었는데 곧바로 "세션이 끝났습니다"가 뜬다면** 연결 문제가 아니라 **셸이
+> 뜨지 못한 것**이다. 열린 지 3초 안에 끝난 세션은 사용자가 나간 것으로 보지 않고,
+> 종료코드와 현재 백엔드를 터미널에 찍은 뒤 preflight 진단을 이어 붙인다. Server 2016에서
+> ConPTY가 골라졌을 때의 모양이 정확히 이것이다.
 
 > **안 열릴 때.** `GET /system/terminal/preflight`(admin)가 서버 쪽 준비 상태를 답한다
 > (실제로 셸을 띄웠다 닫는다).
@@ -159,7 +166,7 @@ Server 2019부터**다 — Server 2016이면 `PAAS_PTY_BACKEND=winpty`로 못 �
 | 브로커 포트 | `PAAS_PS_BROKER_PORT` | `47231` | `/exec` 공유 데몬이 붙는 로컬 TCP 포트. paas가 재시작해도 이 고정 포트로 다시 붙어 세션을 잇는다 |
 | 실행기 | — (`powershell_daemon.POWERSHELL_EXE`) | `powershell.exe` | 분리의 단일 지점. 필요 시 이 상수에서 조정 |
 | 터미널 셸 | `PAAS_PTY_SHELL` | `powershell.exe` | "터미널" 탭이 띄울 셸(`pwsh.exe`·`cmd.exe`로 교체 가능) |
-| PTY 백엔드 | `PAAS_PTY_BACKEND` | (빈 값=자동) | `conpty` \| `winpty`. Server 2016은 ConPTY가 없어 `winpty` |
+| PTY 백엔드 | `PAAS_PTY_BACKEND` | (빈 값=빌드로 판정) | `conpty` \| `winpty`. 빈 값이면 윈도우 빌드가 17763 미만일 때 `winpty`로 내린다 |
 
 ## 6. 수명주기
 

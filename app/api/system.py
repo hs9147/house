@@ -485,6 +485,8 @@ def exec_powershell_cmd(
 # 서버는 비밀값이 아닌 "paas-terminal" 쪽을 골라 되돌려 준다.
 WS_SUBPROTOCOL = "paas-terminal"
 WS_KEY_PREFIX = "paas-key."
+# 이보다 빨리 끝난 세션은 사용자가 나간 것이 아니라 셸이 뜨지 못한 것으로 본다.
+SHORT_SESSION_SECONDS = 3.0
 
 
 @router.get("/system/terminal/preflight")
@@ -538,6 +540,7 @@ async def powershell_websocket_terminal(
     import asyncio  # noqa: PLC0415
     import json as _json  # noqa: PLC0415
     import os  # noqa: PLC0415
+    import time  # noqa: PLC0415
 
     from ..services import pty_terminal  # noqa: PLC0415
 
@@ -595,9 +598,27 @@ async def powershell_websocket_terminal(
 
     output_task = asyncio.create_task(pump_output())
     input_task = asyncio.create_task(pump_input())
+    opened_at = time.monotonic()
     try:
         # 둘 중 하나라도 끝나면 세션이 끝난 것이다(셸 종료 또는 연결 끊김).
-        await asyncio.wait({output_task, input_task}, return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait({output_task, input_task},
+                                     return_when=asyncio.FIRST_COMPLETED)
+        # 열자마자 끝났으면 사용자가 나간 것이 아니라 **셸이 뜨지 못한 것**이다. 둘을
+        # 구분하지 않으면 화면에는 "세션이 끝났습니다"만 남아서, 서버는 이유(종료코드)를
+        # 알면서도 말해 주지 않는 꼴이 된다 — Server 2016에서 ConPTY가 자동 선택돼 셸이
+        # 즉시 죽는 것이 이 기능의 주된 실패 모양이라 그대로 두면 원인을 찾을 수 없다.
+        # 출력 펌프가 먼저 끝났다 = 셸이 죽었다. 입력 펌프가 먼저면 브라우저가 나간
+        # 것이라 보낼 곳이 이미 없다.
+        alive_seconds = time.monotonic() - opened_at
+        status = terminal.exit_status()
+        if output_task in done and status is not None and alive_seconds < SHORT_SESSION_SECONDS:
+            await websocket.send_text(
+                f"\r\n[셸이 바로 종료했습니다 — 종료코드 {status}] "
+                f"'{settings.pty_shell}'을(를) 실행할 수 없습니다."
+                " Windows Server 2016은 ConPTY가 없으므로 PAAS_PTY_BACKEND=winpty를"
+                " 지정해 보세요(현재 백엔드: "
+                f"{settings.pty_backend or 'auto'}).\r\n"
+            )
     finally:
         # **셸을 먼저 끝낸다.** 출력 펌프는 블로킹 읽기 안에 있어서 cancel로는 깨울 수
         # 없고, 셸이 죽어야 그 읽기가 돌아온다 — 순서를 뒤집으면 출력이 없는 채로
