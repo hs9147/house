@@ -39,6 +39,11 @@ catch {
   Write-Host "[실패] $($e.GetType().Name): $($e.Message)" -ForegroundColor Red
   Write-Host ""
   Write-Host "다음으로 볼 곳:" -ForegroundColor Yellow
+  Write-Host "  '404'      → 백엔드가 WebSocket을 받지 않는다. HTTP는 전부 정상이라 이것만으로는"
+  Write-Host "               프록시 문제와 구분되지 않는다. 둘 중 하나다:"
+  Write-Host "                 . 라이브러리 없음   → pip install 'uvicorn[standard]' 후 재시작"
+  Write-Host "                 . 있는데 --ws none → 기동 명령(nssm 서비스 인자)에서 그 플래그를 뺀다"
+  Write-Host "               (preflight의 websocket_library로 앞쪽을 가른다)"
   Write-Host "  '403'      → 관리자 키가 맞는지, 프록시가 Sec-WebSocket-Protocol을 지우지 않는지"
   Write-Host "  '400'/'500' → IIS/ARR이 업그레이드를 넘기지 않는다(Web-WebSockets 기능·앱풀 통합 모드)"
   Write-Host "  Connection refused → 그 주소에 아무도 없다(포트·경로 확인)"

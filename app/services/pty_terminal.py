@@ -51,6 +51,26 @@ def backend_code(name: str) -> int | None:
     return BACKENDS[name]
 
 
+def websocket_library() -> str:
+    """이 프로세스에서 쓸 수 있는 WebSocket 구현 이름. 없으면 빈 문자열.
+
+    uvicorn은 websockets·wsproto 중 하나가 있어야 업그레이드를 받는다. 없으면
+    **HTTP는 전부 정상인데 WebSocket만 404**가 나고, 서버 로그에만 경고가 찍힌다
+    ("No supported WebSocket library detected"). 밖에서 보면 프록시 문제와 똑같이
+    보여서, 여기서 보지 않으면 IIS만 뒤지게 된다(실제로 그랬다).
+
+    **설치 여부만 본다.** 라이브러리가 있어도 서버가 `--ws none`으로 떠 있으면 결과는
+    같은 404다 — 그건 이 프로세스 안에서 알 수 없으므로 기동 명령을 봐야 한다.
+    """
+    for name in ("websockets", "wsproto"):
+        try:
+            __import__(name)
+            return name
+        except ImportError:
+            continue
+    return ""
+
+
 def probe(shell: str, backend: str) -> dict:
     """터미널을 열 수 있는 상태인지 실제로 한 번 열어 보고 닫는다.
 
@@ -61,7 +81,15 @@ def probe(shell: str, backend: str) -> dict:
     import 여부만 보지 않고 실제로 셸을 띄우는 이유: Server 2016에서 ConPTY 자동 선택이
     실패하는 것처럼, 설치는 됐는데 열리지 않는 경우가 이 기능의 주된 실패 모양이다.
     """
-    info: dict = {"shell": shell, "backend": backend or "auto", "ok": False, "error": ""}
+    info: dict = {"shell": shell, "backend": backend or "auto", "ok": False, "error": "",
+                  "websocket_library": websocket_library()}
+    if not info["websocket_library"]:
+        info["error"] = (
+            "이 서버에 WebSocket 구현이 없습니다 — HTTP는 정상이지만 터미널 소켓만"
+            ' 404로 떨어집니다. `pip install "uvicorn[standard]"`(또는 websockets) 후'
+            " 플랫폼을 재시작하세요."
+        )
+        return info
     try:
         terminal = PtyTerminal([shell], cols=80, rows=24, backend=backend_code(backend))
     except PtyUnavailable as e:
