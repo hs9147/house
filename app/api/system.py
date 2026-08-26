@@ -727,8 +727,14 @@ def sw_update(
     된 것이 드러나지 않는다(실제로 겪었다 — xterm 의존성 추가 후 "failed to resolve
     import"). npm이 없거나 콘솔 소스가 없는 설치본에서는 건너뛴다.
 
-    파이썬 의존성(pip install)은 여전히 하지 않는다 — 서비스 계정의 가상환경 위치가
-    설치본마다 다르고, 잘못된 인터프리터에 설치하면 조용히 어긋난다.
+    **파이썬 의존성도 여기서 설치한다.** 예전에는 "가상환경 위치가 설치본마다 달라
+    잘못된 인터프리터에 설치하면 조용히 어긋난다"는 이유로 하지 않았는데, 그 위험은
+    sys.executable을 쓰면 사라진다 — 지금 도는 프로세스 자신의 인터프리터가 정답이고
+    그건 이 프로세스만 확실히 안다. 실제로 uvicorn[standard]가 빠진 채로 돌아 콘솔
+    터미널이 조용히 죽는 일을 겪었고, 그때 "어느 파이썬에 설치해야 하나"가 문제였다.
+
+    윈도우에서는 이미 적재된 확장 모듈(.pyd)을 덮어쓰려 하면 실패할 수 있다 — 새 패키지
+    설치는 문제없고, 실패해도 로그에 남기고 재시작까지는 진행한다.
 
     출력은 logs/sw-update.log에 남긴다. 이 스크립트는 분리된 프로세스라 stdout이 어디에도
     닿지 않는데, 그러면 실패했는지조차 알 수 없다 — 콘솔 "서버 로그" 탭에서 읽는다.
@@ -737,6 +743,7 @@ def sw_update(
     독립 PowerShell 프로세스(run_detached_script)로 띄워 백엔드가 내려가도 업데이트가 끝까지
     진행되게 한다(self-kill 방지).
     """
+    import sys  # noqa: PLC0415
     from pathlib import Path  # noqa: PLC0415
 
     from ..services import powershell_daemon  # noqa: PLC0415
@@ -756,6 +763,10 @@ def sw_update(
     escaped_log_dir = str(log_dir).replace("'", "''")
     escaped_log = str(log_dir / "sw-update.log").replace("'", "''")
     escaped_console = str(Path(repo_dir) / "console").replace("'", "''")
+    escaped_requirements = str(Path(repo_dir) / "requirements.txt").replace("'", "''")
+    # 지금 이 프로세스를 돌리는 인터프리터 — "어느 venv인가"를 물어볼 필요가 없는
+    # 유일한 답이다(서비스가 uvicorn.exe로 떠 있어도 그 venv의 python.exe가 나온다).
+    escaped_python = sys.executable.replace("'", "''")
 
     update_script = (
         "$ErrorActionPreference = 'Continue'; "
@@ -765,6 +776,14 @@ def sw_update(
         "Write-Host '[SW Update] git pull...'; "
         "git pull; "
         "Start-Sleep -Seconds 1; "
+        # 파이썬 의존성 — 지금 도는 프로세스의 인터프리터로 설치한다(어느 venv인지
+        # 물어볼 필요가 없다). 재시작 전에 해야 새 의존성이 다음 기동에 반영된다.
+        f"if (Test-Path '{escaped_requirements}') {{ "
+        "  Write-Host '[SW Update] pip install...'; "
+        f"  & '{escaped_python}' -m pip install -r '{escaped_requirements}'; "
+        "  if ($LASTEXITCODE -ne 0) { "
+        "    Write-Host '[SW Update] !! pip install 실패 — 적재 중인 모듈은 덮어쓰지 못할 수 있습니다'; } "
+        "} "
         # 콘솔은 플랫폼 자신이라 배포 파이프라인이 없다 — 여기서 빌드하지 않으면
         # 의존성이 늘었을 때 예전 dist가 조용히 계속 서빙된다.
         f"if (Test-Path '{escaped_console}\package.json') {{ "
@@ -790,7 +809,8 @@ def sw_update(
                      {"repo_dir": repo_dir, "services": services})
         return {
             "status": "updating",
-            "message": (f"git pull → 콘솔 재빌드 → 서비스 {', '.join(services)} 재시작을 시작했습니다."
+            "message": (f"git pull → 의존성 설치 → 콘솔 재빌드 →"
+                        f" 서비스 {', '.join(services)} 재시작을 시작했습니다."
                         " 진행 상황은 서버 로그의 sw-update.log에서 볼 수 있습니다."),
             "error": None,
             "services": services,
