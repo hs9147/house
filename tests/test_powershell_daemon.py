@@ -562,3 +562,26 @@ def test_preflight_rejects_an_unknown_backend(monkeypatch, fresh_settings):
     body = TestClient(create_app()).get(PREFLIGHT_URL, headers=ADMIN).json()
     assert body["ok"] is False and "알 수 없는" in body["error"]
     assert "winpty" in body["hint"]  # Server 2016 대응을 알려 준다
+
+
+def test_preflight_reports_a_missing_websocket_library(monkeypatch, fresh_settings):
+    """uvicorn에 websockets·wsproto가 없으면 HTTP는 전부 정상인데 소켓만 404가 난다.
+    밖에서 보면 프록시 문제와 똑같이 보여서, 여기서 말해 주지 않으면 IIS만 뒤지게 된다."""
+    from app.services import pty_terminal
+
+    monkeypatch.setattr(pty_terminal, "websocket_library", lambda: "")
+    body = TestClient(create_app()).get(PREFLIGHT_URL, headers=ADMIN).json()
+    assert body["ok"] is False
+    assert body["websocket_library"] == ""
+    assert "uvicorn[standard]" in body["error"]
+    # IIS를 먼저 뒤지지 않도록 순서를 말해 준다
+    assert "IIS보다 여기가 먼저" in body["hint"]
+
+
+@skip_no_posix_pty
+def test_preflight_names_the_websocket_library_when_present(monkeypatch, fresh_settings):
+    monkeypatch.setenv("PAAS_PTY_SHELL", "/bin/sh")
+    get_settings.cache_clear()
+    body = TestClient(create_app()).get(PREFLIGHT_URL, headers=ADMIN).json()
+    assert body["ok"] is True
+    assert body["websocket_library"] in ("websockets", "wsproto")

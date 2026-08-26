@@ -500,13 +500,19 @@ def terminal_preflight(_: ApiKey = Depends(require_admin)):
 
     settings = get_settings()
     result = pty_terminal.probe(settings.pty_shell, settings.pty_backend)
-    result["hint"] = (
-        "서버는 준비됐습니다 — 그래도 터미널이 안 열리면 IIS/ARR이 WebSocket을 넘기지"
-        " 않는 것입니다(Install-WindowsFeature Web-WebSockets 후 iisreset)."
-        if result["ok"] else
-        "이 서버에서 셸을 열지 못했습니다. Windows Server 2016은 ConPTY가 없으므로"
-        " PAAS_PTY_BACKEND=winpty를 지정해 보세요."
-    )
+    if result["ok"]:
+        hint = ("서버는 준비됐습니다. 그래도 터미널이 안 열리면 infra/ws-check.ps1로"
+                " 백엔드에 직접 붙어 보세요 — 거기서 404면 서버가 --ws none으로 떠 있는"
+                " 것이고, 거기는 되는데 IIS 경유가 안 되면 프록시가 업그레이드를 넘기지"
+                " 않는 것입니다(Install-WindowsFeature Web-WebSockets 후 iisreset).")
+    elif not result["websocket_library"]:
+        # 여기가 비면 IIS를 아무리 고쳐도 안 된다 — 소켓이 서버에 닿아도 404가 난다.
+        hint = ("IIS보다 여기가 먼저입니다. 이 상태에서는 프록시 설정과 무관하게"
+                " 터미널 소켓이 404로 떨어집니다.")
+    else:
+        hint = ("이 서버에서 셸을 열지 못했습니다. Windows Server 2016은 ConPTY가 없으므로"
+                " PAAS_PTY_BACKEND=winpty를 지정해 보세요.")
+    result["hint"] = hint
     return result
 
 
