@@ -125,6 +125,11 @@ pywinpty 휠에는 ConPTY와 winpty 백엔드가 모두 들어 있는데 **ConPT
 Server 2019부터**다 — Server 2016이면 `PAAS_PTY_BACKEND=winpty`로 못 박아야 할 수 있다.
 백엔드를 못 열면 빈 화면을 남기지 않고 무엇을 설치하면 되는지 터미널에 찍어 준다.
 
+> **안 열릴 때.** `GET /system/terminal/preflight`(admin)가 서버 쪽 준비 상태를 답한다
+> (실제로 셸을 띄웠다 닫는다). 거기가 ok인데도 안 열리면 원인은 그 사이다 —
+> `infra/ws-check.ps1`로 **백엔드 직접**과 **IIS 경유**를 각각 찔러 보면 갈린다:
+> 직접 OK·IIS 실패면 프록시, 둘 다 403이면 키나 `Sec-WebSocket-Protocol` 전달 문제다.
+>
 > **IIS/ARR 뒤에서는 WebSocket 통과가 전제다.** IIS에 "WebSocket Protocol" 기능
 > (`Install-WindowsFeature Web-WebSockets`)이 설치돼 있어야 하고 앱풀이 통합 모드여야 한다.
 > 안 되면 터미널 탭만 연결에 실패하고 나머지 기능은 그대로 동작한다.
