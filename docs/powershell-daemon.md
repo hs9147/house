@@ -168,6 +168,21 @@ paas가 nssm 등으로 **Job Object**에 묶여 있으면, paas 서비스가 sto
 `CREATE_NO_WINDOW`, `CREATE_NEW_PROCESS_GROUP`)로 **Job에서 breakaway**시킨다. 관련 상수·헬퍼는
 `app/services/powershell_daemon.py`의 `_creation_flags()`에 모여 있다(분리의 단일 지점).
 
+### SW 업데이트가 하는 일
+
+`POST /system/sw-update` → `git pull` → **콘솔 재빌드**(`npm install` + `npm run build`) →
+서비스 재시작. 출력은 `logs/sw-update.log`에 남고 콘솔 "서버 로그" 탭에서 읽는다.
+
+콘솔을 여기서 빌드하는 이유: 배포되는 *프로젝트*의 환경설정은 배포 파이프라인의
+책임이지만(start.cmd·이미지 빌드), **콘솔은 플랫폼 자신이라 그런 파이프라인이 없다** —
+`npm run build` 산출물을 백엔드가 `/console`에 정적 서빙할 뿐이다. `git pull`만 하면
+콘솔 의존성이 늘었을 때 아무도 설치하지 않고, 빌드가 실패해도 **예전 dist가 그대로
+서빙돼** 업데이트가 안 된 것이 드러나지 않는다.
+
+콘솔 소스가 없거나 npm이 없는 설치본에서는 건너뛰고, 빌드가 실패해도 서비스 재시작까지는
+진행한다(대신 로그에 실패를 남긴다). 파이썬 의존성(`pip install`)은 여전히 하지 않는다 —
+서비스 계정의 가상환경 위치가 설치본마다 달라 잘못된 인터프리터에 설치하면 조용히 어긋난다.
+
 - **자기 재시작 / SW 업데이트**(`run_detached_script`): `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
   CREATE_BREAKAWAY_FROM_JOB`로 fire-and-forget 실행. paas 프로세스가 내려가도 `git pull` ·
   포트 해제 · `Restart-Service`가 **끝까지 진행**된다. `/system/restart`·`/system/sw-update`가 이 경로를 쓴다.

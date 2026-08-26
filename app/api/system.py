@@ -487,6 +487,29 @@ WS_SUBPROTOCOL = "paas-terminal"
 WS_KEY_PREFIX = "paas-key."
 
 
+@router.get("/system/terminal/preflight")
+def terminal_preflight(_: ApiKey = Depends(require_admin)):
+    """터미널이 안 열릴 때 원인을 서버 쪽에서 먼저 가른다.
+
+    WebSocket 핸드셰이크가 프록시에 막히면 브라우저는 이유를 알려주지 않는다 — 닫힘
+    코드 1006 하나뿐이고, 그건 "서버가 PTY를 못 연다"와 "IIS가 업그레이드를 안 넘긴다"를
+    구분하지 못한다. 여기가 ok인데 소켓이 안 열리면 원인은 서버가 아니라 그 사이다
+    (IIS의 WebSocket Protocol 기능이 꺼져 있는 경우가 대부분).
+    """
+    from ..services import pty_terminal  # noqa: PLC0415
+
+    settings = get_settings()
+    result = pty_terminal.probe(settings.pty_shell, settings.pty_backend)
+    result["hint"] = (
+        "서버는 준비됐습니다 — 그래도 터미널이 안 열리면 IIS/ARR이 WebSocket을 넘기지"
+        " 않는 것입니다(Install-WindowsFeature Web-WebSockets 후 iisreset)."
+        if result["ok"] else
+        "이 서버에서 셸을 열지 못했습니다. Windows Server 2016은 ConPTY가 없으므로"
+        " PAAS_PTY_BACKEND=winpty를 지정해 보세요."
+    )
+    return result
+
+
 @router.websocket("/system/powershell/ws")
 async def powershell_websocket_terminal(
     websocket: WebSocket,
@@ -688,17 +711,28 @@ def sw_update(
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
-    """SW 업데이트: 프로젝트 폴더에서 git pull 후 paas·console Windows 서비스를 재시작한다.
+    """SW 업데이트: git pull → 콘솔 재빌드 → paas·console Windows 서비스 재시작.
 
-    환경설정(pip/npm install)은 여기서 하지 않는다 — 그건 프로젝트 배포 파이프라인의
-    책임이다(windows_service 런타임의 start.cmd, 또는 Docker 런타임의 이미지 빌드가
-    배포마다 이미 수행한다). sw-update는 플랫폼 자신(paas·콘솔) 코드를 최신화하고
-    이미 구성된 서비스를 재시작하는 것으로 끝난다.
+    **콘솔은 여기서 빌드한다.** 배포되는 *프로젝트*의 환경설정은 배포 파이프라인의
+    책임이지만(windows_service 런타임의 start.cmd, Docker 런타임의 이미지 빌드),
+    콘솔은 플랫폼 자신이라 그런 파이프라인이 없다 — `npm run build` 산출물을 백엔드가
+    /console에 정적 서빙할 뿐이다. 그래서 git pull만 하면 콘솔 의존성이 늘었을 때
+    아무도 설치하지 않고, 빌드가 실패해도 **예전 dist가 그대로 서빙돼** 업데이트가 안
+    된 것이 드러나지 않는다(실제로 겪었다 — xterm 의존성 추가 후 "failed to resolve
+    import"). npm이 없거나 콘솔 소스가 없는 설치본에서는 건너뛴다.
+
+    파이썬 의존성(pip install)은 여전히 하지 않는다 — 서비스 계정의 가상환경 위치가
+    설치본마다 다르고, 잘못된 인터프리터에 설치하면 조용히 어긋난다.
+
+    출력은 logs/sw-update.log에 남긴다. 이 스크립트는 분리된 프로세스라 stdout이 어디에도
+    닿지 않는데, 그러면 실패했는지조차 알 수 없다 — 콘솔 "서버 로그" 탭에서 읽는다.
 
     Restart-Service가 paas 서비스(현재 프로세스)를 stop→start 하므로, paas의 Job에서 분리된
     독립 PowerShell 프로세스(run_detached_script)로 띄워 백엔드가 내려가도 업데이트가 끝까지
     진행되게 한다(self-kill 방지).
     """
+    from pathlib import Path  # noqa: PLC0415
+
     from ..services import powershell_daemon  # noqa: PLC0415
 
     settings = get_settings()
@@ -712,14 +746,36 @@ def sw_update(
         f"Restart-Service -Name '{s.replace(chr(39), chr(39) * 2)}' -Force -ErrorAction SilentlyContinue; "
         for s in services
     )
+    log_dir = _server_log_dir()
+    escaped_log_dir = str(log_dir).replace("'", "''")
+    escaped_log = str(log_dir / "sw-update.log").replace("'", "''")
+    escaped_console = str(Path(repo_dir) / "console").replace("'", "''")
+
     update_script = (
         "$ErrorActionPreference = 'Continue'; "
+        f"New-Item -ItemType Directory -Force -Path '{escaped_log_dir}' | Out-Null; "
+        f"Start-Transcript -Path '{escaped_log}' -Force | Out-Null; "
         f"Set-Location '{escaped_repo}'; "
         "Write-Host '[SW Update] git pull...'; "
         "git pull; "
         "Start-Sleep -Seconds 1; "
+        # 콘솔은 플랫폼 자신이라 배포 파이프라인이 없다 — 여기서 빌드하지 않으면
+        # 의존성이 늘었을 때 예전 dist가 조용히 계속 서빙된다.
+        f"if (Test-Path '{escaped_console}\package.json') {{ "
+        "  if (Get-Command npm -ErrorAction SilentlyContinue) { "
+        f"    Push-Location '{escaped_console}'; "
+        "    Write-Host '[SW Update] console: npm install...'; "
+        "    npm install; "
+        "    Write-Host '[SW Update] console: npm run build...'; "
+        "    npm run build; "
+        "    if ($LASTEXITCODE -ne 0) { "
+        "      Write-Host '[SW Update] !! 콘솔 빌드 실패 — 이전 dist가 그대로 서빙됩니다'; } "
+        "    Pop-Location; "
+        "  } else { Write-Host '[SW Update] npm이 없어 콘솔 빌드를 건너뜁니다'; } "
+        "} else { Write-Host '[SW Update] 콘솔 소스가 없어 빌드를 건너뜁니다'; } "
         "Write-Host '[SW Update] Restarting services...'; "
         + restart_lines
+        + "Stop-Transcript | Out-Null; "
     )
 
     try:
@@ -728,7 +784,8 @@ def sw_update(
                      {"repo_dir": repo_dir, "services": services})
         return {
             "status": "updating",
-            "message": f"git pull 후 서비스 {', '.join(services)} 재시작을 시작했습니다. 잠시 후 연결을 확인하세요.",
+            "message": (f"git pull → 콘솔 재빌드 → 서비스 {', '.join(services)} 재시작을 시작했습니다."
+                        " 진행 상황은 서버 로그의 sw-update.log에서 볼 수 있습니다."),
             "error": None,
             "services": services,
         }

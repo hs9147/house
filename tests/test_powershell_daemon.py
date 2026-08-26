@@ -516,3 +516,49 @@ def test_unknown_pty_backend_is_rejected_by_name(fresh_settings):
     assert pty_terminal.backend_code("conpty") == 0
     with pytest.raises(pty_terminal.PtyUnavailable, match="알 수 없는"):
         pty_terminal.backend_code("openssh")
+
+
+# --- 터미널 사전 점검 ---
+
+PREFLIGHT_URL = "/paas/api/v1/system/terminal/preflight"
+
+
+def test_preflight_requires_admin(fresh_settings):
+    """이 엔드포인트는 셸을 실제로 띄워 본다 — 발급 키(앱 환경변수로도 나가는 값)로
+    열리면 안 된다."""
+    c = TestClient(create_app())
+    assert c.get(PREFLIGHT_URL).status_code in (401, 403)
+
+    raw = c.post("/paas/api/v1/keys", headers=ADMIN,
+                 json={"name": "worker", "is_admin": False}).json()["key"]
+    assert c.get(PREFLIGHT_URL, headers={"x-api-key": raw}).status_code == 403
+
+
+@skip_no_posix_pty
+def test_preflight_reports_ready_when_the_shell_opens(monkeypatch, fresh_settings):
+    """소켓이 안 열릴 때 브라우저는 닫힘 코드 1006만 준다 — 서버가 준비됐는지는
+    여기서만 알 수 있고, ok인데 소켓이 막히면 원인은 그 사이(IIS WebSocket)다."""
+    monkeypatch.setenv("PAAS_PTY_SHELL", "/bin/sh")
+    get_settings.cache_clear()
+    body = TestClient(create_app()).get(PREFLIGHT_URL, headers=ADMIN).json()
+    assert body["ok"] is True and body["shell"] == "/bin/sh"
+    assert "WebSocket" in body["hint"]  # 다음으로 볼 곳을 알려 준다
+
+
+@skip_no_posix_pty
+def test_preflight_catches_a_shell_that_dies_immediately(monkeypatch, fresh_settings):
+    """POSIX에서 셸 경로가 틀리면 fork는 성공하고 자식의 exec만 실패한다 — 열렸는지만
+    보면 "정상"이라고 답하게 된다(셸 경로 오타가 가장 흔한 실패다)."""
+    monkeypatch.setenv("PAAS_PTY_SHELL", "/없는/셸")
+    get_settings.cache_clear()
+    body = TestClient(create_app()).get(PREFLIGHT_URL, headers=ADMIN).json()
+    assert body["ok"] is False
+    assert "127" in body["error"] and "경로를 확인" in body["error"]
+
+
+def test_preflight_rejects_an_unknown_backend(monkeypatch, fresh_settings):
+    monkeypatch.setenv("PAAS_PTY_BACKEND", "openssh")
+    get_settings.cache_clear()
+    body = TestClient(create_app()).get(PREFLIGHT_URL, headers=ADMIN).json()
+    assert body["ok"] is False and "알 수 없는" in body["error"]
+    assert "winpty" in body["hint"]  # Server 2016 대응을 알려 준다

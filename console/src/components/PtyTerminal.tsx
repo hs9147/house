@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { openTerminalSocket } from '../lib/api';
+import { api, openTerminalSocket } from '../lib/api';
 
 /**
  * 서버의 셸에 PTY로 붙는 진짜 터미널.
@@ -18,6 +18,9 @@ import { openTerminalSocket } from '../lib/api';
 export default function PtyTerminal() {
   const holder = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<'연결 중' | '연결됨' | '끊김'>('연결 중');
+  // 소켓이 왜 안 열렸는지 브라우저는 알려주지 않는다(닫힘 코드 1006뿐). 서버에 같은
+  // 것을 REST로 물어 "서버가 준비됐는지"와 "길이 막혔는지"를 가른다.
+  const [diagnosis, setDiagnosis] = useState('');
 
   useEffect(() => {
     if (!holder.current) return;
@@ -42,15 +45,35 @@ export default function PtyTerminal() {
       }
     };
 
+    let everOpened = false;
     socket.onopen = () => {
+      everOpened = true;
       setStatus('연결됨');
       sendResize(); // 셸이 창 크기를 모르면 줄바꿈이 어긋난다
       term.focus();
     };
     socket.onmessage = (e) => term.write(e.data as string);
-    socket.onclose = () => {
+    socket.onclose = (e) => {
       setStatus('끊김');
-      term.write('\r\n\x1b[33m[세션이 끝났습니다 — 다시 열려면 새로고침하세요]\x1b[0m\r\n');
+      if (everOpened) {
+        term.write('\r\n\x1b[33m[세션이 끝났습니다 — 다시 열려면 새로고침하세요]\x1b[0m\r\n');
+        return;
+      }
+      // 한 번도 열리지 못했다 = 핸드셰이크 단계에서 막혔다. 원인을 서버에 물어본다.
+      term.write(`\r\n\x1b[31m[연결하지 못했습니다 — 닫힘 코드 ${e.code}]\x1b[0m\r\n`);
+      api
+        .terminalPreflight()
+        .then((r) => {
+          setDiagnosis(r.ok ? r.hint : `${r.error} ${r.hint}`);
+          term.write(
+            `\x1b[33m서버 점검: 셸 ${r.shell} / 백엔드 ${r.backend} → ${r.ok ? 'OK' : r.error}\x1b[0m\r\n` +
+              `\x1b[33m${r.hint}\x1b[0m\r\n`,
+          );
+        })
+        .catch((err) => {
+          setDiagnosis((err as Error).message);
+          term.write(`\x1b[31m서버 점검도 실패: ${(err as Error).message}\x1b[0m\r\n`);
+        });
     };
 
     const input = term.onData((data) => {
@@ -85,6 +108,11 @@ export default function PtyTerminal() {
         서버 셸에 PTY로 직접 붙습니다 — 되묻는 명령·Ctrl+C·긴 작업의 실시간 출력이
         그대로 동작합니다. 상태: <b>{status}</b>
       </p>
+      {diagnosis && (
+        <p className="error" style={{ fontSize: 12, marginBottom: 8 }}>
+          {diagnosis}
+        </p>
+      )}
       <div
         ref={holder}
         style={{ height: '60vh', background: '#11151c', padding: 8, borderRadius: 6 }}
