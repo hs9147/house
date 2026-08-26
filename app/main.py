@@ -57,6 +57,16 @@ def create_app() -> FastAPI:
         settings.admin_api_key = "paas_" + secrets.token_urlsafe(24)
         print(f"[paas] bootstrap admin key (set PAAS_ADMIN_API_KEY to pin): {settings.admin_api_key}")
 
+    # WebSocket 구현이 없으면 콘솔 터미널만 조용히 죽는다 — HTTP는 전부 정상이라
+    # 밖에서는 프록시 문제와 구분되지 않고, 서버 로그를 봐야만 알 수 있다. 기동할 때
+    # 미리 말해 두면 "왜 터미널이 안 열리지"를 서버 로그에서 바로 찾을 수 있다.
+    from .services.pty_terminal import websocket_library  # noqa: PLC0415
+
+    if not websocket_library():
+        print("[paas] WARNING: WebSocket 구현이 없습니다(websockets·wsproto 모두 없음) — "
+              "콘솔 터미널이 열리지 않습니다(소켓만 404). "
+              'pip install "uvicorn[standard]" 후 재시작하세요.')
+
     app = FastAPI(
         title="house",
         description=(

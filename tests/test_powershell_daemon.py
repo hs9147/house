@@ -585,3 +585,18 @@ def test_preflight_names_the_websocket_library_when_present(monkeypatch, fresh_s
     body = TestClient(create_app()).get(PREFLIGHT_URL, headers=ADMIN).json()
     assert body["ok"] is True
     assert body["websocket_library"] in ("websockets", "wsproto")
+
+
+def test_startup_warns_when_there_is_no_websocket_library(monkeypatch, capsys, fresh_settings):
+    """이 조건은 기동할 때 이미 알 수 있다 — 조용히 뜨면 "왜 터미널이 안 열리지"를
+    IIS부터 뒤지게 된다. 서버 로그에 미리 적어 둔다."""
+    from app.services import pty_terminal
+
+    monkeypatch.setattr(pty_terminal, "websocket_library", lambda: "")
+    create_app()
+    assert "WebSocket 구현이 없습니다" in capsys.readouterr().out
+
+
+def test_startup_is_quiet_when_the_library_is_present(capsys, fresh_settings):
+    create_app()
+    assert "WebSocket 구현이 없습니다" not in capsys.readouterr().out
