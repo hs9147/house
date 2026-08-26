@@ -210,17 +210,6 @@ export default function PowerShellConsole() {
             >
               {connected ? '● 연결됨 (Connected)' : '○ 연결 끊김 (Disconnected)'}
             </span>
-            {/* 엔드포인트가 require_admin이라 관리자에게만 보인다 — 아니면 눌러야 403을 안다. */}
-            {me.data?.is_admin && (
-              <button
-                className="secondary small"
-                disabled={restarting}
-                onClick={handleSwUpdate}
-                title="git pull 후 paas·console 서비스를 재시작합니다 (백엔드가 잠시 내려갑니다)"
-              >
-                {restarting ? 'SW 업데이트 중...' : '⬆️ SW 업데이트'}
-              </button>
-            )}
             {!connected ? (
               <button className="primary small" onClick={handleConnect}>
                 🔗 연결
@@ -242,6 +231,22 @@ export default function PowerShellConsole() {
         >
           ⚡ PowerShell 콘솔
         </button>
+        {/*
+          탭이 아니라 동작이다. 탭 줄에 두는 것은 자리 때문이고, 그래서 탭과 같은
+          `primary/secondary` 전환을 쓰지 않는다 — 눌린 탭처럼 보이면 안 된다.
+
+          엔드포인트가 `require_admin`이라 관리자에게만 보인다. 아니면 눌러야 403을 안다.
+        */}
+        {me.data?.is_admin && (
+          <button
+            className="secondary small"
+            disabled={restarting}
+            onClick={handleSwUpdate}
+            title="git pull 후 paas·console 서비스를 재시작합니다 (백엔드가 잠시 내려갑니다)"
+          >
+            {restarting ? 'SW 업데이트 중...' : '⬆️ SW 업데이트'}
+          </button>
+        )}
         <button
           className={activeTab === 'server_logs' ? 'primary small' : 'secondary small'}
           onClick={() => {
