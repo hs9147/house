@@ -134,6 +134,15 @@ Server 2019부터**다 — Server 2016이면 `PAAS_PTY_BACKEND=winpty`로 못 �
 > `pip install "uvicorn[standard]"` 후 재시작한다(SW 업데이트가 대신 해 준다). 값이
 > 있는데도 404면 기동 명령에 `--ws none`이 붙어 있는지 본다(nssm 서비스 인자).
 >
+> **브라우저 콘솔 문구로 갈린다.** 이 셋은 원인이 완전히 다른데 겉보기엔 다 "연결 실패"다:
+>
+> | 브라우저가 찍는 말 | 뜻 |
+> | --- | --- |
+> | `Unexpected response code: 403` | 서버가 거절했다 — 관리자 키가 아니거나 프록시가 `Sec-WebSocket-Protocol`을 지웠다 |
+> | `Unexpected response code: 404` | 서버가 WebSocket을 받지 않는다 — WS 라이브러리가 없거나 `--ws none` |
+> | 아무 말 없이 계속 "연결 중" | 핸드셰이크가 **매달렸다** — 중간에서 업그레이드를 넘기지 않는다. 8초 뒤 터미널이 그렇게 말해 준다 |
+> | `closed before the connection is established` | **연결 실패가 아니다.** 브라우저가 핸드셰이크 중인 소켓을 JS가 닫았을 때 내는 말이다. 다른 원인과 섞이지 않게 클라이언트에서 없앴다 |
+>
 > 거기가 ok인데도 안 열리면 원인은 그 사이다 —
 > `infra/ws-check.ps1`로 **백엔드 직접**과 **IIS 경유**를 각각 찔러 보면 갈린다:
 > 직접 OK·IIS 실패면 프록시, 둘 다 403이면 키나 `Sec-WebSocket-Protocol` 전달 문제다.
