@@ -482,6 +482,38 @@ def test_websocket_terminal_applies_resize(monkeypatch, fresh_settings):
 
 
 @skip_no_posix_pty
+def test_resize_failure_does_not_end_the_session(monkeypatch, fresh_settings):
+    """창 크기 조정이 실패해도 세션은 살아 있어야 한다.
+
+    **브라우저는 열자마자 resize를 보낸다**(console/src/components/PtyTerminal.tsx의
+    onopen). 그래서 resize에서 난 예외가 입력 펌프를 죽이면 **접속하자마자 끊긴다** —
+    게다가 셸이 죽은 것이 아니라서 서버는 종료코드도 못 내놓고, 화면에는 이유 없이
+    "셸이 열리자마자 끝났습니다"만 남는다. 진단이 통과하는데 브라우저만 죽는,
+    가장 찾기 어려운 모양이 된다(실제로 겪었다).
+
+    창 크기는 부가 기능이다. 실패하면 줄바꿈이 어긋날 뿐, 세션을 끝낼 이유가 없다.
+    """
+    from app.services import pty_terminal
+
+    original = pty_terminal.PtyTerminal.resize
+
+    def exploding_resize(self, cols, rows):
+        # pywinpty의 setwinsize는 KeyError/TypeError/ValueError가 아닌 것을 던진다.
+        raise OSError("winpty: setwinsize failed")
+
+    monkeypatch.setattr(pty_terminal.PtyTerminal, "resize", exploding_resize)
+    monkeypatch.setenv("PAAS_PTY_SHELL", "/bin/sh")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    with c.websocket_connect(WS_URL, subprotocols=ADMIN_SUBPROTOCOLS) as ws:
+        ws.send_text(json.dumps({"type": "resize", "cols": 120, "rows": 30}))
+        # 세션이 살아 있으면 그 뒤 명령이 그대로 돈다.
+        assert "살아있다" in _run(ws, "echo 살아있다\n")
+
+    assert pty_terminal.PtyTerminal.resize is exploding_resize  # monkeypatch 확인
+
+
+@skip_no_posix_pty
 def test_websocket_terminal_ignores_frames_outside_the_protocol(monkeypatch, fresh_settings):
     """규약에 없는 프레임을 셸에 흘려보내면 붙은 쪽이 의도치 않게 명령을 실행시킨다."""
     monkeypatch.setenv("PAAS_PTY_SHELL", "/bin/sh")
@@ -542,7 +574,9 @@ def test_preflight_reports_ready_when_the_shell_opens(monkeypatch, fresh_setting
     get_settings.cache_clear()
     body = TestClient(create_app()).get(PREFLIGHT_URL, headers=ADMIN).json()
     assert body["ok"] is True and body["shell"] == "/bin/sh"
-    assert "WebSocket" in body["hint"]  # 다음으로 볼 곳을 알려 준다
+    # 다음으로 무엇을 돌리면 되는지 이름으로 알려 준다 — "그래도 안 되면"에서
+    # 막다른 길이 되지 않아야 한다.
+    assert "terminal-doctor" in body["hint"]
 
 
 @skip_no_posix_pty
