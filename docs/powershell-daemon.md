@@ -183,12 +183,18 @@ Windows 10 1809 / Server 2019(빌드 17763)부터**다. 그래서 빌드가 그�
 > | WebSocketModule 적재 | `appcmd list modules` | 사이트 web.config의 `<modules>`에 `<remove>`가 있는지 |
 > | webSocket 설정 | `appcmd list config -section:system.webServer/webSocket` | `appcmd set config -section:system.webServer/webSocket /enabled:True /commit:apphost` |
 > | ARR 프록시 | `appcmd list config -section:system.webServer/proxy` | `appcmd set config -section:system.webServer/proxy /enabled:True /commit:apphost` |
-> | 앱풀 파이프라인 | `appcmd list apppool /text:*` | Classic이면 **Integrated**로 바꾼다 |
+> | **앱풀 파이프라인** | `appcmd list app` → 그 풀의 `managedPipelineMode` | **Classic이면 WebSocket이 아예 안 된다** — `appcmd set apppool "<풀>" /managedPipelineMode:Integrated` 후 `recycle` |
 > | 아웃바운드 규칙 | `appcmd list config "<사이트>/" -section:system.webServer/rewrite/outboundRules` | 응답을 버퍼링해 업그레이드를 깬다 — preCondition으로 터미널 경로를 빼거나 범위를 좁힌다 |
 >
 > 기본 설치에 WebSocket Protocol 기능이 **없다**. 그게 이미 깔려 있는데도 안 되면 다음
-> 용의자는 **ARR 버전**이다 — WebSocket 프록시는 ARR 3.0부터다. 2.x에서는 HTTP 경로가
-> 전부 멀쩡히 프록시되고 업그레이드만 조용히 사라져서, 겉보기가 정확히 이 고장과 같다.
+> 용의자는 **앱풀 파이프라인 모드**와 **ARR 버전**이다(실제 현장에서 걸린 것은 Classic
+> 앱풀이었다). WebSocket 프록시는 ARR 3.0부터고, Classic 모드 앱풀은 WebSocket 모듈이
+> 아예 붙지 않는다 — 둘 다 HTTP 경로는 전부 멀쩡히 프록시되고 업그레이드만 조용히
+> 사라져서, 겉보기가 정확히 이 고장과 같다.
+>
+> ⚠️ 파이프라인 모드를 바꾸기 전에 **그 풀에 다른 애플리케이션이 없는지** 본다. Classic을
+> 전제로 만든 옛 ASP.NET 앱이 같은 풀에 있으면 그쪽이 깨진다. 리버스 프록시 전용 사이트
+> (URL Rewrite + ARR만 쓰고 관리 코드가 없는 경우)라면 안전하다.
 > (`appcmd`는 `%windir%\system32\inetsrv\appcmd.exe`)
 
 ## 5. 설정
