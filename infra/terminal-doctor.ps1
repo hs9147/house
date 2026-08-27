@@ -74,6 +74,88 @@ function Resolve-BackendPort {
   return 0
 }
 
+function Test-IisPrereq {
+  <#
+    Once we know the backend is fine and the front end is not relaying, the
+    remaining causes are a short, checkable list. Check them here instead of
+    leaving the operator to guess.
+
+    Everything is best-effort: on a box without IIS (or without appcmd) each
+    probe reports "cannot check" rather than failing the run.
+  #>
+  # $env:OS works on both 5.1 and 7; $IsWindows does not exist in 5.1.
+  if ($env:OS -ne 'Windows_NT') {
+    Write-Info 'Not running on Windows -- skipping IIS checks.'
+    return
+  }
+  $sysRoot = $env:windir
+  if (-not $sysRoot) { $sysRoot = 'C:\Windows' }
+  # Plain concatenation, not Join-Path: Join-Path validates that the drive
+  # exists and throws when it does not, which turns a skippable check into a
+  # red error.
+  $appcmd = "$sysRoot\system32\inetsrv\appcmd.exe"
+
+  # 1. The WebSocket Protocol feature. NOT installed by default, and this is the
+  #    single most common reason an otherwise-working ARR proxy drops upgrades.
+  try {
+    $feature = Get-WindowsFeature -Name Web-WebSockets -ErrorAction Stop
+    if ($feature.Installed) {
+      Write-Ok 'IIS WebSocket Protocol feature: installed'
+    } else {
+      Write-Bad 'IIS WebSocket Protocol feature: NOT installed  <-- most likely cause'
+      Write-Info '  Fix: Install-WindowsFeature Web-WebSockets ; iisreset'
+    }
+  } catch {
+    Write-Info 'IIS WebSocket Protocol feature: cannot check (Get-WindowsFeature unavailable)'
+  }
+
+  if (-not (Test-Path $appcmd)) {
+    Write-Info "appcmd not found at $appcmd -- skipping IIS config checks"
+    return
+  }
+
+  # 2. webSocket section may be present but explicitly turned off.
+  try {
+    $cfg = (& $appcmd list config -section:system.webServer/webSocket 2>$null) -join ' '
+    if ($cfg -match 'enabled="false"') {
+      Write-Bad 'IIS config has webSocket enabled="false"  <-- upgrades are refused'
+      Write-Info "  Fix: $appcmd set config -section:system.webServer/webSocket /enabled:True /commit:apphost"
+    } elseif ($cfg) {
+      Write-Ok 'IIS config: webSocket enabled'
+    }
+  } catch {
+    Write-Info 'IIS webSocket section: cannot check'
+  }
+
+  # 3. ARR proxy. Without it the rewrite rule matches but nothing is forwarded
+  #    (see infra/gitea/web.config.example and docs/deployment-guide.md).
+  try {
+    $proxy = (& $appcmd list config -section:system.webServer/proxy 2>$null) -join ' '
+    if ($proxy -match 'enabled="true"') {
+      Write-Ok 'ARR proxy: enabled'
+    } elseif ($proxy) {
+      Write-Bad 'ARR proxy: disabled -- rules match but nothing is forwarded'
+      Write-Info "  Fix: $appcmd set config -section:system.webServer/proxy /enabled:True /commit:apphost"
+    } else {
+      Write-Info 'ARR proxy: section not present (ARR may not be installed)'
+    }
+  } catch {
+    Write-Info 'ARR proxy: cannot check'
+  }
+
+  # 4. Classic-mode app pools cannot serve WebSockets.
+  try {
+    $pools = (& $appcmd list apppool /text:* 2>$null) -join "`n"
+    $classic = [regex]::Matches($pools, 'APPPOOL.NAME:"([^"]+)"[\s\S]*?managedPipelineMode:"Classic"')
+    if ($classic.Count -gt 0) {
+      Write-Bad 'App pool(s) in Classic mode -- WebSockets require Integrated mode:'
+      foreach ($m in $classic) { Write-Info "    $($m.Groups[1].Value)" }
+    }
+  } catch {
+    Write-Info 'App pool pipeline mode: cannot check'
+  }
+}
+
 function Get-Json($url, $headers) {
   try {
     return @{ Ok = $true; Data = (Invoke-RestMethod -Headers $headers -Uri $url -TimeoutSec 20) }
@@ -250,8 +332,11 @@ if ($dir.Connected -and $dir.Output -and $via.Connected -and $via.Output) {
   Write-Ok 'Both paths work. The browser should work too (hard-refresh if it is serving a cached console).'
 } elseif ($dir.Connected -and $dir.Output -and -not ($via.Connected -and $via.Output)) {
   Write-Bad 'Backend is fine; the front end is not relaying WebSocket upgrades.'
-  Write-Info 'IIS: Install-WindowsFeature Web-WebSockets, then iisreset. App pool must be Integrated mode.'
-  Write-Info 'With ARR, also confirm it does not strip Sec-WebSocket-Protocol -- the key rides in that header.'
+  Write-Section 'IIS prerequisites'
+  Test-IisPrereq
+  Write-Info ''
+  Write-Info 'If all of the above are green, check that ARR is not stripping Sec-WebSocket-Protocol'
+  Write-Info '  -- the admin key rides in that header, and losing it shows up as 403, not as a hang.'
 } elseif ($dir.Connected -and -not $dir.Output) {
   Write-Bad 'Handshake succeeds but the shell dies instantly. Preflight passed, so it is session-specific.'
   Write-Info "Resolved backend = $($d.resolved_backend). On Server 2016 this must be winpty."
