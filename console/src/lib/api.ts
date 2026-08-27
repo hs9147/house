@@ -39,7 +39,6 @@ import type {
   ReviewResult,
   ServerConfigOut,
   StatusSnapshot,
-  StorageListing,
   StorageStore,
   UserAccountOut,
   UserOrgOut,
@@ -169,20 +168,6 @@ async function requestMultipart<T>(path: string, formData: FormData): Promise<T>
     throw new ApiError(res.status, detail);
   }
   return data as T;
-}
-
-/** 파일 다운로드 — x-api-key가 필요해 <a href>로는 못 받는다. Blob으로 받아 저장한다. */
-async function requestBlob(path: string, query: Record<string, string>): Promise<Blob> {
-  const res = await fetch(`${apiUrl(path)}?${new URLSearchParams(query).toString()}`, {
-    headers: { 'x-api-key': getKey() },
-  });
-  if (res.status === 401) {
-    logout();
-    window.location.hash = '#/login';
-    throw new ApiError(401, '인증이 만료되었습니다. 다시 로그인하세요.');
-  }
-  if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
-  return res.blob();
 }
 
 export const api = {
@@ -336,18 +321,14 @@ export const api = {
 
   // 파일 저장소 — 목록은 환경변수(PAAS_STORAGE_ROOT·PAAS_DOC_ROOTS)가 정한다
   listStorageStores: () => request<StorageStore[]>('GET', '/storage/stores'),
-  listStorageFiles: (store: string) =>
-    request<StorageListing>('GET', `/storage/${store}/files`),
+  // 파일 목록·다운로드·삭제 엔드포인트는 백엔드에 그대로 있지만 콘솔에서는 쓰지 않는다 —
+  // 파일 관리 화면은 저장소 상태와 업로드만 다루고, 내용을 찾는 창구는 paas-docs다.
   uploadStorageFile: (store: string, file: File, path?: string) => {
     const fd = new FormData();
     fd.append('file', file);
     if (path) fd.append('path', path);
     return requestMultipart<{ path: string }>(`/storage/${store}/files`, fd);
   },
-  deleteStorageFile: (store: string, path: string) =>
-    request<void>('DELETE', `/storage/${store}/files`, undefined, { path }),
-  downloadStorageFile: (store: string, path: string) =>
-    requestBlob(`/storage/${store}/files/content`, { path }),
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),
   bindModule: (projectId: number, moduleId: number, env_prefix: string) =>

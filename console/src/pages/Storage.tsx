@@ -3,71 +3,36 @@ import Async from '../components/Async';
 import { api } from '../lib/api';
 import { useApi } from '../lib/hooks';
 
-function humanSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
 export default function Storage() {
   const storesState = useApi(() => api.listStorageStores());
   const [selected, setSelected] = useState('');
   const [path, setPath] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState('');
   const [error, setError] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
 
   const stores = storesState.data ?? [];
   const active = stores.find((s) => s.name === selected) ?? stores[0];
-  const listing = useApi(
-    () => (active ? api.listStorageFiles(active.name) : Promise.resolve(null)),
-    [active?.name],
-  );
 
   const upload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file || !active) return;
     setBusy(true);
     setError('');
+    setDone('');
     try {
-      await api.uploadStorageFile(active.name, file, path.trim() || undefined);
+      const saved = await api.uploadStorageFile(active.name, file, path.trim() || undefined);
+      // 목록을 보여주지 않으므로, 어디에 저장됐는지는 여기서 말해 주어야 한다.
+      setDone(`저장했습니다: ${saved.path}`);
       setPath('');
       setFile(null);
       if (fileInput.current) fileInput.current.value = '';
-      listing.reload();
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setBusy(false);
-    }
-  };
-
-  const download = async (target: string) => {
-    if (!active) return;
-    setError('');
-    try {
-      const blob = await api.downloadStorageFile(active.name, target);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = target.split('/').pop() || target;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  };
-
-  const remove = async (target: string) => {
-    if (!active) return;
-    if (!confirm(`${target} 파일을 삭제할까요? 되돌릴 수 없습니다.`)) return;
-    setError('');
-    try {
-      await api.deleteStorageFile(active.name, target);
-      listing.reload();
-    } catch (err) {
-      setError((err as Error).message);
     }
   };
 
@@ -89,9 +54,10 @@ export default function Storage() {
               <div className="row" style={{ marginBottom: 12 }}>
                 <select value={active.name} onChange={(e) => setSelected(e.target.value)}>
                   {stores.map((s) => (
+                    // 읽기 전용만 표시하면 나머지가 무엇인지는 없는 표시로 읽어야 한다 —
+                    // 둘 다 적어 상태를 눈으로 바로 알 수 있게 한다.
                     <option key={s.name} value={s.name}>
-                      {s.name}
-                      {s.read_only ? ' (읽기 전용)' : ''}
+                      {s.name} {s.read_only ? '(읽기 전용)' : '(읽기/쓰기)'}
                     </option>
                   ))}
                 </select>
@@ -103,50 +69,11 @@ export default function Storage() {
               </p>
 
               {error && <p className="error">{error}</p>}
-
-              <Async state={listing}>
-                {(data) =>
-                  data && (
-                    <>
-                      {data.files.length === 0 ? (
-                        <p className="mutedtext">저장된 파일이 없습니다.</p>
-                      ) : (
-                        <table style={{ marginBottom: 16 }}>
-                          <thead>
-                            <tr>
-                              <th>경로</th>
-                              <th>크기</th>
-                              <th />
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {data.files.map((f) => (
-                              <tr key={f.path}>
-                                <td className="mono">{f.path}</td>
-                                <td>{humanSize(f.size)}</td>
-                                <td>
-                                  <button className="secondary small" onClick={() => download(f.path)}>
-                                    다운로드
-                                  </button>{' '}
-                                  {!active.read_only && (
-                                    <button className="secondary small" onClick={() => remove(f.path)}>
-                                      삭제
-                                    </button>
-                                  )}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      )}
-                    </>
-                  )
-                }
-              </Async>
+              {done && <p className="mutedtext" style={{ fontSize: 12 }}>{done}</p>}
 
               {active.read_only ? (
                 <p className="mutedtext" style={{ fontSize: 12 }}>
-                  사내 문서 폴더는 읽으러 붙인 것이라 업로드·삭제가 열려 있지 않습니다.
+                  사내 문서 폴더는 읽으러 붙인 것이라 업로드가 열려 있지 않습니다.
                 </p>
               ) : (
                 <form className="row" onSubmit={upload}>
