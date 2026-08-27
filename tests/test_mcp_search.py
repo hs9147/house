@@ -29,11 +29,11 @@ def test_ops_server_is_always_listed(monkeypatch, tmp_path, fresh_settings):
 def test_storage_and_code_servers_come_from_what_exists(monkeypatch, tmp_path, fresh_settings):
     """실재하지 않는 대상을 목록에 올리지 않는다 — 예전 외부 목록이 바로 그 실수였다.
 
-    저장소는 환경변수가 정하므로 내부 저장소 하나는 언제나 있고, 코드 서버는 프로젝트를
-    등록해야 생긴다."""
+    저장소는 환경변수가 정하므로 내부 저장소 하나는 언제나 있다. 코드 서버는 프로젝트
+    수와 무관하게 하나다 — 엔드포인트가 실재하므로 docs와 마찬가지로 항상 나온다."""
     c = _client(monkeypatch, tmp_path)
     assert [i["id"] for i in c.get(f"{API}/mcp/search", headers=ADMIN).json()] == [
-        "paas-ops", "paas-docs", "paas-storage-internal"]
+        "paas-ops", "paas-docs", "paas-storage-internal", "paas-code"]
 
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"company-docs={tmp_path / 'docs'}")
     get_settings.cache_clear()
@@ -43,7 +43,9 @@ def test_storage_and_code_servers_come_from_what_exists(monkeypatch, tmp_path, f
 
     items = {i["id"]: i for i in c.get(f"{API}/mcp/search", headers=ADMIN).json()}
     assert items["paas-storage-company-docs"]["url"].endswith("/mcp/storage/company-docs")
-    assert items["paas-code-shop-web"]["url"].endswith(f"/mcp/projects/{pid}/code")
+    # 코드 조회는 프로젝트 수와 무관하게 **하나**다
+    assert items["paas-code"]["url"].endswith("/mcp/code")
+    assert not [k for k in items if k.startswith("paas-code-")]
 
 
 def test_db_server_is_listed_only_when_allowlisted(monkeypatch, tmp_path, fresh_settings):
@@ -177,7 +179,7 @@ def test_a_keyless_module_says_why_it_is_401(monkeypatch, tmp_path, fresh_settin
 def test_refresh_reports_the_current_count(monkeypatch, tmp_path, fresh_settings):
     c = _client(monkeypatch, tmp_path)
     body = c.post(f"{API}/modules/search/refresh-mcp", headers=ADMIN).json()
-    assert body["total_mcp_servers"] == 3  # ops + docs + 내부 저장소
+    assert body["total_mcp_servers"] == 4  # ops + docs + 내부 저장소 + code
     assert body["base_url"] == "http://localhost:7000/paas"
 
 

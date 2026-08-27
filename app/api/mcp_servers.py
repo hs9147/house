@@ -7,7 +7,7 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
 
 서버 5개:
   POST /mcp/ops                  운영 조회 — 배포 상태·로그·라우팅·호스트·감사(읽기 전용)
-  POST /mcp/projects/{id}/code   프로젝트 코드 조회(읽기 전용)
+  POST /mcp/code                 프로젝트 코드 조회 — project 인자로 고른다(읽기 전용)
   POST /mcp/docs                 사내 문서 본문 검색 — 저장소를 가로질러 한 번에(읽기 전용)
   POST /mcp/storage/{저장소}      저장소 파일 — 저장소 루트 밖으로 나갈 수 없다
   POST /mcp/db/{module}          database 모듈 조회 — SELECT 전용, 허용 목록에 있는 모듈만
@@ -202,12 +202,13 @@ async def ops_mcp_server(
     )
 
 
-def _project_by_name(db: Session, args: dict) -> Project:
+def _project_by_name(db: Session, args: dict, discover: str = "list_routes") -> Project:
+    """project 인자 → 프로젝트. 이름을 찾는 도구는 서버마다 다르므로 힌트로 받는다."""
     name = _str_arg(args, "project")
     row = db.execute(select(Project).where(Project.name == name)).scalar_one_or_none()
     if row is None:
         raise mcp_server.McpToolError(
-            f"프로젝트를 찾을 수 없습니다: {name} (list_routes로 이름을 확인하세요)")
+            f"프로젝트를 찾을 수 없습니다: {name} ({discover}로 이름을 확인하세요)")
     return row
 
 
@@ -328,21 +329,37 @@ def _runtime_status(runtime, project: Project, profile: BuildProfile) -> str:
         return f"unknown ({e})"
 
 
-# --- 코드 조회 서버 (/mcp/projects/{id}/code) ---
+# --- 코드 조회 서버 (/mcp/code) ---
+#
+# **프로젝트를 URL이 아니라 인자로 받는다.** 예전에는 프로젝트마다 서버가 하나씩
+# 나갔는데(/mcp/projects/{id}/code), 그러면 프로젝트가 늘어난 만큼 등록할 모듈과 발급할
+# 키가 늘고, 붙는 쪽도 프로젝트를 바꿀 때마다 다른 서버를 골라야 했다. 문서 검색
+# 서버(/mcp/docs)가 저장소를 가로지르는 것과 같은 모양으로 맞춘다 — list_projects로
+# 이름을 얻고 나머지 도구에 project로 넘긴다.
+
+_PROJECT_ARG = {
+    "project": {"type": "string", "description": "프로젝트 이름(list_projects로 확인)"},
+}
 
 _CODE_TOOLS = [
     {
+        "name": "list_projects",
+        "description": "조회할 수 있는 프로젝트 이름 목록. 다른 도구의 project 인자에 쓴다.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "list_files",
         "description": "프로젝트 리포의 파일 경로 목록(워킹카피 기준).",
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {"type": "object", "properties": dict(_PROJECT_ARG),
+                        "required": ["project"]},
     },
     {
         "name": "read_file",
         "description": "리포 파일 하나의 내용을 읽는다(경로는 리포 루트 기준 상대경로).",
         "inputSchema": {
             "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
+            "properties": {**_PROJECT_ARG, "path": {"type": "string"}},
+            "required": ["project", "path"],
         },
     },
     {
@@ -350,36 +367,40 @@ _CODE_TOOLS = [
         "description": "특정 브랜치·커밋(ref)의 파일 내용을 읽는다.",
         "inputSchema": {
             "type": "object",
-            "properties": {"path": {"type": "string"}, "ref": {"type": "string"}},
-            "required": ["path", "ref"],
+            "properties": {**_PROJECT_ARG, "path": {"type": "string"},
+                           "ref": {"type": "string"}},
+            "required": ["project", "path", "ref"],
         },
     },
     {
         "name": "get_code_map",
         "description": "코드 구조 개요 — 파일 → 클래스/함수 계층(정적 파싱, LLM 호출 없음).",
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {"type": "object", "properties": dict(_PROJECT_ARG),
+                        "required": ["project"]},
     },
 ]
 
 
-@router.post("/mcp/projects/{project_id}/code",
-             dependencies=[Depends(require_feature("workspace"))])
+@router.post("/mcp/code", dependencies=[Depends(require_feature("workspace"))])
 async def code_mcp_server(
-    project_id: int,
     request: Request,
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_api_key),
 ):
-    """프로젝트 코드 조회 MCP 서버(JSON-RPC 2.0) — 읽기 전용."""
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
+    """코드 조회 MCP 서버(JSON-RPC 2.0) — 모든 프로젝트, 읽기 전용."""
     return mcp_server.dispatch(
         await mcp_server.read_payload(request),
-        server_name=f"paas-code-{project.name}",
+        server_name="paas-code",
         tools=_CODE_TOOLS,
-        call=lambda name, args: _code_call(project, name, args),
+        call=lambda name, args: _code_dispatch(db, name, args),
     )
+
+
+def _code_dispatch(db: Session, name: str, args: dict) -> str:
+    if name == "list_projects":
+        names = db.execute(select(Project.name).order_by(Project.name)).scalars().all()
+        return "\n".join(names) if names else "(등록된 프로젝트가 없습니다)"
+    return _code_call(_project_by_name(db, args, discover="list_projects"), name, args)
 
 
 def _code_workdir(project: Project) -> Path:

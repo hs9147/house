@@ -222,36 +222,58 @@ def _project_with_repo(monkeypatch, tmp_path, name="code-mcp"):
     return c, r.json()["id"]
 
 
-def test_code_server_reads_repo(monkeypatch, fresh_settings, tmp_path):
-    c, pid = _project_with_repo(monkeypatch, tmp_path)
-    path = f"/mcp/projects/{pid}/code"
-    names = [t["name"] for t in _rpc(c, path, "tools/list")["result"]["tools"]]
-    assert names == ["list_files", "read_file", "read_file_at_ref", "get_code_map"]
-    assert _rpc(c, path, "initialize")["result"]["serverInfo"]["name"] == "paas-code-code-mcp"
+CODE_PATH = "/mcp/code"
 
-    files = _text(_call(c, path, "list_files")).split("\n")
+
+def test_code_server_reads_repo(monkeypatch, fresh_settings, tmp_path):
+    """코드 조회는 **서버 하나**다 — 프로젝트는 URL이 아니라 인자로 고른다.
+
+    프로젝트마다 서버를 내주면 프로젝트가 늘어난 만큼 등록할 모듈과 발급할 키가 늘고,
+    붙는 쪽도 프로젝트를 바꿀 때마다 다른 서버를 골라야 한다.
+    """
+    c, _pid = _project_with_repo(monkeypatch, tmp_path)
+    path = CODE_PATH
+    names = [t["name"] for t in _rpc(c, path, "tools/list")["result"]["tools"]]
+    assert names == ["list_projects", "list_files", "read_file",
+                     "read_file_at_ref", "get_code_map"]
+    assert _rpc(c, path, "initialize")["result"]["serverInfo"]["name"] == "paas-code"
+
+    # 이름을 몰라도 여기서 얻는다
+    assert "code-mcp" in _text(_call(c, path, "list_projects")).split("\n")
+
+    proj = {"project": "code-mcp"}
+    files = _text(_call(c, path, "list_files", proj)).split("\n")
     assert set(files) == {"app.py", "README.md"}
-    assert _text(_call(c, path, "read_file", {"path": "app.py"})) == "def hello():\n    return 1\n"
-    assert "hello" in _text(_call(c, path, "get_code_map"))
-    at_ref = _text(_call(c, path, "read_file_at_ref", {"path": "app.py", "ref": "main"}))
+    assert _text(_call(c, path, "read_file", {**proj, "path": "app.py"})) == \
+        "def hello():\n    return 1\n"
+    assert "hello" in _text(_call(c, path, "get_code_map", proj))
+    at_ref = _text(_call(c, path, "read_file_at_ref",
+                         {**proj, "path": "app.py", "ref": "main"}))
     assert "def hello" in at_ref
 
 
 def test_code_server_rejects_path_escape_and_missing(monkeypatch, fresh_settings, tmp_path):
-    c, pid = _project_with_repo(monkeypatch, tmp_path)
-    path = f"/mcp/projects/{pid}/code"
-    escape = _call(c, path, "read_file", {"path": "../../../etc/passwd"})
+    c, _pid = _project_with_repo(monkeypatch, tmp_path)
+    path, proj = CODE_PATH, {"project": "code-mcp"}
+    escape = _call(c, path, "read_file", {**proj, "path": "../../../etc/passwd"})
     assert escape["error"]["code"] == -32602
-    assert _call(c, path, "read_file", {"path": "nope.py"})["error"]["code"] == -32602
-    bad_ref = _call(c, path, "read_file_at_ref", {"path": "app.py", "ref": "no-such-branch"})
+    assert _call(c, path, "read_file", {**proj, "path": "nope.py"})["error"]["code"] == -32602
+    bad_ref = _call(c, path, "read_file_at_ref",
+                    {**proj, "path": "app.py", "ref": "no-such-branch"})
     assert bad_ref["error"]["code"] == -32602
 
 
-def test_code_server_unknown_project_is_404(monkeypatch, fresh_settings, tmp_path):
+def test_code_server_unknown_project_points_at_the_right_discovery_tool(
+        monkeypatch, fresh_settings, tmp_path):
+    """이름을 틀렸을 때 **이 서버의** 목록 도구를 가리켜야 한다.
+
+    ops 서버는 list_routes로 찾지만 코드 서버에는 그 도구가 없다 — 같은 문구를 돌려쓰면
+    있지도 않은 도구를 부르라고 하게 된다.
+    """
     c, _pid = _project_with_repo(monkeypatch, tmp_path)
-    r = c.post(f"{API}/mcp/projects/9999/code", headers=ADMIN,
-               json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    assert r.status_code == 404
+    body = _call(c, CODE_PATH, "list_files", {"project": "없는프로젝트"})
+    assert body["error"]["code"] == -32602
+    assert "list_projects" in body["error"]["message"]
 
 
 # --- 파일 저장소 서버 ---
