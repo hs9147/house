@@ -171,9 +171,21 @@ Windows 10 1809 / Server 2019(빌드 17763)부터**다. 그래서 빌드가 그�
 > 거기가 ok인데도 안 열리면 원인은 그 사이다 — 직접 OK·앞단 실패면 프록시, 둘 다
 > 403이면 키나 `Sec-WebSocket-Protocol` 전달 문제다(doctor가 이걸 비교한다).
 >
-> **IIS/ARR 뒤에서는 WebSocket 통과가 전제다.** IIS에 "WebSocket Protocol" 기능
-> (`Install-WindowsFeature Web-WebSockets`)이 설치돼 있어야 하고 앱풀이 통합 모드여야 한다.
-> 안 되면 터미널 탭만 연결에 실패하고 나머지 기능은 그대로 동작한다.
+> **IIS/ARR 뒤에서는 WebSocket 통과가 전제다.** 안 되면 터미널 탭만 연결에 실패하고
+> 나머지 기능은 그대로 동작한다 — HTTP는 전부 정상이라 겉보기로는 서버 문제와
+> 구분되지 않는다. doctor가 "front is not relaying"으로 판정하면 아래 넷을 이어서
+> 점검해 준다(직접 확인하려면 같은 명령을 쓰면 된다):
+>
+> | 전제 | 확인 | 고치기 |
+> | --- | --- | --- |
+> | WebSocket Protocol 기능 | `Get-WindowsFeature Web-WebSockets` | `Install-WindowsFeature Web-WebSockets` 후 `iisreset` |
+> | webSocket 설정 | `appcmd list config -section:system.webServer/webSocket` | `appcmd set config -section:system.webServer/webSocket /enabled:True /commit:apphost` |
+> | ARR 프록시 | `appcmd list config -section:system.webServer/proxy` | `appcmd set config -section:system.webServer/proxy /enabled:True /commit:apphost` |
+> | 앱풀 파이프라인 | `appcmd list apppool /text:*` | Classic이면 **Integrated**로 바꾼다 |
+>
+> **기본 설치에 WebSocket Protocol 기능이 없다.** URL Rewrite·ARR을 다 갖춰 HTTP는
+> 멀쩡히 프록시되는데 업그레이드만 조용히 떨어지는 전형적인 원인이 이것이다.
+> (`appcmd`는 `%windir%\system32\inetsrv\appcmd.exe`)
 
 ## 5. 설정
 
