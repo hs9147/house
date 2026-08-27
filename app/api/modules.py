@@ -165,7 +165,8 @@ def search_external_apis(
     category="기타"는 카테고리가 없는 항목만 고른다.
     반환된 항목은 POST /modules/import로 external_api 모듈에 추가할 수 있다."""
     try:
-        return {"results": apisearch.search_apis(keyword, category)}
+        # 소스가 둘이라 한쪽이 죽어도 나머지 결과는 나온다 — warnings가 그 사유다.
+        return apisearch.search_apis(keyword, category)
     except apisearch.ApiSearchError as e:
         raise HTTPException(status_code=502, detail=str(e))
 

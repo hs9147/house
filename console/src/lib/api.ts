@@ -266,7 +266,9 @@ export const api = {
     request<PlatformModuleReportOut>('GET', '/modules/usage-report'),
   // 외부 API 디렉터리 검색 + external_api 모듈 자동 추가 (admin)
   searchApis: (keyword: string, category?: string) =>
-    request<{ results: ApiSearchResult[] }>('GET', '/modules/search', undefined, {
+    // warnings = 한쪽 소스만 죽은 경우의 사유. 결과가 적은 것이 "그런 API가 없다"인지
+    // "목록 하나를 못 받았다"인지 화면에서 구분되어야 한다.
+    request<{ results: ApiSearchResult[]; warnings: string[] }>('GET', '/modules/search', undefined, {
       keyword,
       // 빈 값이면 조건을 안 건다(= 전체). 서버 기본값과 같은 뜻이라 굳이 보내지 않는다.
       ...(category ? { category } : {}),

@@ -328,6 +328,9 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
     try {
       const res = await api.searchApis(keyword.trim(), category);
       setResults(res.results);
+      // 한쪽 소스가 죽어도 나머지 결과는 나온다 — 그 사실을 감추면 결과가 적은 이유를
+      // 알 수 없다.
+      setError((res.warnings ?? []).join(' / '));
     } catch (err) {
       setError((err as Error).message);
     } finally {
