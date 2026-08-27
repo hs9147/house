@@ -179,12 +179,16 @@ Windows 10 1809 / Server 2019(빌드 17763)부터**다. 그래서 빌드가 그�
 > | 전제 | 확인 | 고치기 |
 > | --- | --- | --- |
 > | WebSocket Protocol 기능 | `Get-WindowsFeature Web-WebSockets` | `Install-WindowsFeature Web-WebSockets` 후 `iisreset` |
+> | **ARR 버전** | `(Get-Item "$env:windir\system32\inetsrv\requestRouter.dll").VersionInfo.ProductVersion` | **3.0 미만이면 업그레이드를 아예 안 넘긴다** — ARR을 올린다 |
+> | WebSocketModule 적재 | `appcmd list modules` | 사이트 web.config의 `<modules>`에 `<remove>`가 있는지 |
 > | webSocket 설정 | `appcmd list config -section:system.webServer/webSocket` | `appcmd set config -section:system.webServer/webSocket /enabled:True /commit:apphost` |
 > | ARR 프록시 | `appcmd list config -section:system.webServer/proxy` | `appcmd set config -section:system.webServer/proxy /enabled:True /commit:apphost` |
 > | 앱풀 파이프라인 | `appcmd list apppool /text:*` | Classic이면 **Integrated**로 바꾼다 |
+> | 아웃바운드 규칙 | `appcmd list config "<사이트>/" -section:system.webServer/rewrite/outboundRules` | 응답을 버퍼링해 업그레이드를 깬다 — preCondition으로 터미널 경로를 빼거나 범위를 좁힌다 |
 >
-> **기본 설치에 WebSocket Protocol 기능이 없다.** URL Rewrite·ARR을 다 갖춰 HTTP는
-> 멀쩡히 프록시되는데 업그레이드만 조용히 떨어지는 전형적인 원인이 이것이다.
+> 기본 설치에 WebSocket Protocol 기능이 **없다**. 그게 이미 깔려 있는데도 안 되면 다음
+> 용의자는 **ARR 버전**이다 — WebSocket 프록시는 ARR 3.0부터다. 2.x에서는 HTTP 경로가
+> 전부 멀쩡히 프록시되고 업그레이드만 조용히 사라져서, 겉보기가 정확히 이 고장과 같다.
 > (`appcmd`는 `%windir%\system32\inetsrv\appcmd.exe`)
 
 ## 5. 설정

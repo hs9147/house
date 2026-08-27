@@ -7,7 +7,8 @@ completely different in each case:
   1. Stale code        -> the SW update never actually landed
   2. No WS library     -> every HTTP route is fine, only the socket 404s
   3. Shell won't start -> PTY backend (ConPTY on Server 2016) or pywinpty missing
-  4. Proxy won't relay -> IIS WebSocket feature
+  4. Proxy won't relay -> IIS: WebSocket feature/module, ARR older than 3.0,
+                          Classic app pool, or outbound rewrite rules
 
 The browser cannot tell them apart -- it only ever reports close code 1006. So
 this asks the same question twice: once straight at the backend, once through
@@ -109,12 +110,28 @@ function Test-IisPrereq {
     Write-Info 'IIS WebSocket Protocol feature: cannot check (Get-WindowsFeature unavailable)'
   }
 
+
+  # 2. ARR version. WebSocket proxying arrived in ARR 3.0 -- with 2.x every HTTP
+  #    route proxies perfectly and upgrades are simply never forwarded, which
+  #    looks exactly like this failure.
+  try {
+    $arr = "$sysRoot\system32\inetsrv\requestRouter.dll"
+    if (Test-Path $arr) {
+      $ver = (Get-Item $arr).VersionInfo.ProductVersion
+      Write-Info "ARR module version: $ver  (WebSocket proxying requires ARR 3.0 or newer)"
+    } else {
+      Write-Info 'ARR module (requestRouter.dll) not found -- ARR may not be installed.'
+    }
+  } catch {
+    Write-Info 'ARR version: cannot check'
+  }
+
   if (-not (Test-Path $appcmd)) {
     Write-Info "appcmd not found at $appcmd -- skipping IIS config checks"
     return
   }
 
-  # 2. webSocket section may be present but explicitly turned off.
+  # 3. webSocket section may be present but explicitly turned off.
   try {
     $cfg = (& $appcmd list config -section:system.webServer/webSocket 2>$null) -join ' '
     if ($cfg -match 'enabled="false"') {
@@ -127,7 +144,7 @@ function Test-IisPrereq {
     Write-Info 'IIS webSocket section: cannot check'
   }
 
-  # 3. ARR proxy. Without it the rewrite rule matches but nothing is forwarded
+  # 4. ARR proxy. Without it the rewrite rule matches but nothing is forwarded
   #    (see infra/gitea/web.config.example and docs/deployment-guide.md).
   try {
     $proxy = (& $appcmd list config -section:system.webServer/proxy 2>$null) -join ' '
@@ -143,7 +160,7 @@ function Test-IisPrereq {
     Write-Info 'ARR proxy: cannot check'
   }
 
-  # 4. Classic-mode app pools cannot serve WebSockets.
+  # 5. Classic-mode app pools cannot serve WebSockets.
   try {
     $pools = (& $appcmd list apppool /text:* 2>$null) -join "`n"
     $classic = [regex]::Matches($pools, 'APPPOOL.NAME:"([^"]+)"[\s\S]*?managedPipelineMode:"Classic"')
@@ -153,6 +170,41 @@ function Test-IisPrereq {
     }
   } catch {
     Write-Info 'App pool pipeline mode: cannot check'
+  }
+
+  # 6. The WebSocket module has to be loaded, not merely installed. A site can
+  #    drop it in <modules>, and then upgrades fail with the feature present.
+  try {
+    $modules = (& $appcmd list modules 2>$null) -join ' '
+    if ($modules -match 'WebSocketModule') {
+      Write-Ok 'WebSocketModule: loaded'
+    } else {
+      Write-Bad 'WebSocketModule is NOT loaded even though the feature may be installed.'
+      Write-Info '  Check <system.webServer><modules> in the site web.config for a <remove>.'
+    }
+  } catch {
+    Write-Info 'WebSocketModule: cannot check'
+  }
+
+  # 7. Per-site overrides. Server level can say enabled while a site says false,
+  #    and outbound rewrite rules force IIS to buffer the response -- which a
+  #    WebSocket upgrade cannot survive (see infra/gitea/web.config.example).
+  try {
+    $sites = & $appcmd list site /text:site.name 2>$null
+    foreach ($site in $sites) {
+      if (-not $site) { continue }
+      $siteCfg = (& $appcmd list config "$site/" -section:system.webServer/webSocket 2>$null) -join ' '
+      if ($siteCfg -match 'enabled="false"') {
+        Write-Bad "Site '$site' sets webSocket enabled=`"false`""
+      }
+      $outbound = (& $appcmd list config "$site/" -section:system.webServer/rewrite/outboundRules 2>$null) -join ' '
+      if ($outbound -match '<rule') {
+        Write-Bad "Site '$site' has outbound rewrite rules -- these buffer responses and break upgrades."
+        Write-Info '  Add a preCondition so they do not apply to the terminal path, or scope them tighter.'
+      }
+    }
+  } catch {
+    Write-Info 'Per-site webSocket/outbound rules: cannot check'
   }
 }
 
