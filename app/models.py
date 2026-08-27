@@ -388,6 +388,47 @@ class ModuleBinding(Base):
     env_prefix: Mapped[str] = mapped_column(String(32))  # 예: PAY → PAY_URL, PAY_API_KEY
 
 
+class ApiCatalogEntry(Base):
+    """외부 API 카탈로그 한 줄 — 소스에서 받아 쌓아 둔 것(services/apisearch.py).
+
+    **검색은 이 표만 읽는다.** 수집은 따로 돌기 때문에 검색 경로에는 아웃바운드 호출이
+    없고, 그래서 검색을 MCP 도구로 열 수 있다(api/mcp_servers.py의 /mcp/apis).
+    모듈이 아니라 별도 표인 이유: 카탈로그는 수천 건이고 대부분 끝내 쓰이지 않는다 —
+    modules에 넣으면 실제로 등록해 쓰는 자원과 "있더라"를 구분할 수 없게 된다.
+
+    소스에서 사라진 항목은 행을 지우지 않고 removed_at을 찍는다: 잠깐 빠졌다 돌아오는
+    일이 흔한데 지워 버리면 그 사이에 무엇이 있었는지도, import해 만든 모듈이 어디서
+    왔는지도 남지 않는다.
+    """
+
+    __tablename__ = "api_catalog"
+    __table_args__ = (
+        UniqueConstraint("source", "ext_id", name="uq_api_catalog_source_ext"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(String(32), index=True)  # apisguru | publicdata
+    ext_id: Mapped[str] = mapped_column(String(255))  # 소스가 붙인 식별자
+    title: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text, default="")
+    provider: Mapped[str] = mapped_column(String(128), default="")
+    categories: Mapped[list] = mapped_column(JSON, default=list)
+    homepage: Mapped[str] = mapped_column(String(500), default="")
+    spec_url: Mapped[str] = mapped_column(String(500), default="")
+    # 검색용 소문자 건초더미(ext_id+title+description+categories). SQL에서 한 번 걸러
+    # 내려고 둔다 — 없으면 검색마다 카탈로그 전체를 파이썬으로 올려야 한다.
+    search_text: Mapped[str] = mapped_column(Text, default="")
+    removed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # onupdate 덕에 "실제로 바뀐 행"만 시각이 움직인다 — 안 바뀐 행에는 UPDATE 자체가
+    # 나가지 않으므로(services/apisearch._merge), 갱신 시각이 수집 시각에 덮이지 않는다.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class RedirectKind(str, enum.Enum):
     redirect = "redirect"  # 브라우저 301/302 리다이렉트
     rewrite = "rewrite"  # 서버 내부 재작성(클라이언트에 노출 안 됨)

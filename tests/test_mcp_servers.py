@@ -1,4 +1,5 @@
-"""사내 MCP 서버 5종 — 운영 조회·코드 조회·문서 검색·파일 저장소·DB 조회(SELECT 전용)."""
+"""사내 MCP 서버 6종 — 운영 조회·코드 조회·문서 검색·파일 저장소·DB 조회(SELECT 전용)·
+API 카탈로그 검색."""
 import subprocess
 
 from fastapi.testclient import TestClient
@@ -730,3 +731,98 @@ def test_docs_server_appears_in_the_internal_directory(monkeypatch, fresh_settin
     assert items["paas-docs"]["url"] == "http://localhost:7000/paas/api/v1/mcp/docs"
     # 저장소마다 전용 서버도 함께 올라간다
     assert items["paas-storage-company-docs"]["url"].endswith("/mcp/storage/company-docs")
+
+
+# --- 외부 API 카탈로그 서버 (/mcp/apis) ---
+
+_FAKE_CATALOG = {"stripe.com": {"preferred": "1.0", "versions": {"1.0": {
+    "info": {"title": "Stripe", "description": "Online payment processing",
+             "x-apisguru-categories": ["financial"]},
+    "swaggerUrl": "https://example.test/swagger.json"}}}}
+
+
+def _apis_client(monkeypatch) -> TestClient:
+    """카탈로그를 한 번 수집해 둔 클라이언트.
+
+    수집이 끝난 뒤 httpx를 폭탄으로 바꾼다 — 이 서버가 실제로 밖으로 나가지 않는다는
+    것이 테스트마다 성립해야 하는 성질이라서다(그것이 admin 없이 여는 근거다).
+    """
+    from app.services import httpx_retry
+
+    httpx_retry.reset_breakers()
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_URL", "")
+    get_settings.cache_clear()
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return _FAKE_CATALOG
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", lambda url, **kw: _R())
+    c = _client()
+    assert c.post(f"{API}/modules/search/refresh", headers=ADMIN).json()["added"] == 1
+
+    def boom(url, **kw):
+        raise AssertionError(f"카탈로그 서버가 밖으로 나갔다: {url}")
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", boom)
+    return c
+
+
+def test_apis_server_searches_the_collected_catalog(monkeypatch, fresh_settings):
+    import json
+
+    c = _apis_client(monkeypatch)
+    tools = {t["name"] for t in _rpc(c, "/mcp/apis", "tools/list")["result"]["tools"]}
+    assert tools == {"search_apis", "list_api_categories", "catalog_status"}
+
+    hits = json.loads(_text(_call(c, "/mcp/apis", "search_apis", {"keyword": "payment"})))
+    assert [h["id"] for h in hits] == ["stripe.com"]
+    assert json.loads(_text(_call(c, "/mcp/apis", "list_api_categories"))) == [
+        {"name": "financial", "count": 1}]
+    assert json.loads(_text(_call(c, "/mcp/apis", "catalog_status")))["total"] == 1
+
+
+def test_apis_server_has_no_collect_tool(monkeypatch, fresh_settings):
+    """수집 도구를 두면 이 서버가 아웃바운드 호출을 여는 셈이고, 그러면 admin 없이 열
+    수 있는 근거가 그대로 무너진다."""
+    c = _apis_client(monkeypatch)
+    tools = {t["name"] for t in _rpc(c, "/mcp/apis", "tools/list")["result"]["tools"]}
+    assert not [t for t in tools if "sync" in t or "refresh" in t]
+    reply = _call(c, "/mcp/apis", "sync_catalog")
+    assert "unknown tool" in reply["error"]["message"]
+
+
+def test_apis_server_works_without_an_admin_key(monkeypatch, fresh_settings):
+    """mcp 모듈의 api_key는 배포된 앱의 환경변수로도 주입된다 — 관리자 키를 붙이게
+    만들면 안 되므로, 이 서버는 관리자 아닌 키로 동작해야 한다."""
+    c = _apis_client(monkeypatch)
+    member = c.post(f"{API}/keys", json={"name": "app"}, headers=ADMIN).json()["key"]
+    r = c.post(f"{API}/mcp/apis", headers={"x-api-key": member}, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "search_apis", "arguments": {"keyword": "payment"}},
+    })
+    assert r.status_code == 200
+    assert "stripe.com" in r.json()["result"]["content"][0]["text"]
+    # 같은 검색의 HTTP 창구는 모듈 등록으로 이어지므로 그대로 admin 전용이다
+    assert c.get(f"{API}/modules/search", params={"keyword": "payment"},
+                 headers={"x-api-key": member}).status_code == 403
+
+
+def test_apis_server_answers_no_match_with_an_empty_list(monkeypatch, fresh_settings):
+    c = _apis_client(monkeypatch)
+    assert _text(_call(c, "/mcp/apis", "search_apis", {"keyword": "없는말"})) == "[]"
+
+
+def test_apis_server_says_the_catalog_was_never_collected():
+    """수집한 적 없는 것을 빈 목록으로 돌려주면 모델은 질의를 바꿔 가며 헛돌게 된다."""
+    reply = _call(_client(), "/mcp/apis", "search_apis", {"keyword": "payment"})
+    assert "수집하지 않았습니다" in reply["error"]["message"]
+
+
+def test_apis_server_appears_in_the_internal_directory(monkeypatch, fresh_settings):
+    monkeypatch.setenv("PAAS_MCP_INTERNAL_BASE_URL", "http://localhost:7000/paas")
+    get_settings.cache_clear()
+    items = {i["id"]: i for i in _client().get(f"{API}/mcp/search", headers=ADMIN).json()}
+    assert items["paas-apis"]["url"] == "http://localhost:7000/paas/api/v1/mcp/apis"

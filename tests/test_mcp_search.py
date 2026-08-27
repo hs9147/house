@@ -33,7 +33,7 @@ def test_storage_and_code_servers_come_from_what_exists(monkeypatch, tmp_path, f
     수와 무관하게 하나다 — 엔드포인트가 실재하므로 docs와 마찬가지로 항상 나온다."""
     c = _client(monkeypatch, tmp_path)
     assert [i["id"] for i in c.get(f"{API}/mcp/search", headers=ADMIN).json()] == [
-        "paas-ops", "paas-docs", "paas-storage-internal", "paas-code"]
+        "paas-ops", "paas-docs", "paas-storage-internal", "paas-code", "paas-apis"]
 
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"company-docs={tmp_path / 'docs'}")
     get_settings.cache_clear()
@@ -179,7 +179,7 @@ def test_a_keyless_module_says_why_it_is_401(monkeypatch, tmp_path, fresh_settin
 def test_refresh_reports_the_current_count(monkeypatch, tmp_path, fresh_settings):
     c = _client(monkeypatch, tmp_path)
     body = c.post(f"{API}/modules/search/refresh-mcp", headers=ADMIN).json()
-    assert body["total_mcp_servers"] == 4  # ops + docs + 내부 저장소 + code
+    assert body["total_mcp_servers"] == 5  # ops + docs + 내부 저장소 + code + apis
     assert body["base_url"] == "http://localhost:7000/paas"
 
 

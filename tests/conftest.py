@@ -29,6 +29,23 @@ def fresh_settings():
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _no_background_api_sync():
+    """카탈로그 수집 스케줄러를 테스트에서는 띄우지 않는다.
+
+    create_app이 데몬 스레드를 하나 띄우고 10초 뒤 수집을 시작하는데(services/apisearch),
+    그 시각은 스위트 한복판이다. 스레드는 자기 세션을 열어 test-paas.db에 쓰고, 그때
+    httpx가 어느 테스트의 스텁으로 갈려 있는지는 알 수 없다 — 무작위로 한 테스트만
+    흔드는 종류의 실패가 된다. 스케줄러 자체는 test_apisearch에서 따로 확인한다.
+    """
+    from app.services import apisearch
+
+    original = apisearch.start_daily_api_directory_scheduler
+    apisearch.start_daily_api_directory_scheduler = lambda: None
+    yield
+    apisearch.start_daily_api_directory_scheduler = original
+
+
 @pytest.fixture(autouse=True)
 def _clear_mcp_tools_cache():
     """MCP tools/list 캐시(TTL 60초)는 프로세스 전역이라 테스트 사이에 남는다 —

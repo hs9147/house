@@ -253,6 +253,13 @@ class Settings(BaseSettings):
     # 키워드로 공개 API를 검색해 external_api 모듈로 추가할 때 조회하는 머신리더블
     # OpenAPI 디렉터리. 기본은 apis.guru 공개 목록. 폐쇄망이라면 사내 미러 URL로 교체.
     api_directory_url: str = "https://api.apis.guru/v2/list.json"
+    # 공공데이터 카탈로그(선택) — 비어 있으면 이 소스는 아예 부르지 않는다. apis.guru는
+    # 글로벌 OpenAPI 목록이라 국내 공공데이터가 잡히지 않아서, 목록을 하나 더 붙이는
+    # 자리다. 폐쇄망이면 사내 미러(내려받아 놓은 카탈로그 JSON)를 가리켜도 된다.
+    #   PAAS_PUBLIC_DATA_URL=https://<카탈로그 주소>
+    #   PAAS_PUBLIC_DATA_KEY=<인증키>        # 필요할 때만. serviceKey 쿼리로 붙는다
+    public_data_url: str = ""
+    public_data_key: str = ""
 
     # --- 콘솔 자기 배포 (옵트인, services/self_deploy.py) ---
     # true면 백엔드 기동 시 platform/console/을 일반 react Project(source_subdir 사용)로
