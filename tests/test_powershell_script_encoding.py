@@ -18,11 +18,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BOM = b"\xef\xbb\xbf"
 
 
+def _scripts():
+    return [p for p in sorted(REPO_ROOT.rglob("*.ps1"))
+            if "node_modules" not in p.parts and ".venv" not in p.parts]
+
+
 def _scripts_with_non_ascii():
     found = []
-    for path in sorted(REPO_ROOT.rglob("*.ps1")):
-        if "node_modules" in path.parts or ".venv" in path.parts:
-            continue
+    for path in _scripts():
         raw = path.read_bytes()
         body = raw[len(BOM):] if raw.startswith(BOM) else raw
         try:
@@ -35,9 +38,13 @@ def _scripts_with_non_ascii():
     return found
 
 
-def test_repo_has_powershell_scripts_to_check():
-    """검사 대상이 사라지면 이 테스트는 조용히 통과한다 — 그걸 막는다."""
-    assert _scripts_with_non_ascii(), "한글이 든 .ps1을 하나도 못 찾았다 — 경로 규칙을 확인할 것"
+def test_glob_actually_finds_scripts():
+    """경로 규칙이 깨지면 아래 검사가 **조용히 통과**한다 — 그걸 막는다.
+
+    한글이 든 .ps1이 하나도 없는 것은 정상이다(오히려 권장이다 — 콘솔 코드페이지에
+    기대지 않으려면 ASCII가 낫다). 하지만 .ps1을 아예 못 찾는 것은 규칙이 깨진 것이다.
+    """
+    assert _scripts(), ".ps1을 하나도 못 찾았다 — rglob 경로 규칙을 확인할 것"
 
 
 @pytest.mark.parametrize("path,raw", _scripts_with_non_ascii(),

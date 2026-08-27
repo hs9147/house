@@ -442,6 +442,10 @@ export const api = {
       // 여기서만 드러난다.
       resolved_backend: string;
       ok: boolean;
+      // 기계가 읽는 사유 코드(pty_terminal.REASON_*). 화면에는 error·hint를 그대로
+      // 띄우면 되지만, 서버에서 도는 진단 스크립트는 한글 문장을 쓸 수 없어 이걸 본다.
+      reason: string;
+      exit_status: number | null;
       error: string;
       hint: string;
     }>('GET', '/system/terminal/preflight'),
