@@ -2,8 +2,19 @@
 
 저장소는 모듈 레지스트리에 등록하는 것이 아니라 **환경변수로 정한다**:
 
-  PAAS_STORAGE_ROOT  내부 저장소 한 곳(쓰기 가능). 이름은 `internal`.
-  PAAS_DOC_ROOTS     사내 문서 폴더(읽기 전용, 쉼표 구분). `이름=경로` 또는 경로만.
+  PAAS_STORAGE_ROOT       내부 저장소 한 곳(쓰기 가능). 이름은 `internal`.
+  PAAS_DOC_ROOTS          사내 문서 폴더(쉼표 구분). `이름=경로` 또는 경로만.
+  PAAS_DOC_ROOTS_WRITABLE 그중 쓰기를 열 폴더 이름. 기본은 비어 있다 = 전부 읽기 전용.
+
+**전체는 읽기, 쓰기는 폴더별 opt-in.** 사내 공유 폴더는 플랫폼이 만든 것이 아니고
+삭제에 되돌리기가 없다(서비스 계정이 SMB로 지우면 휴지통에 가지 않는다). 그래서 쓰기는
+경로 옆에 적는 것이 아니라 허용 목록으로 따로 연다 — 경로를 복사해 붙일 때 권한이
+딸려 오지 않게 하려는 것이다.
+
+읽기만 필요하면 저장소별 서버를 등록할 필요가 없다: /mcp/docs 하나가 전 폴더를 가로질러
+본문을 찾는다. 저장소별 서버(/mcp/storage/{이름})는 그 폴더의 파일을 다루는 자리이고,
+**쓰기 도구는 쓰기가 열린 폴더의 서버에만 광고된다**(api/mcp_servers.py) — 폴더가 URL에
+있기 때문에 성립하는 성질이라, 이 서버를 하나로 합치면 잃는다.
 
 왜 모듈이 아니게 됐나: 저장소가 어느 디렉터리에 얹혀 있는지는 서버를 설치한 사람이
 이미 아는 사실이지 콘솔에서 등록할 일이 아니었다. 모듈로 두면 같은 폴더가 이름만 달리
@@ -11,13 +22,17 @@
 접근은 사내 MCP 서버(/mcp/docs, /mcp/storage/{저장소})와 /storage 창구가 맡는다.
 """
 import re
+import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from ..config import get_settings
 
 # 내부 저장소(PAAS_STORAGE_ROOT)의 이름. 문서 폴더가 이 이름을 다시 쓰면 거부한다.
 INTERNAL_STORE = "internal"
+# 저장소 안 휴지통. 점으로 시작해서 색인(docsearch.skip_dir)과 목록에서 함께 빠진다.
+TRASH_DIRNAME = ".trash"
 
 
 class StorageError(Exception):
@@ -85,6 +100,8 @@ def stores() -> list[Store]:
     "그 폴더에 문서가 없다"는 구분이 되지 않아 원인을 찾는 데 시간을 다 쓰게 된다.
     """
     settings = get_settings()
+    # 쓰기를 여는 것은 별도의 행위다 — 경로 옆이 아니라 허용 목록에서 정한다.
+    writable = {n.strip() for n in settings.doc_roots_writable.split(",") if n.strip()}
     found = [Store(
         INTERNAL_STORE,
         Path(settings.storage_root or "./data/storage").resolve(),
@@ -108,7 +125,15 @@ def stores() -> list[Store]:
                 f"PAAS_DOC_ROOTS의 저장소 이름이 겹칩니다: {name!r}"
                 f" ({INTERNAL_STORE}은 내부 저장소가 쓰는 이름입니다)")
         seen.add(name)
-        found.append(Store(name, Path(path).resolve(), read_only=True))
+        found.append(Store(name, Path(path).resolve(), read_only=name not in writable))
+
+    # 허용 목록에 없는 이름이 남았다 = 오타이거나 지운 폴더를 가리킨다. 조용히 넘기면
+    # 그 폴더는 읽기 전용으로 남고, 왜 안 써지는지 알아낼 방법이 없다.
+    unknown = writable - seen
+    if unknown:
+        raise StorageError(
+            f"PAAS_DOC_ROOTS_WRITABLE에 없는 저장소 이름이 있습니다: {', '.join(sorted(unknown))}"
+            f" — PAAS_DOC_ROOTS에 있는 이름이어야 합니다(현재: {', '.join(sorted(seen))}).")
     return found
 
 
@@ -144,7 +169,9 @@ def list_files(root: Path) -> list[dict]:
         (
             {"path": p.relative_to(root).as_posix(), "size": p.stat().st_size}
             for p in root.rglob("*")
-            if p.is_file()
+            # 휴지통은 목록에 넣지 않는다 — 지운 것이 계속 보이면 지운 것이 아니다.
+            # (docsearch는 점으로 시작하는 폴더를 통째로 건너뛰므로 검색에도 안 잡힌다.)
+            if p.is_file() and TRASH_DIRNAME not in p.relative_to(root).parts
         ),
         key=lambda f: f["path"],
     )
@@ -157,8 +184,26 @@ def write_file(root: Path, rel: str, data: bytes) -> str:
     return target.relative_to(root).as_posix()
 
 
-def delete_file(root: Path, rel: str) -> None:
+def delete_file(root: Path, rel: str) -> str:
+    """지우지 않고 저장소 안 휴지통으로 옮긴다. 옮겨진 자리(저장소 기준 상대경로)를 돌려준다.
+
+    **사내 공유 폴더에는 되돌리기가 없다.** 서비스 계정이 SMB로 지우면 윈도우 휴지통에
+    가지 않고 그대로 사라진다. 그런데 이 경로는 사람뿐 아니라 LLM도 부른다(MCP의
+    delete_file) — 한 번의 잘못된 호출이 복구 불가능하면 안 된다.
+
+    휴지통을 **저장소 안**에 두는 이유: 같은 볼륨이라 이동이 즉시 끝나고(다른 볼륨이면
+    복사 후 삭제가 되어 큰 파일에서 실패할 여지가 생긴다), 사람이 그 폴더에서 바로 찾아
+    되돌릴 수 있다. 점으로 시작해서 색인·목록에서 함께 빠진다.
+    """
     target = resolve(root, rel)
     if not target.is_file():
         raise FileNotFoundError(rel)
-    target.unlink()
+
+    grave = root / TRASH_DIRNAME / Path(rel)
+    if grave.exists():
+        # 같은 파일을 두 번 지웠다 — 먼저 지운 것을 덮어쓰면 되돌릴 것이 하나 사라진다.
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        grave = grave.with_name(f"{grave.stem}.{stamp}{grave.suffix}")
+    grave.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(target), str(grave))
+    return grave.relative_to(root).as_posix()

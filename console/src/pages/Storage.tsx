@@ -41,8 +41,10 @@ export default function Storage() {
       <h2>파일 관리</h2>
       <p className="mutedtext" style={{ fontSize: 12 }}>
         저장소 목록은 서버 환경변수가 정합니다 — 내부 저장소는 <code>PAAS_STORAGE_ROOT</code>,
-        사내 문서 폴더는 <code>PAAS_DOC_ROOTS</code>(읽기 전용). 같은 파일을 LLM이 본문으로
-        검색하는 창구는 사내 MCP 서버 <code>paas-docs</code>입니다.
+        사내 문서 폴더는 <code>PAAS_DOC_ROOTS</code>(기본 읽기 전용 —
+        <code>PAAS_DOC_ROOTS_WRITABLE</code>에 적은 폴더만 쓰기가 열립니다). 같은 파일을
+        LLM이 본문으로 검색하는 창구는 사내 MCP 서버 <code>paas-docs</code>입니다.
+        삭제는 저장소 안 <code>.trash</code>로 옮기는 것이라 되돌릴 수 있습니다.
       </p>
 
       <Async state={storesState}>

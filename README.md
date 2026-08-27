@@ -256,7 +256,7 @@ POST /paas/api/v1/mcp/docs                          # 사내 MCP 서버 — 사�
                                                 #   list_sources·search_docs·read_doc·reindex_docs·index_status
 POST /paas/api/v1/mcp/storage/{저장소}              # 사내 MCP 서버 — 저장소 파일(루트 밖으로 못 나감)
                                                 #   list_files·read_file + search_docs·reindex_docs·index_status
-                                                #   PAAS_DOC_ROOTS로 붙인 폴더는 읽기 전용 — 쓰기·삭제 도구를 광고하지 않음
+                                                #   문서 폴더는 기본 읽기 전용 — PAAS_DOC_ROOTS_WRITABLE에 적은 폴더만 쓰기·삭제 도구가 붙음
 POST /paas/api/v1/mcp/db/{module}                   # 사내 MCP 서버 — database 모듈 조회(SELECT 전용)
                                                 #   PAAS_MCP_DB_MODULES에 이름이 있는 모듈만 열림(기본 전부 차단)
 
@@ -276,7 +276,7 @@ DELETE /paas/api/v1/previews/{id}
   공개와 JSON-RPC `message/send` 수용이 남아 있습니다(미구현).
 - **파일 저장소는 환경변수로 정하고, MCP와 창구로 다룹니다**: 저장소는 모듈로 등록하지
   않습니다 — `PAAS_STORAGE_ROOT`가 내부 저장소 하나(이름 `internal`, 쓰기 가능),
-  `PAAS_DOC_ROOTS`가 사내 문서 폴더(읽기 전용)를 정합니다. 디스크 경로는 서버를 설치한
+  `PAAS_DOC_ROOTS`가 사내 문서 폴더를 정합니다(기본 읽기 전용). 디스크 경로는 서버를 설치한
   사람이 이미 아는 사실이지 콘솔에서 등록할 일이 아니고, 모듈로 두면 같은 폴더가 이름만
   달리 두 번 등록되거나 존재하지 않는 경로가 등록돼도 열어 보기 전까지 아무도 모릅니다.
   `PAAS_DOC_ROOTS`는 쉼표로 여러 개를 받고 각 항목은 `이름=경로` 또는 경로만 씁니다.
@@ -289,6 +289,11 @@ DELETE /paas/api/v1/previews/{id}
   ```
   PAAS_STORAGE_ROOT=D:\paas\data\storage
   PAAS_DOC_ROOTS=rules=D:\공유\사내규정,costdb=D:\cost db
+  PAAS_DOC_ROOTS_WRITABLE=costdb        # 쓰기를 열 폴더만 (기본: 전부 읽기 전용)
+
+  삭제는 완전 삭제가 아니라 저장소 안 `.trash`로 옮기는 것입니다 — 목록·검색에서는 곧바로
+  빠지지만 파일은 남아 있어 되돌릴 수 있습니다. 사내 공유 폴더에는 되돌리기가 없고
+  (서비스 계정이 SMB로 지우면 윈도우 휴지통에 가지 않습니다) 이 경로는 LLM도 부릅니다.
   ```
 
   접근 창구는 셋입니다 — LLM은 `/mcp/docs`(본문 검색)와 `/mcp/storage/{저장소}`,

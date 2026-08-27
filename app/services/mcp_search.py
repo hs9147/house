@@ -84,8 +84,8 @@ def list_internal_servers(db: Session) -> list[dict]:
     for store in found:
         entries.append(_entry(
             f"paas-storage-{store.name}", f"paas-storage-{store.name}",
-            f"파일 저장소 '{store.name}' — 목록·읽기{'' if store.read_only else '·쓰기'}와"
-            " 그 저장소 안 문서 검색",
+            f"파일 저장소 '{store.name}' — 목록·읽기{'' if store.read_only else '·쓰기·삭제'}와"
+            f" 그 저장소 안 문서 검색{'' if store.read_only else ' (쓰기 열림)'}",
             "storage", f"/mcp/storage/{store.name}",
         ))
 

@@ -300,7 +300,9 @@ def test_storage_server_write_list_read_delete(monkeypatch, fresh_settings, tmp_
         _call(c, path, "write_file", {"path": "spec.md", "content": "# 규격\n"}))
     assert "spec.md" in _text(_call(c, path, "list_files"))
     assert _text(_call(c, path, "read_file", {"path": "spec.md"})) == "# 규격\n"
-    assert "deleted spec.md" in _text(_call(c, path, "delete_file", {"path": "spec.md"}))
+    # 지우지 않고 휴지통으로 옮긴다 — 어디로 갔는지 함께 말해 준다
+    moved = _text(_call(c, path, "delete_file", {"path": "spec.md"}))
+    assert "trash" in moved and ".trash/spec.md" in moved
     assert _call(c, path, "read_file", {"path": "spec.md"})["error"]["code"] == -32602
 
     # 저장소를 건드린 주체가 감사 로그에 남는다(HTTP 창구와 같은 규칙)
@@ -340,6 +342,35 @@ def test_doc_root_store_hides_write_tools(monkeypatch, fresh_settings, tmp_path)
     assert up.status_code == 403
     rm = c.delete(f"{API}/storage/company-docs/files?path=a.txt", headers=ADMIN)
     assert rm.status_code == 403
+
+
+def test_writable_doc_root_advertises_write_tools(monkeypatch, fresh_settings, tmp_path):
+    """쓰기를 연 폴더의 서버에만 쓰기 도구가 뜬다.
+
+    **이 성질은 폴더가 URL에 있어서 성립한다.** 저장소 서버를 하나로 합쳐 폴더를 인자로
+    받게 하면 write_file·delete_file이 항상 목록에 뜨고, 계약 폴더를 다루는 문맥에서도
+    모델이 쓰기 도구를 보게 된다. 읽기만 필요한 쪽은 /mcp/docs 하나로 전 폴더를 가로지르면
+    되므로, 저장소 서버를 폴더별로 두는 대가는 크지 않다.
+    """
+    (tmp_path / "scratch").mkdir()
+    (tmp_path / "contract").mkdir()
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
+    monkeypatch.setenv("PAAS_DOC_ROOTS",
+                       f"scratch={tmp_path / 'scratch'},contract={tmp_path / 'contract'}")
+    monkeypatch.setenv("PAAS_DOC_ROOTS_WRITABLE", "scratch")
+    get_settings.cache_clear()
+    c = _client()
+
+    opened = [t["name"] for t in _rpc(c, "/mcp/storage/scratch", "tools/list")["result"]["tools"]]
+    assert "write_file" in opened and "delete_file" in opened
+    _call(c, "/mcp/storage/scratch", "write_file", {"path": "memo.md", "content": "# 메모\n"})
+    assert (tmp_path / "scratch" / "memo.md").read_text(encoding="utf-8") == "# 메모\n"
+
+    # 같은 설정의 다른 폴더에는 그 도구가 **보이지도 않는다**
+    locked = [t["name"] for t in _rpc(c, "/mcp/storage/contract", "tools/list")["result"]["tools"]]
+    assert "write_file" not in locked and "delete_file" not in locked
+    assert _call(c, "/mcp/storage/contract", "write_file",
+                 {"path": "x.md", "content": "x"})["error"]["code"] == -32601
 
 
 def test_storage_list_files_filters_and_caps(monkeypatch, fresh_settings, tmp_path):

@@ -107,9 +107,17 @@ class Settings(BaseSettings):
     # 모듈로 가져올 때 모듈 이름이 된다). 경로만 주면 마지막 폴더 이름에서 만들어 보고
     # ("Company Docs" → company-docs), 만들 수 없으면(한글 폴더 등) 직접 쓰라고 알려 준다:
     #   PAAS_DOC_ROOTS=rules=D:\공유\사내규정,D:\shared\contracts
-    # 플랫폼이 만든 저장소가 아니라 **이미 있는 공유 폴더**를 붙이는 자리라 쓰기는 열지
-    # 않는다 — 읽고 찾기만 한다(/mcp/docs로 본문 검색, /mcp/storage/{이름}으로 열람).
+    # 플랫폼이 만든 저장소가 아니라 **이미 있는 공유 폴더**를 붙이는 자리라 기본은 읽기
+    # 전용이다 — 읽고 찾기만 한다(/mcp/docs로 본문 검색, /mcp/storage/{이름}으로 열람).
     doc_roots: str = ""
+    # 쓰기를 열 문서 폴더 이름(쉼표 구분). **여기 적은 폴더만** 업로드·삭제가 열린다.
+    #   PAAS_DOC_ROOTS_WRITABLE=scratch,team-share
+    # 허용 목록을 따로 두는 이유: 경로 문자열 안에 권한을 섞으면(`이름:rw=경로`) 티켓에서
+    # 경로를 복사해 붙일 때 권한까지 딸려 온다. 권한을 여는 것은 별도의 행위여야 한다 —
+    # PAAS_MCP_DB_MODULES가 DB 조회를 여는 방식과 같다.
+    # 여기 적힌 이름이 PAAS_DOC_ROOTS에 없으면 기동을 막는다(오타는 조용히 읽기 전용으로
+    # 남아, 왜 안 써지는지 알 수 없게 된다).
+    doc_roots_writable: str = ""
     powershell_start_dir: str = ""
     # /exec가 쓰는 상주 PowerShell 세션의 로컬 TCP 브로커 포트. paas 프로세스가 재시작돼도
     # 이 고정 포트로 다시 붙어 같은 세션(cd·변수 등 상태)을 잇는다 — services/ps_broker.py.
