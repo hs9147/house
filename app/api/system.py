@@ -62,11 +62,18 @@ def _start_session(db: Session, email: str, is_admin: bool) -> str:
 @health_router.get("/health")
 def health():
     from ..features import enabled_features  # noqa: PLC0415
+    from ..services import buildinfo  # noqa: PLC0415
     from ..services.host import get_host_caps  # noqa: PLC0415
 
     settings = get_settings()
+    # 이 프로세스가 적재한 커밋. 기동할 때 한 번 읽어 둔 값이라(services/buildinfo.py),
+    # pull만 하고 재시작하지 않았으면 디스크가 아니라 **돌고 있는 쪽**을 답한다 —
+    # "SW 업데이트가 먹었나"는 그것이 알고 싶은 것이다.
+    revision, branch = buildinfo.head(settings.resolved_repo_root)
     return {
         "ok": True,
+        "revision": revision,
+        "branch": branch,
         "platform_name": settings.platform_name,
         "allowed_email_domain": settings.allowed_email_domain,
         "tier": settings.tier,

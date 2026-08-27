@@ -450,6 +450,11 @@ export interface StatusSnapshot {
 
 export interface HealthInfo {
   ok: boolean;
+  // 이 백엔드 프로세스가 **적재한** 커밋(기동 시점에 읽는다). SW 업데이트가 실제로
+  // 반영됐는지를 이것 하나로 확인한다 — 디스크가 아니라 돌고 있는 쪽을 말한다.
+  // .git이 없는 설치본에서는 빈 문자열.
+  revision?: string;
+  branch?: string;
   platform_name?: string;
   tier: string;
   host_os: string;
