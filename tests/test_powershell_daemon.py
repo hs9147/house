@@ -482,6 +482,44 @@ def test_websocket_terminal_applies_resize(monkeypatch, fresh_settings):
 
 
 @skip_no_posix_pty
+def test_session_end_is_logged_on_the_server(monkeypatch, capsys, fresh_settings):
+    """세션이 왜 끝났는지 **서버에도** 남아야 한다.
+
+    지금까지는 세션이 죽어도 서버 쪽에 흔적이 없어서, "화면에 이렇게 나온다"는 전언만
+    가지고 원인을 좁혀야 했다. 한 줄이면 다음부터는 서버 로그에서 바로 읽힌다.
+    """
+    monkeypatch.setenv("PAAS_PTY_SHELL", "/bin/sh")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    with c.websocket_connect(WS_URL, subprotocols=ADMIN_SUBPROTOCOLS) as ws:
+        _run(ws, "echo hi\n")
+    logged = capsys.readouterr().out
+    assert "terminal session ended" in logged
+    assert "/bin/sh" in logged  # 어떤 셸이었는지도 함께
+
+
+@skip_no_posix_pty
+def test_output_read_failure_is_reported_not_silent(monkeypatch, fresh_settings):
+    """출력 읽기가 터져도 이유가 남아야 한다.
+
+    pywinpty의 read는 EOFError 말고도 던진다. 그 예외가 그냥 올라가면 세션은 끝나는데
+    셸은 살아 있어서 종료코드가 없고, 화면에는 이유 없이 "열리자마자 끝났습니다"만
+    남는다 — resize와 똑같은 모양이라 서버·프록시·셸 어디도 지목할 수 없다.
+    """
+    from app.services import pty_terminal
+
+    def exploding_read(self, size=4096):
+        raise OSError("winpty: read failed")
+
+    monkeypatch.setattr(pty_terminal.PtyTerminal, "read", exploding_read)
+    monkeypatch.setenv("PAAS_PTY_SHELL", "/bin/sh")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    with c.websocket_connect(WS_URL, subprotocols=ADMIN_SUBPROTOCOLS) as ws:
+        assert "셸 출력을 읽지 못했습니다" in _recv(ws)
+
+
+@skip_no_posix_pty
 def test_resize_failure_does_not_end_the_session(monkeypatch, fresh_settings):
     """창 크기 조정이 실패해도 세션은 살아 있어야 한다.
 
