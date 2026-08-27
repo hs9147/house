@@ -510,10 +510,11 @@ def terminal_preflight(_: ApiKey = Depends(require_admin)):
     settings = get_settings()
     result = pty_terminal.probe(settings.pty_shell, settings.pty_backend)
     if result["ok"]:
-        hint = ("서버는 준비됐습니다. 그래도 터미널이 안 열리면 infra/ws-check.ps1로"
-                " 백엔드에 직접 붙어 보세요 — 거기서 404면 서버가 --ws none으로 떠 있는"
-                " 것이고, 거기는 되는데 IIS 경유가 안 되면 프록시가 업그레이드를 넘기지"
-                " 않는 것입니다(Install-WindowsFeature Web-WebSockets 후 iisreset).")
+        hint = ("서버는 셸을 열 수 있습니다. 그래도 터미널이 안 열리면 서버에서"
+                " infra/terminal-doctor.ps1 -Key <관리자키> -Proxy <브라우저 주소>를"
+                " 돌려 보세요 — 백엔드 직접과 앞단 경유를 비교해 어디가 막혔는지"
+                " 짚어 줍니다. 참고로 이 점검은 셸을 열었다 닫을 뿐이라, 창 크기 조정"
+                " 같은 세션 중 동작까지 보증하지는 않습니다.")
     elif not result["websocket_library"]:
         # 여기가 비면 IIS를 아무리 고쳐도 안 된다 — 소켓이 서버에 닿아도 404가 난다.
         hint = ("IIS보다 여기가 먼저입니다. 이 상태에서는 프록시 설정과 무관하게"
@@ -587,6 +588,10 @@ async def powershell_websocket_terminal(
                 break
             await websocket.send_text(chunk)
 
+    # 입력 펌프가 왜 끝났는지 담아 둔다 — 이유 없이 끊기면 서버·프록시·셸 중 어디가
+    # 문제인지 밖에서 가릴 방법이 없다.
+    input_error: dict[str, str] = {}
+
     async def pump_input() -> None:
         while True:
             raw = await websocket.receive_text()
@@ -596,11 +601,22 @@ async def powershell_websocket_terminal(
                 continue  # 규약에 없는 프레임은 무시한다(셸에 흘려보내지 않는다)
             kind = message.get("type")
             if kind == "input":
-                terminal.write(str(message.get("data", "")))
+                try:
+                    terminal.write(str(message.get("data", "")))
+                except Exception as e:  # noqa: BLE001 — 백엔드마다 예외 종류가 다르다
+                    # 셸이 이미 사라진 것이다. 세션은 끝나지만 조용히 끝내지는 않는다.
+                    input_error["reason"] = f"셸에 입력을 전달하지 못했습니다: {type(e).__name__}: {e}"
+                    return
             elif kind == "resize":
+                # **창 크기는 부가 기능이다.** 여기서 난 예외가 입력 펌프를 죽이면
+                # 브라우저가 열자마자 보내는 resize 때문에 **접속 즉시 끊긴다** — 그런데
+                # 셸은 멀쩡하므로 종료코드도 없고, 화면에는 이유 없이 "열리자마자
+                # 끝났습니다"만 남는다. 진단은 통과하는데 브라우저만 죽는, 가장 찾기
+                # 어려운 모양이 된다(실제로 그렇게 겪었다). 실패해 봐야 줄바꿈이
+                # 어긋날 뿐이므로 삼킨다.
                 try:
                     terminal.resize(int(message["cols"]), int(message["rows"]))
-                except (KeyError, TypeError, ValueError):
+                except Exception:  # noqa: BLE001 — pywinpty는 ValueError를 던지지 않는다
                     pass
 
     output_task = asyncio.create_task(pump_output())
@@ -618,7 +634,9 @@ async def powershell_websocket_terminal(
         # 것이라 보낼 곳이 이미 없다.
         alive_seconds = time.monotonic() - opened_at
         status = terminal.exit_status()
-        if output_task in done and status is not None and alive_seconds < SHORT_SESSION_SECONDS:
+        if input_error:
+            await websocket.send_text(f"\r\n[{input_error['reason']}]\r\n")
+        elif output_task in done and status is not None and alive_seconds < SHORT_SESSION_SECONDS:
             await websocket.send_text(
                 f"\r\n[셸이 바로 종료했습니다 — 종료코드 {status}] "
                 f"'{settings.pty_shell}'을(를) 실행할 수 없습니다."
