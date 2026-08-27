@@ -132,7 +132,19 @@ Windows 10 1809 / Server 2019(빌드 17763)부터**다. 그래서 빌드가 그�
 > 종료코드와 현재 백엔드를 터미널에 찍은 뒤 preflight 진단을 이어 붙인다. Server 2016에서
 > ConPTY가 골라졌을 때의 모양이 정확히 이것이다.
 
-> **안 열릴 때.** `GET /system/terminal/preflight`(admin)가 서버 쪽 준비 상태를 답한다
+> **안 열릴 때 — 먼저 이걸 돌린다.**
+>
+> ```powershell
+> .\infra\terminal-doctor.ps1 -Key <관리자키>
+> ```
+>
+> 아래에 적힌 갈래를 전부 순서대로 짚어 준다: 돌고 있는 리비전 → preflight(셸을 열 수
+> 있나) → WebSocket을 **백엔드 직접**과 **앞단(IIS) 경유**로 각각. 마지막에 무엇을
+> 고쳐야 하는지 한 줄로 답한다. 포트는 서비스 인자에서 찾고, 못 찾으면 `-Port`로 준다.
+>
+> 아래는 그 판정의 근거다 — 손으로 볼 때 참고.
+>
+> `GET /system/terminal/preflight`(admin)가 서버 쪽 준비 상태를 답한다
 > (실제로 셸을 띄웠다 닫는다).
 >
 > **먼저 `websocket_library`를 본다.** uvicorn은 `websockets`·`wsproto` 중 하나가 있어야
@@ -150,9 +162,8 @@ Windows 10 1809 / Server 2019(빌드 17763)부터**다. 그래서 빌드가 그�
 > | 아무 말 없이 계속 "연결 중" | 핸드셰이크가 **매달렸다** — 중간에서 업그레이드를 넘기지 않는다. 8초 뒤 터미널이 그렇게 말해 준다 |
 > | `closed before the connection is established` | **연결 실패가 아니다.** 브라우저가 핸드셰이크 중인 소켓을 JS가 닫았을 때 내는 말이다. 다른 원인과 섞이지 않게 클라이언트에서 없앴다 |
 >
-> 거기가 ok인데도 안 열리면 원인은 그 사이다 —
-> `infra/ws-check.ps1`로 **백엔드 직접**과 **IIS 경유**를 각각 찔러 보면 갈린다:
-> 직접 OK·IIS 실패면 프록시, 둘 다 403이면 키나 `Sec-WebSocket-Protocol` 전달 문제다.
+> 거기가 ok인데도 안 열리면 원인은 그 사이다 — 직접 OK·앞단 실패면 프록시, 둘 다
+> 403이면 키나 `Sec-WebSocket-Protocol` 전달 문제다(doctor가 이걸 비교한다).
 >
 > **IIS/ARR 뒤에서는 WebSocket 통과가 전제다.** IIS에 "WebSocket Protocol" 기능
 > (`Install-WindowsFeature Web-WebSockets`)이 설치돼 있어야 하고 앱풀이 통합 모드여야 한다.
