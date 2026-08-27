@@ -109,6 +109,45 @@ def test_doc_roots_are_read_only_by_default(monkeypatch, tmp_path, fresh_setting
     assert (docs / "규정.txt").exists()
 
 
+def test_delete_moves_to_trash_and_can_be_recovered(monkeypatch, tmp_path, fresh_settings):
+    """삭제는 되돌릴 수 있어야 한다.
+
+    사내 공유 폴더에는 되돌리기가 없다 — 서비스 계정이 SMB로 지우면 윈도우 휴지통에
+    가지 않고 그대로 사라진다. 그런데 이 경로는 사람뿐 아니라 LLM도 부른다(MCP의
+    delete_file). 한 번의 잘못된 호출이 복구 불가능하면 안 된다.
+    """
+    c = _client(monkeypatch, tmp_path)
+    root = tmp_path / "internal"
+    c.post(f"{API}/storage/internal/files",
+           files={"file": ("보고서.txt", "중요한 내용".encode())}, headers=ADMIN)
+
+    assert c.delete(f"{API}/storage/internal/files?path=보고서.txt",
+                    headers=ADMIN).status_code == 204
+
+    # 원래 자리에서는 사라지고 목록에도 안 나온다
+    assert not (root / "보고서.txt").exists()
+    assert c.get(f"{API}/storage/internal/files", headers=ADMIN).json()["files"] == []
+
+    # 그러나 내용은 살아 있다 — 사람이 그 폴더에서 되돌릴 수 있다
+    grave = root / storage.TRASH_DIRNAME / "보고서.txt"
+    assert grave.read_text(encoding="utf-8") == "중요한 내용"
+
+
+def test_deleting_the_same_name_twice_keeps_both(monkeypatch, tmp_path, fresh_settings):
+    """먼저 지운 것을 덮어쓰면 되돌릴 것이 하나 사라진다."""
+    c = _client(monkeypatch, tmp_path)
+    root = tmp_path / "internal"
+    for body in ("첫 번째", "두 번째"):
+        c.post(f"{API}/storage/internal/files",
+               files={"file": ("메모.txt", body.encode())}, headers=ADMIN)
+        assert c.delete(f"{API}/storage/internal/files?path=메모.txt",
+                        headers=ADMIN).status_code == 204
+
+    trashed = sorted(p.read_text(encoding="utf-8")
+                     for p in (root / storage.TRASH_DIRNAME).iterdir())
+    assert trashed == ["두 번째", "첫 번째"]
+
+
 def test_a_doc_root_can_be_opened_for_writing(monkeypatch, tmp_path, fresh_settings):
     """폴더별 opt-in — 허용 목록에 적은 폴더만 열린다."""
     open_dir, locked_dir = tmp_path / "scratch", tmp_path / "contract"

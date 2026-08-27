@@ -740,7 +740,10 @@ _STORAGE_WRITE_TOOLS = [
     },
     {
         "name": "delete_file",
-        "description": "저장소 파일 하나를 지운다.",
+        "description": (
+            "저장소 파일 하나를 휴지통(.trash)으로 옮긴다. 완전히 지우지 않으므로"
+            " 되돌릴 수 있고, 목록·검색에서는 곧바로 빠진다."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {"path": {"type": "string"}},
@@ -879,13 +882,15 @@ def _storage_call(db: Session, actor: str, store: storage_service.Store, name: s
 
     # delete_file
     try:
-        storage_service.delete_file(root, path)
+        grave = storage_service.delete_file(root, path)
     except storage_service.StorageError as e:
         raise mcp_server.McpToolError(str(e))
     except FileNotFoundError:
         raise mcp_server.McpToolError(f"파일이 없습니다: {path}")
-    audit.record(db, actor, "mcp.storage.delete", store.name, {"path": path})
-    return f"deleted {path}"
+    # 어디로 갔는지 남긴다 — 되돌릴 수 있다는 사실은 자리를 알아야 쓸모가 있다.
+    audit.record(db, actor, "mcp.storage.delete", store.name,
+                 {"path": path, "trashed_to": grave})
+    return f"moved {path} to trash ({grave})"
 
 
 # --- DB 조회 서버 (/mcp/db/{module}) ---

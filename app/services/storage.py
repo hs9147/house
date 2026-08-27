@@ -22,13 +22,17 @@
 접근은 사내 MCP 서버(/mcp/docs, /mcp/storage/{저장소})와 /storage 창구가 맡는다.
 """
 import re
+import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from ..config import get_settings
 
 # 내부 저장소(PAAS_STORAGE_ROOT)의 이름. 문서 폴더가 이 이름을 다시 쓰면 거부한다.
 INTERNAL_STORE = "internal"
+# 저장소 안 휴지통. 점으로 시작해서 색인(docsearch.skip_dir)과 목록에서 함께 빠진다.
+TRASH_DIRNAME = ".trash"
 
 
 class StorageError(Exception):
@@ -165,7 +169,9 @@ def list_files(root: Path) -> list[dict]:
         (
             {"path": p.relative_to(root).as_posix(), "size": p.stat().st_size}
             for p in root.rglob("*")
-            if p.is_file()
+            # 휴지통은 목록에 넣지 않는다 — 지운 것이 계속 보이면 지운 것이 아니다.
+            # (docsearch는 점으로 시작하는 폴더를 통째로 건너뛰므로 검색에도 안 잡힌다.)
+            if p.is_file() and TRASH_DIRNAME not in p.relative_to(root).parts
         ),
         key=lambda f: f["path"],
     )
@@ -178,8 +184,26 @@ def write_file(root: Path, rel: str, data: bytes) -> str:
     return target.relative_to(root).as_posix()
 
 
-def delete_file(root: Path, rel: str) -> None:
+def delete_file(root: Path, rel: str) -> str:
+    """지우지 않고 저장소 안 휴지통으로 옮긴다. 옮겨진 자리(저장소 기준 상대경로)를 돌려준다.
+
+    **사내 공유 폴더에는 되돌리기가 없다.** 서비스 계정이 SMB로 지우면 윈도우 휴지통에
+    가지 않고 그대로 사라진다. 그런데 이 경로는 사람뿐 아니라 LLM도 부른다(MCP의
+    delete_file) — 한 번의 잘못된 호출이 복구 불가능하면 안 된다.
+
+    휴지통을 **저장소 안**에 두는 이유: 같은 볼륨이라 이동이 즉시 끝나고(다른 볼륨이면
+    복사 후 삭제가 되어 큰 파일에서 실패할 여지가 생긴다), 사람이 그 폴더에서 바로 찾아
+    되돌릴 수 있다. 점으로 시작해서 색인·목록에서 함께 빠진다.
+    """
     target = resolve(root, rel)
     if not target.is_file():
         raise FileNotFoundError(rel)
-    target.unlink()
+
+    grave = root / TRASH_DIRNAME / Path(rel)
+    if grave.exists():
+        # 같은 파일을 두 번 지웠다 — 먼저 지운 것을 덮어쓰면 되돌릴 것이 하나 사라진다.
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        grave = grave.with_name(f"{grave.stem}.{stamp}{grave.suffix}")
+    grave.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(target), str(grave))
+    return grave.relative_to(root).as_posix()

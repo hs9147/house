@@ -300,7 +300,9 @@ def test_storage_server_write_list_read_delete(monkeypatch, fresh_settings, tmp_
         _call(c, path, "write_file", {"path": "spec.md", "content": "# 규격\n"}))
     assert "spec.md" in _text(_call(c, path, "list_files"))
     assert _text(_call(c, path, "read_file", {"path": "spec.md"})) == "# 규격\n"
-    assert "deleted spec.md" in _text(_call(c, path, "delete_file", {"path": "spec.md"}))
+    # 지우지 않고 휴지통으로 옮긴다 — 어디로 갔는지 함께 말해 준다
+    moved = _text(_call(c, path, "delete_file", {"path": "spec.md"}))
+    assert "trash" in moved and ".trash/spec.md" in moved
     assert _call(c, path, "read_file", {"path": "spec.md"})["error"]["code"] == -32602
 
     # 저장소를 건드린 주체가 감사 로그에 남는다(HTTP 창구와 같은 규칙)

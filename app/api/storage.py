@@ -115,10 +115,12 @@ def delete_storage_file(
     store = _store(store_name)
     _require_writable(store)
     try:
-        storage_service.delete_file(store.root, path)
+        grave = storage_service.delete_file(store.root, path)
     except storage_service.StorageError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="file not found")
-    audit.record(db, key.name, "storage.delete", store.name, {"path": path})
+    # 어디로 갔는지 남긴다 — 되돌릴 수 있다는 사실은 자리를 알아야 쓸모가 있다.
+    audit.record(db, key.name, "storage.delete", store.name,
+                 {"path": path, "trashed_to": grave})
     return None
