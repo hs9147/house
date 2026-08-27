@@ -853,9 +853,11 @@ function PlatformReportModal({ onClose }: { onClose: () => void }) {
  * 등록만으로는 동작을 알 수 없다. 주소가 틀렸거나 전송 방식이 안 맞으면 등록은 성공한
  * 채 조용히 죽어 있어서, 채팅에서 도구가 안 보일 때까지 아무도 모른다.
  */
+type McpCheck = { ok: boolean; error: string | null; tool_count: number; can_issue_key?: boolean };
+
 function McpCheckButton({ moduleId }: { moduleId: number }) {
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; error: string | null; tool_count: number } | null>(null);
+  const [result, setResult] = useState<McpCheck | null>(null);
 
   const check = async () => {
     setBusy(true);
@@ -868,11 +870,36 @@ function McpCheckButton({ moduleId }: { moduleId: number }) {
     }
   };
 
+  // 사내 MCP 서버는 인증을 요구하는데, '사내 MCP 검색'으로 가져온 모듈에만 키가
+  // 자동 발급된다. 그 전에 등록됐거나 주소를 직접 적어 만든 모듈은 키가 빈 채로 남는다.
+  // 예전 안내는 지우고 다시 가져오라고 했지만, 바인딩된 프로젝트가 있으면 그럴 수 없다.
+  const issueKey = async () => {
+    setBusy(true);
+    try {
+      await api.issueMcpModuleKey(moduleId);
+      setResult(await api.checkMcpModule(moduleId)); // 발급이 실제로 통했는지 바로 확인
+    } catch (e) {
+      setResult({ ok: false, error: (e as Error).message, tool_count: 0 });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginRight: 6 }}>
       <button className="small secondary" disabled={busy} onClick={check}>
         {busy ? '확인 중…' : '연결 확인'}
       </button>
+      {result && !result.ok && result.can_issue_key && (
+        <button
+          className="small"
+          disabled={busy}
+          onClick={issueKey}
+          title="이 모듈에 전용 키를 발급해 넣습니다 (모듈을 지울 필요 없음)"
+        >
+          키 발급
+        </button>
+      )}
       {result && (
         <span
           style={{ fontSize: 11, color: result.ok ? '#10b981' : '#ef4444', maxWidth: 320 }}

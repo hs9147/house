@@ -6,9 +6,8 @@ stdio 전용이라 URL이라는 개념 자체가 없었다. 그래서 **실재�
 플랫폼이 직접 띄우는 사내 MCP 서버(api/mcp_servers.py)다.
 
 목록은 고정 표가 아니라 **지금 있는 것에서 만든다**: 저장소 서버는 환경변수가 정한
-저장소마다(PAAS_STORAGE_ROOT · PAAS_DOC_ROOTS), DB 서버는 허용 목록에 있는 모듈만,
-코드 서버는 프로젝트마다 주소가 다르다. 없는 대상을 목록에 올리면 예전과 같은 실수를
-반복하게 된다.
+저장소마다(PAAS_STORAGE_ROOT · PAAS_DOC_ROOTS), DB 서버는 허용 목록에 있는 모듈만.
+없는 대상을 목록에 올리면 예전과 같은 실수를 반복하게 된다.
 """
 from datetime import datetime, timezone
 
@@ -16,11 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import Module, ModuleType, Project
+from ..models import Module, ModuleType
 from . import storage
-
-# 코드 서버는 프로젝트 수만큼 생기므로 목록이 길어진다 — 키워드로 좁히도록 상한을 둔다.
-MAX_PROJECT_ENTRIES = 50
 
 
 def internal_base_url() -> str:
@@ -105,13 +101,13 @@ def list_internal_servers(db: Session) -> list[dict]:
             "database", f"/mcp/db/{module.name}",
         ))
 
-    projects = db.execute(select(Project).order_by(Project.name)).scalars().all()
-    for project in projects[:MAX_PROJECT_ENTRIES]:
-        entries.append(_entry(
-            f"paas-code-{project.name}", f"paas-code-{project.name}",
-            f"프로젝트 '{project.name}' 코드 조회 — 파일 목록·내용·구조 개요(읽기 전용)",
-            "code", f"/mcp/projects/{project.id}/code",
-        ))
+    # 코드 조회는 **서버 하나**다. 예전에는 프로젝트마다 하나씩 나갔는데, 프로젝트가
+    # 늘어난 만큼 등록할 모듈과 발급할 키가 늘었다. 프로젝트는 이제 도구 인자로 받는다.
+    entries.append(_entry(
+        "paas-code", "paas-code",
+        "프로젝트 코드 조회 — 파일 목록·내용·구조 개요(project 인자로 고른다, 읽기 전용)",
+        "code", "/mcp/code",
+    ))
     return entries
 
 

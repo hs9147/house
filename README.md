@@ -251,7 +251,7 @@ POST /paas/api/v1/storage/{저장소}/files             # multipart {file, path?
 DELETE /paas/api/v1/storage/{저장소}/files           # ?path= 삭제 (읽기 전용이면 403)
 
 POST /paas/api/v1/mcp/ops                           # 사내 MCP 서버 — 운영 조회(배포 상태·로그·라우팅·호스트·감사)
-POST /paas/api/v1/mcp/projects/{id}/code            # 사내 MCP 서버 — 프로젝트 코드 조회(파일·구조 개요)
+POST /paas/api/v1/mcp/code                          # 사내 MCP 서버 — 코드 조회(project 인자로 프로젝트 선택)
 POST /paas/api/v1/mcp/docs                          # 사내 MCP 서버 — 사내 문서 본문 검색(저장소를 가로질러)
                                                 #   list_sources·search_docs·read_doc·reindex_docs·index_status
 POST /paas/api/v1/mcp/storage/{저장소}              # 사내 MCP 서버 — 저장소 파일(루트 밖으로 못 나감)
@@ -323,7 +323,7 @@ DELETE /paas/api/v1/previews/{id}
   솔루션 단계 매 턴마다 바인딩된 서버 전부에 왕복하지 않고, 응답하지 않는 서버의
   타임아웃도 턴마다 다시 기다리지 않습니다.
 - **사내 MCP 서버 — 플랫폼이 가진 것을 도구로 노출**(`api/mcp_servers.py`): 운영
-  조회(`/mcp/ops`), 프로젝트 코드 조회(`/mcp/projects/{id}/code`), 파일 저장소
+  조회(`/mcp/ops`), 코드 조회(`/mcp/code`), 파일 저장소
   (`/mcp/storage/{모듈}`), DB 조회(`/mcp/db/{모듈}`) 네 개입니다. 공개 레지스트리의
   동종 서버는 대부분 벤더 호스팅 원격 엔드포인트(소스·운영 데이터가 사외로 나감)이거나
   stdio 전용(이 플랫폼 클라이언트로는 통신 불가)이라 사내에서 만든 것입니다. 이 주소를

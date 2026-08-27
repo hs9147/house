@@ -39,7 +39,6 @@ import type {
   ReviewResult,
   ServerConfigOut,
   StatusSnapshot,
-  StorageListing,
   StorageStore,
   UserAccountOut,
   UserOrgOut,
@@ -171,20 +170,6 @@ async function requestMultipart<T>(path: string, formData: FormData): Promise<T>
   return data as T;
 }
 
-/** 파일 다운로드 — x-api-key가 필요해 <a href>로는 못 받는다. Blob으로 받아 저장한다. */
-async function requestBlob(path: string, query: Record<string, string>): Promise<Blob> {
-  const res = await fetch(`${apiUrl(path)}?${new URLSearchParams(query).toString()}`, {
-    headers: { 'x-api-key': getKey() },
-  });
-  if (res.status === 401) {
-    logout();
-    window.location.hash = '#/login';
-    throw new ApiError(401, '인증이 만료되었습니다. 다시 로그인하세요.');
-  }
-  if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
-  return res.blob();
-}
-
 export const api = {
   // 시스템
   health: () => request<HealthInfo>('GET', '/health'),
@@ -299,7 +284,15 @@ export const api = {
   // ok/error로 구분한다 — 여러 모듈을 나열하며 표시하기 때문이다.
   checkMcpModule: (moduleId: number) =>
     request<{ module_id: number; name: string; url: string; ok: boolean; error: string | null;
-              tool_count: number; tools: string[] }>('POST', `/modules/${moduleId}/mcp-check`),
+              tool_count: number; tools: string[];
+              // 사내 서버인데 키가 비어 있다 = 그 자리에서 발급할 수 있다. 오류 문구를
+              // 파싱해 판단하면 문구를 다듬을 때마다 버튼이 조용히 사라진다.
+              can_issue_key: boolean }>('POST', `/modules/${moduleId}/mcp-check`),
+  // 이미 등록된 사내 mcp 모듈에 전용 키를 발급해 넣는다. 모듈을 지웠다 다시 만들면
+  // 바인딩된 프로젝트를 잃으므로, 그 자리에서 고칠 수 있어야 한다.
+  issueMcpModuleKey: (moduleId: number) =>
+    request<{ id: number; name: string; key_issued: boolean; config: Record<string, unknown> }>(
+      'POST', `/modules/${moduleId}/mcp-key`),
   importMcpModule: (name: string, url: string, category?: string) =>
     request<ModuleOut>('POST', '/modules/import-mcp', { name, url, category: category || null }),
   createModule: (
@@ -328,18 +321,14 @@ export const api = {
 
   // 파일 저장소 — 목록은 환경변수(PAAS_STORAGE_ROOT·PAAS_DOC_ROOTS)가 정한다
   listStorageStores: () => request<StorageStore[]>('GET', '/storage/stores'),
-  listStorageFiles: (store: string) =>
-    request<StorageListing>('GET', `/storage/${store}/files`),
+  // 파일 목록·다운로드·삭제 엔드포인트는 백엔드에 그대로 있지만 콘솔에서는 쓰지 않는다 —
+  // 파일 관리 화면은 저장소 상태와 업로드만 다루고, 내용을 찾는 창구는 paas-docs다.
   uploadStorageFile: (store: string, file: File, path?: string) => {
     const fd = new FormData();
     fd.append('file', file);
     if (path) fd.append('path', path);
     return requestMultipart<{ path: string }>(`/storage/${store}/files`, fd);
   },
-  deleteStorageFile: (store: string, path: string) =>
-    request<void>('DELETE', `/storage/${store}/files`, undefined, { path }),
-  downloadStorageFile: (store: string, path: string) =>
-    requestBlob(`/storage/${store}/files/content`, { path }),
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),
   bindModule: (projectId: number, moduleId: number, env_prefix: string) =>
