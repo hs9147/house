@@ -2,8 +2,19 @@
 
 저장소는 모듈 레지스트리에 등록하는 것이 아니라 **환경변수로 정한다**:
 
-  PAAS_STORAGE_ROOT  내부 저장소 한 곳(쓰기 가능). 이름은 `internal`.
-  PAAS_DOC_ROOTS     사내 문서 폴더(읽기 전용, 쉼표 구분). `이름=경로` 또는 경로만.
+  PAAS_STORAGE_ROOT       내부 저장소 한 곳(쓰기 가능). 이름은 `internal`.
+  PAAS_DOC_ROOTS          사내 문서 폴더(쉼표 구분). `이름=경로` 또는 경로만.
+  PAAS_DOC_ROOTS_WRITABLE 그중 쓰기를 열 폴더 이름. 기본은 비어 있다 = 전부 읽기 전용.
+
+**전체는 읽기, 쓰기는 폴더별 opt-in.** 사내 공유 폴더는 플랫폼이 만든 것이 아니고
+삭제에 되돌리기가 없다(서비스 계정이 SMB로 지우면 휴지통에 가지 않는다). 그래서 쓰기는
+경로 옆에 적는 것이 아니라 허용 목록으로 따로 연다 — 경로를 복사해 붙일 때 권한이
+딸려 오지 않게 하려는 것이다.
+
+읽기만 필요하면 저장소별 서버를 등록할 필요가 없다: /mcp/docs 하나가 전 폴더를 가로질러
+본문을 찾는다. 저장소별 서버(/mcp/storage/{이름})는 그 폴더의 파일을 다루는 자리이고,
+**쓰기 도구는 쓰기가 열린 폴더의 서버에만 광고된다**(api/mcp_servers.py) — 폴더가 URL에
+있기 때문에 성립하는 성질이라, 이 서버를 하나로 합치면 잃는다.
 
 왜 모듈이 아니게 됐나: 저장소가 어느 디렉터리에 얹혀 있는지는 서버를 설치한 사람이
 이미 아는 사실이지 콘솔에서 등록할 일이 아니었다. 모듈로 두면 같은 폴더가 이름만 달리
@@ -85,6 +96,8 @@ def stores() -> list[Store]:
     "그 폴더에 문서가 없다"는 구분이 되지 않아 원인을 찾는 데 시간을 다 쓰게 된다.
     """
     settings = get_settings()
+    # 쓰기를 여는 것은 별도의 행위다 — 경로 옆이 아니라 허용 목록에서 정한다.
+    writable = {n.strip() for n in settings.doc_roots_writable.split(",") if n.strip()}
     found = [Store(
         INTERNAL_STORE,
         Path(settings.storage_root or "./data/storage").resolve(),
@@ -108,7 +121,15 @@ def stores() -> list[Store]:
                 f"PAAS_DOC_ROOTS의 저장소 이름이 겹칩니다: {name!r}"
                 f" ({INTERNAL_STORE}은 내부 저장소가 쓰는 이름입니다)")
         seen.add(name)
-        found.append(Store(name, Path(path).resolve(), read_only=True))
+        found.append(Store(name, Path(path).resolve(), read_only=name not in writable))
+
+    # 허용 목록에 없는 이름이 남았다 = 오타이거나 지운 폴더를 가리킨다. 조용히 넘기면
+    # 그 폴더는 읽기 전용으로 남고, 왜 안 써지는지 알아낼 방법이 없다.
+    unknown = writable - seen
+    if unknown:
+        raise StorageError(
+            f"PAAS_DOC_ROOTS_WRITABLE에 없는 저장소 이름이 있습니다: {', '.join(sorted(unknown))}"
+            f" — PAAS_DOC_ROOTS에 있는 이름이어야 합니다(현재: {', '.join(sorted(seen))}).")
     return found
 
 

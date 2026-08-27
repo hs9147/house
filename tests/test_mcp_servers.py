@@ -342,6 +342,35 @@ def test_doc_root_store_hides_write_tools(monkeypatch, fresh_settings, tmp_path)
     assert rm.status_code == 403
 
 
+def test_writable_doc_root_advertises_write_tools(monkeypatch, fresh_settings, tmp_path):
+    """쓰기를 연 폴더의 서버에만 쓰기 도구가 뜬다.
+
+    **이 성질은 폴더가 URL에 있어서 성립한다.** 저장소 서버를 하나로 합쳐 폴더를 인자로
+    받게 하면 write_file·delete_file이 항상 목록에 뜨고, 계약 폴더를 다루는 문맥에서도
+    모델이 쓰기 도구를 보게 된다. 읽기만 필요한 쪽은 /mcp/docs 하나로 전 폴더를 가로지르면
+    되므로, 저장소 서버를 폴더별로 두는 대가는 크지 않다.
+    """
+    (tmp_path / "scratch").mkdir()
+    (tmp_path / "contract").mkdir()
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
+    monkeypatch.setenv("PAAS_DOC_ROOTS",
+                       f"scratch={tmp_path / 'scratch'},contract={tmp_path / 'contract'}")
+    monkeypatch.setenv("PAAS_DOC_ROOTS_WRITABLE", "scratch")
+    get_settings.cache_clear()
+    c = _client()
+
+    opened = [t["name"] for t in _rpc(c, "/mcp/storage/scratch", "tools/list")["result"]["tools"]]
+    assert "write_file" in opened and "delete_file" in opened
+    _call(c, "/mcp/storage/scratch", "write_file", {"path": "memo.md", "content": "# 메모\n"})
+    assert (tmp_path / "scratch" / "memo.md").read_text(encoding="utf-8") == "# 메모\n"
+
+    # 같은 설정의 다른 폴더에는 그 도구가 **보이지도 않는다**
+    locked = [t["name"] for t in _rpc(c, "/mcp/storage/contract", "tools/list")["result"]["tools"]]
+    assert "write_file" not in locked and "delete_file" not in locked
+    assert _call(c, "/mcp/storage/contract", "write_file",
+                 {"path": "x.md", "content": "x"})["error"]["code"] == -32601
+
+
 def test_storage_list_files_filters_and_caps(monkeypatch, fresh_settings, tmp_path):
     """문서 폴더는 파일이 수천 개다 — 전체 목록을 그대로 내주면 컨텍스트가 통째로 찬다."""
     c = _storage_client(monkeypatch, tmp_path)

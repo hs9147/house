@@ -14,9 +14,10 @@ ADMIN = {"x-api-key": "test-admin-key"}
 API = "/paas/api/v1"
 
 
-def _client(monkeypatch, tmp_path, doc_roots="") -> TestClient:
+def _client(monkeypatch, tmp_path, doc_roots="", writable="") -> TestClient:
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_ROOTS", doc_roots)
+    monkeypatch.setenv("PAAS_DOC_ROOTS_WRITABLE", writable)
     get_settings.cache_clear()
     return TestClient(create_app())
 
@@ -92,8 +93,8 @@ def test_stores_listing_shows_what_the_env_vars_opened(monkeypatch, tmp_path, fr
     assert rows["missing-folder"]["exists"] is False
 
 
-def test_doc_roots_are_read_only(monkeypatch, tmp_path, fresh_settings):
-    """읽으러 붙인 폴더다 — 콘솔에서 실수로 지워지는 일까지 막힌다."""
+def test_doc_roots_are_read_only_by_default(monkeypatch, tmp_path, fresh_settings):
+    """기본은 읽기 전용이다 — 쓰기는 허용 목록으로 따로 연다."""
     docs = tmp_path / "shared"
     docs.mkdir()
     (docs / "규정.txt").write_text("연차 규정", encoding="utf-8")
@@ -106,6 +107,46 @@ def test_doc_roots_are_read_only(monkeypatch, tmp_path, fresh_settings):
     assert c.delete(f"{API}/storage/shared/files?path=규정.txt",
                     headers=ADMIN).status_code == 403
     assert (docs / "규정.txt").exists()
+
+
+def test_a_doc_root_can_be_opened_for_writing(monkeypatch, tmp_path, fresh_settings):
+    """폴더별 opt-in — 허용 목록에 적은 폴더만 열린다."""
+    open_dir, locked_dir = tmp_path / "scratch", tmp_path / "contract"
+    open_dir.mkdir()
+    locked_dir.mkdir()
+    (locked_dir / "계약.txt").write_text("원본", encoding="utf-8")
+    c = _client(monkeypatch, tmp_path,
+                doc_roots=f"scratch={open_dir},contract={locked_dir}", writable="scratch")
+
+    rows = {s["name"]: s for s in c.get(f"{API}/storage/stores", headers=ADMIN).json()}
+    assert rows["scratch"]["read_only"] is False
+    assert rows["contract"]["read_only"] is True   # 같은 설정의 다른 폴더는 그대로 잠긴다
+
+    assert c.post(f"{API}/storage/scratch/files",
+                  files={"file": ("메모.txt", "내용".encode())},
+                  headers=ADMIN).status_code == 201
+    assert (open_dir / "메모.txt").read_text(encoding="utf-8") == "내용"
+    assert c.delete(f"{API}/storage/scratch/files?path=메모.txt",
+                    headers=ADMIN).status_code == 204
+
+    # 열지 않은 폴더는 여전히 막힌다
+    assert c.post(f"{API}/storage/contract/files",
+                  files={"file": ("x.txt", b"hi")}, headers=ADMIN).status_code == 403
+    assert (locked_dir / "계약.txt").read_text(encoding="utf-8") == "원본"
+
+
+def test_writable_name_that_is_not_a_doc_root_is_rejected(monkeypatch, tmp_path, fresh_settings):
+    """오타를 조용히 넘기면 그 폴더는 읽기 전용으로 남고 이유를 알 수 없다.
+
+    권한이 안 먹는 것과 설정이 틀린 것은 밖에서 구분되지 않는다 — 그래서 막는다.
+    """
+    docs = tmp_path / "scratch"
+    docs.mkdir()
+    c = _client(monkeypatch, tmp_path, doc_roots=f"scratch={docs}", writable="scrach")
+    r = c.get(f"{API}/storage/stores", headers=ADMIN)
+    assert r.status_code == 500
+    assert "scrach" in r.json()["detail"]
+    assert "scratch" in r.json()["detail"]  # 있는 이름을 함께 보여 준다
 
 
 def test_broken_doc_roots_say_which_entry_is_wrong(monkeypatch, tmp_path, fresh_settings):
