@@ -265,6 +265,54 @@ function Test-IisPrereq {
   }
 }
 
+function Show-IisAccessLog {
+  <#
+    What did IIS itself see? This doctor runs ON the server, but the browser runs
+    on someone's PC -- different network path. When the server-side legs all pass
+    and the browser still fails, the question is no longer "is the server ok" but
+    "did the browser's request even arrive". The IIS access log answers that, and
+    nothing else does.
+  #>
+  if ($env:OS -ne 'Windows_NT') {
+    Write-Info 'Not running on Windows -- skipping IIS access log.'
+    return
+  }
+  $root = "$env:SystemDrive\inetpub\logs\LogFiles"
+  if (-not (Test-Path $root)) {
+    Write-Info "No IIS log directory at $root -- check the site's logFile.directory."
+    return
+  }
+  try {
+    # Newest few files across all sites; a server may host several.
+    $files = Get-ChildItem $root -Recurse -Filter 'u_ex*.log' -ErrorAction Stop |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 4
+    if (-not $files) {
+      Write-Info 'No IIS log files yet (logging may be disabled for the site).'
+      return
+    }
+    $hits = @()
+    foreach ($f in $files) {
+      $hits += Select-String -Path $f.FullName -Pattern 'powershell/ws' -ErrorAction SilentlyContinue |
+               Select-Object -Last 5
+    }
+    if (-not $hits) {
+      Write-Bad 'IIS never logged a request for the terminal socket path.'
+      Write-Info '  The browser request did not reach IIS at all. Look between the browser'
+      Write-Info '  and this server: a corporate HTTP proxy that does not pass Upgrade, or a'
+      Write-Info '  different host/binding than the one you tested here.'
+      Write-Info "  Logs searched: $($files[0].DirectoryName)"
+      return
+    }
+    Write-Info 'IIS logged these terminal socket requests (newest last):'
+    foreach ($h in ($hits | Select-Object -Last 6)) {
+      Write-Info "    $($h.Line.Trim())"
+    }
+    Write-Info '  A 101 means IIS relayed the upgrade. Anything else is the status it returned.'
+  } catch {
+    Write-Info "IIS access log: cannot check ($($_.Exception.Message))"
+  }
+}
+
 function Get-Json($url, $headers) {
   try {
     return @{ Ok = $true; Data = (Invoke-RestMethod -Headers $headers -Uri $url -TimeoutSec 20) }
@@ -459,7 +507,11 @@ $dir = $results['direct']
 $via = $results['front']
 
 if ($dir.Connected -and $dir.Output -and $via.Connected -and $via.Output) {
-  Write-Ok 'Both paths work. The browser should work too (hard-refresh if it is serving a cached console).'
+  Write-Ok 'Both paths work from this server.'
+  Write-Info 'If the browser still fails, the difference is the network path: this script runs'
+  Write-Info '  on the server, the browser does not. What IIS logged tells you which it is.'
+  Write-Section 'IIS access log -- what did the browser actually send?'
+  Show-IisAccessLog
 } elseif ($dir.Connected -and $dir.Output -and -not ($via.Connected -and $via.Output)) {
   Write-Bad 'Backend is fine; the front end is not relaying WebSocket upgrades.'
   Write-Section 'IIS prerequisites'
