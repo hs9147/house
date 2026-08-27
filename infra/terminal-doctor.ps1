@@ -114,13 +114,37 @@ function Test-IisPrereq {
   # 2. ARR version. WebSocket proxying arrived in ARR 3.0 -- with 2.x every HTTP
   #    route proxies perfectly and upgrades are simply never forwarded, which
   #    looks exactly like this failure.
+  #
+  #    Do NOT guess the path. ARR lives under Program Files in some versions and
+  #    under inetsrv in others; hardcoding one produces a confident "not
+  #    installed" for a server that plainly has it. Ask IIS where the module is.
   try {
-    $arr = "$sysRoot\system32\inetsrv\requestRouter.dll"
-    if (Test-Path $arr) {
+    $arr = ''
+    if (Test-Path $appcmd) {
+      $gm = (& $appcmd list config -section:system.webServer/globalModules 2>$null) -join "`n"
+      # Attribute order is not fixed -- match it both ways.
+      $m = [regex]::Match($gm, 'name="ApplicationRequestRouting"[^>]*?image="([^"]+)"')
+      if (-not $m.Success) {
+        $m = [regex]::Match($gm, 'image="([^"]+)"[^>]*?name="ApplicationRequestRouting"')
+      }
+      if ($m.Success) { $arr = [Environment]::ExpandEnvironmentVariables($m.Groups[1].Value) }
+    }
+    if (-not $arr) {
+      foreach ($candidate in @("$sysRoot\system32\inetsrv\requestRouter.dll",
+                               "$env:ProgramFiles\IIS\Application Request Routing\requestRouter.dll")) {
+        if (Test-Path $candidate) { $arr = $candidate; break }
+      }
+    }
+    if ($arr -and (Test-Path $arr)) {
       $ver = (Get-Item $arr).VersionInfo.ProductVersion
       Write-Info "ARR module version: $ver  (WebSocket proxying requires ARR 3.0 or newer)"
+      Write-Info "  at $arr"
+    } elseif ($arr) {
+      Write-Bad "IIS registers the ARR module at '$arr' but that file is missing."
     } else {
-      Write-Info 'ARR module (requestRouter.dll) not found -- ARR may not be installed.'
+      Write-Bad 'ARR module is not registered in IIS globalModules.'
+      Write-Info '  Without ARR nothing is forwarded to the backend at all -- but plain HTTP'
+      Write-Info '  works, so check whether the rewrite target is served some other way.'
     }
   } catch {
     Write-Info 'ARR version: cannot check'
@@ -320,6 +344,27 @@ if ($health.Data.PSObject.Properties.Name -notcontains 'revision') {
   return
 }
 Write-Ok "revision $($health.Data.revision) ($($health.Data.branch))"
+
+# Does plain HTTP even reach the same platform through the front door? Without
+# this the next section is untrustworthy: a wrong -Proxy (or a site bound to a
+# hostname, so http://localhost lands on a different site) fails the WebSocket
+# leg for reasons that have nothing to do with WebSockets, and the verdict then
+# blames the proxy's upgrade handling.
+$frontHealth = Get-Json "$Proxy$PATH_HEALTH" @{}
+if (-not $frontHealth.Ok) {
+  Write-Bad "HTTP through the front ($Proxy) fails: $($frontHealth.Message)"
+  Write-Info '  This is NOT a WebSocket problem -- plain HTTP does not get through either.'
+  Write-Info '  Either -Proxy is not the address the browser uses, or the site does not route /paas.'
+  Write-Info '  Check the site bindings: appcmd list site'
+  Write-Info '  Re-run with -Proxy set to the exact URL you open in the browser.'
+  return
+}
+if ($frontHealth.Data.revision -ne $health.Data.revision) {
+  Write-Bad "The front door reaches a DIFFERENT backend (revision $($frontHealth.Data.revision))."
+  Write-Info '  The rewrite rule points somewhere other than the service you just checked.'
+  return
+}
+Write-Ok "HTTP through the front reaches the same backend"
 
 # ------------------------------------------------------------ 3. preflight
 
