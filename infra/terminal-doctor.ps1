@@ -321,6 +321,27 @@ if ($health.Data.PSObject.Properties.Name -notcontains 'revision') {
 }
 Write-Ok "revision $($health.Data.revision) ($($health.Data.branch))"
 
+# Does plain HTTP even reach the same platform through the front door? Without
+# this the next section is untrustworthy: a wrong -Proxy (or a site bound to a
+# hostname, so http://localhost lands on a different site) fails the WebSocket
+# leg for reasons that have nothing to do with WebSockets, and the verdict then
+# blames the proxy's upgrade handling.
+$frontHealth = Get-Json "$Proxy$PATH_HEALTH" @{}
+if (-not $frontHealth.Ok) {
+  Write-Bad "HTTP through the front ($Proxy) fails: $($frontHealth.Message)"
+  Write-Info '  This is NOT a WebSocket problem -- plain HTTP does not get through either.'
+  Write-Info '  Either -Proxy is not the address the browser uses, or the site does not route /paas.'
+  Write-Info '  Check the site bindings: appcmd list site'
+  Write-Info '  Re-run with -Proxy set to the exact URL you open in the browser.'
+  return
+}
+if ($frontHealth.Data.revision -ne $health.Data.revision) {
+  Write-Bad "The front door reaches a DIFFERENT backend (revision $($frontHealth.Data.revision))."
+  Write-Info '  The rewrite rule points somewhere other than the service you just checked.'
+  return
+}
+Write-Ok "HTTP through the front reaches the same backend"
+
 # ------------------------------------------------------------ 3. preflight
 
 $headers = @{ 'x-api-key' = $Key }
