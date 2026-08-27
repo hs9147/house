@@ -67,3 +67,49 @@ def test_unreadable_windows_version_falls_back_to_pywinpty():
     with patch.object(pty_terminal.os, "name", "nt"), \
             patch.object(pty_terminal.sys, "getwindowsversion", boom, create=True):
         assert pty_terminal.default_backend_code() is None
+
+
+class TestProbeReasonCodes:
+    """probe()의 reason은 **계약**이다 — infra/terminal-doctor.ps1이 이걸로 판정한다.
+
+    error·hint는 브라우저에 띄울 한국어 문장이라 언제든 다듬는다. 그런데 서버에서 도는
+    진단 스크립트는 그 문장을 쓸 수 없다: Windows 콘솔 코드페이지에서 한글이 깨져 정작
+    가장 중요한 줄을 못 읽는다. 문장을 파싱하게 두면 문구를 손볼 때마다 스크립트가 조용히
+    깨지므로, 사유를 값으로 주고 그 값을 여기서 고정한다.
+    """
+
+    def test_shell_that_cannot_be_executed(self):
+        info = pty_terminal.probe("/nonexistent-shell-xyz", "")
+        assert info["ok"] is False
+        assert info["reason"] == pty_terminal.REASON_SHELL_EXITED
+        # 127 = exec 실패. 스크립트가 이 값으로 "경로를 확인하라"를 가른다.
+        assert info["exit_status"] == 127
+
+    def test_shell_that_exits_immediately(self):
+        info = pty_terminal.probe("/bin/false", "")
+        assert info["reason"] == pty_terminal.REASON_SHELL_EXITED
+        assert info["exit_status"] == 1
+
+    def test_unknown_backend_name(self):
+        info = pty_terminal.probe("/bin/sh", "nonsense")
+        assert info["reason"] == pty_terminal.REASON_BAD_BACKEND
+        assert info["exit_status"] is None
+
+    def test_missing_websocket_library(self):
+        with patch.object(pty_terminal, "websocket_library", lambda: ""):
+            info = pty_terminal.probe("/bin/sh", "")
+        assert info["reason"] == pty_terminal.REASON_NO_WS_LIBRARY
+
+    def test_backend_cannot_be_opened(self):
+        def boom(*a, **kw):
+            raise pty_terminal.PtyUnavailable("no backend")
+
+        with patch.object(pty_terminal, "PtyTerminal", boom):
+            info = pty_terminal.probe("/bin/sh", "")
+        assert info["reason"] == pty_terminal.REASON_NO_BACKEND
+
+    def test_healthy_shell_has_no_reason(self):
+        info = pty_terminal.probe("/bin/sh", "")
+        assert info["ok"] is True
+        assert info["reason"] == ""
+        assert info["exit_status"] is None

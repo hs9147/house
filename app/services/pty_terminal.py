@@ -39,6 +39,13 @@ CONPTY_MIN_BUILD = 17763
 # 길면 진단 요청이 그만큼 늘어진다.
 PROBE_SETTLE_SECONDS = 0.3
 
+# probe()가 돌려주는 사유 코드. 화면 문구는 언제든 다듬지만 이 값은 계약이라 그대로 둔다
+# (infra/terminal-doctor.ps1이 이걸로 판정한다).
+REASON_NO_WS_LIBRARY = "no_ws_library"      # uvicorn이 업그레이드를 못 받는다
+REASON_BAD_BACKEND = "bad_backend"          # PAAS_PTY_BACKEND 값이 잘못됐다
+REASON_NO_BACKEND = "no_pty_backend"        # pywinpty가 없거나 셸을 못 띄웠다
+REASON_SHELL_EXITED = "shell_exited"        # 열렸는데 즉시 죽었다(exit_status 참고)
+
 
 class PtyUnavailable(RuntimeError):
     """이 서버에서는 PTY를 열 수 없다(백엔드 미설치·미지원)."""
@@ -102,9 +109,15 @@ def probe(shell: str, backend: str) -> dict:
     import 여부만 보지 않고 실제로 셸을 띄우는 이유: Server 2016에서 ConPTY 자동 선택이
     실패하는 것처럼, 설치는 됐는데 열리지 않는 경우가 이 기능의 주된 실패 모양이다.
     """
+    # reason은 기계가 읽는 사유 코드고, error·hint는 사람이 읽는 한국어 문장이다.
+    # 콘솔은 후자를 그대로 띄우면 되지만, 서버에서 도는 진단 스크립트는 그럴 수 없다 —
+    # Windows 콘솔 코드페이지에서 한글이 깨져 정작 가장 중요한 줄을 못 읽는다. 문장을
+    # 파싱하게 두면 문구를 다듬을 때마다 조용히 깨지므로, 사유를 값으로 준다.
     info: dict = {"shell": shell, "backend": backend or "auto", "ok": False, "error": "",
+                  "reason": "", "exit_status": None,
                   "resolved_backend": "", "websocket_library": websocket_library()}
     if not info["websocket_library"]:
+        info["reason"] = REASON_NO_WS_LIBRARY
         info["error"] = (
             "이 서버에 WebSocket 구현이 없습니다 — HTTP는 정상이지만 터미널 소켓만"
             ' 404로 떨어집니다. `pip install "uvicorn[standard]"`(또는 websockets) 후'
@@ -114,6 +127,7 @@ def probe(shell: str, backend: str) -> dict:
     try:
         resolved = backend_code(backend)
     except PtyUnavailable as e:
+        info["reason"] = REASON_BAD_BACKEND
         info["error"] = str(e)
         return info
     # 실제로 무엇이 골라졌는지 함께 답한다 — "auto"만 보여 주면 Server 2016에서 무엇이
@@ -125,6 +139,7 @@ def probe(shell: str, backend: str) -> dict:
     try:
         terminal = PtyTerminal([shell], cols=80, rows=24, backend=resolved)
     except PtyUnavailable as e:
+        info["reason"] = REASON_NO_BACKEND
         info["error"] = str(e)
         return info
     try:
@@ -136,6 +151,8 @@ def probe(shell: str, backend: str) -> dict:
         if status is None:
             info["ok"] = True
         else:
+            info["reason"] = REASON_SHELL_EXITED
+            info["exit_status"] = status
             info["error"] = (
                 f"셸이 즉시 종료했습니다(종료코드 {status})."
                 + (f" '{shell}'을 실행할 수 없습니다 — 경로를 확인하세요."
