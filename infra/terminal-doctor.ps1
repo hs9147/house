@@ -215,10 +215,25 @@ function Test-IisPrereq {
       if ($siteCfg -match 'enabled="false"') {
         Write-Bad "Site '$site' sets webSocket enabled=`"false`""
       }
-      $outbound = (& $appcmd list config "$site/" -section:system.webServer/rewrite/outboundRules 2>$null) -join ' '
-      if ($outbound -match '<rule') {
-        Write-Bad "Site '$site' has outbound rewrite rules -- these buffer responses and break upgrades."
-        Write-Info '  Add a preCondition so they do not apply to the terminal path, or scope them tighter.'
+      # Not every outbound rule matters. Ones that rewrite a response HEADER
+      # (serverVariable="RESPONSE_...") need no body buffering and leave an
+      # upgrade alone. Ones that rewrite the response BODY (filterByTags, or no
+      # serverVariable at all) force IIS to buffer the response, which a 101
+      # upgrade cannot survive. Naming the rule is the difference between a
+      # finding you can act on and one you cannot.
+      $outbound = (& $appcmd list config "$site/" -section:system.webServer/rewrite/outboundRules 2>$null) -join "`n"
+      foreach ($m in [regex]::Matches($outbound, '<rule\s+name="([^"]+)"([^>]*)>([\s\S]*?)</rule>')) {
+        $ruleName = $m.Groups[1].Value
+        $pm = [regex]::Match($m.Groups[2].Value, 'preCondition="([^"]+)"')
+        if ($pm.Success) { $pre = $pm.Groups[1].Value } else { $pre = '(none)' }
+        $ruleBody = $m.Groups[3].Value
+        if ($ruleBody -match 'serverVariable="RESPONSE_' -and $ruleBody -notmatch 'filterByTags') {
+          Write-Info "Site '$site' outbound rule '$ruleName' rewrites a header only -- harmless."
+        } else {
+          Write-Bad "Site '$site' outbound rule '$ruleName' rewrites the response body (preCondition=$pre)."
+          Write-Info '  Body rewriting buffers the response, which breaks WebSocket upgrades.'
+          Write-Info '  Scope it with a preCondition so it does not apply to the terminal path.'
+        }
       }
     }
   } catch {

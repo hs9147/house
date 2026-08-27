@@ -184,7 +184,17 @@ Windows 10 1809 / Server 2019(빌드 17763)부터**다. 그래서 빌드가 그�
 > | webSocket 설정 | `appcmd list config -section:system.webServer/webSocket` | `appcmd set config -section:system.webServer/webSocket /enabled:True /commit:apphost` |
 > | ARR 프록시 | `appcmd list config -section:system.webServer/proxy` | `appcmd set config -section:system.webServer/proxy /enabled:True /commit:apphost` |
 > | **앱풀 파이프라인** | `appcmd list app` → 그 풀의 `managedPipelineMode` | **Classic이면 WebSocket이 아예 안 된다** — `appcmd set apppool "<풀>" /managedPipelineMode:Integrated` 후 `recycle` |
-> | 아웃바운드 규칙 | `appcmd list config "<사이트>/" -section:system.webServer/rewrite/outboundRules` | 응답을 버퍼링해 업그레이드를 깬다 — preCondition으로 터미널 경로를 빼거나 범위를 좁힌다 |
+> | 아웃바운드 규칙 | `appcmd list config "<사이트>/" -section:system.webServer/rewrite/outboundRules` | **본문**을 고치는 규칙만 문제다(아래) — preCondition으로 범위를 좁힌다 |
+>
+> 아웃바운드 규칙이 있다고 다 문제는 아니다. 갈리는 지점은 **무엇을 고치느냐**다:
+>
+> - `<match serverVariable="RESPONSE_Location" ...>` — **헤더만** 고친다. 본문을 버퍼링할
+>   이유가 없으므로 업그레이드에 영향이 없다. (`infra/gitea/web.config.example`이 다루는
+>   Location 재작성이 이 종류다.)
+> - `<match filterByTags="A, Form, Img" ...>` — **본문**을 고친다. IIS가 응답을 버퍼링해야
+>   하는데, 101 업그레이드는 버퍼링될 수 있는 응답이 아니라 여기서 깨진다.
+>
+> doctor가 규칙 이름과 종류를 각각 찍어 준다 — 이름을 알아야 손을 댈 수 있다.
 >
 > 기본 설치에 WebSocket Protocol 기능이 **없다**. 그게 이미 깔려 있는데도 안 되면 다음
 > 용의자는 **앱풀 파이프라인 모드**와 **ARR 버전**이다(실제 현장에서 걸린 것은 Classic
