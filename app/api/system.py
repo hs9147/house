@@ -580,17 +580,24 @@ async def powershell_websocket_terminal(
     audit.record(db, key.name, "powershell.ws_open", "terminal",
                  {"shell": settings.pty_shell, "backend": settings.pty_backend or "auto"})
 
+    # 세션이 왜 끝났는지 담아 둔다. 이유 없이 끊기면 서버·프록시·셸 중 어디가 문제인지
+    # 밖에서 가릴 방법이 없다 — 화면에는 "열리자마자 끝났습니다"만 남고 preflight는
+    # 계속 OK라고 답한다(그 조합으로 한참 헤맸다).
+    session_error: dict[str, str] = {}
+
     async def pump_output() -> None:
         """PTY 읽기는 블로킹이라 스레드에서 돌린다 — 이벤트 루프를 잡으면 입력이 막힌다."""
         while True:
-            chunk = await asyncio.to_thread(terminal.read)
+            try:
+                chunk = await asyncio.to_thread(terminal.read)
+            except Exception as e:  # noqa: BLE001 — 백엔드마다 예외 종류가 제각각이다
+                # 여기서 예외가 그냥 올라가면 세션은 끝나는데 이유가 어디에도 안 남는다.
+                # pywinpty의 read는 EOFError 말고도 던진다.
+                session_error["reason"] = f"셸 출력을 읽지 못했습니다: {type(e).__name__}: {e}"
+                return
             if not chunk:
-                break
+                return
             await websocket.send_text(chunk)
-
-    # 입력 펌프가 왜 끝났는지 담아 둔다 — 이유 없이 끊기면 서버·프록시·셸 중 어디가
-    # 문제인지 밖에서 가릴 방법이 없다.
-    input_error: dict[str, str] = {}
 
     async def pump_input() -> None:
         while True:
@@ -605,7 +612,7 @@ async def powershell_websocket_terminal(
                     terminal.write(str(message.get("data", "")))
                 except Exception as e:  # noqa: BLE001 — 백엔드마다 예외 종류가 다르다
                     # 셸이 이미 사라진 것이다. 세션은 끝나지만 조용히 끝내지는 않는다.
-                    input_error["reason"] = f"셸에 입력을 전달하지 못했습니다: {type(e).__name__}: {e}"
+                    session_error["reason"] = f"셸에 입력을 전달하지 못했습니다: {type(e).__name__}: {e}"
                     return
             elif kind == "resize":
                 # **창 크기는 부가 기능이다.** 여기서 난 예외가 입력 펌프를 죽이면
@@ -634,16 +641,27 @@ async def powershell_websocket_terminal(
         # 것이라 보낼 곳이 이미 없다.
         alive_seconds = time.monotonic() - opened_at
         status = terminal.exit_status()
-        if input_error:
-            await websocket.send_text(f"\r\n[{input_error['reason']}]\r\n")
+        reason = session_error.get("reason", "")
+        if reason:
+            await websocket.send_text(f"\r\n[{reason}]\r\n")
         elif output_task in done and status is not None and alive_seconds < SHORT_SESSION_SECONDS:
+            reason = f"셸이 바로 종료했습니다(종료코드 {status})"
             await websocket.send_text(
-                f"\r\n[셸이 바로 종료했습니다 — 종료코드 {status}] "
-                f"'{settings.pty_shell}'을(를) 실행할 수 없습니다."
+                f"\r\n[{reason}] '{settings.pty_shell}'을(를) 실행할 수 없습니다."
                 " Windows Server 2016은 ConPTY가 없으므로 PAAS_PTY_BACKEND=winpty를"
                 " 지정해 보세요(현재 백엔드: "
                 f"{settings.pty_backend or 'auto'}).\r\n"
             )
+        elif output_task in done:
+            reason = f"셸이 종료했습니다(종료코드 {status})"
+        else:
+            reason = "브라우저가 연결을 끊었습니다"
+        # **서버에도 남긴다.** 지금까지는 세션이 죽어도 서버 쪽에 아무 흔적이 없어서,
+        # "화면에는 이렇게 나온다"는 전언만으로 원인을 좁혀야 했다. 한 줄이면 다음부터는
+        # 서버 로그에서 바로 읽힌다(nssm이 서비스 stdout을 로그 파일로 받는다).
+        print(f"[paas] terminal session ended after {alive_seconds:.1f}s "
+              f"— {reason} (shell={settings.pty_shell}, "
+              f"backend={settings.pty_backend or 'auto'}, user={key.name})")
     finally:
         # **셸을 먼저 끝낸다.** 출력 펌프는 블로킹 읽기 안에 있어서 cancel로는 깨울 수
         # 없고, 셸이 죽어야 그 읽기가 돌아온다 — 순서를 뒤집으면 출력이 없는 채로
