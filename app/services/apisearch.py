@@ -1,49 +1,62 @@
-"""외부 API 디렉터리 검색 — 키워드로 공개 API를 찾아 external_api 모듈로 추가한다.
+"""외부 API 카탈로그 — 소스에서 받아 DB에 쌓고, 검색은 그 표만 읽는다.
 
-소스는 둘이고, 결과는 합쳐서 내보낸다:
+수집 소스는 둘이고 한 표(api_catalog)에 source로 갈라 담는다:
 
   apis.guru      PAAS_API_DIRECTORY_URL (기본값 있음) — 글로벌 OpenAPI 목록
   공공데이터      PAAS_PUBLIC_DATA_URL (기본 비어 있음 = 안 부른다) — 국내 공공 카탈로그
 
-두 번째를 붙인 이유: apis.guru는 글로벌 OpenAPI 카탈로그라 국내 공공데이터가 잡히지
-않는다. 기본값을 비워 두는 이유: 설정하지 않은 설치본에 아웃바운드 호출을 새로 만들지
-않기 위해서다.
+**받는 일과 찾는 일을 갈랐다.** 예전에는 검색이 목록 전체를 메모리에 캐시하고 그 위에서
+걸렀다. 재시작하면 사라지고, 워커가 여럿이면 각자 따로 받고, 무엇보다 검색 경로에
+아웃바운드 호출이 섞여 있어서 관리자 전용으로 묶을 수밖에 없었다. 이제 수집
+(sync_catalog)만 밖으로 나가고 검색(search_apis)은 DB만 읽는다 — 그래서 검색을 MCP
+도구로 열 수 있다(api/mcp_servers.py의 /mcp/apis).
 
-**한 소스가 죽어도 다른 소스는 나온다.** 둘을 한 번에 실패시키면 "검색이 안 된다"만
-남고 어느 쪽이 문제인지 알 수 없다 — 살아 있는 결과를 주고 죽은 쪽은 warnings로 말한다.
+**갱신은 바뀐 것만 쓴다.** 소스는 매번 목록 전체를 주지만 그중 달라지는 것은 몇 개뿐이다.
+행마다 필드를 비교해 달라진 것만 대입하므로 안 바뀐 행에는 UPDATE 자체가 나가지 않고,
+updated_at도 그대로다 — "언제 바뀌었나"가 "언제 받았나"에 덮이지 않는다.
 
-목록 전체를 한 번 받아 메모리에 캐시(TTL)하고, 이후 키워드 필터는 로컬에서 수행한다 —
-검색마다 외부 호출을 하지 않는다. 폐쇄망에서는 두 주소 모두 사내 미러로 바꾼다.
+**사라진 항목은 지우지 않고 removed_at을 찍는다.** 한 소스가 실패하면 그 소스의 행은
+아예 손대지 않는다 — 조회 실패를 "없어졌다"로 기록하면 다음 검색에서 멀쩡한 카탈로그가
+통째로 사라진다.
 
-주의: 이 조회는 아웃바운드 호출이다(소스코드가 아니라 API 메타데이터). 그래서
-관리자 전용으로 게이트하고, get_with_retry로 서킷브레이커를 적용한다.
+주의: 수집은 아웃바운드 호출이다. 그래서 수집을 부르는 창구(POST /modules/search/refresh)는
+관리자 전용이고, get_with_retry로 서킷브레이커를 적용한다.
 """
 import re
 import threading
 import time
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
 from ..config import get_settings
+from ..models import ApiCatalogEntry, utcnow
 from .httpx_retry import get_with_retry
 
-_CACHE_TTL = 86400.0  # 1일 1회(24시간) 주기적 동기화
-_lock = threading.Lock()
-_cache: dict | None = None
-_cached_at = 0.0
-# 공공데이터 카탈로그는 형식이 apis.guru와 달라 정규화한 뒤 캐시한다.
-_public_cache: list[dict] | None = None
-_public_cached_at = 0.0
+SOURCE_APISGURU = "apisguru"
+SOURCE_PUBLIC_DATA = "publicdata"
+
+# 소스가 주는 값 그대로인 필드. 갱신할 때 이 목록만 비교한다 — search_text는 여기서
+# 파생되고, created_at·updated_at·removed_at은 표가 스스로 관리한다.
+_FIELDS = ("title", "description", "provider", "categories", "homepage", "spec_url")
+
+_SYNC_INTERVAL = 86400.0  # 1일 1회
+_scheduler_lock = threading.Lock()
 _scheduler_thread: threading.Thread | None = None
+
+EMPTY_CATALOG = (
+    "API 카탈로그가 비어 있습니다 — 아직 수집하지 않았습니다"
+    "(관리자: POST /modules/search/refresh)."
+)
 
 
 class ApiSearchError(RuntimeError):
-    """디렉터리 조회 실패 — 502로 매핑."""
+    """카탈로그 수집 실패 — 502로 매핑."""
 
 
-def _load_directory(force_refresh: bool = False) -> dict:
-    global _cache, _cached_at
-    with _lock:
-        if not force_refresh and _cache is not None and time.monotonic() - _cached_at < _CACHE_TTL:
-            return _cache
+# --- 소스 1: apis.guru ---
+
+def _apisguru_items() -> list[dict]:
     url = get_settings().api_directory_url
     try:
         res = get_with_retry(url, timeout=15)
@@ -54,45 +67,12 @@ def _load_directory(force_refresh: bool = False) -> dict:
     data = res.json()
     if not isinstance(data, dict):
         raise ApiSearchError("API 디렉터리 형식이 올바르지 않습니다")
-    with _lock:
-        _cache = data
-        _cached_at = time.monotonic()
-    return data
-
-
-def refresh_api_directory() -> dict:
-    """외부 API 수집 루트를 즉시 강제 탐색 및 업데이트한다."""
-    return _load_directory(force_refresh=True)
-
-
-def clear_cache() -> None:
-    """테스트·수동 갱신용."""
-    global _cache, _public_cache
-    with _lock:
-        _cache = None
-        _public_cache = None
-
-
-def start_daily_api_directory_scheduler() -> None:
-    """1일 1회(24시간 주기) 백그라운드에서 외부 API 수집 루트를 탐색하고 갱신한다."""
-    global _scheduler_thread
-    with _lock:
-        if _scheduler_thread is not None and _scheduler_thread.is_alive():
-            return
-
-        def _loop():
-            # 최초 실행 10초 후 1차 워밍업 수행
-            time.sleep(10)
-            while True:
-                try:
-                    refresh_api_directory()
-                except Exception:
-                    pass
-                # 24시간 (86,400초) 주기 대기
-                time.sleep(_CACHE_TTL)
-
-        _scheduler_thread = threading.Thread(target=_loop, daemon=True, name="daily-api-scheduler")
-        _scheduler_thread.start()
+    out = []
+    for api_id, entry in data.items():
+        item = _entry_to_result(api_id, entry)
+        if item is not None:
+            out.append(item)
+    return out
 
 
 def _entry_to_result(api_id: str, entry: dict) -> dict | None:
@@ -119,7 +99,7 @@ def _entry_to_result(api_id: str, entry: dict) -> dict | None:
     }
 
 
-# --- 공공데이터 카탈로그 어댑터 ---
+# --- 소스 2: 공공데이터 카탈로그 어댑터 ---
 #
 # **응답 형식을 확정할 수 없는 자리다.** 카탈로그마다 감싸는 모양이 다르고(목록을 그대로
 # 주기도, data/items/response.body.items 아래 넣기도 한다) 필드 이름도 제각각이다. 그래서
@@ -163,14 +143,10 @@ def _rows_of(payload) -> list[dict]:
 
 def _public_data_items() -> list[dict]:
     """공공데이터 카탈로그 → 공통 항목 모양. 주소가 없으면 빈 목록(소스를 끈 것)."""
-    global _public_cache, _public_cached_at
     settings = get_settings()
     url = settings.public_data_url.strip()
     if not url:
         return []
-    with _lock:
-        if _public_cache is not None and time.monotonic() - _public_cached_at < _CACHE_TTL:
-            return _public_cache
 
     params = {"serviceKey": settings.public_data_key} if settings.public_data_key else None
     try:
@@ -206,55 +182,209 @@ def _public_data_items() -> list[dict]:
             "homepage": _pick(row, _URL_KEYS),
             "spec_url": "",
         })
-    with _lock:
-        _public_cache = items
-        _public_cached_at = time.monotonic()
     return items
 
 
-def _all_items() -> tuple[list[dict], list[str]]:
-    """두 소스를 합친 항목과, 실패한 소스의 사유. 한쪽이 죽어도 다른 쪽은 나온다."""
-    items: list[dict] = []
-    warnings: list[str] = []
-    for load in (_apisguru_items, _public_data_items):
-        try:
-            items += load()
-        except ApiSearchError as e:
-            warnings.append(str(e))
-    if not items and warnings:
-        # 둘 다 죽었으면 결과가 없는 것이 아니라 조회가 안 된 것이다.
-        raise ApiSearchError(" / ".join(warnings))
-    return items, warnings
-
-
-def _apisguru_items() -> list[dict]:
-    out = []
-    for api_id, entry in _load_directory().items():
-        result = _entry_to_result(api_id, entry)
-        if result is not None:
-            out.append(result)
+def _sources() -> list[tuple[str, object]]:
+    """지금 켜져 있는 소스. 공공데이터는 주소를 넣은 설치본에서만 목록에 오른다 —
+    끈 소스를 "받았는데 비어 있었다"로 다루면 그 소스의 행이 전부 removed로 찍힌다."""
+    out: list[tuple[str, object]] = [(SOURCE_APISGURU, _apisguru_items)]
+    if get_settings().public_data_url.strip():
+        out.append((SOURCE_PUBLIC_DATA, _public_data_items))
     return out
 
 
-# 카테고리가 비어 있는 항목을 고르는 값. 디렉터리에 실제로 그런 항목이 많아서
+# --- 수집 ---
+
+def sync_catalog(db: Session) -> dict:
+    """소스를 받아 카탈로그를 최신으로 만든다. 바뀐 행만 쓴다.
+
+    소스별로 따로 처리한다 — 한쪽이 죽어도 다른 쪽은 갱신되고, 죽은 쪽의 행은 그대로
+    남는다(다음 검색에서 사라지지 않는다). 전부 죽었을 때만 오류다: 그때는 "바뀐 것이
+    없다"가 아니라 아무 것도 못 받은 것이다.
+    """
+    stats = {"added": 0, "updated": 0, "restored": 0, "removed": 0, "unchanged": 0}
+    warnings: list[str] = []
+    synced: list[str] = []
+    for source, load in _sources():
+        try:
+            items = load()
+        except ApiSearchError as e:
+            warnings.append(str(e))
+            continue
+        _merge(db, source, items, stats)
+        synced.append(source)
+    if not synced:
+        raise ApiSearchError(" / ".join(warnings) or "수집할 소스가 없습니다")
+    db.commit()
+    return {**stats, "sources": synced, "warnings": warnings}
+
+
+def _merge(db: Session, source: str, items: list[dict], stats: dict) -> None:
+    existing = {
+        row.ext_id: row
+        for row in db.execute(
+            select(ApiCatalogEntry).where(ApiCatalogEntry.source == source)
+        ).scalars()
+    }
+    seen: set[str] = set()
+    for item in items:
+        ext_id = str(item["id"])[:255]
+        if ext_id in seen:
+            continue  # 같은 응답 안의 중복 — 앞엣것만 남긴다
+        seen.add(ext_id)
+        row = existing.get(ext_id)
+        if row is None:
+            db.add(ApiCatalogEntry(
+                source=source, ext_id=ext_id, search_text=_haystack(item),
+                **{f: item[f] for f in _FIELDS},
+            ))
+            stats["added"] += 1
+            continue
+
+        # **바뀐 필드만 대입한다.** 전부 대입하면 categories(JSON)가 같은 값이어도
+        # dirty로 잡혀 UPDATE가 나가고, onupdate가 updated_at을 매번 밀어 올린다.
+        changed = [f for f in _FIELDS if getattr(row, f) != item[f]]
+        back = row.removed_at is not None
+        if not changed and not back:
+            stats["unchanged"] += 1
+            continue
+        for field in changed:
+            setattr(row, field, item[field])
+        if changed:
+            row.search_text = _haystack(item)
+        if back:
+            row.removed_at = None
+        stats["restored" if back else "updated"] += 1
+
+    if not seen:
+        # 성공했는데 목록이 비었다 = 카탈로그가 통째로 사라진 것보다 응답이 깨진 쪽이
+        # 훨씬 그럴듯하다. 지우는 판단은 하지 않는다(다음 수집이 정상이면 그때 정리된다).
+        return
+    for ext_id, row in existing.items():
+        if ext_id in seen or row.removed_at is not None:
+            continue
+        row.removed_at = utcnow()
+        stats["removed"] += 1
+
+
+def _haystack(item: dict) -> str:
+    """검색이 훑을 소문자 건초더미 — 예전에 검색마다 메모리에서 만들던 그 문자열이다."""
+    return " ".join([
+        str(item["id"]), item["title"], item["description"], " ".join(item["categories"]),
+    ]).lower()
+
+
+def start_daily_api_directory_scheduler() -> None:
+    """1일 1회 백그라운드로 카탈로그를 수집한다.
+
+    기동 직후가 아니라 10초 뒤에 시작한다 — 첫 요청이 몰리는 구간에 수천 건 upsert를
+    끼워 넣지 않기 위해서다. 실패는 삼킨다: 카탈로그가 낡는 것은 서비스가 죽는 것보다
+    훨씬 가벼운 문제이고, 실패한 소스의 행은 손대지 않으므로 기존 카탈로그는 남는다.
+    """
+    global _scheduler_thread
+    with _scheduler_lock:
+        if _scheduler_thread is not None and _scheduler_thread.is_alive():
+            return
+
+        def _loop():
+            time.sleep(10)
+            while True:
+                try:
+                    _sync_in_background()
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(_SYNC_INTERVAL)
+
+        _scheduler_thread = threading.Thread(target=_loop, daemon=True, name="daily-api-scheduler")
+        _scheduler_thread.start()
+
+
+def _sync_in_background() -> dict:
+    """스케줄러 전용 — 요청 세션이 없으므로 자기 세션을 연다."""
+    from ..db import SessionLocal  # noqa: PLC0415 — 기동 순서 의존을 만들지 않는다
+
+    db = SessionLocal()
+    try:
+        return sync_catalog(db)
+    finally:
+        db.close()
+
+
+# --- 검색(DB만 읽는다) ---
+
+# 카테고리가 비어 있는 항목을 고르는 값. 카탈로그에 실제로 그런 항목이 많아서
 # (x-apisguru-categories가 없는 스펙) "전체" 아니면 못 고르는 상태였다.
 UNCATEGORIZED = "기타"
 
 
-def list_categories() -> list[dict]:
-    """디렉터리에 실제로 있는 카테고리와 그 개수. 목록 끝에 "기타"(카테고리 없음)를 붙인다.
+def _to_result(row: ApiCatalogEntry) -> dict:
+    return {
+        "id": row.ext_id,
+        "title": row.title,
+        "description": row.description,
+        "provider": row.provider,
+        "categories": row.categories or [],
+        "homepage": row.homepage,
+        "spec_url": row.spec_url,
+        "source": row.source,
+    }
 
-    고정 표를 두지 않는 이유: 목록은 외부 디렉터리가 정하고 갱신될 때마다 바뀐다 —
-    화면에만 적어 두면 실제로는 고를 수 없는 값이 남는다.
+
+def _live(query):
+    return query.where(ApiCatalogEntry.removed_at.is_(None))
+
+
+def search_apis(db: Session, keyword: str, category: str = "", limit: int = 30) -> dict:
+    """키워드·카테고리로 카탈로그를 찾는다. 두 조건은 AND, 각각 비우면 그 조건은 안 건다.
+
+    category가 UNCATEGORIZED("기타")면 카테고리가 없는 항목만 고른다 — 그 항목들은
+    카테고리 이름으로는 영영 걸리지 않아서 따로 고를 값이 필요하다.
+    둘 다 비면 빈 목록이다(카탈로그 전체를 쏟아내지 않는다).
+    """
+    kw = keyword.strip().lower()
+    cat = category.strip()
+    if not kw and not cat:
+        return {"results": [], "warnings": []}
+
+    query = _live(select(ApiCatalogEntry))
+    if kw:
+        # 카테고리는 리스트라 SQL에서 걸 수 없다 — 키워드로 먼저 좁히고 아래에서 본다.
+        query = query.where(ApiCatalogEntry.search_text.contains(kw))
+    results = []
+    for row in db.execute(query.order_by(ApiCatalogEntry.title, ApiCatalogEntry.id)).scalars():
+        if not _matches_category(row.categories or [], cat):
+            continue
+        results.append(_to_result(row))
+        if len(results) >= limit:
+            break
+
+    # 결과가 없는 것과 아직 아무 것도 안 받은 것은 다른 문제다 — 구분해서 알려 준다.
+    warnings = [] if results or catalog_size(db) else [EMPTY_CATALOG]
+    return {"results": results, "warnings": warnings}
+
+
+def _matches_category(categories: list, category: str) -> bool:
+    if not category:
+        return True
+    if category == UNCATEGORIZED:
+        return not categories
+    return any(str(c).lower() == category.lower() for c in categories)
+
+
+def list_categories(db: Session) -> list[dict]:
+    """카탈로그에 실제로 있는 카테고리와 그 개수. 끝에 "기타"(카테고리 없음)를 붙인다.
+
+    고정 표를 두지 않는 이유: 목록은 소스가 정하고 수집할 때마다 바뀐다 — 화면에만 적어
+    두면 실제로는 고를 수 없는 값이 남는다.
     """
     counts: dict[str, int] = {}
     uncategorized = 0
-    items, _warnings = _all_items()
-    for result in items:
-        if not result["categories"]:
+    for categories in db.execute(_live(select(ApiCatalogEntry.categories))).scalars():
+        if not categories:
             uncategorized += 1
             continue
-        for name in result["categories"]:
+        for name in categories:
             counts[name] = counts.get(name, 0) + 1
     items = [{"name": name, "count": counts[name]} for name in sorted(counts)]
     if uncategorized:
@@ -262,41 +392,31 @@ def list_categories() -> list[dict]:
     return items
 
 
-def search_apis(keyword: str, category: str = "", limit: int = 30) -> dict:
-    """키워드·카테고리로 API를 찾는다. 두 조건은 AND, 각각 비우면 그 조건은 안 건다.
+def catalog_size(db: Session) -> int:
+    return db.execute(_live(select(func.count(ApiCatalogEntry.id)))).scalar_one()
 
-    category가 UNCATEGORIZED("기타")면 카테고리가 없는 항목만 고른다 — 그 항목들은
-    카테고리 이름으로는 영영 걸리지 않아서 따로 고를 값이 필요하다.
-    둘 다 비면 빈 목록이다(디렉터리 전체를 쏟아내지 않는다).
+
+def catalog_status(db: Session) -> dict:
+    """수집 현황 — 소스별 건수와 마지막으로 바뀐 시각.
+
+    "검색 결과가 없다"가 질의 탓인지 수집이 안 된 탓인지 여기서 갈린다.
     """
-    kw = keyword.strip().lower()
-    cat = category.strip()
-    if not kw and not cat:
-        return {"results": [], "warnings": []}
-    items, warnings = _all_items()
-    results: list[dict] = []
-    for r in items:
-        if not _matches_category(r, cat):
-            continue
-        haystack = " ".join([
-            r["id"], r["title"], r["description"], " ".join(r["categories"]),
-        ]).lower()
-        if kw and kw not in haystack:
-            continue
-        results.append(r)
-        if len(results) >= limit:
-            break
-    # 살아 있는 결과와 함께 죽은 소스를 말한다 — 결과가 적은 것이 "그런 API가 없다"인지
-    # "한쪽 목록을 못 받았다"인지 화면에서 구분되어야 한다.
-    return {"results": results, "warnings": warnings}
-
-
-def _matches_category(result: dict, category: str) -> bool:
-    if not category:
-        return True
-    if category == UNCATEGORIZED:
-        return not result["categories"]
-    return any(c.lower() == category.lower() for c in result["categories"])
+    per_source: dict[str, dict] = {}
+    rows = db.execute(select(
+        ApiCatalogEntry.source, ApiCatalogEntry.removed_at, ApiCatalogEntry.updated_at,
+    )).all()
+    for source, removed_at, updated_at in rows:
+        stat = per_source.setdefault(source, {"total": 0, "removed": 0, "updated_at": None})
+        if removed_at is None:
+            stat["total"] += 1
+        else:
+            stat["removed"] += 1
+        if updated_at and (stat["updated_at"] is None or updated_at > stat["updated_at"]):
+            stat["updated_at"] = updated_at
+    return {
+        "total": sum(s["total"] for s in per_source.values()),
+        "sources": per_source,
+    }
 
 
 def normalize_module_name(raw: str) -> str:

@@ -311,13 +311,36 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   const [error, setError] = useState('');
   const [added, setAdded] = useState<Record<string, string>>({});
 
-  // 선택지는 디렉터리에서 받아 온다 — 화면에 적어 두면 실제로는 고를 수 없는 값이 남는다.
-  useEffect(() => {
+  const [notice, setNotice] = useState('');
+
+  // 선택지는 카탈로그에서 받아 온다 — 화면에 적어 두면 실제로는 고를 수 없는 값이 남는다.
+  const loadCategories = () => {
     api
       .listApiCategories()
       .then((res) => setCategories(res.categories))
       .catch(() => setCategories([]));   // 목록을 못 받아도 키워드 검색은 되어야 한다
-  }, []);
+  };
+  useEffect(loadCategories, []);
+
+  // 검색은 수집해 둔 표만 읽으므로, 아직 한 번도 안 받았으면 아무리 검색해도 비어 있다.
+  // 하루 한 번 백그라운드로 돌지만 그 사이에 당겨 쓸 자리가 화면에 없으면
+  // "비어 있습니다"만 보고 할 수 있는 일이 없다.
+  const refresh = async () => {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const r = await api.refreshApiCatalog();
+      setNotice(`수집 완료 — 추가 ${r.added} · 갱신 ${r.updated} · 그대로 ${r.unchanged}`
+        + (r.removed ? ` · 사라짐 ${r.removed}` : ''));
+      setError((r.warnings ?? []).join(' / '));
+      loadCategories();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const search = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -326,9 +349,10 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
     setBusy(true);
     setError('');
     try {
+      setNotice('');
       const res = await api.searchApis(keyword.trim(), category);
       setResults(res.results);
-      // 한쪽 소스가 죽어도 나머지 결과는 나온다 — 그 사실을 감추면 결과가 적은 이유를
+      // 아직 수집하지 않았으면 그렇다고 말한다 — 그 사실을 감추면 결과가 없는 이유를
       // 알 수 없다.
       setError((res.warnings ?? []).join(' / '));
     } catch (err) {
@@ -353,7 +377,9 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   return (
     <Modal title="외부 API 검색 → 모듈 추가" onClose={onClose}>
       <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
-        공개 API 디렉터리를 키워드·카테고리로 검색해 external_api 모듈로 추가합니다.
+        수집해 둔 공개 API 카탈로그를 키워드·카테고리로 검색해 external_api 모듈로
+        추가합니다(검색은 밖으로 나가지 않습니다 — 수집은 하루 한 번, <b>수집</b> 버튼으로
+        당겨 쓸 수 있습니다).
         카테고리 기본값은 전체이고, 카테고리가 없는 API는 <span className="mono">기타</span>로
         고릅니다. 추가 후
         설정의 <span className="mono">url</span>·<span className="mono">api_key</span>는 새 모듈
@@ -381,7 +407,17 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
         <button type="submit" disabled={busy || (!keyword.trim() && !category)}>
           {busy ? '검색 중...' : '검색'}
         </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={refresh}
+          disabled={busy}
+          title="apis.guru·공공데이터에서 카탈로그를 지금 다시 받습니다(아웃바운드)"
+        >
+          수집
+        </button>
       </form>
+      {notice && <p className="mutedtext" style={{ fontSize: 12 }}>{notice}</p>}
       {error && <p className="error">{error}</p>}
       {results && results.length === 0 && (
         <p className="mutedtext">검색 결과가 없습니다.</p>

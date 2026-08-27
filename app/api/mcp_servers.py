@@ -5,12 +5,13 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
 충돌), 뒤는 이 플랫폼 클라이언트(services/mcp_client.py — streamable-http 단일 JSON
 응답)로는 통신 자체가 안 된다. 그래서 필요한 것만 사내에서 만든다.
 
-서버 5개:
+서버 6개:
   POST /mcp/ops                  운영 조회 — 배포 상태·로그·라우팅·호스트·감사(읽기 전용)
   POST /mcp/code                 프로젝트 코드 조회 — project 인자로 고른다(읽기 전용)
   POST /mcp/docs                 사내 문서 본문 검색 — 저장소를 가로질러 한 번에(읽기 전용)
   POST /mcp/storage/{저장소}      저장소 파일 — 저장소 루트 밖으로 나갈 수 없다
   POST /mcp/db/{module}          database 모듈 조회 — SELECT 전용, 허용 목록에 있는 모듈만
+  POST /mcp/apis                 외부 API 카탈로그 검색 — 수집해 둔 표만 읽는다(읽기 전용)
 
 저장소 목록은 모듈 레지스트리가 아니라 환경변수가 정한다(PAAS_STORAGE_ROOT ·
 PAAS_DOC_ROOTS, services/storage.py) — 디스크 경로는 서버를 설치한 사람이 아는
@@ -52,6 +53,7 @@ from ..models import (
     Project, ProjectType,
 )
 from ..security import require_api_key
+from ..services import apisearch
 from ..services import codemap as codemap_service
 from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, workspace
 from ..services import modules as modules_service
@@ -1050,3 +1052,86 @@ def _db_call(db: Session, actor: str, module: Module, name: str, args: dict) -> 
                       "truncated": len(rows) == limit})
     finally:
         engine.dispose()
+
+
+# --- 외부 API 카탈로그 서버 (/mcp/apis) ---
+#
+# 수집(services/apisearch.sync_catalog)은 여기 없다. 그 도구를 두면 이 서버가 아웃바운드
+# 호출을 여는 셈이고, 그러면 아래 docstring이 말하는 성질이 그대로 무너진다.
+
+_APIS_TOOLS = [
+    {
+        "name": "search_apis",
+        "description": (
+            "외부 공개 API 카탈로그를 키워드·카테고리로 검색한다(apis.guru + 공공데이터)."
+            " 두 조건은 AND이고 각각 비우면 그 조건은 걸지 않는다. 둘 다 비면 빈 목록이다."
+            f" 카테고리가 없는 항목만 고르려면 category에 \"{apisearch.UNCATEGORIZED}\"를 준다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string"},
+                "category": {"type": "string", "description": "list_api_categories로 확인"},
+                "limit": {"type": "integer", "description": f"기본 30, 최대 {_MAX_LIST}"},
+            },
+        },
+    },
+    {
+        "name": "list_api_categories",
+        "description": "카탈로그에 실제로 있는 카테고리와 건수. search_apis의 category에 쓴다.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "catalog_status",
+        "description": (
+            "수집 현황 — 소스별 건수·사라진 건수·마지막으로 바뀐 시각."
+            " 검색 결과가 비었을 때 질의 문제인지 수집 문제인지 여기서 갈린다."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
+
+
+@router.post("/mcp/apis")
+async def apis_mcp_server(
+    request: Request,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """외부 API 카탈로그 검색 MCP 서버(JSON-RPC 2.0) — 읽기 전용, DB만 읽는다.
+
+    같은 검색이 /modules/search에도 있지만 그쪽은 admin 전용이다. 여기가 admin이 아니어도
+    되는 이유는 **밖으로 나가지 않기 때문**이다: 예전에는 검색이 곧 아웃바운드 조회라
+    관리자 키로 묶을 수밖에 없었는데, 수집을 sync_catalog로 떼어 낸 뒤로 이 경로는 이미
+    받아 둔 표를 읽는 것이 전부다. 나가는 호출도 쓰기도 없다.
+
+    수집은 여전히 admin 전용(POST /modules/search/refresh)이고 이 서버에는 그 도구를 두지
+    않는다 — mcp 모듈의 api_key는 배포된 앱의 환경변수로도 주입되므로, 여기에 붙는 키로
+    할 수 있는 일은 읽기여야 한다.
+    """
+    return mcp_server.dispatch(
+        await mcp_server.read_payload(request),
+        server_name="paas-apis",
+        tools=_APIS_TOOLS,
+        call=lambda name, args: _apis_call(db, name, args),
+    )
+
+
+def _apis_call(db: Session, name: str, args: dict) -> str:
+    if name == "list_api_categories":
+        return _dump(apisearch.list_categories(db))
+    if name == "catalog_status":
+        return _dump(apisearch.catalog_status(db))
+
+    # search_apis
+    result = apisearch.search_apis(
+        db,
+        _str_arg(args, "keyword", required=False),
+        _str_arg(args, "category", required=False),
+        _int_arg(args, "limit", 30, _MAX_LIST),
+    )
+    if result["warnings"]:
+        # 카탈로그가 비어 있는 것과 "그런 API가 없다"는 다른 문제다 — 빈 목록으로
+        # 돌려주면 모델은 질의를 바꿔 가며 헛돌게 된다.
+        raise mcp_server.McpToolError(" / ".join(result["warnings"]))
+    return _dump(result["results"])

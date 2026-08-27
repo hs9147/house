@@ -157,38 +157,42 @@ def unbind_module(
 def search_external_apis(
     keyword: str = "",
     category: str = "",
+    db: Session = Depends(get_db),
     _: ApiKey = Depends(require_admin),
 ):
-    """키워드·카테고리로 외부 API 디렉터리를 검색한다. 아웃바운드 조회이므로 admin 전용.
+    """키워드·카테고리로 외부 API 카탈로그를 검색한다.
+
+    아웃바운드 조회가 아니다 — 수집해 둔 표(api_catalog)만 읽는다. admin으로 두는 것은
+    이 화면이 모듈 등록(admin 전용)으로 이어지기 때문이고, 읽기만 필요한 쪽에는 같은
+    검색을 MCP로 열어 두었다(/mcp/apis).
 
     두 조건은 AND이고 각각 비우면 그 조건은 걸지 않는다(category 기본값 = 전체).
     category="기타"는 카테고리가 없는 항목만 고른다.
     반환된 항목은 POST /modules/import로 external_api 모듈에 추가할 수 있다."""
-    try:
-        # 소스가 둘이라 한쪽이 죽어도 나머지 결과는 나온다 — warnings가 그 사유다.
-        return apisearch.search_apis(keyword, category)
-    except apisearch.ApiSearchError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    return apisearch.search_apis(db, keyword, category)
 
 
 @router.get("/modules/search/categories")
-def list_api_categories(_: ApiKey = Depends(require_admin)):
-    """검색 화면의 카테고리 선택지 — 디렉터리에 실제로 있는 값만 내려간다."""
-    try:
-        return {"categories": apisearch.list_categories(),
-                "uncategorized_label": apisearch.UNCATEGORIZED}
-    except apisearch.ApiSearchError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+def list_api_categories(
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_admin),
+):
+    """검색 화면의 카테고리 선택지 — 카탈로그에 실제로 있는 값만 내려간다."""
+    return {"categories": apisearch.list_categories(db),
+            "uncategorized_label": apisearch.UNCATEGORIZED}
 
 
 @router.post("/modules/search/refresh")
 def refresh_external_api_directory(
+    db: Session = Depends(get_db),
     _: ApiKey = Depends(require_admin),
 ):
-    """외부 API 수집 루트(디렉터리)를 1일 1회 주기 외에 즉시 재탐색하고 업데이트한다."""
+    """카탈로그를 1일 1회 주기 외에 즉시 수집한다 — **여기가 유일한 아웃바운드 경로다**.
+
+    응답의 added/updated/unchanged는 이번 수집이 실제로 무엇을 바꿨는지다(대부분은
+    unchanged다). warnings는 실패한 소스이고, 그 소스의 행은 손대지 않는다."""
     try:
-        data = apisearch.refresh_api_directory()
-        return {"status": "success", "total_apis": len(data)}
+        return apisearch.sync_catalog(db)
     except apisearch.ApiSearchError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
