@@ -160,13 +160,31 @@ function Test-IisPrereq {
     Write-Info 'ARR proxy: cannot check'
   }
 
-  # 5. Classic-mode app pools cannot serve WebSockets.
+  # 5. Classic-mode app pools cannot serve WebSockets. Report which application
+  #    each Classic pool actually serves -- "some pool is Classic" is not
+  #    actionable when a server hosts a dozen of them.
   try {
-    $pools = (& $appcmd list apppool /text:* 2>$null) -join "`n"
-    $classic = [regex]::Matches($pools, 'APPPOOL.NAME:"([^"]+)"[\s\S]*?managedPipelineMode:"Classic"')
-    if ($classic.Count -gt 0) {
-      Write-Bad 'App pool(s) in Classic mode -- WebSockets require Integrated mode:'
-      foreach ($m in $classic) { Write-Info "    $($m.Groups[1].Value)" }
+    $seen = @{}
+    $appLines = & $appcmd list app 2>$null
+    foreach ($appLine in $appLines) {
+      $m = [regex]::Match($appLine, 'APP\s+"([^"]+)"\s+\(applicationPool:([^)]+)\)')
+      if (-not $m.Success) { continue }
+      $appPath = $m.Groups[1].Value
+      $pool = $m.Groups[2].Value
+      $mode = (& $appcmd list apppool "$pool" /text:managedPipelineMode 2>$null) -join ''
+      if ($mode.Trim() -eq 'Classic') {
+        if (-not $seen.ContainsKey($pool)) {
+          Write-Bad "App pool '$pool' is Classic -- WebSockets require Integrated mode."
+          Write-Info "  Fix: $appcmd set apppool `"$pool`" /managedPipelineMode:Integrated"
+          Write-Info "       $appcmd recycle apppool `"$pool`""
+          Write-Info '  Check first that nothing else in this pool needs Classic (legacy ASP.NET).'
+          $seen[$pool] = $true
+        }
+        Write-Info "    serves: $appPath"
+      }
+    }
+    if ($seen.Count -eq 0 -and $appLines) {
+      Write-Ok 'App pools serving sites: all Integrated'
     }
   } catch {
     Write-Info 'App pool pipeline mode: cannot check'
