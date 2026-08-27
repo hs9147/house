@@ -114,13 +114,37 @@ function Test-IisPrereq {
   # 2. ARR version. WebSocket proxying arrived in ARR 3.0 -- with 2.x every HTTP
   #    route proxies perfectly and upgrades are simply never forwarded, which
   #    looks exactly like this failure.
+  #
+  #    Do NOT guess the path. ARR lives under Program Files in some versions and
+  #    under inetsrv in others; hardcoding one produces a confident "not
+  #    installed" for a server that plainly has it. Ask IIS where the module is.
   try {
-    $arr = "$sysRoot\system32\inetsrv\requestRouter.dll"
-    if (Test-Path $arr) {
+    $arr = ''
+    if (Test-Path $appcmd) {
+      $gm = (& $appcmd list config -section:system.webServer/globalModules 2>$null) -join "`n"
+      # Attribute order is not fixed -- match it both ways.
+      $m = [regex]::Match($gm, 'name="ApplicationRequestRouting"[^>]*?image="([^"]+)"')
+      if (-not $m.Success) {
+        $m = [regex]::Match($gm, 'image="([^"]+)"[^>]*?name="ApplicationRequestRouting"')
+      }
+      if ($m.Success) { $arr = [Environment]::ExpandEnvironmentVariables($m.Groups[1].Value) }
+    }
+    if (-not $arr) {
+      foreach ($candidate in @("$sysRoot\system32\inetsrv\requestRouter.dll",
+                               "$env:ProgramFiles\IIS\Application Request Routing\requestRouter.dll")) {
+        if (Test-Path $candidate) { $arr = $candidate; break }
+      }
+    }
+    if ($arr -and (Test-Path $arr)) {
       $ver = (Get-Item $arr).VersionInfo.ProductVersion
       Write-Info "ARR module version: $ver  (WebSocket proxying requires ARR 3.0 or newer)"
+      Write-Info "  at $arr"
+    } elseif ($arr) {
+      Write-Bad "IIS registers the ARR module at '$arr' but that file is missing."
     } else {
-      Write-Info 'ARR module (requestRouter.dll) not found -- ARR may not be installed.'
+      Write-Bad 'ARR module is not registered in IIS globalModules.'
+      Write-Info '  Without ARR nothing is forwarded to the backend at all -- but plain HTTP'
+      Write-Info '  works, so check whether the rewrite target is served some other way.'
     }
   } catch {
     Write-Info 'ARR version: cannot check'
