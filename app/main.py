@@ -67,6 +67,15 @@ def create_app() -> FastAPI:
               "콘솔 터미널이 열리지 않습니다(소켓만 404). "
               'pip install "uvicorn[standard]" 후 재시작하세요.')
 
+    # 리비전은 **여기서** 읽어야 한다 — 이 시점이 코드가 적재된 시점이라, 나중에 pull만
+    # 하고 재시작하지 않아도 헬스체크는 계속 돌고 있는 커밋을 답한다(services/buildinfo.py).
+    # 로그에도 남긴다: 서비스 로그 첫 줄만 봐도 어느 커밋이 떴는지 알 수 있어야 한다.
+    from .services import buildinfo  # noqa: PLC0415
+
+    revision, branch = buildinfo.head(settings.resolved_repo_root)
+    print(f"[paas] revision {revision or '(알 수 없음 — .git 없음)'}"
+          f"{f' ({branch})' if branch else ''}")
+
     app = FastAPI(
         title="house",
         description=(

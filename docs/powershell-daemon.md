@@ -197,6 +197,23 @@ paas가 nssm 등으로 **Job Object**에 묶여 있으면, paas 서비스가 sto
 `CREATE_NO_WINDOW`, `CREATE_NEW_PROCESS_GROUP`)로 **Job에서 breakaway**시킨다. 관련 상수·헬퍼는
 `app/services/powershell_daemon.py`의 `_creation_flags()`에 모여 있다(분리의 단일 지점).
 
+### 업데이트가 실제로 반영됐는지 — 리비전으로 본다
+
+`GET /paas/health`가 **이 백엔드 프로세스가 적재한 커밋**을 답한다(`revision`, `branch`).
+콘솔 PowerShell 화면 머리말에도 같은 값이 찍히고, 서비스 로그 첫 줄에도 남는다.
+
+```powershell
+(Invoke-RestMethod http://127.0.0.1:8000/paas/health).revision
+```
+
+디스크가 아니라 **돌고 있는 쪽**을 말한다 — `git pull`만 하고 재시작하지 않았으면 예전
+커밋이 그대로 나온다. 그게 알고 싶은 것이기 때문이다(기동할 때 한 번 읽는다). git 명령을
+부르지 않고 `.git`을 직접 읽으므로 서비스 계정 PATH에 git이 없어도 된다. `.git`이 없는
+설치본에서는 빈 문자열이다.
+
+없던 엔드포인트가 404라면 먼저 이 값을 보면 된다 — 코드가 옛것인지, 프록시 문제인지가
+거기서 갈린다.
+
 ### SW 업데이트가 하는 일
 
 `POST /system/sw-update` → `git pull` → **파이썬 의존성 설치**(`pip install -r requirements.txt`)

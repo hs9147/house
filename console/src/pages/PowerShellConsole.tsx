@@ -8,6 +8,8 @@ const PS_HISTORY_STORAGE_KEY = 'paas_powershell_cmd_history';
 
 export default function PowerShellConsole() {
   const me = useApi(() => api.me());
+  // 돌고 있는 커밋 — SW 업데이트 직후 "정말 반영됐나"를 여기서 바로 본다.
+  const health = useApi(() => api.health());
   const [activeTab, setActiveTab] = useState<'terminal' | 'console' | 'server_logs'>('terminal');
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
@@ -193,6 +195,14 @@ export default function PowerShellConsole() {
           </h2>
           <p className="mutedtext" style={{ margin: '4px 0 0 0', fontSize: 12 }}>
             관리자 권한 PowerShell 프롬프트 터미널과 서버 로그를 조회합니다.
+            {/* SW 업데이트가 실제로 반영됐는지는 이 값으로 확인한다 — 백엔드가 기동할 때
+                읽은 커밋이라 디스크가 아니라 돌고 있는 쪽을 말한다. */}
+            {health.data?.revision && (
+              <>
+                {' '}실행 중: <code>{health.data.revision}</code>
+                {health.data.branch ? ` (${health.data.branch})` : ''}
+              </>
+            )}
           </p>
         </div>
         <div className="spacer" />
