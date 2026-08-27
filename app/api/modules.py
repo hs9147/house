@@ -316,6 +316,48 @@ def _issue_module_key(db: Session, admin: ApiKey, module_name: str) -> str:
     return raw
 
 
+@router.post("/modules/{module_id}/mcp-key")
+def issue_mcp_module_key(
+    module_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """이미 등록된 사내 MCP 모듈에 전용 키를 발급해 그 자리에서 넣는다.
+
+    자동 발급은 '사내 MCP 검색'으로 가져올 때만 걸린다. 그 전에 등록됐거나 주소를 직접
+    적어 만든 모듈은 키가 빈 채로 남고, 연결 확인이 401로 떨어진다. 예전 안내는 **모듈을
+    지우고 다시 가져오라**고 했는데, 바인딩된 프로젝트가 있으면 그럴 수 없다 — 고치는
+    방법이 곧 잃는 방법이면 안내가 아니다.
+
+    **사내 주소일 때만 발급한다.** 발급한 키는 그 주소로 그대로 전송되므로(mcp_client의
+    Authorization 헤더), 사외 주소에 붙이면 플랫폼 키를 남의 서버로 보내는 꼴이 된다.
+    거절할 때는 지금 기준 주소가 무엇인지 함께 알려 준다 — 사내 서버인데 거절당했다면
+    기준 주소 설정이 틀린 것이고, 그 값이 보여야 바로잡을 수 있다.
+    """
+    row = db.get(Module, module_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="module not found")
+    if row.type != ModuleType.mcp:
+        raise HTTPException(status_code=400, detail=f"mcp 타입 모듈이 아닙니다: {row.type.value}")
+    config = svc.decrypt_config(row.config)
+    url = config.get("url", "")
+    if not mcp_search.is_internal_server_url(url):
+        base = mcp_search.internal_base_url() or "(비어 있음 — PAAS_MCP_INTERNAL_BASE_URL 미설정)"
+        raise HTTPException(status_code=400, detail=(
+            f"사내 MCP 주소가 아니라 키를 발급하지 않습니다: {url} — 발급한 키는 이 주소로"
+            " 전송되므로 사외 서버에는 붙일 수 없습니다. 사외 서버라면 모듈 수정에서"
+            " config.api_key에 그 서버가 준 키를 넣으세요. 사내 서버인데 여기서 걸린다면"
+            f" 기준 주소 설정을 보세요(현재 기준: {base})."))
+
+    issued = _issue_module_key(db, admin, row.name)
+    config["api_key"] = issued
+    row.config = svc.encrypt_config(config)
+    db.commit()
+    audit.record(db, admin.name, "module.issue_mcp_key", row.name, {"url": url})
+    return {"id": row.id, "name": row.name, "key_issued": True,
+            "config": svc.masked_config(row.config)}
+
+
 @router.post("/modules/{module_id}/mcp-check")
 def check_mcp_module(
     module_id: int,
@@ -336,13 +378,16 @@ def check_mcp_module(
     config = svc.decrypt_config(row.config)
     url, api_key = config.get("url", ""), config.get("api_key") or None
     result = mcp_client.check_server(url, api_key)
+    # 화면의 '키 발급' 버튼은 이 값으로 나온다 — 오류 문구를 파싱해 판단하게 두면
+    # 문구를 다듬을 때마다 버튼이 조용히 사라진다.
+    result["can_issue_key"] = not api_key and mcp_search.is_internal_server_url(url)
     if not result["ok"] and "401" in (result["error"] or "") and not api_key:
         # 401을 그대로 내주면 "주소가 틀렸나"를 먼저 의심하게 된다 — 원인은 키가 없는
         # 것이고, 사내 서버는 다시 가져오기만 하면 전용 키가 발급된다.
         result["error"] += (
             " — 이 모듈에 API 키가 없습니다."
-            + (" 사내 MCP 서버는 인증이 필요합니다. 모듈을 지우고 '사내 MCP 검색'에서"
-               " 다시 가져오면 전용 키가 함께 발급됩니다."
+            + (" 사내 MCP 서버는 인증이 필요합니다. '키 발급'으로 이 모듈에 전용 키를"
+               " 넣으세요(모듈을 지울 필요 없습니다 — 바인딩도 그대로 유지됩니다)."
                if mcp_search.is_internal_server_url(url)
                else " 모듈 수정에서 config.api_key에 키를 넣으세요.")
         )

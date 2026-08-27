@@ -169,7 +169,9 @@ def test_a_keyless_module_says_why_it_is_401(monkeypatch, tmp_path, fresh_settin
     body = c.post(f"{API}/modules/{created['id']}/mcp-check", headers=ADMIN).json()
     assert body["ok"] is False
     assert "API 키가 없습니다" in body["error"]
-    assert "다시 가져오면" in body["error"]
+    # 고치는 방법이 곧 잃는 방법이면 안내가 아니다 — 지우라고 하지 않는다
+    assert "키 발급" in body["error"]
+    assert "지울 필요 없습니다" in body["error"]
 
 
 def test_refresh_reports_the_current_count(monkeypatch, tmp_path, fresh_settings):
@@ -177,3 +179,72 @@ def test_refresh_reports_the_current_count(monkeypatch, tmp_path, fresh_settings
     body = c.post(f"{API}/modules/search/refresh-mcp", headers=ADMIN).json()
     assert body["total_mcp_servers"] == 3  # ops + docs + 내부 저장소
     assert body["base_url"] == "http://localhost:7000/paas"
+
+
+def test_issue_key_fixes_a_keyless_module_in_place(monkeypatch, tmp_path, fresh_settings):
+    """지우지 않고 고칠 수 있어야 한다.
+
+    자동 발급은 '사내 MCP 검색'으로 가져올 때만 걸린다. 그 전에 등록됐거나 주소를 직접
+    적어 만든 모듈은 키가 빈 채로 남는다. 예전 안내는 **모듈을 지우고 다시 가져오라**고
+    했는데, 바인딩된 프로젝트가 있으면 그럴 수 없다 — 고치는 방법이 곧 잃는 방법이면
+    안내가 아니다.
+    """
+    c = _client(monkeypatch, tmp_path)
+    created = _import_ops(c)
+    # 예전 방식으로 등록된 모듈(키 없음)을 재현한다
+    c.put(f"{API}/modules/{created['id']}", headers=ADMIN, json={
+        "name": "paas-ops", "type": "mcp",
+        "config": {"url": created["config"]["url"], "api_key": ""}})
+
+    before = c.post(f"{API}/modules/{created['id']}/mcp-check", headers=ADMIN).json()
+    assert before["ok"] is False and before["can_issue_key"] is True
+
+    issued = c.post(f"{API}/modules/{created['id']}/mcp-key", headers=ADMIN)
+    assert issued.status_code == 200, issued.text
+    assert issued.json()["key_issued"] is True
+    assert issued.json()["config"]["api_key"] == "•••"  # 값은 가려서 내보낸다
+
+    sent: dict[str, str] = {}
+
+    def post_rpc(url, headers, payload):
+        sent.update(headers)
+        res = c.post(url.replace("http://localhost:7000/paas", "/paas"),
+                     headers=headers, json=payload)
+        res.raise_for_status()
+        return res.json()
+
+    monkeypatch.setattr(mcp_client, "_post_rpc", post_rpc)
+    after = c.post(f"{API}/modules/{created['id']}/mcp-check", headers=ADMIN).json()
+    assert after["ok"] is True, after["error"]
+
+    # 발급 키는 **비관리자**여야 한다 — 앱 환경변수로도 주입되기 때문이다.
+    raw = sent["authorization"].removeprefix("Bearer ")
+    assert c.get(f"{API}/audit", headers={"x-api-key": raw}).status_code == 403
+
+
+def test_issue_key_refuses_an_external_url_and_says_what_the_base_is(
+        monkeypatch, tmp_path, fresh_settings):
+    """사외 주소에 플랫폼 키를 붙이면 남의 서버로 키를 보내는 꼴이다.
+
+    거절할 때 기준 주소를 함께 알려 준다 — 사내 서버인데 걸렸다면 그 설정이 틀린
+    것이고, 값이 보여야 바로잡을 수 있다.
+    """
+    c = _client(monkeypatch, tmp_path)
+    created = c.post(f"{API}/modules/import-mcp", headers=ADMIN, json={
+        "id": "vendor", "name": "vendor-mcp", "url": "https://mcp.vendor.com/v1",
+        "category": "etc"}).json()
+    res = c.post(f"{API}/modules/{created['id']}/mcp-key", headers=ADMIN)
+    assert res.status_code == 400
+    detail = res.json()["detail"]
+    assert "mcp.vendor.com" in detail
+    assert "localhost:7000" in detail  # 지금 기준 주소를 그대로 보여 준다
+
+
+def test_issue_key_requires_admin(monkeypatch, tmp_path, fresh_settings):
+    """이 키는 사내 MCP 서버를 여는 자격증명이다 — 발급은 관리자만."""
+    c = _client(monkeypatch, tmp_path)
+    created = _import_ops(c)
+    raw = c.post(f"{API}/keys", headers=ADMIN,
+                 json={"name": "worker", "is_admin": False}).json()["key"]
+    res = c.post(f"{API}/modules/{created['id']}/mcp-key", headers={"x-api-key": raw})
+    assert res.status_code == 403

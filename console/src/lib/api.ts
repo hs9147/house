@@ -299,7 +299,15 @@ export const api = {
   // ok/error로 구분한다 — 여러 모듈을 나열하며 표시하기 때문이다.
   checkMcpModule: (moduleId: number) =>
     request<{ module_id: number; name: string; url: string; ok: boolean; error: string | null;
-              tool_count: number; tools: string[] }>('POST', `/modules/${moduleId}/mcp-check`),
+              tool_count: number; tools: string[];
+              // 사내 서버인데 키가 비어 있다 = 그 자리에서 발급할 수 있다. 오류 문구를
+              // 파싱해 판단하면 문구를 다듬을 때마다 버튼이 조용히 사라진다.
+              can_issue_key: boolean }>('POST', `/modules/${moduleId}/mcp-check`),
+  // 이미 등록된 사내 mcp 모듈에 전용 키를 발급해 넣는다. 모듈을 지웠다 다시 만들면
+  // 바인딩된 프로젝트를 잃으므로, 그 자리에서 고칠 수 있어야 한다.
+  issueMcpModuleKey: (moduleId: number) =>
+    request<{ id: number; name: string; key_issued: boolean; config: Record<string, unknown> }>(
+      'POST', `/modules/${moduleId}/mcp-key`),
   importMcpModule: (name: string, url: string, category?: string) =>
     request<ModuleOut>('POST', '/modules/import-mcp', { name, url, category: category || null }),
   createModule: (
