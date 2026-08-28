@@ -1,5 +1,5 @@
-"""사내 MCP 서버 6종 — 운영 조회·코드 조회·문서 검색·파일 저장소·DB 조회(SELECT 전용)·
-API 카탈로그 검색."""
+"""사내 MCP 서버 7종 — 운영 조회·코드 조회·문서 검색·파일 저장소·DB 조회(SELECT 전용)·
+API 카탈로그·문서 온톨로지(그래프는 tests/test_ontology.py)."""
 import subprocess
 
 from fastapi.testclient import TestClient

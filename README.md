@@ -258,6 +258,9 @@ POST /paas/api/v1/mcp/storage/{저장소}              # 사내 MCP 서버 — �
                                                 #   list_files·read_file + search_docs·reindex_docs·index_status
                                                 #   문서 폴더는 기본 읽기/쓰기 — PAAS_DOC_ROOTS_READONLY에 적은 폴더만 쓰기·삭제 도구가 빠짐
                                                 #   플랫폼 저장소(internal)는 서버 목록에 안 나오지만 주소로는 닿음
+POST /paas/api/v1/mcp/graph                         # 사내 MCP 서버 — 문서 온톨로지(그래프·스키마, 읽기 전용)
+                                                #   graph_schema·find_nodes·neighbors
+                                                #   색인과 같은 추출에서 만들어짐(정적 파싱, LLM 호출 없음)
 POST /paas/api/v1/mcp/db/{module}                   # 사내 MCP 서버 — database 모듈 조회(SELECT 전용)
                                                 #   PAAS_MCP_DB_MODULES에 이름이 있는 모듈만 열림(기본 전부 차단)
 
