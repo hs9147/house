@@ -431,6 +431,57 @@ class ApiCatalogEntry(Base):
     )
 
 
+class JobKind(str, enum.Enum):
+    """주기 갱신이 필요한 일. **플랫폼이 이미 하고 있던 일들**이지 새로 만든 개념이 아니다.
+
+    api_catalog는 자기 스레드를 따로 갖고 있었고(24시간 하드코딩), doc_index는 스케줄러가
+    아예 없어 사람이 눌러야 했으며, 두 probe는 모듈 화면의 버튼으로만 있었다.
+    """
+
+    api_catalog = "api_catalog"  # 외부 API 카탈로그 수집(services/apisearch.sync_catalog)
+    doc_index = "doc_index"      # 문서 색인 + 온톨로지(services/docsearch.reindex)
+    mcp_probe = "mcp_probe"      # mcp 모듈이 실제로 응답하는지(services/mcp_client)
+    api_probe = "api_probe"      # external_api 모듈 주소가 살아 있는지
+
+
+class JobStatus(str, enum.Enum):
+    ok = "ok"
+    failed = "failed"
+    skipped = "skipped"  # 할 일이 없었다(바뀐 문서 없음 등) — 실패가 아니다
+
+
+class ScheduledJob(Base):
+    """주기 갱신 작업 한 건과 **마지막 실행 결과**.
+
+    행은 사람이 만들지 않는다 — services/scheduler.reconcile()이 지금 있는 것에서
+    만들어 낸다(저장소가 늘면 job이 늘고, 모듈을 지우면 job이 사라진다). 목록을 손으로
+    관리하면 없는 대상을 가리키는 job이 남고, 그것이 실패로 계속 뜬다.
+
+    결과를 행에 함께 두는 이유: 대시보드가 묻는 것은 "지금 무엇이 밀려 있나"인데, 그
+    답은 이력 전체가 아니라 **각 job의 마지막 상태**다. 이력이 필요하면 감사 로그를 본다.
+    """
+
+    __tablename__ = "scheduled_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # kind + target 조합. 사람이 읽는 이름이자 재조정(reconcile)의 키다.
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    kind: Mapped[JobKind] = mapped_column(Enum(JobKind))
+    target: Mapped[str] = mapped_column(String(128), default="")  # 저장소·모듈 이름
+    interval_seconds: Mapped[int] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_status: Mapped[JobStatus | None] = mapped_column(Enum(JobStatus), nullable=True)
+    last_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 연속 실패 횟수. 대시보드가 "한 번 튄 것"과 "계속 죽어 있는 것"을 가르는 값이다.
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class RedirectKind(str, enum.Enum):
     redirect = "redirect"  # 브라우저 301/302 리다이렉트
     rewrite = "rewrite"  # 서버 내부 재작성(클라이언트에 노출 안 됨)

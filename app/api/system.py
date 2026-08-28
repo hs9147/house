@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from .. import audit
 from ..config import get_settings
 from ..db import get_db
-from ..models import ApiKey, AuditEvent, EnvVar, LlmProvider, Module, Organization, UserAccount, UserOrganization, UserSession, utcnow
+from ..models import ApiKey, AuditEvent, EnvVar, LlmProvider, Module, Organization, ScheduledJob, UserAccount, UserOrganization, UserSession, utcnow
 from ..schemas import (
     ApiKeyCreate,
     ApiKeyIssued,
@@ -35,7 +35,7 @@ from ..security import (
     validate_email_domain,
     verify_password,
 )
-from ..services import gitea, monitor
+from ..services import gitea, monitor, scheduler
 
 # 헬스체크·상태 프로브는 버전 prefix 밖에 둔다(로드밸런서/k8s liveness probe, 콘솔 로그인
 # 프로브가 API 버전과 무관하게 고정된 경로를 기대함) — router.py 참고.
@@ -92,6 +92,51 @@ def health():
 @health_router.get("/status")
 def system_status(_: ApiKey = Depends(require_admin)):
     return monitor.snapshot()
+
+
+@router.get("/scheduler")
+def scheduler_snapshot(
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """주기 갱신 현황 — 대시보드 모니터가 읽는 값.
+
+    작업 목록은 사람이 만들지 않는다(services/scheduler.reconcile) — 저장소·모듈이
+    늘고 줄면 따라서 늘고 준다. 그래서 "없는 대상을 가리키는 job"이 남지 않는다.
+    """
+    scheduler.reconcile(db)
+    return scheduler.snapshot(db)
+
+
+@router.post("/scheduler/jobs/{job_id}/run")
+def run_scheduled_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """주기를 기다리지 않고 지금 돌린다. 실패해도 200이다 — 결과가 곧 답이다."""
+    job = db.get(ScheduledJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    result = scheduler.run(db, job)
+    audit.record(db, admin.name, "scheduler.run", job.name, result)
+    return result
+
+
+@router.post("/scheduler/jobs/{job_id}/toggle")
+def toggle_scheduled_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """job 하나를 켜고 끈다. 끈 job은 재조정에서도 살아남는다(설정은 보존한다)."""
+    job = db.get(ScheduledJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    job.enabled = not job.enabled
+    db.commit()
+    audit.record(db, admin.name, "scheduler.toggle", job.name, {"enabled": job.enabled})
+    return {"id": job.id, "name": job.name, "enabled": job.enabled}
 
 
 @router.get("/auth/me")

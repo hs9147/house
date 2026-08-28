@@ -136,6 +136,9 @@ GET  /paas/health                     # 인증 불필요, 버전 prefix 없음
 GET  /paas/status                     # CPU/메모리/디스크/GPU (admin), 버전 prefix 없음
 POST /paas/api/v1/keys                     # API 키 발급 (admin)
 GET  /paas/api/v1/audit                    # 감사 로그 (admin)
+GET  /paas/api/v1/scheduler                # 주기 갱신 현황 (아무 키나) — 대시보드 모니터가 읽는 값
+POST /paas/api/v1/scheduler/jobs/{id}/run  # 주기를 기다리지 않고 지금 실행 (admin)
+POST /paas/api/v1/scheduler/jobs/{id}/toggle  # 작업 하나를 켜고 끔 (admin)
 
 POST /paas/api/v1/orgs                     # {name} → 사내 Gitea에 동명 Organization 생성 (admin)
 GET  /paas/api/v1/orgs                     # 조직 목록 + 프로젝트 수
@@ -251,6 +254,7 @@ POST /paas/api/v1/storage/{저장소}/files             # multipart {file, path?
 DELETE /paas/api/v1/storage/{저장소}/files           # ?path= 삭제 (읽기 전용이면 403)
 
 POST /paas/api/v1/mcp/ops                           # 사내 MCP 서버 — 운영 조회(배포 상태·로그·라우팅·호스트·감사)
+                                                #   + list_scheduled_jobs·run_scheduled_job(주기 갱신, 최소 간격 5분)
 POST /paas/api/v1/mcp/code                          # 사내 MCP 서버 — 코드 조회(project 인자로 프로젝트 선택)
 POST /paas/api/v1/mcp/docs                          # 사내 MCP 서버 — 사내 문서 본문 검색(저장소를 가로질러)
                                                 #   list_sources·search_docs·read_doc·reindex_docs·index_status
@@ -325,8 +329,9 @@ DELETE /paas/api/v1/previews/{id}
   (`services/apisearch.py`).
 
   **검색은 표만 읽습니다**(아웃바운드 없음) — 그래서 같은 검색을 사내 MCP 서버
-  `/mcp/apis`로도 열어 두었습니다. 밖으로 나가는 것은 수집뿐이고, 수집은 하루 한 번
-  자동으로 돌거나 `POST /modules/search/refresh`(admin, 콘솔의 "수집" 버튼)로 당깁니다.
+  `/mcp/apis`로도 열어 두었습니다. 밖으로 나가는 것은 수집뿐이고, 수집은 주기 갱신
+  스케줄러가 하루 한 번 돌리거나(아래 "주기 갱신 + 모니터")
+  `POST /modules/search/refresh`(admin, 콘솔의 "수집" 버튼)로 당깁니다.
   `/mcp/apis`에도 `sync_catalog` 도구가 있어 **요청이 있을 때 최신화**할 수 있습니다
   (`source`로 공공데이터만 골라 받을 수 있음). 이 도구가 넓히는 것은 권한이 아니라
   호출 횟수뿐이라 — 목적지는 환경변수가 정하고 쓰는 곳은 카탈로그 표 하나입니다 —
@@ -466,6 +471,33 @@ DELETE /paas/api/v1/previews/{id}
   > 기본 unicode61은 공백 토큰만 잡아 `규정`으로 "규정은"을 못 찾고, trigram은 3글자 미만
   > 질의를 아예 받지 못해 `정산`·`휴가` 같은 2음절 키워드가 전부 탈락합니다. LIKE는 부분
   > 일치가 정확하고, 본문 6MB/5,000건 전체 스캔이 30ms였습니다.
+- **주기 갱신 + 모니터**(`services/scheduler.py`): 갱신이 필요한 일 — 외부 API 카탈로그
+  수집, 문서 색인·온톨로지, mcp 모듈 응답 확인, external_api 모듈 응답 확인 — 을 **스레드
+  하나**가 30초마다 훑어 밀린 것만 순서대로 돌리고, 결과를 `scheduled_jobs` 표에 남깁니다.
+  대시보드 "주기 갱신" 패널이 그 표를 그대로 보여 줍니다(마지막 실행·소요·결과 요약·연속
+  실패 횟수·밀림 여부, 그리고 작업별 "지금 실행"·"켜기/끄기").
+
+  **작업 목록은 사람이 만들지 않습니다.** 매 순회 첫 단계가 재조정입니다 — 저장소가 늘면
+  색인 작업이 늘고, 모듈을 지우면 그 확인 작업이 사라집니다(사내 MCP 목록을 등록제로
+  두지 않은 것과 같은 이유입니다: 손으로 관리하면 **없는 대상을 가리키는 작업**이 남아
+  영원히 빨간불로 뜹니다). 사람이 끈 작업은 재조정을 넘어 살아남습니다.
+
+  실패는 예외로 올라오지 않고 표에 적힙니다 — 앞 작업이 터졌다고 뒤에 밀린 색인이 통째로
+  안 도는 일을 막기 위해서입니다. "바뀐 것이 없음"은 실패가 아니라 `skipped`입니다(그렇지
+  않으면 모니터가 늘 빨갛습니다). external_api 확인은 **주소가 살아 있는지만** 봅니다 —
+  응답 본문을 어디에 어떻게 저장할지는 모듈마다 다르고, 그것을 지어내면 틀린 값이 DB에
+  쌓입니다.
+
+  `/mcp/ops`에도 `list_scheduled_jobs`·`run_scheduled_job`이 있어 에이전트가 "언제 마지막으로
+  갱신됐나"를 묻고 필요하면 당길 수 있습니다. `/mcp/apis`의 `sync_catalog`과 같은 이유로
+  최소 간격(5분)을 두었습니다 — 도구가 넓히는 것은 권한이 아니라 호출 횟수뿐입니다.
+
+  ```
+  api_catalog        24시간   외부 API 카탈로그 수집(소스는 PAAS_API_DIRECTORY_URL 등)
+  doc_index:{저장소}  15분     문서 색인 + 온톨로지 그래프 (저장소마다 하나)
+  mcp_probe:{모듈}    10분     mcp 모듈 tools/list 응답 확인
+  api_probe:{모듈}    10분     external_api 모듈 주소 응답 확인
+  ```
 
 ## 콘솔 UI (`console/`)
 
@@ -483,7 +515,7 @@ npm run build        # tsc 타입체크 + vite build → dist/
   (admin 키: 대시보드·감사 로그·키 발급·프로바이더 등록 포함, 일반 키: 프로젝트 운영 화면)
 - 레이아웃: 메뉴는 왼쪽 고정 사이드바(`components/Layout.tsx`)에 배치되고, OS 태그·계정
   구분·로그아웃은 사이드바 하단에 있다
-- 화면: 시스템 대시보드(CPU/메모리/디스크/GPU 게이지, 키 발급), 프로젝트(생성 시 git_url 직접
+- 화면: 시스템 대시보드(CPU/메모리/디스크/GPU 게이지, **주기 갱신 모니터**, 키 발급), 프로젝트(생성 시 git_url 직접
   입력/조직 소속 자동 생성/zip·폴더 업로드 3가지 방식 선택, dev/release 배포·롤백·중지·배포
   이력·로그 3초 폴링·환경변수·모듈 바인딩·프리뷰), 코드 확인(읽기 전용 파일 트리·내용 뷰어 —
   수정 경로 없음 — 구현은 외부 개발도구), 모듈 레지스트리(카테고리·조직 범위 표시 + admin은 "외부 API

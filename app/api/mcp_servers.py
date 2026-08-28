@@ -6,7 +6,7 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
 응답)로는 통신 자체가 안 된다. 그래서 필요한 것만 사내에서 만든다.
 
 서버 7개:
-  POST /mcp/ops                  운영 조회 — 배포 상태·로그·라우팅·호스트·감사(읽기 전용)
+  POST /mcp/ops                  운영 — 배포 상태·로그·라우팅·호스트·감사·주기 갱신 현황
   POST /mcp/code                 프로젝트 코드 조회 — project 인자로 고른다(읽기 전용)
   POST /mcp/docs                 사내 문서 본문 검색 — 저장소를 가로질러 한 번에(읽기 전용)
   POST /mcp/storage/{저장소}      저장소 파일 — 저장소 루트 밖으로 나갈 수 없다
@@ -38,6 +38,7 @@ mcp 모듈의 api_key는 배포된 앱의 환경변수로도 주입되므로(ser
 """
 import json
 import re
+import time
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -117,6 +118,11 @@ def _profile_arg(args: dict) -> BuildProfile:
 
 # --- 운영 조회 서버 (/mcp/ops) ---
 
+# MCP로 부르는 job 실행의 최소 간격(초). 목적지와 쓰는 곳이 고정돼 있어(job 종류가
+# 정한다) 넓히는 것은 권한이 아니라 호출 횟수뿐이다 — /mcp/apis의 수집과 같은 판단이다.
+_MCP_JOB_MIN_INTERVAL = 300.0
+_job_last_run: dict[str, float] = {}
+
 _OPS_TOOLS = [
     {
         "name": "list_routes",
@@ -177,6 +183,29 @@ _OPS_TOOLS = [
         },
     },
     {
+        "name": "list_scheduled_jobs",
+        "description": (
+            "주기 갱신 현황 — 무엇이 언제 돌았고, 밀렸는지(overdue), 연속 실패 중인지."
+            " 대상은 외부 API 카탈로그 수집·문서 색인·모듈 응답 확인이다."
+            " 목록은 저장소·모듈 등록 현황에서 만들어지므로 없는 대상은 올라오지 않는다."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "run_scheduled_job",
+        "description": (
+            "주기를 기다리지 않고 job 하나를 지금 돌린다(list_scheduled_jobs의 name)."
+            " 실패해도 오류가 아니라 결과로 답한다 — 무엇이 왜 실패했는지가 답이다."
+            f" 같은 job을 {int(_MCP_JOB_MIN_INTERVAL)}초 안에 다시 부르면 돌리지 않고"
+            " skipped로 답한다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+    {
         "name": "search_audit",
         "description": "감사 이벤트 검색 — 누가(actor) 언제 무엇(action)을 어디에(target) 했는지.",
         "inputSchema": {
@@ -196,14 +225,19 @@ _OPS_TOOLS = [
 async def ops_mcp_server(
     request: Request,
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_api_key),
 ):
-    """운영 조회 MCP 서버(JSON-RPC 2.0) — 읽기 전용."""
+    """운영 MCP 서버(JSON-RPC 2.0).
+
+    거의 전부 읽기다. 하나만 예외인데(run_scheduled_job) 그것도 넓히는 것은 권한이 아니라
+    호출 횟수다 — job의 종류가 무엇을 어디에 쓸지 정하므로 인자로 대상이 바뀌지 않고,
+    되풀이 호출은 최소 간격이 막는다.
+    """
     return mcp_server.dispatch(
         await mcp_server.read_payload(request),
         server_name="paas-ops",
         tools=_OPS_TOOLS,
-        call=lambda name, args: _ops_call(db, name, args),
+        call=lambda name, args: _ops_call(db, key.name, name, args),
     )
 
 
@@ -217,7 +251,7 @@ def _project_by_name(db: Session, args: dict, discover: str = "list_routes") -> 
     return row
 
 
-def _ops_call(db: Session, name: str, args: dict) -> str:
+def _ops_call(db: Session, actor: str, name: str, args: dict) -> str:
     if name == "list_routes":
         # 서버구성 화면과 같은 함수를 쓴다 — 화면과 다른 값을 말하기 시작하면 둘 중
         # 어느 쪽이 사실인지 알 수 없게 된다.
@@ -235,6 +269,31 @@ def _ops_call(db: Session, name: str, args: dict) -> str:
             db, probe_host=upstream_host(get_settings()),
             probe_range=bool(args.get("probe_range")),
         ))
+
+    if name == "list_scheduled_jobs":
+        from ..services import scheduler  # noqa: PLC0415
+
+        scheduler.reconcile(db)
+        return _dump(scheduler.snapshot(db))
+
+    if name == "run_scheduled_job":
+        from ..services import scheduler  # noqa: PLC0415
+        from ..models import ScheduledJob  # noqa: PLC0415
+
+        wanted = _str_arg(args, "name")
+        job = db.execute(
+            select(ScheduledJob).where(ScheduledJob.name == wanted)).scalar_one_or_none()
+        if job is None:
+            raise mcp_server.McpToolError(
+                f"그런 job이 없습니다: {wanted} (list_scheduled_jobs로 이름을 확인하세요)")
+        now = time.monotonic()
+        if now - _job_last_run.get(wanted, -_MCP_JOB_MIN_INTERVAL) < _MCP_JOB_MIN_INTERVAL:
+            return _dump({"job": wanted, "status": "skipped",
+                          "detail": {"reason": "방금 돌렸습니다 — 잠시 뒤에 다시 부르세요."}})
+        _job_last_run[wanted] = now
+        result = scheduler.run(db, job)
+        audit.record(db, actor, "mcp.scheduler.run", wanted, result)
+        return _dump(result)
 
     if name == "search_audit":
         query = select(AuditEvent)

@@ -543,3 +543,28 @@ export interface PlatformModuleReportOut {
   modules: GlobalModuleUsageSummary[];
   recent_history: ModuleHistoryItem[];
 }
+
+// 주기 갱신 모니터 — 대시보드가 읽는 값(app/services/scheduler.py)
+export interface ScheduledJobRow {
+  id: number;
+  name: string;
+  kind: string;
+  target: string;
+  enabled: boolean;
+  interval_seconds: number;
+  last_run_at: string | null;
+  last_status: 'ok' | 'failed' | 'skipped' | null;
+  last_ms: number | null;
+  last_detail: Record<string, unknown> | null;
+  consecutive_failures: number;
+  /** 주기가 지났는데 아직 안 돈 것 — "밀렸다"가 모니터의 첫 질문이다. */
+  overdue: boolean;
+}
+
+export interface SchedulerSnapshot {
+  running: boolean;
+  tick_seconds: number;
+  failing: number;
+  never_run: number;
+  jobs: ScheduledJobRow[];
+}

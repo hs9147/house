@@ -86,7 +86,8 @@ def test_ops_tools_list():
     names = [t["name"] for t in _rpc(c, "/mcp/ops", "tools/list")["result"]["tools"]]
     assert names == [
         "list_routes", "get_deploy_status", "list_deployments", "tail_app_log",
-        "host_snapshot", "list_ports", "search_audit",
+        "host_snapshot", "list_ports", "list_scheduled_jobs", "run_scheduled_job",
+        "search_audit",
     ]
 
 
