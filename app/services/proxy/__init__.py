@@ -12,12 +12,13 @@ from ...config import get_settings
 from ...models import BuildProfile, RedirectRule
 from ..runtime.base import Endpoint
 from .apache_proxy import ApacheProxy
-from .base import PathRoute, RedirectSpec, ReverseProxy
+from .base import DEV_SEGMENT, PathRoute, RedirectSpec, ReverseProxy
 from .caddy_proxy import CaddyProxy
 from .iis_proxy import IISProxy
 
 __all__ = [
     "RedirectSpec", "ReverseProxy", "PathRoute", "get_proxy", "domain_for", "path_prefix_for",
+    "DEV_SEGMENT",
     "configure", "configure_paths", "remove",
 ]
 
@@ -49,7 +50,7 @@ def path_prefix_for(
     if settings.tier == "enterprise":
         return "/"
     org_segment = org_name or "_"
-    dev_segment = "dev/" if profile == BuildProfile.development else ""
+    dev_segment = f"{DEV_SEGMENT}/" if profile == BuildProfile.development else ""
     return f"/apps/{org_segment}/{project_name}/{dev_segment}"
 
 

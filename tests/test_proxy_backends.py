@@ -128,7 +128,8 @@ def test_iis_configure_shared_writes_fragment_and_regenerates_base(monkeypatch, 
     IISProxy().configure("shop", BuildProfile.release, "apps.test", "/acme/shop/", ENDPOINT, REDIRECTS)
 
     fragment = (tmp_path / "sites" / "apps" / "shop" / "route.xml").read_text(encoding="utf-8")
-    assert 'match url="^acme/shop/(.*)"' in fragment
+    # release 규칙은 dev/ 조각을 뺀다 — 아래 test_release_rule_does_not_swallow_dev 참고
+    assert 'match url="^acme/shop/(?!dev/)(.*)"' in fragment
     assert "http://127.0.0.1:8123/{R:1}" in fragment
     assert 'match url="^acme/shop/old$"' in fragment  # redirect가 조직/프로젝트 접두사를 명시적으로 반영
 
@@ -151,7 +152,8 @@ def test_iis_configure_dedicated_domain_writes_own_site(monkeypatch, tmp_path, f
     IISProxy().configure("shop", BuildProfile.release, "shop.example.com", "/acme/shop/", ENDPOINT, REDIRECTS)
 
     fragment = (tmp_path / "sites" / "apps" / "shop" / "route.xml").read_text(encoding="utf-8")
-    assert 'match url="^acme/shop/(.*)"' in fragment
+    # release 규칙은 dev/ 조각을 뺀다 — 아래 test_release_rule_does_not_swallow_dev 참고
+    assert 'match url="^acme/shop/(?!dev/)(.*)"' in fragment
     assert "http://127.0.0.1:8123/{R:1}" in fragment
 
 
@@ -651,3 +653,90 @@ def test_apache_keeps_prefix_by_repeating_it_on_the_upstream(fresh_settings):
     stripped = _path_directives([PathRoute("/apps/org/shop/", ep)])
     assert "http://localhost:8123/apps/org/shop/dev/" in kept
     assert "http://localhost:8123/\n" in stripped or "http://localhost:8123/ " in stripped
+
+
+
+# --- release와 dev가 섞이지 않는가 ---
+
+def _iis_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("PAAS_IIS_SITES_ROOT", str(tmp_path / "sites"))
+    monkeypatch.setenv("PAAS_IIS_APPCMD_PATH", "appcmd.exe")
+    monkeypatch.setenv("PAAS_BASE_DOMAIN", "apps.test")
+    get_settings.cache_clear()
+    monkeypatch.setattr(subprocess, "run", lambda args, **kw: _Ok())
+
+
+def _composed_rules(tmp_path) -> list[tuple[str, str, str]]:
+    """합성된 web.config에서 (규칙 이름, match 패턴, 타겟)을 **파일에 적힌 순서대로**."""
+    import re
+
+    xml = (tmp_path / "sites" / "_base" / "web.config").read_text(encoding="utf-8")
+    return re.findall(
+        r'<rule name="([^"]+)".*?<match url="([^"]+)".*?<action[^>]*url="([^"]+)"', xml, re.S)
+
+
+def _route(rules, url: str) -> str:
+    """IIS URL Rewrite처럼 위에서부터 보고 첫 매칭에서 멈춘다(stopProcessing="true")."""
+    import re
+
+    for name, pattern, target in rules:
+        m = re.match(pattern, url)
+        if m:
+            return target.replace("{R:1}", m.group(1) if m.groups() else "")
+    return "(매칭 없음)"
+
+
+def test_release_rule_does_not_swallow_dev(monkeypatch, tmp_path, fresh_settings):
+    """**dev 경로가 release 경로 안에 있다**(/apps/_/shop/ ⊃ /apps/_/shop/dev/).
+
+    두 규칙을 겹친 채로 두면 어느 쪽이 먼저 놓이느냐가 라우팅을 정하는데, 그 순서를
+    정하는 것은 조각 파일 정렬이라는 눈에 안 보이는 성질이었다 — 그리고 실제로 release가
+    앞에 놓여 dev 요청이 전부 release 업스트림으로 갔다. 패턴을 서로소로 만들어 순서에
+    기대지 않는다.
+    """
+    _iis_env(monkeypatch, tmp_path)
+    release = proxy.path_prefix_for(None, "shop", None, BuildProfile.release)
+    dev = proxy.path_prefix_for(None, "shop", None, BuildProfile.development)
+    assert dev.startswith(release)   # 이 포함관계가 문제의 뿌리다
+
+    IISProxy().configure("shop", BuildProfile.release, "apps.test", release,
+                         Endpoint(host="127.0.0.1", port=8001), [])
+    IISProxy().configure("shop", BuildProfile.development, "apps.test", dev,
+                         Endpoint(host="127.0.0.1", port=8002), [])
+
+    rules = _composed_rules(tmp_path)
+    assert _route(rules, "apps/_/shop/index.html") == "http://127.0.0.1:8001/index.html"
+    assert _route(rules, "apps/_/shop/dev/index.html") == "http://127.0.0.1:8002/index.html"
+    # 조각 경계까지 본다 — "dev"로 시작하는 파일 이름은 dev 배포가 아니다
+    assert _route(rules, "apps/_/shop/devtools.js") == "http://127.0.0.1:8001/devtools.js"
+
+    # 그리고 **순서가 뒤바뀌어도** 같은 답이 나온다(그것이 서로소의 뜻이다)
+    assert _route(list(reversed(rules)), "apps/_/shop/dev/a") == "http://127.0.0.1:8002/a"
+    assert _route(list(reversed(rules)), "apps/_/shop/a") == "http://127.0.0.1:8001/a"
+
+
+def test_dev_fragment_itself_is_not_guarded(monkeypatch, tmp_path, fresh_settings):
+    """선읽기는 release 쪽에만 붙는다 — dev 규칙에 붙으면 /dev/dev/... 를 스스로 막는다."""
+    _iis_env(monkeypatch, tmp_path)
+    dev = proxy.path_prefix_for(None, "shop", None, BuildProfile.development)
+    IISProxy().configure("shop", BuildProfile.development, "apps.test", dev,
+                         Endpoint(host="127.0.0.1", port=8002), [])
+    fragment = (tmp_path / "sites" / "apps" / "shop-dev" / "route.xml").read_text(encoding="utf-8")
+    assert 'match url="^apps/_/shop/dev/(.*)"' in fragment
+    assert "(?!" not in fragment
+
+
+def test_composite_subpaths_are_not_guarded(monkeypatch, tmp_path, fresh_settings):
+    """dev를 삼킬 수 있는 것은 프로젝트 루트 규칙 하나뿐이다.
+
+    /api/ 같은 하위 경로에까지 선읽기를 붙이면 앱이 실제로 가진 /api/dev/... 경로를
+    플랫폼이 막아 버린다.
+    """
+    _iis_env(monkeypatch, tmp_path)
+    base = proxy.path_prefix_for(None, "shop", None, BuildProfile.release)
+    IISProxy().configure_paths("shop", BuildProfile.release, "apps.test",
+                               _composite_routes(base), [])
+
+    rules = _composed_rules(tmp_path)
+    assert _route(rules, "apps/_/shop/api/dev/report") == "http://127.0.0.1:8001/dev/report"
+    assert _route(rules, "apps/_/shop/dev/index.html") == "(매칭 없음)"   # dev 배포가 받는다
