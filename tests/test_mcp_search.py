@@ -35,7 +35,7 @@ def test_storage_and_code_servers_come_from_what_exists(monkeypatch, tmp_path, f
     c = _client(monkeypatch, tmp_path)
     # 플랫폼 저장소(internal)는 사람이 가져다 등록할 대상이 아니라 목록에 없다
     assert [i["id"] for i in c.get(f"{API}/mcp/search", headers=ADMIN).json()] == [
-        "paas-ops", "paas-docs", "paas-code", "paas-apis"]
+        "paas-ops", "paas-docs", "paas-code", "paas-graph", "paas-apis"]
 
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"company-docs={tmp_path / 'docs'}")
     get_settings.cache_clear()
@@ -179,7 +179,7 @@ def test_a_keyless_module_says_why_it_is_401(monkeypatch, tmp_path, fresh_settin
 def test_refresh_reports_the_current_count(monkeypatch, tmp_path, fresh_settings):
     c = _client(monkeypatch, tmp_path)
     body = c.post(f"{API}/modules/search/refresh-mcp", headers=ADMIN).json()
-    assert body["total_mcp_servers"] == 4  # ops + docs + code + apis (문서 폴더 없음)
+    assert body["total_mcp_servers"] == 5  # ops + docs + code + graph + apis (문서 폴더 없음)
     assert body["base_url"] == "http://localhost:7000/paas"
 
 

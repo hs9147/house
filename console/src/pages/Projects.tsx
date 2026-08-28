@@ -118,7 +118,6 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
     organization_id: '',
     git_url: '',
     branch: 'main',
-    domain: '',
     health_check_path: '/',
     default_profile: 'release' as BuildProfile,
   });
@@ -201,7 +200,6 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
             type: form.type,
             organization_id: Number(targetOrgId),
             branch: form.branch,
-            domain: form.domain || undefined,
             health_check_path: form.health_check_path,
             default_profile: form.default_profile,
             deploy_after_upload: deployAfterUpload,
@@ -223,7 +221,6 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
           name: form.name,
           type: form.type,
           branch: form.branch,
-          domain: form.domain || null,
           health_check_path: form.health_check_path,
           default_profile: form.default_profile,
           git_url: gitUrl,
@@ -232,7 +229,6 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
           name: form.name,
           type: form.type,
           branch: form.branch,
-          domain: form.domain || null,
           health_check_path: form.health_check_path,
           default_profile: form.default_profile,
           organization_id: Number(targetOrgId),
@@ -450,10 +446,6 @@ export function CreateModal({ onClose, onCreated }: { onClose: () => void; onCre
             </select>
           </label>
         </div>
-        <label className="field">
-          도메인 (선택 — 비우면 {'{이름}.{기본도메인}'})
-          <input value={form.domain} onChange={(e) => set('domain', e.target.value)} />
-        </label>
         <label className="field">
           헬스체크 경로
           <input

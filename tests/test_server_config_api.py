@@ -64,7 +64,8 @@ def test_server_config_path_prefix_uses_organization_name(monkeypatch, fresh_set
     release = next(s for s in body["sites"] if s["project_id"] == pid and s["profile"] == "release")
     dev = next(s for s in body["sites"] if s["project_id"] == pid and s["profile"] == "development")
     assert release["path_prefix"] == "/apps/acme/shop/"
-    assert dev["path_prefix"] == "/apps/acme/shop/dev/"
+    # dev는 release의 형제다 — 안에 넣으면 프록시 규칙이 서로를 삼킨다
+    assert dev["path_prefix"] == "/apps/acme/shop~dev/"
 
 
 def test_server_config_reflects_backend_settings(monkeypatch, fresh_settings):

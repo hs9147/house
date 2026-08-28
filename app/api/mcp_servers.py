@@ -5,13 +5,14 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
 충돌), 뒤는 이 플랫폼 클라이언트(services/mcp_client.py — streamable-http 단일 JSON
 응답)로는 통신 자체가 안 된다. 그래서 필요한 것만 사내에서 만든다.
 
-서버 6개:
-  POST /mcp/ops                  운영 조회 — 배포 상태·로그·라우팅·호스트·감사(읽기 전용)
+서버 7개:
+  POST /mcp/ops                  운영 — 배포 상태·로그·라우팅·호스트·감사·주기 갱신 현황
   POST /mcp/code                 프로젝트 코드 조회 — project 인자로 고른다(읽기 전용)
   POST /mcp/docs                 사내 문서 본문 검색 — 저장소를 가로질러 한 번에(읽기 전용)
   POST /mcp/storage/{저장소}      저장소 파일 — 저장소 루트 밖으로 나갈 수 없다
   POST /mcp/db/{module}          database 모듈 조회 — SELECT 전용, 허용 목록에 있는 모듈만
   POST /mcp/apis                 외부 API 카탈로그 — 검색은 표만 읽고, 수집만 밖으로 나간다
+  POST /mcp/graph                사내 문서 온톨로지 — 그래프와 스키마(읽기 전용)
 
 저장소 목록은 모듈 레지스트리가 아니라 환경변수가 정한다(PAAS_STORAGE_ROOT ·
 PAAS_DOC_ROOTS, services/storage.py) — 디스크 경로는 서버를 설치한 사람이 아는
@@ -37,6 +38,7 @@ mcp 모듈의 api_key는 배포된 앱의 환경변수로도 주입되므로(ser
 """
 import json
 import re
+import time
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -116,6 +118,11 @@ def _profile_arg(args: dict) -> BuildProfile:
 
 # --- 운영 조회 서버 (/mcp/ops) ---
 
+# MCP로 부르는 job 실행의 최소 간격(초). 목적지와 쓰는 곳이 고정돼 있어(job 종류가
+# 정한다) 넓히는 것은 권한이 아니라 호출 횟수뿐이다 — /mcp/apis의 수집과 같은 판단이다.
+_MCP_JOB_MIN_INTERVAL = 300.0
+_job_last_run: dict[str, float] = {}
+
 _OPS_TOOLS = [
     {
         "name": "list_routes",
@@ -176,6 +183,29 @@ _OPS_TOOLS = [
         },
     },
     {
+        "name": "list_scheduled_jobs",
+        "description": (
+            "주기 갱신 현황 — 무엇이 언제 돌았고, 밀렸는지(overdue), 연속 실패 중인지."
+            " 대상은 외부 API 카탈로그 수집·문서 색인·모듈 응답 확인이다."
+            " 목록은 저장소·모듈 등록 현황에서 만들어지므로 없는 대상은 올라오지 않는다."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "run_scheduled_job",
+        "description": (
+            "주기를 기다리지 않고 job 하나를 지금 돌린다(list_scheduled_jobs의 name)."
+            " 실패해도 오류가 아니라 결과로 답한다 — 무엇이 왜 실패했는지가 답이다."
+            f" 같은 job을 {int(_MCP_JOB_MIN_INTERVAL)}초 안에 다시 부르면 돌리지 않고"
+            " skipped로 답한다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+    {
         "name": "search_audit",
         "description": "감사 이벤트 검색 — 누가(actor) 언제 무엇(action)을 어디에(target) 했는지.",
         "inputSchema": {
@@ -195,14 +225,19 @@ _OPS_TOOLS = [
 async def ops_mcp_server(
     request: Request,
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_api_key),
 ):
-    """운영 조회 MCP 서버(JSON-RPC 2.0) — 읽기 전용."""
+    """운영 MCP 서버(JSON-RPC 2.0).
+
+    거의 전부 읽기다. 하나만 예외인데(run_scheduled_job) 그것도 넓히는 것은 권한이 아니라
+    호출 횟수다 — job의 종류가 무엇을 어디에 쓸지 정하므로 인자로 대상이 바뀌지 않고,
+    되풀이 호출은 최소 간격이 막는다.
+    """
     return mcp_server.dispatch(
         await mcp_server.read_payload(request),
         server_name="paas-ops",
         tools=_OPS_TOOLS,
-        call=lambda name, args: _ops_call(db, name, args),
+        call=lambda name, args: _ops_call(db, key.name, name, args),
     )
 
 
@@ -216,7 +251,7 @@ def _project_by_name(db: Session, args: dict, discover: str = "list_routes") -> 
     return row
 
 
-def _ops_call(db: Session, name: str, args: dict) -> str:
+def _ops_call(db: Session, actor: str, name: str, args: dict) -> str:
     if name == "list_routes":
         # 서버구성 화면과 같은 함수를 쓴다 — 화면과 다른 값을 말하기 시작하면 둘 중
         # 어느 쪽이 사실인지 알 수 없게 된다.
@@ -234,6 +269,31 @@ def _ops_call(db: Session, name: str, args: dict) -> str:
             db, probe_host=upstream_host(get_settings()),
             probe_range=bool(args.get("probe_range")),
         ))
+
+    if name == "list_scheduled_jobs":
+        from ..services import scheduler  # noqa: PLC0415
+
+        scheduler.reconcile(db)
+        return _dump(scheduler.snapshot(db))
+
+    if name == "run_scheduled_job":
+        from ..services import scheduler  # noqa: PLC0415
+        from ..models import ScheduledJob  # noqa: PLC0415
+
+        wanted = _str_arg(args, "name")
+        job = db.execute(
+            select(ScheduledJob).where(ScheduledJob.name == wanted)).scalar_one_or_none()
+        if job is None:
+            raise mcp_server.McpToolError(
+                f"그런 job이 없습니다: {wanted} (list_scheduled_jobs로 이름을 확인하세요)")
+        now = time.monotonic()
+        if now - _job_last_run.get(wanted, -_MCP_JOB_MIN_INTERVAL) < _MCP_JOB_MIN_INTERVAL:
+            return _dump({"job": wanted, "status": "skipped",
+                          "detail": {"reason": "방금 돌렸습니다 — 잠시 뒤에 다시 부르세요."}})
+        _job_last_run[wanted] = now
+        result = scheduler.run(db, job)
+        audit.record(db, actor, "mcp.scheduler.run", wanted, result)
+        return _dump(result)
 
     if name == "search_audit":
         query = select(AuditEvent)
@@ -281,8 +341,8 @@ def _ops_call(db: Session, name: str, args: dict) -> str:
             ).scalars().first()
             out["profiles"][profile.value] = {
                 "status": _runtime_status(runtime, project, profile),
-                "domain": domain_for(project.name, project.domain, profile),
-                "path_prefix": path_prefix_for(org_name, project.name, project.domain, profile),
+                "domain": domain_for(project.name, profile),
+                "path_prefix": path_prefix_for(org_name, project.name, profile),
                 "internal_port": running_ports.get(profile),
                 "last_deployment": None if latest is None else {
                     "id": latest.id, "status": latest.status.value, "git_sha": latest.git_sha,
@@ -1199,3 +1259,128 @@ def _apis_call(db: Session, actor: str, name: str, args: dict) -> str:
         # 돌려주면 모델은 질의를 바꿔 가며 헛돌게 된다.
         raise mcp_server.McpToolError(" / ".join(result["warnings"]))
     return _dump(result["results"])
+
+
+# --- 문서 온톨로지 서버 (/mcp/graph) ---
+#
+# /mcp/docs가 "본문에서 찾아라"라면 여기는 "무엇이 있고 어떻게 이어져 있나"다. 검색은
+# 낱말이 본문에 있어야 걸리지만, 그래프는 **문서에 적히지 않은 관계**를 답한다 —
+# 어느 규정이 이 용어를 정의했는지, 어떤 표들이 같은 컬럼을 쓰는지, 이 조문이 어느 문서를
+# 인용하는지. 그래프는 색인과 같은 추출에서 나오므로 따로 만들 것이 없다
+# (services/ontology.py, docsearch._write_graph).
+
+_GRAPH_TOOLS = [
+    {
+        "name": "graph_schema",
+        "description": (
+            "그래프에 **무엇이 있는지** — 노드 종류별 개수, 관계 종류별 개수, 그리고"
+            " 되풀이되는 표의 컬럼 이름 묶음(사내 문서의 점검표·대장·양식은 사실상"
+            " 레코드 타입이고 그 머리글이 곧 스키마다). 찾기 전에 여기부터 본다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"source": {"type": "string", "description": "저장소 이름(생략 = 전체)"}},
+        },
+    },
+    {
+        "name": "find_nodes",
+        "description": (
+            "이름으로 노드를 찾는다. kind: document | section | term | table."
+            " 용어의 정의문을 찾으려면 kind=term, 표를 찾으려면 kind=table(이름이 컬럼"
+            " 목록이다). 결과의 path가 그 노드를 만든 문서다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "이름 부분 일치"},
+                "kind": {"type": "string"},
+                "source": {"type": "string"},
+                "limit": {"type": "integer", "description": f"기본 20, 최대 {_MAX_LIST}"},
+            },
+        },
+    },
+    {
+        "name": "neighbors",
+        "description": (
+            "노드 하나에 붙은 관계 — 나가는 것(out)과 들어오는 것(in)."
+            " 절이 정의한 용어, 문서가 인용한 다른 문서, 용어를 정의한 절을 여기서 얻는다."
+            " kind와 name은 find_nodes 결과의 값을 그대로 쓴다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string"},
+                "name": {"type": "string"},
+                "source": {"type": "string"},
+                "limit": {"type": "integer", "description": f"기본 30, 최대 {_MAX_LIST}"},
+            },
+            "required": ["kind", "name"],
+        },
+    },
+]
+
+
+@router.post("/mcp/graph")
+async def graph_mcp_server(
+    request: Request,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """사내 문서 온톨로지 MCP 서버(JSON-RPC 2.0) — 읽기 전용.
+
+    대상은 /mcp/docs와 같은 저장소 전부다. source를 생략하면 저장소를 가로질러 답하고,
+    결과에 어느 저장소·어느 문서인지를 실어 준다 — 저장소 이름을 모르는 쪽에서 부르는
+    창구라는 점도 같다.
+    """
+    return mcp_server.dispatch(
+        await mcp_server.read_payload(request),
+        server_name="paas-graph",
+        tools=_GRAPH_TOOLS,
+        call=lambda name, args: _graph_call(name, args),
+    )
+
+
+def _graph_sources(args: dict) -> list[storage_service.Store]:
+    source = _str_arg(args, "source", required=False)
+    return [_doc_source(source)] if source else _all_stores()
+
+
+def _graph_call(name: str, args: dict) -> str:
+    sources = _graph_sources(args)
+
+    if name == "graph_schema":
+        out = {store.name: docsearch.graph_schema(store.name) for store in sources}
+        if not any(s["node_kinds"] for s in out.values()):
+            # 그래프가 비어 있는 것과 "그런 것이 없는 것"은 다른 문제다.
+            raise mcp_server.McpToolError(
+                "그래프가 비어 있습니다 — reindex_docs(/mcp/docs)를 먼저 실행하세요."
+                " 온톨로지는 색인과 같은 추출에서 만들어집니다.")
+        return _dump(out)
+
+    if name == "find_nodes":
+        limit = _int_arg(args, "limit", 20, _MAX_LIST)
+        hits: list[dict] = []
+        for store in sources:
+            if len(hits) >= limit:
+                break
+            hits += [
+                {"source": store.name, **row}
+                for row in docsearch.find_nodes(
+                    store.name, _str_arg(args, "kind", required=False),
+                    _str_arg(args, "q", required=False), limit - len(hits))
+            ]
+        return _dump(hits)
+
+    # neighbors
+    kind, node_name = _str_arg(args, "kind"), _str_arg(args, "name")
+    limit = _int_arg(args, "limit", 30, _MAX_LIST)
+    found = [
+        {"source": store.name, **docsearch.neighbors(store.name, kind, node_name, limit)}
+        for store in sources
+    ]
+    found = [f for f in found if f["out"] or f["in"]]
+    if not found:
+        raise mcp_server.McpToolError(
+            f"그 노드에 붙은 관계가 없습니다: {kind}:{node_name}"
+            " (find_nodes로 kind와 name을 정확히 확인하세요)")
+    return _dump(found)

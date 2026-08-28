@@ -130,9 +130,12 @@ def create_app() -> FastAPI:
         except OidcProviderError as e:
             print(f"[paas] OIDC Provider 설정 오류: {e}")
 
-    # 1일 1회 외부 API 수집 루트 백그라운드 탐색 및 갱신 스케줄러 시동
-    from .services.apisearch import start_daily_api_directory_scheduler  # noqa: PLC0415
-    start_daily_api_directory_scheduler()
+    # 주기 갱신 스케줄러 — 외부 API 카탈로그 수집·문서 색인·모듈 응답 확인을 한 스레드가
+    # 돌리고 결과를 표에 남긴다(services/scheduler.py). 예전에는 카탈로그 수집만 자기
+    # 스레드를 갖고 있었고, 무엇이 언제 돌았는지 볼 곳이 없었다.
+    from .services import scheduler  # noqa: PLC0415
+
+    scheduler.start()
 
     # 선택 모듈 (설치 빌드옵션)
     if "deploy" in features:

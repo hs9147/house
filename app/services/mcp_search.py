@@ -110,6 +110,11 @@ def list_internal_servers(db: Session) -> list[dict]:
         "프로젝트 코드 조회 — 파일 목록·내용·구조 개요(project 인자로 고른다, 읽기 전용)",
         "code", "/mcp/code",
     ))
+    entries.append(_entry(
+        "paas-graph", "paas-graph",
+        "사내 문서 온톨로지 — 용어 정의·문서 인용·표 스키마를 그래프로 묻는다(읽기 전용)",
+        "docs", "/mcp/graph",
+    ))
     # 수집해 둔 카탈로그를 읽기만 한다 — 밖으로 나가지 않으므로 여기 올려도 된다.
     entries.append(_entry(
         "paas-apis", "paas-apis",

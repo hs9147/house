@@ -21,7 +21,7 @@ from pathlib import Path
 from stat import S_ISREG
 
 from ..config import get_settings
-from . import docready, doctext
+from . import docready, doctext, ontology
 
 # 한 문서에서 색인에 담을 최대 글자 수. 뒷부분은 검색되지 않는 대신 색인 크기와 스캔
 # 시간이 문서 수에 비례해서만 늘어난다(120,000자 ≈ 60쪽 분량).
@@ -55,6 +55,8 @@ SKIP_NAMES = {"desktop.ini", "thumbs.db"}
 SKIP_DIR_NAMES = {"$recycle.bin", "system volume information", "found.000"}
 _DEFAULT_BUDGET = 20.0
 
+# 온톨로지는 색인과 **같은 수명**을 갖는다 — 같은 추출에서 나오고, 문서가 지워지면 함께
+# 지워지며, 통째로 지우고 다시 만들 수 있다. 그래서 같은 파일에 둔다(services/ontology.py).
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS docs (
   path       TEXT PRIMARY KEY,
@@ -64,7 +66,25 @@ CREATE TABLE IF NOT EXISTS docs (
   truncated  INTEGER NOT NULL DEFAULT 0,
   error      TEXT,           -- 실패 이유(사용자에게 그대로 보여 준다)
   indexed_at REAL NOT NULL
-)
+);
+CREATE TABLE IF NOT EXISTS nodes (
+  path   TEXT NOT NULL,      -- 이 노드를 만든 문서 — 삭제·재색인의 단위다
+  key    TEXT NOT NULL,      -- 문서 안에서의 식별자(ontology._key)
+  kind   TEXT NOT NULL,      -- document | section | term | table
+  name   TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  depth  INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (path, key)
+);
+CREATE TABLE IF NOT EXISTS edges (
+  path TEXT NOT NULL,
+  src  TEXT NOT NULL,
+  rel  TEXT NOT NULL,        -- contains | defines | references
+  dst  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_nodes_name ON nodes(name);
+CREATE INDEX IF NOT EXISTS ix_nodes_kind ON nodes(kind);
+CREATE INDEX IF NOT EXISTS ix_edges_path ON edges(path)
 """
 
 
@@ -77,7 +97,7 @@ def index_path(store_name: str) -> Path:
 def _connect(store_name: str) -> sqlite3.Connection:
     conn = sqlite3.connect(index_path(store_name))
     conn.row_factory = sqlite3.Row
-    conn.execute(_SCHEMA)
+    conn.executescript(_SCHEMA)
     return conn
 
 
@@ -187,9 +207,12 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
             body: str | None = None
             error: str | None = None
             try:
-                # 추출은 한 번만 하고 두 곳에 쓴다 — 색인에는 평문, .ready에는 마크다운.
+                # 추출은 한 번만 하고 세 곳에 쓴다 — 색인에는 평문, .ready에는 마크다운,
+                # 그리고 그 마크다운에서 온톨로지(그래프)를 뽑는다. 같은 추출을 세 번
+                # 하지 않으려고 여기서 함께 처리한다.
                 markdown, body = doctext.extract(root / rel)
                 docready.write(store_name, rel, root / rel, markdown)
+                _write_graph(conn, rel, markdown)
             except doctext.ExtractError as e:
                 error = str(e)
             except OSError as e:  # 색인 중 파일이 사라지거나 잠긴 경우
@@ -212,6 +235,7 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
         gone = _vanished(known, candidates, root, unreadable)
         for rel in gone:
             conn.execute("DELETE FROM docs WHERE path = ?", (rel,))
+            _forget_graph(conn, rel)
             docready.forget(store_name, rel)
         remaining = len(todo) - (indexed + failed)
         conn.commit()
@@ -225,6 +249,97 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
             # (지운 것이 아니라 못 본 것이다) files 수치는 실제보다 작게 나온다.
             result["unreadable_dirs"] = len(unreadable)
         return result
+    finally:
+        conn.close()
+
+
+def _forget_graph(conn: sqlite3.Connection, rel: str) -> None:
+    conn.execute("DELETE FROM nodes WHERE path = ?", (rel,))
+    conn.execute("DELETE FROM edges WHERE path = ?", (rel,))
+
+
+def _write_graph(conn: sqlite3.Connection, rel: str, markdown: str) -> None:
+    """이 문서의 그래프를 갈아 끼운다 — 부분 갱신이 아니라 통째로 다시 쓴다.
+
+    문서가 바뀌면 절이 통째로 사라지거나 이름이 바뀐다. 남은 것만 지우려 들면 어느 노드가
+    옛것인지 판정하는 규칙이 하나 더 필요해지는데, 문서 하나의 노드는 수백 개 이하라
+    지우고 다시 넣는 편이 싸고 정확하다.
+    """
+    _forget_graph(conn, rel)
+    title = Path(rel).stem
+    nodes, edges = ontology.extract(rel, title, markdown)
+    conn.executemany(
+        "INSERT OR REPLACE INTO nodes (path, key, kind, name, detail, depth)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        [(rel, f"{n['kind']}:{n['name']}", n["kind"], n["name"], n["detail"], n["depth"])
+         for n in nodes],
+    )
+    conn.executemany(
+        "INSERT INTO edges (path, src, rel, dst) VALUES (?, ?, ?, ?)",
+        [(rel, e["src"], e["rel"], e["dst"]) for e in edges],
+    )
+
+
+def graph_schema(store_name: str) -> dict:
+    """이 저장소 그래프에 **무엇이 있는지**. 찾기 전에 먼저 보는 자리다.
+
+    표의 컬럼 이름 묶음을 함께 준다 — 사내 문서에서 되풀이되는 표(점검표·대장·양식)는
+    사실상 레코드 타입이고, 그 머리글이 곧 스키마다.
+    """
+    conn = _connect(store_name)
+    try:
+        kinds = {r["kind"]: r["n"] for r in conn.execute(
+            "SELECT kind, COUNT(*) AS n FROM nodes GROUP BY kind ORDER BY n DESC")}
+        rels = {r["rel"]: r["n"] for r in conn.execute(
+            "SELECT rel, COUNT(*) AS n FROM edges GROUP BY rel ORDER BY n DESC")}
+        tables = [
+            {"columns": r["name"].split(" | "), "documents": r["n"]}
+            for r in conn.execute(
+                "SELECT name, COUNT(DISTINCT path) AS n FROM nodes WHERE kind = 'table'"
+                " GROUP BY name ORDER BY n DESC, name LIMIT 50")
+        ]
+        return {"store": store_name, "node_kinds": kinds, "edge_kinds": rels,
+                "documents": kinds.get("document", 0), "table_schemas": tables}
+    finally:
+        conn.close()
+
+
+def find_nodes(store_name: str, kind: str = "", q: str = "", limit: int = 20) -> list[dict]:
+    """이름으로 노드를 찾는다. kind를 주면 그 종류만."""
+    sql = "SELECT path, kind, name, detail, depth FROM nodes WHERE 1=1"
+    args: list = []
+    if kind:
+        sql += " AND kind = ?"
+        args.append(kind)
+    if q:
+        sql += " AND name LIKE ? ESCAPE '\\'"
+        args.append(_like_pattern(q))
+    sql += " ORDER BY kind, name LIMIT ?"
+    args.append(limit)
+    conn = _connect(store_name)
+    try:
+        return [dict(r) for r in conn.execute(sql, args)]
+    finally:
+        conn.close()
+
+
+def neighbors(store_name: str, kind: str, name: str, limit: int = 30) -> dict:
+    """이 노드에 붙은 엣지 — 나가는 것과 들어오는 것. 문서 경로를 함께 준다."""
+    key = f"{kind}:{name}"
+    conn = _connect(store_name)
+    try:
+        def rows(column: str, other: str):
+            return [
+                {"path": r["path"], "rel": r["rel"], "kind": r["k"], "name": r["n"],
+                 "detail": r["d"]}
+                for r in conn.execute(
+                    f"SELECT e.path, e.rel, n.kind AS k, n.name AS n, n.detail AS d"
+                    f" FROM edges e LEFT JOIN nodes n"
+                    f"   ON n.path = e.path AND n.key = e.{other}"
+                    f" WHERE e.{column} = ? LIMIT ?", (key, limit))
+            ]
+        return {"node": {"kind": kind, "name": name},
+                "out": rows("src", "dst"), "in": rows("dst", "src")}
     finally:
         conn.close()
 

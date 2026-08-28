@@ -13,7 +13,6 @@ export interface ProjectOut {
   // organization_id로 생성된 프로젝트는 비관리자에게 마스킹된 값이 온다
   git_url: string;
   branch: string;
-  domain: string | null;
   default_profile: BuildProfile;
   created_at: string;
 }
@@ -25,7 +24,6 @@ export interface ProjectCreate {
   organization_id?: number | null;
   git_url?: string;
   branch: string;
-  domain?: string | null;
   health_check_path?: string;
   default_profile?: BuildProfile;
 }
@@ -544,4 +542,29 @@ export interface PlatformModuleReportOut {
   total_bindings: number;
   modules: GlobalModuleUsageSummary[];
   recent_history: ModuleHistoryItem[];
+}
+
+// 주기 갱신 모니터 — 대시보드가 읽는 값(app/services/scheduler.py)
+export interface ScheduledJobRow {
+  id: number;
+  name: string;
+  kind: string;
+  target: string;
+  enabled: boolean;
+  interval_seconds: number;
+  last_run_at: string | null;
+  last_status: 'ok' | 'failed' | 'skipped' | null;
+  last_ms: number | null;
+  last_detail: Record<string, unknown> | null;
+  consecutive_failures: number;
+  /** 주기가 지났는데 아직 안 돈 것 — "밀렸다"가 모니터의 첫 질문이다. */
+  overdue: boolean;
+}
+
+export interface SchedulerSnapshot {
+  running: boolean;
+  tick_seconds: number;
+  failing: number;
+  never_run: number;
+  jobs: ScheduledJobRow[];
 }

@@ -158,8 +158,8 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
                 project_id=p.id,
                 project_name=p.name,
                 profile=profile,
-                domain=domain_for(p.name, p.domain, profile),
-                path_prefix=path_prefix_for(org_name, p.name, p.domain, profile),
+                domain=domain_for(p.name, profile),
+                path_prefix=path_prefix_for(org_name, p.name, profile),
                 status=status,
                 # 표기는 localhost로 한다 — 127.0.0.1은 "사용자 자기 PC"를 가리켜야
                 # 하는 자리(git 클라이언트 OAuth 콜백 등)에 남겨 두고, 서버 안쪽

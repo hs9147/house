@@ -36,6 +36,7 @@ import type {
   ProjectOut,
   ProjectType,
   RedirectRule,
+  SchedulerSnapshot,
   ResourceItem,
   ReviewResult,
   ServerConfigOut,
@@ -179,6 +180,15 @@ export const api = {
   issueKey: (name: string, is_admin: boolean) =>
     request<ApiKeyIssued>('POST', '/keys', { name, is_admin }),
 
+  // 주기 갱신 모니터 — 목록은 서버가 저장소·모듈 현황에서 만든다(사람이 등록하지 않는다).
+  schedulerSnapshot: () => request<SchedulerSnapshot>('GET', '/scheduler'),
+  runScheduledJob: (id: number) =>
+    request<{ job: string; status: string; ms: number; detail: Record<string, unknown> }>(
+      'POST', `/scheduler/jobs/${id}/run`),
+  toggleScheduledJob: (id: number) =>
+    request<{ id: number; name: string; enabled: boolean }>(
+      'POST', `/scheduler/jobs/${id}/toggle`),
+
   // 프로젝트
   listProjects: () => request<ProjectOut[]>('GET', '/projects'),
   createProject: (body: ProjectCreate) => request<ProjectOut>('POST', '/projects', body),
@@ -192,7 +202,6 @@ export const api = {
       type: ProjectType;
       organization_id: number;
       branch: string;
-      domain?: string;
       health_check_path?: string;
       default_profile: BuildProfile;
       deploy_after_upload: boolean;
@@ -204,7 +213,6 @@ export const api = {
     fd.append('type', form.type);
     fd.append('organization_id', String(form.organization_id));
     fd.append('branch', form.branch);
-    if (form.domain) fd.append('domain', form.domain);
     fd.append('health_check_path', form.health_check_path ?? '/');
     fd.append('default_profile', form.default_profile);
     fd.append('deploy_after_upload', String(form.deploy_after_upload));

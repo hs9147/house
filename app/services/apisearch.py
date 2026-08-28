@@ -23,7 +23,6 @@ updated_at도 그대로다 — "언제 바뀌었나"가 "언제 받았나"에 �
 관리자 전용이고, get_with_retry로 서킷브레이커를 적용한다.
 """
 import re
-import threading
 import time
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -43,10 +42,6 @@ SOURCE_LABELS = {SOURCE_APISGURU: "apis.guru", SOURCE_PUBLIC_DATA: "공공데이
 # 소스가 주는 값 그대로인 필드. 갱신할 때 이 목록만 비교한다 — search_text는 여기서
 # 파생되고, created_at·updated_at·removed_at은 표가 스스로 관리한다.
 _FIELDS = ("title", "description", "provider", "categories", "homepage", "spec_url")
-
-_SYNC_INTERVAL = 86400.0  # 1일 1회
-_scheduler_lock = threading.Lock()
-_scheduler_thread: threading.Thread | None = None
 
 EMPTY_CATALOG = (
     "API 카탈로그가 비어 있습니다 — 아직 수집하지 않았습니다"
@@ -379,42 +374,6 @@ def _haystack(item: dict) -> str:
         str(item["id"]), item["title"], item["description"], " ".join(item["categories"]),
         _url_text(item["homepage"]), _url_text(item["spec_url"]),
     ]).lower()
-
-
-def start_daily_api_directory_scheduler() -> None:
-    """1일 1회 백그라운드로 카탈로그를 수집한다.
-
-    기동 직후가 아니라 10초 뒤에 시작한다 — 첫 요청이 몰리는 구간에 수천 건 upsert를
-    끼워 넣지 않기 위해서다. 실패는 삼킨다: 카탈로그가 낡는 것은 서비스가 죽는 것보다
-    훨씬 가벼운 문제이고, 실패한 소스의 행은 손대지 않으므로 기존 카탈로그는 남는다.
-    """
-    global _scheduler_thread
-    with _scheduler_lock:
-        if _scheduler_thread is not None and _scheduler_thread.is_alive():
-            return
-
-        def _loop():
-            time.sleep(10)
-            while True:
-                try:
-                    _sync_in_background()
-                except Exception:  # noqa: BLE001
-                    pass
-                time.sleep(_SYNC_INTERVAL)
-
-        _scheduler_thread = threading.Thread(target=_loop, daemon=True, name="daily-api-scheduler")
-        _scheduler_thread.start()
-
-
-def _sync_in_background() -> dict:
-    """스케줄러 전용 — 요청 세션이 없으므로 자기 세션을 연다."""
-    from ..db import SessionLocal  # noqa: PLC0415 — 기동 순서 의존을 만들지 않는다
-
-    db = SessionLocal()
-    try:
-        return sync_catalog(db)
-    finally:
-        db.close()
 
 
 # --- 검색(DB만 읽는다) ---

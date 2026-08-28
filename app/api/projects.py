@@ -123,7 +123,6 @@ async def upload_project(
     type: ProjectType = Form(...),  # noqa: A002 - Form 필드명을 ProjectCreate와 맞춤
     organization_id: int = Form(...),
     branch: str = Form("main"),
-    domain: str | None = Form(None),
     health_check_path: str = Form("/"),
     default_profile: BuildProfile = Form(BuildProfile.release),
     deploy_after_upload: bool = Form(False),
@@ -144,7 +143,7 @@ async def upload_project(
     """
     form = ProjectUploadForm(
         name=name, type=type, organization_id=organization_id, branch=branch,
-        domain=domain, health_check_path=health_check_path,
+        health_check_path=health_check_path,
         default_profile=default_profile, deploy_after_upload=deploy_after_upload,
     )
     exists = db.execute(select(Project).where(Project.name == form.name)).scalar_one_or_none()
@@ -203,7 +202,6 @@ async def upload_project(
         organization_id=form.organization_id,
         git_url=git_url,
         branch=form.branch,
-        domain=form.domain,
         health_check_path=form.health_check_path,
         default_profile=form.default_profile,
     )

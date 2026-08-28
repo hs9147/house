@@ -19,6 +19,27 @@ os.environ.setdefault("PAAS_GIT_INTERNAL_ONLY", "false")
 import pytest  # noqa: E402
 
 
+def _disable_background_scheduler() -> None:
+    """주기 갱신 스케줄러를 테스트에서는 띄우지 않는다.
+
+    create_app이 데몬 스레드를 하나 띄우고 잠시 뒤 갱신을 시작하는데(services/scheduler),
+    그 시각은 스위트 한복판이다. 스레드는 자기 세션을 열어 test-paas.db에 쓰고, 그때
+    httpx가 어느 테스트의 스텁으로 갈려 있는지는 알 수 없다 — 무작위로 한 테스트만
+    흔드는 종류의 실패가 된다. 스케줄러 자체는 test_scheduler에서 tick을 직접 불러 본다.
+
+    **fixture로는 늦다.** app/main.py는 모듈 하단에서 app = create_app()을 하므로,
+    테스트 모듈이 `from app.main import create_app`을 하는 순간 — 즉 수집 단계, 어떤
+    fixture보다 먼저 — 스레드가 이미 뜬다. conftest는 테스트 모듈보다 먼저 import되니
+    여기 import 시점에 막아야 실제로 막힌다.
+    """
+    from app.services import scheduler
+
+    scheduler.start = lambda: None
+
+
+_disable_background_scheduler()
+
+
 @pytest.fixture
 def fresh_settings():
     """PAAS_* 환경변수를 monkeypatch한 테스트용 — 설정 캐시를 전후로 비운다."""
@@ -27,23 +48,6 @@ def fresh_settings():
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
-
-
-@pytest.fixture(autouse=True, scope="session")
-def _no_background_api_sync():
-    """카탈로그 수집 스케줄러를 테스트에서는 띄우지 않는다.
-
-    create_app이 데몬 스레드를 하나 띄우고 10초 뒤 수집을 시작하는데(services/apisearch),
-    그 시각은 스위트 한복판이다. 스레드는 자기 세션을 열어 test-paas.db에 쓰고, 그때
-    httpx가 어느 테스트의 스텁으로 갈려 있는지는 알 수 없다 — 무작위로 한 테스트만
-    흔드는 종류의 실패가 된다. 스케줄러 자체는 test_apisearch에서 따로 확인한다.
-    """
-    from app.services import apisearch
-
-    original = apisearch.start_daily_api_directory_scheduler
-    apisearch.start_daily_api_directory_scheduler = lambda: None
-    yield
-    apisearch.start_daily_api_directory_scheduler = original
 
 
 @pytest.fixture(autouse=True)

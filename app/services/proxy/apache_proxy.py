@@ -14,8 +14,8 @@ ProxyPass는 지정한 경로 접두사를 스스로 벗겨내므로 <Location> 
 필요없다). PAAS_APACHE_SITES_DIR을 Include하는 메인 httpd.conf 설정은 기존과
 동일하게 한 번만 연결해두면 된다.
 
-release 배포에 커스텀 도메인(project.domain)을 지정한 예외만 기존처럼 독립된
-VirtualHost 파일을 그대로 쓴다.
+도메인은 언제나 base_domain 하나다 — 프로젝트별 커스텀 도메인은 없다
+(services/proxy/__init__.py의 domain_for).
 """
 import subprocess
 
@@ -38,11 +38,6 @@ def _directive(r: RedirectSpec) -> str:
     return f"    RewriteRule ^{r.from_path}$ {r.to_path} [L]\n"
 
 
-def _conf_file(project_name: str, profile: BuildProfile):
-    settings = get_settings()
-    return settings.apache_sites_dir / f"{site_name(project_name, profile)}.conf"
-
-
 def _handles_dir():
     settings = get_settings()
     d = settings.apache_sites_dir / "handles"
@@ -52,10 +47,6 @@ def _handles_dir():
 
 def _handle_file(project_name: str, profile: BuildProfile):
     return _handles_dir() / f"{site_name(project_name, profile)}.conf"
-
-
-def _is_shared(domain: str) -> bool:
-    return domain == get_settings().base_domain
 
 
 def _ensure_base_vhost() -> None:
@@ -91,24 +82,6 @@ def _path_directives(routes: list[PathRoute]) -> str:
     return "".join(lines)
 
 
-def _vhost_conf_paths(domain: str, routes: list[PathRoute], redirects: list[RedirectSpec]) -> str:
-    root = next((r for r in routes if r.path_prefix in ("/", "")), routes[-1])
-    rewrite_engine = "    RewriteEngine On\n" if any(r.kind == "rewrite" for r in redirects) else ""
-    directives = "".join(_directive(r) for r in redirects)
-    root_prefix = "/" + root.path_prefix.strip("/") + "/" if root.path_prefix not in ("/", "") else "/"
-    return (
-        "<VirtualHost *:80>\n"
-        f"    ServerName {domain}\n"
-        f"{rewrite_engine}"
-        f"{directives}"
-        "    ProxyPreserveHost On\n"
-        f"{_path_directives(routes)}"
-        f"    ProxyPass {root_prefix} http://{root.endpoint.host}:{root.endpoint.port}/\n"
-        f"    ProxyPassReverse {root_prefix} http://{root.endpoint.host}:{root.endpoint.port}/\n"
-        "</VirtualHost>\n"
-    )
-
-
 def _shared_fragment(routes: list[PathRoute], redirects: list[RedirectSpec]) -> str:
     """base VirtualHost에 IncludeOptional로 이어붙는 조각 — <VirtualHost> 래핑 없이
     ProxyPass/redirect 지시어만 담는다."""
@@ -140,19 +113,13 @@ class ApacheProxy(ReverseProxy):
 
     def configure_paths(self, project_name, profile: BuildProfile, domain,
                          routes: list[PathRoute], redirects: list[RedirectSpec]) -> None:
-        if _is_shared(domain):
-            _ensure_base_vhost()
-            _handle_file(project_name, profile).write_text(
-                _shared_fragment(routes, redirects), encoding="utf-8",
-            )
-        else:
-            _conf_file(project_name, profile).write_text(
-                _vhost_conf_paths(domain, routes, redirects), encoding="utf-8",
-            )
+        # 도메인은 언제나 base_domain 하나다(proxy.domain_for) — 조각 하나를 쓰고 끝난다.
+        _ensure_base_vhost()
+        _handle_file(project_name, profile).write_text(
+            _shared_fragment(routes, redirects), encoding="utf-8")
         self._reload()
 
     def remove(self, project_name, profile: BuildProfile) -> None:
-        _conf_file(project_name, profile).unlink(missing_ok=True)
         _handle_file(project_name, profile).unlink(missing_ok=True)
         self._reload()
 

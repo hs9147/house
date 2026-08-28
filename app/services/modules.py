@@ -76,7 +76,7 @@ def binding_env(
                 ).scalar_one_or_none()
                 if target_project is not None and target_project.organization is not None:
                     org_name = target_project.organization.name
-            path = proxy.path_prefix_for(org_name, target, None, BuildProfile.release)
+            path = proxy.path_prefix_for(org_name, target, BuildProfile.release)
             url = f"https://{settings.base_domain}{path}"
         return {f"{p}_URL": url}
 
