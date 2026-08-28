@@ -54,6 +54,16 @@ SKIP_NAMES = {"desktop.ini", "thumbs.db"}
 # 색인 예산을 다 쓴다.
 SKIP_DIR_NAMES = {"$recycle.bin", "system volume information", "found.000"}
 _DEFAULT_BUDGET = 20.0
+# 배치 색인이 쓰기 트랜잭션을 붙잡고 있을 최대 시간. 예산(20초) 내내 붙잡으면 그 사이
+# 업로드가 여는 연결이 쓰기 락에 걸려 `database is locked`로 실패한다. 1초마다 끊으면
+# 5,000건 기준 0.09초가 0.3초쯤 되는데, 추출 비용(건당 수십~수백 ms) 옆에서는 없는 값이다.
+_COMMIT_EVERY = 1.0
+# 업로드가 여는 연결은 오래 기다리지 않는다 — 응답을 5초 붙잡는 것이 색인이 한 주기
+# 늦는 것보다 나쁘다. 못 잡으면 포기하고 주기 색인에 맡긴다.
+_INLINE_TIMEOUT = 1.0
+# 인라인 색인을 시도할 최대 크기. 바이트는 추출 시간의 정확한 대리값이 아니지만
+# (9MB 텍스트는 수 ms, 2MB짜리 97-2003 문서는 LibreOffice를 띄워 ~2초다) 최악은 막는다.
+INLINE_MAX_BYTES = 10 * 1024 * 1024
 
 # 온톨로지는 색인과 **같은 수명**을 갖는다 — 같은 추출에서 나오고, 문서가 지워지면 함께
 # 지워지며, 통째로 지우고 다시 만들 수 있다. 그래서 같은 파일에 둔다(services/ontology.py).
@@ -94,8 +104,8 @@ def index_path(store_name: str) -> Path:
     return directory / f"{store_name}.db"
 
 
-def _connect(store_name: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(index_path(store_name))
+def _connect(store_name: str, timeout: float = 5.0) -> sqlite3.Connection:
+    conn = sqlite3.connect(index_path(store_name), timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
     return conn
@@ -201,36 +211,19 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
         ]
 
         indexed = failed = 0
+        last_commit = time.monotonic()
         for rel, size, mtime in todo:
             if time.monotonic() - started > budget_seconds:
                 break
-            body: str | None = None
-            error: str | None = None
-            try:
-                # 추출은 한 번만 하고 세 곳에 쓴다 — 색인에는 평문, .ready에는 마크다운,
-                # 그리고 그 마크다운에서 온톨로지(그래프)를 뽑는다. 같은 추출을 세 번
-                # 하지 않으려고 여기서 함께 처리한다.
-                markdown, body = doctext.extract(root / rel)
-                docready.write(store_name, rel, root / rel, markdown)
-                _write_graph(conn, rel, markdown)
-            except doctext.ExtractError as e:
-                error = str(e)
-            except OSError as e:  # 색인 중 파일이 사라지거나 잠긴 경우
-                error = f"파일을 읽을 수 없습니다: {e}"
-            truncated = bool(body and len(body) > MAX_INDEX_CHARS)
-            conn.execute(
-                "INSERT INTO docs (path, size, mtime, body, truncated, error, indexed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
-                "size=excluded.size, mtime=excluded.mtime, body=excluded.body, "
-                "truncated=excluded.truncated, error=excluded.error, "
-                "indexed_at=excluded.indexed_at",
-                (rel, size, mtime, body[:MAX_INDEX_CHARS] if body else None,
-                 int(truncated), error, time.time()),
-            )
-            if error:
-                failed += 1
-            else:
+            if _index_file(conn, store_name, root, rel, size, mtime):
                 indexed += 1
+            else:
+                failed += 1
+            if time.monotonic() - last_commit >= _COMMIT_EVERY:
+                # 트랜잭션을 예산 내내 붙잡지 않는다 — 그동안 업로드가 여는 연결은
+                # 쓰기 락에 걸려 실패한다. 색인은 파생 데이터라 중간에 끊어도 무방하다.
+                conn.commit()
+                last_commit = time.monotonic()
 
         gone = _vanished(known, candidates, root, unreadable)
         for rel in gone:
@@ -251,6 +244,86 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
         return result
     finally:
         conn.close()
+
+
+def _index_file(conn: sqlite3.Connection, store_name: str, root: Path, rel: str,
+                size: int, mtime: float) -> bool:
+    """파일 하나를 색인에 기록한다. 추출에 성공했으면 True.
+
+    실패도 기록한다 — 실패를 기억하지 않으면 색인마다 같은 파일을 다시 열어 본다
+    (97-2003 문서 하나에 LibreOffice가 뜨는 데 2초쯤 든다).
+    """
+    body: str | None = None
+    error: str | None = None
+    try:
+        # 추출은 한 번만 하고 세 곳에 쓴다 — 색인에는 평문, .ready에는 마크다운,
+        # 그리고 그 마크다운에서 온톨로지(그래프)를 뽑는다. 같은 추출을 세 번
+        # 하지 않으려고 여기서 함께 처리한다.
+        markdown, body = doctext.extract(root / rel)
+        docready.write(store_name, rel, root / rel, markdown)
+        _write_graph(conn, rel, markdown)
+    except doctext.ExtractError as e:
+        error = str(e)
+    except OSError as e:  # 색인 중 파일이 사라지거나 잠긴 경우
+        error = f"파일을 읽을 수 없습니다: {e}"
+    truncated = bool(body and len(body) > MAX_INDEX_CHARS)
+    conn.execute(
+        "INSERT INTO docs (path, size, mtime, body, truncated, error, indexed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
+        "size=excluded.size, mtime=excluded.mtime, body=excluded.body, "
+        "truncated=excluded.truncated, error=excluded.error, "
+        "indexed_at=excluded.indexed_at",
+        (rel, size, mtime, body[:MAX_INDEX_CHARS] if body else None,
+         int(truncated), error, time.time()),
+    )
+    return error is None
+
+
+def index_one(store_name: str, root: Path, rel: str) -> dict:
+    """파일 하나만 색인한다 — 업로드 직후 부르는 빠른 경로.
+
+    **주기 색인의 대체가 아니라 지름길이다.** 문서 폴더는 공유 폴더라 탐색기·SMB로
+    직접 들어오는 파일은 이 플랫폼을 거치지 않는다 — 전체 스캔은 그대로 돈다. 그래서
+    여기서 못 하고 넘어가도 틀리지 않고 늦어질 뿐이고, 호출자는 실패를 삼켜도 된다.
+
+    없앤 것은 "어느 파일이 바뀌었나"를 공유 폴더 전체를 훑어 다시 알아내는 일이다.
+    업로드 시점에는 이미 알고 있다.
+    """
+    if skip_file(Path(rel).name) or any(skip_dir(p) for p in Path(rel).parts[:-1]):
+        return {"path": rel, "status": "skipped"}
+    target = root / rel
+    try:
+        info = target.stat()
+    except OSError as e:
+        return {"path": rel, "status": "failed", "error": str(e)}
+    if info.st_size > INLINE_MAX_BYTES:
+        # 큰 파일은 주기 색인에 맡긴다 — 업로드 응답에 추출 시간을 얹지 않는다.
+        return {"path": rel, "status": "deferred", "size": info.st_size}
+
+    conn = _connect(store_name, timeout=_INLINE_TIMEOUT)
+    try:
+        ok = _index_file(conn, store_name, root, rel, info.st_size, info.st_mtime)
+        conn.commit()
+        return {"path": rel, "status": "indexed" if ok else "failed"}
+    finally:
+        conn.close()
+
+
+def forget_one(store_name: str, rel: str) -> dict:
+    """지운 파일을 색인·그래프·.ready에서 함께 뺀다.
+
+    이쪽이 늦으면 방향이 반대인 오류가 난다: 지운 문서가 검색에 계속 잡히고, 그 결과로
+    읽으러 가면 "파일이 없습니다"가 난다 — 검색이 있다고 한 것을 읽지 못한다.
+    """
+    conn = _connect(store_name, timeout=_INLINE_TIMEOUT)
+    try:
+        conn.execute("DELETE FROM docs WHERE path = ?", (rel,))
+        _forget_graph(conn, rel)
+        conn.commit()
+    finally:
+        conn.close()
+    docready.forget(store_name, rel)
+    return {"path": rel, "status": "forgotten"}
 
 
 def _forget_graph(conn: sqlite3.Connection, rel: str) -> None:

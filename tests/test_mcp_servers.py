@@ -287,6 +287,7 @@ def _storage_client(monkeypatch, tmp_path):
     뺀 것이지 닿지 못하게 한 것이 아니다.
     """
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "assets"))
+    monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
     monkeypatch.setenv("PAAS_DOC_ROOTS", "")
     get_settings.cache_clear()
     return _client()
@@ -302,7 +303,12 @@ def test_storage_server_write_list_read_delete(monkeypatch, fresh_settings, tmp_
     assert "wrote spec.md" in _text(
         _call(c, path, "write_file", {"path": "spec.md", "content": "# 규격\n"}))
     assert "spec.md" in _text(_call(c, path, "list_files"))
-    assert _text(_call(c, path, "read_file", {"path": "spec.md"})) == "# 규격\n"
+    # 끝 개행은 떨어진다 — .ready 캐시를 거친 읽기와 값이 같아야 하기 때문이다
+    # (services/docready.py). 색인이 돌았는지에 따라 결과가 달라지면 안 된다.
+    assert _text(_call(c, path, "read_file", {"path": "spec.md"})) == "# 규격"
+
+    # 쓴 즉시 검색에 잡힌다 — reindex_docs를 부르지 않았다(services/storage._touch_index)
+    assert "spec.md" in _text(_call(c, path, "search_docs", {"query": "규격"}))
     # 지우지 않고 휴지통으로 옮긴다 — 어디로 갔는지 함께 말해 준다
     moved = _text(_call(c, path, "delete_file", {"path": "spec.md"}))
     assert "trash" in moved and ".trash/spec.md" in moved

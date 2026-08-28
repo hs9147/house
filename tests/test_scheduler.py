@@ -116,6 +116,22 @@ def test_due_prefers_never_run_and_respects_interval(db, fresh_settings):
     assert catalog not in scheduler.due(db)
 
 
+def test_a_job_that_could_not_finish_runs_again_next_tick(db, fresh_settings):
+    """색인은 호출마다 예산(20초)만큼만 진행하고 done: false로 답한다. 그걸 다음 주기까지
+    재우면 900초당 20초 — 듀티 사이클 2%다. 문서 수천 건짜리 저장소는 첫 색인이 하루를
+    넘긴다. (예전에는 사람이 reindex_docs를 done이 될 때까지 다시 눌렀다.)"""
+    scheduler.reconcile(db)
+    job = db.query(ScheduledJob).filter_by(name="doc_index:internal").one()
+    job.last_run_at = utcnow()
+    job.last_detail = {"indexed": 12, "remaining": 300, "done": False}
+    db.commit()
+    assert job in scheduler.due(db)
+
+    job.last_detail = {"indexed": 12, "remaining": 0, "done": True}
+    db.commit()
+    assert job not in scheduler.due(db)
+
+
 # --- 실행 결과는 반드시 표에 남는다 ---
 
 def test_run_records_failure_without_raising(db, fresh_settings):

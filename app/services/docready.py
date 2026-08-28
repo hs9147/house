@@ -58,7 +58,9 @@ def read(store_name: str, rel: str, source: Path) -> str:
 
     markdown, _plain = doctext.extract(source)
     write(store_name, rel, source, markdown)
-    return markdown
+    # 캐시를 거친 읽기와 **같은 값**이어야 한다(_load는 끝 개행을 떼고 돌려준다).
+    # 두 경로가 갈리면 같은 파일을 읽는데 색인이 돌았는지에 따라 결과가 달라진다.
+    return markdown.rstrip("\n")
 
 
 def write(store_name: str, rel: str, source: Path, markdown: str) -> Path | None:
