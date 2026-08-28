@@ -385,3 +385,85 @@ def test_plain_files_are_never_stripped(tmp_path):
     path = tmp_path / "표.csv"
     path.write_text("# 제목\n| 항목 | 금액 |\n|---|---|\n", encoding="utf-8")
     assert doctext.extract_text(path) == "# 제목\n| 항목 | 금액 |\n|---|---|\n"
+
+
+def test_xlsx_skipped_cells_stay_in_their_column(tmp_path):
+    """엑셀은 빈 셀을 XML에 아예 쓰지 않는다 — 셀 참조(r="C2")를 무시하고 순서대로
+    받으면 금액이 담당자 열로 밀려, 틀린 값이 조용히 맞는 값처럼 보인다."""
+    ns = _SHEET_NS
+    sheet = (
+        f'<worksheet {ns}><sheetData>'
+        '<row r="1"><c r="A1" t="inlineStr"><is><t>항목</t></is></c>'
+        '<c r="B1" t="inlineStr"><is><t>담당</t></is></c>'
+        '<c r="C1" t="inlineStr"><is><t>금액</t></is></c></row>'
+        '<row r="2"><c r="A2" t="inlineStr"><is><t>반출승인</t></is></c>'
+        '<c r="C2" t="n"><v>1500</v></c></row>'
+        '</sheetData></worksheet>'
+    )
+    path = _zip(tmp_path / "대장.xlsx", {
+        "xl/workbook.xml": f'<workbook {ns}><sheets><sheet name="대장"/></sheets></workbook>',
+        "xl/worksheets/sheet1.xml": sheet,
+    })
+    assert "| 반출승인 |  | 1500 |" in doctext.extract_markdown(path)
+
+
+def test_docx_vertical_merge_fills_down(tmp_path):
+    """세로 병합의 이어지는 셀은 XML에서 빈 셀이다 — 그대로 두면 병합 아래 행들이
+    부서 없는 값이 된다. 위 행의 값을 내려 채워 행마다 온전한 레코드로 만든다."""
+    body = (
+        '<w:tbl>'
+        '<w:tr><w:tc><w:p><w:r><w:t>부서</w:t></w:r></w:p></w:tc>'
+        '<w:tc><w:p><w:r><w:t>항목</w:t></w:r></w:p></w:tc></w:tr>'
+        '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>'
+        '<w:p><w:r><w:t>총무팀</w:t></w:r></w:p></w:tc>'
+        '<w:tc><w:p><w:r><w:t>비품</w:t></w:r></w:p></w:tc></w:tr>'
+        '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>'
+        '<w:tc><w:p><w:r><w:t>인장</w:t></w:r></w:p></w:tc></w:tr>'
+        '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>'
+        '<w:tc><w:p><w:r><w:t>차량</w:t></w:r></w:p></w:tc></w:tr>'
+        '</w:tbl>'
+    )
+    path = _zip(tmp_path / "a.docx", {
+        "word/document.xml": f"<w:document {OOXML_NS}><w:body>{body}</w:body></w:document>"})
+    md = doctext.extract_markdown(path)
+    assert "| 총무팀 | 비품 |" in md
+    assert "| 총무팀 | 인장 |" in md   # 이어지는 행에도 부서가 내려온다
+    assert "| 총무팀 | 차량 |" in md   # 3행 병합도 한 행씩 내려온다
+
+
+HWPX_NS = 'xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"'
+
+
+def test_hwpx_tables_keep_rows_and_columns(tmp_path):
+    """hwpx 표를 단락처럼 흘리면 셀이 세로 나열로 무너져 "2025-01"이 어느 관리번호의
+    값인지 복원할 수 없다 — 규정·대장류의 지배적 형식이 hwpx라 표가 곧 본문이다."""
+    section = (
+        f'<sec {HWPX_NS}>'
+        '<hp:p><hp:run><hp:t>인장 관리 대장</hp:t></hp:run></hp:p>'
+        '<hp:p><hp:run><hp:tbl>'
+        '<hp:tr><hp:tc><hp:p><hp:run><hp:t>관리번호</hp:t></hp:run></hp:p></hp:tc>'
+        '<hp:tc><hp:p><hp:run><hp:t>사용부서</hp:t></hp:run></hp:p></hp:tc></hp:tr>'
+        '<hp:tr><hp:tc><hp:p><hp:run><hp:t>2025-01</hp:t></hp:run></hp:p></hp:tc>'
+        '<hp:tc><hp:p><hp:run><hp:t>총무팀</hp:t></hp:run></hp:p></hp:tc></hp:tr>'
+        '</hp:tbl></hp:run></hp:p>'
+        '<hp:p><hp:run><hp:t>연 1회 실사한다.</hp:t></hp:run></hp:p>'
+        '</sec>'
+    )
+    md = doctext.extract_markdown(_zip(tmp_path / "대장.hwpx", {"Contents/section0.xml": section}))
+    assert "| 관리번호 | 사용부서 |" in md
+    assert "| 2025-01 | 총무팀 |" in md
+    assert "인장 관리 대장" in md and "연 1회 실사한다." in md
+    # 셀 텍스트가 단락 나열로 한 번 더 나오지 않는다 — 두 번 나오면 검색에 두 번 걸린다
+    assert md.count("총무팀") == 1
+
+
+def test_hwpx_merged_cells_fall_back_to_inline_html(tmp_path):
+    section = (
+        f'<sec {HWPX_NS}><hp:p><hp:run><hp:tbl>'
+        '<hp:tr><hp:tc><hp:cellSpan colSpan="2" rowSpan="1"/>'
+        '<hp:p><hp:run><hp:t>결재</hp:t></hp:run></hp:p></hp:tc>'
+        '<hp:tc><hp:p><hp:run><hp:t>승인자</hp:t></hp:run></hp:p></hp:tc></hp:tr>'
+        '</hp:tbl></hp:run></hp:p></sec>'
+    )
+    md = doctext.extract_markdown(_zip(tmp_path / "양식.hwpx", {"Contents/section0.xml": section}))
+    assert '<th colspan="2">결재</th>' in md

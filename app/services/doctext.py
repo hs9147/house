@@ -109,12 +109,13 @@ def _ooxml_markdown(path: Path) -> str:
                 return _xlsx_markdown(zf, names)
             if "word/document.xml" in names:
                 return _docx_markdown(zf)
-            for pattern in (_SLIDE_RE, _HWPX_RE):
-                entries = sorted((n for n in names if pattern.match(n)), key=_entry_order)
-                if not entries:
-                    continue
+            sections = sorted((n for n in names if _HWPX_RE.match(n)), key=_entry_order)
+            if sections:
+                return _hwpx_markdown(zf, sections)
+            slides = sorted((n for n in names if _SLIDE_RE.match(n)), key=_entry_order)
+            if slides:
                 # 단락 사이는 빈 줄로 — 마크다운에서 줄바꿈 하나는 같은 문단의 이어짐이다.
-                parts = [_xml_text(zf.read(n), "t", "p") for n in entries]
+                parts = [_xml_text(zf.read(n), "t", "p") for n in slides]
                 return "\n".join(p for p in parts if p)
     except zipfile.BadZipFile as e:
         raise ExtractError(f"압축이 깨졌습니다: {e}")
@@ -160,17 +161,40 @@ def _docx_markdown(zf: zipfile.ZipFile) -> str:
 
 
 def _docx_rows(tbl) -> list[list[tuple[str, int]]]:
-    """(셀 텍스트, 가로 병합 칸 수). 세로 병합은 칸 수를 바꾸지 않으므로 빈 셀로 남는다."""
+    """(셀 텍스트, 가로 병합 칸 수).
+
+    세로 병합의 이어지는 셀(vMerge, restart 아님)은 XML에서 빈 셀이다 — 그대로 두면
+    "총무팀"이 첫 행에만 남고 병합 아래 행들은 부서 없는 값이 된다. 위 행에서 같은
+    자리를 덮는 셀의 텍스트를 내려 채워 행마다 온전한 레코드로 만든다."""
     rows = []
     for tr in (c for c in tbl if _local(c) == "tr"):
         cells = []
+        grid = 0  # 이 셀이 시작하는 표 기준 열 자리(앞 셀들의 병합 칸 수 누적)
         for tc in (c for c in tr if _local(c) == "tc"):
             text = "".join(t.text or "" for t in tc.iter() if _local(t) == "t")
             span = next((_attr(g, "val") for g in tc.iter() if _local(g) == "gridSpan"), "")
-            cells.append((text, int(span) if span.isdigit() else 1))
+            width = int(span) if span.isdigit() else 1
+            merge = next((g for g in tc.iter() if _local(g) == "vMerge"), None)
+            if merge is not None and _attr(merge, "val") != "restart" and not text.strip():
+                text = _cell_above(rows, grid)
+            cells.append((text, width))
+            grid += width
         if cells:
             rows.append(cells)
     return rows
+
+
+def _cell_above(rows: list[list[tuple[str, int]]], grid: int) -> str:
+    """바로 위 행에서 grid 열 자리를 덮는 셀의 텍스트 — 위 행도 이미 채워져 있으므로
+    3행 이상 병합도 한 행씩 내려온다."""
+    if not rows:
+        return ""
+    pos = 0
+    for text, span in rows[-1]:
+        if pos <= grid < pos + span:
+            return text
+        pos += span
+    return ""
 
 
 # --- 표 렌더링 ---
@@ -213,6 +237,62 @@ def _table_html(rows: list[list[tuple[str, int]]]) -> str:
     return "\n".join(out)
 
 
+# --- hwpx: 표를 살린다 ---
+
+def _hwpx_markdown(zf: zipfile.ZipFile, entries: list[str]) -> str:
+    """hwpx 구역 — 단락은 줄로, 표는 행·열이 남게 마크다운 표로.
+
+    사내 규정·대장류의 지배적 형식인데, 표를 단락처럼 흘리면 셀이 세로 나열로 무너져
+    "2025-01"이 어느 관리번호의 값인지 복원할 수 없다(평문 추출의 표 문제와 같다).
+
+    hwpx의 표는 단락의 런 안에 컨트롤로 들어 있다(<hp:p><hp:run><hp:tbl>…). 문서
+    순서로 걸으며 표를 만나면 통째로 렌더링하고 그 아래로는 들어가지 않는다 — 셀
+    텍스트가 단락 나열로 한 번 더 나오면 같은 값이 검색에 두 번 걸린다.
+    """
+    blocks: list[str] = []
+    for name in entries:
+        root = _parse(zf.read(name), name)
+        inside_table: set[int] = set()
+        buffer: list[str] = []
+
+        def flush() -> None:
+            if buffer:
+                blocks.append("".join(buffer))
+                buffer.clear()
+
+        for element in root.iter():
+            if id(element) in inside_table:
+                continue
+            local = _local(element)
+            if local == "tbl":
+                inside_table.update(id(d) for d in element.iter())
+                flush()
+                table = _table_markdown(_hwpx_rows(element))
+                if table:
+                    blocks.append(table)
+            elif local == "p":
+                flush()
+            elif local == "t" and element.text:
+                buffer.append(element.text)
+        flush()
+    return "\n\n".join(blocks)
+
+
+def _hwpx_rows(tbl) -> list[list[tuple[str, int]]]:
+    """(셀 텍스트, 가로 병합 칸 수). 병합 칸 수는 <hp:cellSpan colSpan="…">에 있다."""
+    rows = []
+    for tr in (c for c in tbl if _local(c) == "tr"):
+        cells = []
+        for tc in (c for c in tr if _local(c) == "tc"):
+            text = "".join(t.text or "" for t in tc.iter() if _local(t) == "t")
+            span = next(
+                (g.get("colSpan") or "" for g in tc.iter() if _local(g) == "cellSpan"), "")
+            cells.append((text, int(span) if span.isdigit() else 1))
+        if cells:
+            rows.append(cells)
+    return rows
+
+
 # --- xlsx ---
 
 def _xlsx_markdown(zf: zipfile.ZipFile, names: list[str]) -> str:
@@ -242,7 +322,17 @@ def _xlsx_markdown(zf: zipfile.ZipFile, names: list[str]) -> str:
         for row in root.iter():
             if _local(row) != "row":
                 continue
-            cells = [_cell_text(cell, shared) for cell in row if _local(cell) == "c"]
+            # 엑셀은 빈 셀을 XML에 아예 쓰지 않는다 — 순서대로만 받으면 A·C에 값이 있는
+            # 행에서 C의 값이 B 열로 밀려 들어온다(금액이 담당자 열로 읽히는 식으로,
+            # 틀린 값이 조용히 맞는 값처럼 보인다). 셀 참조(r="C2")로 제자리에 놓는다.
+            cells: list[str] = []
+            for cell in row:
+                if _local(cell) != "c":
+                    continue
+                at = _col_index(cell.get("r") or "")
+                if at is not None and at > len(cells):
+                    cells.extend([""] * (at - len(cells)))
+                cells.append(_cell_text(cell, shared))
             if any(cells):
                 rows.append([(value, 1) for value in cells])
         if not rows:
@@ -254,6 +344,17 @@ def _xlsx_markdown(zf: zipfile.ZipFile, names: list[str]) -> str:
             blocks.append(f"## {title}")
         blocks.append(_table_markdown(rows))
     return "\n\n".join(blocks)
+
+
+def _col_index(ref: str) -> int | None:
+    """셀 참조의 열 자리 — "C2"면 2. 참조가 없는 파일(라이브러리 생성)은 None → 순서대로."""
+    match = re.match(r"([A-Z]{1,3})\d+$", ref)
+    if not match:
+        return None
+    index = 0
+    for ch in match.group(1):
+        index = index * 26 + (ord(ch) - 64)
+    return index - 1
 
 
 def _cell_text(cell, shared: list[str]) -> str:

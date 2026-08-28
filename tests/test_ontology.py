@@ -183,3 +183,59 @@ def test_one_document_cannot_flood_the_graph():
     body = "\n\n".join(f"| a{i} | b{i} |\n|---|---|\n| x | y |" for i in range(600))
     nodes, _edges = ontology.extract("big.xlsx", "big", body)
     assert len(nodes) == ontology.MAX_NODES_PER_DOC
+
+
+PLAIN_REGULATION = """여비 규정
+
+제1조(목적) 이 규정은 임직원의 여비 지급 기준을 정한다.
+
+제2조(정의) "출장"이란 근무지 밖에서 업무를 수행하는 것을 말한다.
+
+제3조(적용) 국외 여비는 「해외출장 지침」에 따르고, 제2조의 정의를 준용한다.
+"""
+
+
+def test_plain_article_lines_become_sections(monkeypatch, tmp_path, fresh_settings):
+    """사내 규정 대부분은 워드 제목 스타일 없이 본문 단락으로 쓰인다(hwpx·pdf·97-2003
+    경유 추출은 애초에 제목 단계가 없다). 줄 머리의 `제N조(제목)`가 절이 되지 않으면
+    그 문서들 전부에서 그래프가 문서 노드 하나로 무너진다."""
+    _store(monkeypatch, tmp_path, body=PLAIN_REGULATION, filename="여비규정.md")
+    sections = {n["name"]: n for n in docsearch.find_nodes("rules", kind="section")}
+    assert set(sections) == {"제1조(목적)", "제2조(정의)", "제3조(적용)"}
+    assert sections["제2조(정의)"]["detail"] == "제2조"
+
+    # 정의·인용은 문서가 아니라 **그 조문**에 달린다 — 같은 줄에 이어지는 것이 조문의 모양이다
+    nb = docsearch.neighbors("rules", "term", "출장")
+    assert [e["name"] for e in nb["in"]] == ["제2조(정의)"]
+    nb = docsearch.neighbors("rules", "document", "해외출장 지침")
+    assert [e["name"] for e in nb["in"]] == ["제3조(적용)"]
+
+    # "제2조의 정의를 준용한다"처럼 줄 중간의 조문 인용은 절이 되지 않는다
+    assert "제2조" not in {n["name"] for n in docsearch.find_nodes("rules", kind="section")}
+
+
+def test_a_reference_at_line_start_is_not_a_section(monkeypatch, tmp_path, fresh_settings):
+    """괄호 제목이 없는 `제N조 …`는 조문이 아니라 인용일 수 있다 — 절로 오인하지 않는다."""
+    _store(monkeypatch, tmp_path, body="제5조에 따라 처리한다.\n", filename="메모.md")
+    assert docsearch.find_nodes("rules", kind="section") == []
+
+
+def test_html_table_header_is_a_schema_too(monkeypatch, tmp_path, fresh_settings):
+    """병합 셀 표는 마크다운이 아니라 인라인 HTML로 나온다(doctext) — 결재란처럼 병합이
+    있는 양식이 사내 표의 다수라, 이걸 안 읽으면 정작 흔한 표가 스키마에서 빠진다."""
+    body = (
+        "# 구매 요청서\n\n"
+        "<table>\n"
+        '<tr><th colspan="2">결재</th><th>승인자</th></tr>\n'
+        "<tr><td>품명</td><td>수량</td><td>금액</td></tr>\n"
+        "</table>\n"
+    )
+    _store(monkeypatch, tmp_path, body=body, filename="요청서.md")
+    tables = docsearch.find_nodes("rules", kind="table")
+    assert [t["name"] for t in tables] == ["결재 | 승인자"]
+
+    nb = docsearch.neighbors("rules", "table", "결재 | 승인자")
+    assert [e["name"] for e in nb["in"]] == ["구매 요청서"]  # 절 아래에 달린다
+
+    schema = docsearch.graph_schema("rules")
+    assert {"columns": ["결재", "승인자"], "documents": 1} in schema["table_schemas"]
