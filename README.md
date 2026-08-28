@@ -256,7 +256,8 @@ POST /paas/api/v1/mcp/docs                          # 사내 MCP 서버 — 사�
                                                 #   list_sources·search_docs·read_doc·reindex_docs·index_status
 POST /paas/api/v1/mcp/storage/{저장소}              # 사내 MCP 서버 — 저장소 파일(루트 밖으로 못 나감)
                                                 #   list_files·read_file + search_docs·reindex_docs·index_status
-                                                #   문서 폴더는 기본 읽기 전용 — PAAS_DOC_ROOTS_WRITABLE에 적은 폴더만 쓰기·삭제 도구가 붙음
+                                                #   문서 폴더는 기본 읽기/쓰기 — PAAS_DOC_ROOTS_READONLY에 적은 폴더만 쓰기·삭제 도구가 빠짐
+                                                #   플랫폼 저장소(internal)는 서버 목록에 안 나오지만 주소로는 닿음
 POST /paas/api/v1/mcp/db/{module}                   # 사내 MCP 서버 — database 모듈 조회(SELECT 전용)
                                                 #   PAAS_MCP_DB_MODULES에 이름이 있는 모듈만 열림(기본 전부 차단)
 
@@ -289,7 +290,9 @@ DELETE /paas/api/v1/previews/{id}
   ```
   PAAS_STORAGE_ROOT=D:\paas\data\storage
   PAAS_DOC_ROOTS=rules=D:\공유\사내규정,costdb=D:\cost db
-  PAAS_DOC_ROOTS_WRITABLE=costdb        # 쓰기를 열 폴더만 (기본: 전부 읽기 전용)
+  PAAS_DOC_ROOTS_READONLY=rules         # 잠글 폴더만 (기본: 전부 읽기/쓰기)
+  # PAAS_STORAGE_ROOT는 플랫폼 자신의 저장소입니다 — 파일 관리 화면과 MCP 서버
+  # 목록에는 안 나오고, 이름(internal)으로는 그대로 닿습니다.
 
   삭제는 완전 삭제가 아니라 저장소 안 `.trash`로 옮기는 것입니다 — 목록·검색에서는 곧바로
   빠지지만 파일은 남아 있어 되돌릴 수 있습니다. 사내 공유 폴더에는 되돌리기가 없고

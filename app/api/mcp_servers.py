@@ -15,8 +15,9 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
 
 저장소 목록은 모듈 레지스트리가 아니라 환경변수가 정한다(PAAS_STORAGE_ROOT ·
 PAAS_DOC_ROOTS, services/storage.py) — 디스크 경로는 서버를 설치한 사람이 아는
-사실이지 콘솔에서 등록할 일이 아니다. 문서 폴더는 **전부 읽기 전용이 기본**이고,
-PAAS_DOC_ROOTS_WRITABLE에 적은 폴더에서만 쓰기·삭제 도구가 붙는다.
+사실이지 콘솔에서 등록할 일이 아니다. 문서 폴더는 **기본이 읽기/쓰기**이고,
+PAAS_DOC_ROOTS_READONLY에 적은 폴더에서만 쓰기·삭제 도구가 빠진다. 플랫폼 자신의
+저장소(internal)는 서버 목록에 올리지 않는다 — 주소로는 그대로 닿는다.
 
 문서 검색이 두 곳에 있는 이유: /mcp/storage/{저장소}는 **그 저장소 안**을 다루는 도구
 묶음이고(목록·읽기·쓰기와 함께 검색), /mcp/docs는 "사내 문서에서 찾아라"는 하나의 일을
@@ -544,6 +545,9 @@ async def docs_mcp_server(
 
 
 def _all_stores() -> list[storage_service.Store]:
+    """**숨긴 저장소까지 포함한 전부.** /mcp/docs는 "사내 문서 전체에서 찾아라"는 창구라
+    목록에 안 보이는 저장소의 파일도 찾혀야 한다 — 숨긴 것은 고르는 자리에서 뺀 것이지
+    없는 것이 아니다."""
     try:
         return storage_service.stores()
     except storage_service.StorageError as e:
@@ -767,9 +771,8 @@ async def storage_mcp_server(
     경로는 storage.resolve가 저장소 루트 안으로 가둔다 — 이 서버의 존재 이유가 그
     가둠이다(공개 filesystem MCP 서버는 호스트 디스크를 그대로 연다).
 
-    문서 폴더는 기본이 읽기 전용이라 쓰기·삭제 도구를 아예 광고하지 않는다 — 플랫폼이
-    만든 것이 아닌 디렉터리이기 때문이다. 목록에 없는 도구는 모델이 부르지도 않고, 불러도
-    unknown tool로 막힌다. PAAS_DOC_ROOTS_WRITABLE에 적은 폴더에서만 그 둘이 붙는다.
+    잠근 폴더(PAAS_DOC_ROOTS_READONLY)에는 쓰기·삭제 도구를 아예 광고하지 않는다.
+    목록에 없는 도구는 모델이 부르지도 않고, 불러도 unknown tool로 막힌다.
 
     **이 성질은 폴더가 URL에 있어서 성립한다.** 이 서버를 하나로 합쳐 폴더를 인자로 받게
     하면 쓰기 도구가 항상 목록에 떠서, 계약 폴더를 다루는 문맥에서도 모델이 그것을 보게

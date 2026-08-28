@@ -2,19 +2,20 @@
 
 저장소는 모듈 레지스트리에 등록하는 것이 아니라 **환경변수로 정한다**:
 
-  PAAS_STORAGE_ROOT       내부 저장소 한 곳(쓰기 가능). 이름은 `internal`.
+  PAAS_STORAGE_ROOT       플랫폼 자신의 저장소. 이름은 `internal`이고 목록에 안 나온다.
   PAAS_DOC_ROOTS          사내 문서 폴더(쉼표 구분). `이름=경로` 또는 경로만.
-  PAAS_DOC_ROOTS_WRITABLE 그중 쓰기를 열 폴더 이름. 기본은 비어 있다 = 전부 읽기 전용.
+  PAAS_DOC_ROOTS_READONLY 그중 **잠글** 폴더 이름. 기본은 비어 있다 = 전부 읽기/쓰기.
 
-**전체는 읽기, 쓰기는 폴더별 opt-in.** 사내 공유 폴더는 플랫폼이 만든 것이 아니고
-삭제에 되돌리기가 없다(서비스 계정이 SMB로 지우면 휴지통에 가지 않는다). 그래서 쓰기는
-경로 옆에 적는 것이 아니라 허용 목록으로 따로 연다 — 경로를 복사해 붙일 때 권한이
-딸려 오지 않게 하려는 것이다.
+**전체 읽기는 /mcp/docs, 쓰기는 폴더별.** 읽기만 필요하면 저장소별 서버를 등록할 필요가
+없다 — /mcp/docs 하나가 전 폴더를 가로질러 본문을 찾는다. 저장소별
+서버(/mcp/storage/{이름})는 그 폴더의 파일을 다루는 자리이고, **쓰기 도구는 잠기지 않은
+폴더의 서버에만 광고된다**(api/mcp_servers.py) — 폴더가 URL에 있기 때문에 성립하는
+성질이라, 이 서버를 하나로 합치면 잃는다.
 
-읽기만 필요하면 저장소별 서버를 등록할 필요가 없다: /mcp/docs 하나가 전 폴더를 가로질러
-본문을 찾는다. 저장소별 서버(/mcp/storage/{이름})는 그 폴더의 파일을 다루는 자리이고,
-**쓰기 도구는 쓰기가 열린 폴더의 서버에만 광고된다**(api/mcp_servers.py) — 폴더가 URL에
-있기 때문에 성립하는 성질이라, 이 서버를 하나로 합치면 잃는다.
+**internal은 숨긴다(hidden).** 플랫폼이 자기 파일을 두는 자리이지 사람이 파일 관리
+화면에서 고를 폴더가 아니다. 목록(GET /storage/stores)과 MCP 서버 디렉터리에서 빠지되,
+이름으로는 그대로 닿고 /mcp/docs 검색에도 포함된다 — 예전에 여기 올린 파일을 못 꺼내게
+만들면 숨긴 것이 아니라 잃은 것이다.
 
 왜 모듈이 아니게 됐나: 저장소가 어느 디렉터리에 얹혀 있는지는 서버를 설치한 사람이
 이미 아는 사실이지 콘솔에서 등록할 일이 아니었다. 모듈로 두면 같은 폴더가 이름만 달리
@@ -42,11 +43,17 @@ class StorageError(Exception):
 @dataclass(frozen=True)
 class Store:
     """이름이 붙은 저장소 하나. root는 호출자 밖으로 새어 나가도 되는 값이 아니다 —
-    운영자에게 되비추는 자리(list_sources·/storage/stores)에서만 보여 준다."""
+    운영자에게 되비추는 자리(list_sources·/storage/stores)에서만 보여 준다.
+
+    hidden은 "고를 목록에 올리지 않는다"는 뜻이지 "닿지 않는다"가 아니다 — 접근을
+    막는 것은 read_only가 하는 일이고, 둘을 섞으면 숨긴 저장소의 파일을 꺼낼 방법이
+    없어진다.
+    """
 
     name: str
     root: Path
     read_only: bool
+    hidden: bool = False
 
 
 # 저장소 이름은 URL 조각(/mcp/storage/{이름})이자 색인 파일 이름이고, 모듈로 가져올 때
@@ -94,18 +101,22 @@ def _check_name(name: str, entry: str) -> str:
 
 
 def stores() -> list[Store]:
-    """지금 열 수 있는 저장소 전부 — 내부 저장소 하나 + 사내 문서 폴더들.
+    """지금 열 수 있는 저장소 전부 — 숨긴 internal 하나 + 사내 문서 폴더들.
+
+    목록에 보일 것만 필요하면 visible_stores()를 쓴다. 여기서는 숨긴 것도 함께 준다:
+    /mcp/docs의 "전체 읽기"와 이름으로 하는 직접 접근이 이 목록을 쓴다.
 
     설정이 잘못돼 있으면 조용히 빼지 않고 StorageError를 낸다: 목록에서 사라지는 것과
     "그 폴더에 문서가 없다"는 구분이 되지 않아 원인을 찾는 데 시간을 다 쓰게 된다.
     """
     settings = get_settings()
-    # 쓰기를 여는 것은 별도의 행위다 — 경로 옆이 아니라 허용 목록에서 정한다.
-    writable = {n.strip() for n in settings.doc_roots_writable.split(",") if n.strip()}
+    # 잠그는 것이 별도의 행위다 — 경로 옆이 아니라 목록에서 정한다.
+    locked = {n.strip() for n in settings.doc_roots_readonly.split(",") if n.strip()}
     found = [Store(
         INTERNAL_STORE,
         Path(settings.storage_root or "./data/storage").resolve(),
         read_only=False,
+        hidden=True,
     )]
     seen = {INTERNAL_STORE}
     for entry in settings.doc_roots.split(","):
@@ -125,19 +136,26 @@ def stores() -> list[Store]:
                 f"PAAS_DOC_ROOTS의 저장소 이름이 겹칩니다: {name!r}"
                 f" ({INTERNAL_STORE}은 내부 저장소가 쓰는 이름입니다)")
         seen.add(name)
-        found.append(Store(name, Path(path).resolve(), read_only=name not in writable))
+        found.append(Store(name, Path(path).resolve(), read_only=name in locked))
 
-    # 허용 목록에 없는 이름이 남았다 = 오타이거나 지운 폴더를 가리킨다. 조용히 넘기면
-    # 그 폴더는 읽기 전용으로 남고, 왜 안 써지는지 알아낼 방법이 없다.
-    unknown = writable - seen
+    # 목록에 없는 이름이 남았다 = 오타이거나 지운 폴더를 가리킨다. 조용히 넘기면 잠근
+    # 줄 알았던 폴더가 열린 채로 남고, 그 사실을 알아낼 방법이 없다.
+    unknown = locked - seen
     if unknown:
         raise StorageError(
-            f"PAAS_DOC_ROOTS_WRITABLE에 없는 저장소 이름이 있습니다: {', '.join(sorted(unknown))}"
+            f"PAAS_DOC_ROOTS_READONLY에 없는 저장소 이름이 있습니다: {', '.join(sorted(unknown))}"
             f" — PAAS_DOC_ROOTS에 있는 이름이어야 합니다(현재: {', '.join(sorted(seen))}).")
     return found
 
 
+def visible_stores() -> list[Store]:
+    """사람이 고를 수 있는 저장소 — 숨긴 것을 뺀 목록(파일 관리 화면·MCP 서버 디렉터리)."""
+    return [s for s in stores() if not s.hidden]
+
+
 def store(name: str) -> Store | None:
+    """이름으로 찾는다 — 숨긴 저장소도 찾힌다. 숨긴 것은 고르는 목록에서 뺀 것이지
+    닿지 못하게 한 것이 아니다."""
     return next((s for s in stores() if s.name == name), None)
 
 

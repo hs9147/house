@@ -99,25 +99,24 @@ class Settings(BaseSettings):
     # 없으면 응답 없는 명령(네트워크 문제로 멈춘 npm install 등)이 배포를 "진행중"에
     # 영원히 묶어 둔다 — 초과 시 그 단계를 실패로 끝낸다.
     build_timeout_seconds: int = 600
-    # 내부 저장소 — 플랫폼이 쓰기까지 하는 유일한 저장소 경로. 콘솔 파일 관리 화면과
-    # /storage 창구, /mcp/storage/internal이 여기를 본다. (services/storage.py)
+    # 플랫폼 자신의 저장소. **파일 관리 화면과 MCP 서버 목록에는 나오지 않는다** —
+    # 사람이 고를 폴더는 아래 PAAS_DOC_ROOTS다. 이름(internal)을 알고 주소를 직접 치면
+    # 여전히 닿고 /mcp/docs 검색에도 포함된다(예전에 여기 올린 파일을 잃지 않는다).
     storage_root: str = "./data/storage"
     # 사내 문서 폴더(읽기 전용). 쉼표로 여러 개 지정하고, 각 항목은 `이름=경로` 또는
     # 경로만 쓴다. 이름은 소문자·숫자·하이픈만 쓴다(URL 조각이자 색인 파일 이름이고,
     # 모듈로 가져올 때 모듈 이름이 된다). 경로만 주면 마지막 폴더 이름에서 만들어 보고
     # ("Company Docs" → company-docs), 만들 수 없으면(한글 폴더 등) 직접 쓰라고 알려 준다:
     #   PAAS_DOC_ROOTS=rules=D:\공유\사내규정,D:\shared\contracts
-    # 플랫폼이 만든 저장소가 아니라 **이미 있는 공유 폴더**를 붙이는 자리라 기본은 읽기
-    # 전용이다 — 읽고 찾기만 한다(/mcp/docs로 본문 검색, /mcp/storage/{이름}으로 열람).
+    # 사람이 파일 관리 화면에서 고르는 폴더는 이것들이고, 기본이 읽기/쓰기다.
     doc_roots: str = ""
-    # 쓰기를 열 문서 폴더 이름(쉼표 구분). **여기 적은 폴더만** 업로드·삭제가 열린다.
-    #   PAAS_DOC_ROOTS_WRITABLE=scratch,team-share
-    # 허용 목록을 따로 두는 이유: 경로 문자열 안에 권한을 섞으면(`이름:rw=경로`) 티켓에서
-    # 경로를 복사해 붙일 때 권한까지 딸려 온다. 권한을 여는 것은 별도의 행위여야 한다 —
-    # PAAS_MCP_DB_MODULES가 DB 조회를 여는 방식과 같다.
-    # 여기 적힌 이름이 PAAS_DOC_ROOTS에 없으면 기동을 막는다(오타는 조용히 읽기 전용으로
-    # 남아, 왜 안 써지는지 알 수 없게 된다).
-    doc_roots_writable: str = ""
+    # 그중 **잠글** 폴더 이름(쉼표 구분). 여기 적은 폴더만 업로드·삭제가 막힌다.
+    #   PAAS_DOC_ROOTS_READONLY=rules,contracts
+    # 목록을 경로와 따로 두는 이유: 경로 문자열 안에 권한을 섞으면(`이름:ro=경로`)
+    # 티켓에서 경로를 복사해 붙일 때 권한까지 딸려 온다.
+    # 여기 적힌 이름이 PAAS_DOC_ROOTS에 없으면 기동을 막는다 — 오타는 조용히 "안 잠긴
+    # 폴더"로 남고, 잠근 줄 알았던 폴더가 열려 있게 된다.
+    doc_roots_readonly: str = ""
     powershell_start_dir: str = ""
     # /exec가 쓰는 상주 PowerShell 세션의 로컬 TCP 브로커 포트. paas 프로세스가 재시작돼도
     # 이 고정 포트로 다시 붙어 같은 세션(cd·변수 등 상태)을 잇는다 — services/ps_broker.py.

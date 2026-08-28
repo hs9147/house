@@ -280,9 +280,10 @@ def test_code_server_unknown_project_points_at_the_right_discovery_tool(
 # --- 파일 저장소 서버 ---
 
 def _storage_client(monkeypatch, tmp_path):
-    """쓰기가 열려 있는 저장소는 내부 저장소 하나뿐이고 이름은 'internal'이다.
+    """플랫폼 저장소 'internal' 하나로 저장소 서버의 기본 동작을 본다.
 
-    (사내 문서 폴더는 PAAS_DOC_ROOTS로 붙고 읽기 전용이다 — 아래 별도 테스트.)
+    이 저장소는 목록에서 숨겨져 있지만 서버는 그대로 산다 — 숨긴 것은 고르는 자리에서
+    뺀 것이지 닿지 못하게 한 것이 아니다.
     """
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "assets"))
     monkeypatch.setenv("PAAS_DOC_ROOTS", "")
@@ -321,12 +322,13 @@ def test_storage_server_cannot_escape_store_root(monkeypatch, fresh_settings, tm
     assert not (tmp_path / "outside.txt").exists()
 
 
-def test_doc_root_store_hides_write_tools(monkeypatch, fresh_settings, tmp_path):
-    """PAAS_DOC_ROOTS로 붙인 사내 문서 폴더는 플랫폼이 만든 것이 아니다 — 목록에 없는
-    도구는 모델이 부르지 않고, 불러도 막힌다."""
+def test_locked_doc_root_hides_write_tools(monkeypatch, fresh_settings, tmp_path):
+    """잠근 폴더에서는 쓰기 도구를 아예 광고하지 않는다 — 목록에 없는 도구는 모델이
+    부르지 않고, 불러도 막힌다."""
     (tmp_path / "company-docs").mkdir()
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_ROOTS", str(tmp_path / "company-docs"))
+    monkeypatch.setenv("PAAS_DOC_ROOTS_READONLY", "company-docs")
     get_settings.cache_clear()
     c = _client()
 
@@ -345,8 +347,8 @@ def test_doc_root_store_hides_write_tools(monkeypatch, fresh_settings, tmp_path)
     assert rm.status_code == 403
 
 
-def test_writable_doc_root_advertises_write_tools(monkeypatch, fresh_settings, tmp_path):
-    """쓰기를 연 폴더의 서버에만 쓰기 도구가 뜬다.
+def test_unlocked_doc_root_advertises_write_tools(monkeypatch, fresh_settings, tmp_path):
+    """잠그지 않은 폴더의 서버에만 쓰기 도구가 뜬다.
 
     **이 성질은 폴더가 URL에 있어서 성립한다.** 저장소 서버를 하나로 합쳐 폴더를 인자로
     받게 하면 write_file·delete_file이 항상 목록에 뜨고, 계약 폴더를 다루는 문맥에서도
@@ -358,7 +360,7 @@ def test_writable_doc_root_advertises_write_tools(monkeypatch, fresh_settings, t
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_ROOTS",
                        f"scratch={tmp_path / 'scratch'},contract={tmp_path / 'contract'}")
-    monkeypatch.setenv("PAAS_DOC_ROOTS_WRITABLE", "scratch")
+    monkeypatch.setenv("PAAS_DOC_ROOTS_READONLY", "contract")
     get_settings.cache_clear()
     c = _client()
 
@@ -716,9 +718,9 @@ def test_docs_server_lists_sources_with_coverage(monkeypatch, fresh_settings, tm
                json.loads(_text(_call(c, "/mcp/docs", "list_sources")))}
     assert sources["company-docs"] == {
         "source": "company-docs", "root": str(tmp_path / "shared" / "company-docs"),
-        "exists": True, "read_only": True,
+        "exists": True, "read_only": False,
         "index": {"total": 2, "indexed": 1, "failed": 1}}
-    # 내부 저장소도 같은 창구로 검색된다(쓰기가 열려 있다는 것만 다르다)
+    # 숨긴 저장소도 여기서는 나온다 — /mcp/docs는 "전체에서 찾아라"는 창구다
     assert sources["internal"]["read_only"] is False
     status = json.loads(_text(_call(c, "/mcp/docs", "index_status")))
     assert "97-2003" in " ".join(status["company-docs"]["failure_reasons"])
