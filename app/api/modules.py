@@ -454,7 +454,9 @@ def get_platform_module_report(
             actor=r.actor,
             action=r.action,
             target=r.target,
-            payload=r.payload or {},
+            # 감사 표의 컬럼 이름은 detail이다(models.AuditEvent) — 응답 필드 이름만
+            # payload로 나간다.
+            payload=r.detail or {},
             created_at=r.created_at,
         )
         for r in audit_rows

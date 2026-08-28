@@ -545,7 +545,8 @@ def get_project_module_report(
                     actor=r.actor,
                     action=r.action,
                     target=r.target,
-                    payload=r.payload or {},
+                    # 감사 표의 컬럼 이름은 detail이다(models.AuditEvent).
+                    payload=r.detail or {},
                     created_at=r.created_at,
                 )
             )
