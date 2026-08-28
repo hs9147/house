@@ -852,3 +852,13 @@ def test_apis_server_can_narrow_to_one_source(monkeypatch, fresh_settings):
     status = json.loads(_text(_call(c, "/mcp/apis", "catalog_status")))
     assert status["sources"]["publicdata"]["enabled"] is False
     assert status["sources"]["publicdata"]["total"] == 0
+
+
+def test_apis_server_finds_an_api_by_its_url(monkeypatch, fresh_settings):
+    """받아 둔 주소가 무슨 API였는지 되짚는 것도 검색이다."""
+    import json
+
+    c = _apis_client(monkeypatch)
+    hits = json.loads(_text(_call(c, "/mcp/apis", "search_apis",
+                                  {"keyword": "https://example.test/swagger.json"})))
+    assert [h["id"] for h in hits] == ["stripe.com"]

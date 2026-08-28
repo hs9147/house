@@ -493,3 +493,48 @@ def test_status_endpoint_shows_every_source_even_at_zero(monkeypatch, db):
     # 한 번도 못 받은 소스도 나온다 — 화면에서 고를 수 있어야 이유를 확인할 수 있다
     assert body["sources"]["publicdata"] == {
         "label": "공공데이터", "enabled": False, "total": 0, "removed": 0, "updated_at": None}
+
+
+# --- 주소로 찾기 ---
+
+def test_search_finds_an_api_by_its_url(monkeypatch, db):
+    """받아 놓은 주소를 되짚는 일이 잦다 — 이름·설명만 훑으면 그 주소로는 영영 안 걸린다."""
+    _synced(monkeypatch, db)
+    # 홈페이지(contact.url)
+    assert apisearch.search_apis(db, "stripe.com")["results"][0]["id"] == "stripe.com"
+    # 스펙 주소 — 이름·설명 어디에도 없는 문자열이다
+    spec = "api.apis.guru/v2/specs/google/calendar/v3/swagger.json"
+    assert apisearch.search_apis(db, spec)["results"][0]["title"] == "Calendar API"
+
+
+def test_a_pasted_url_matches_despite_scheme_and_trailing_slash(monkeypatch, db):
+    """브라우저에서 복사하면 https://가 붙고 끝에 슬래시가 붙는다 — 한 글자만 어긋나도
+    부분일치가 깨진다."""
+    _synced(monkeypatch, db)
+    for pasted in (
+        "https://stripe.com",
+        "https://stripe.com/",
+        "http://stripe.com",
+        "STRIPE.COM",
+    ):
+        hits = apisearch.search_apis(db, pasted)["results"]
+        assert [h["id"] for h in hits] == ["stripe.com"], pasted
+
+
+def test_sync_rebuilds_a_stale_haystack(monkeypatch, db):
+    """건초더미 만드는 방법이 바뀌면 이미 쌓인 행도 따라와야 한다.
+
+    URL을 넣기 전에 수집한 행은 필드가 그대로라 "안 바뀜"으로 지나가고, 주소로는
+    영영 안 걸린 채 남는다.
+    """
+    spec = "api.apis.guru/v2/specs/google/calendar/v3/swagger.json"
+    _synced(monkeypatch, db)
+    row = _row(db, "googleapis.com:calendar")
+    # 주소가 빠진 옛 방식 — 이름·설명·카테고리만 들어 있다
+    row.search_text = "googleapis.com:calendar calendar api manipulates events productivity"
+    db.commit()
+    assert apisearch.search_apis(db, spec)["results"] == []
+
+    stats = _synced(monkeypatch, db)
+    assert (stats["updated"], stats["unchanged"]) == (1, 2)
+    assert apisearch.search_apis(db, spec)["results"][0]["title"] == "Calendar API"

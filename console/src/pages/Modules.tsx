@@ -386,7 +386,8 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
         추가합니다(검색은 밖으로 나가지 않습니다 — 수집은 하루 한 번, <b>수집</b> 버튼으로
         당겨 쓸 수 있습니다).
         카테고리 기본값은 전체이고, 카테고리가 없는 API는 <span className="mono">기타</span>로
-        고릅니다. 추가 후
+        고릅니다. 키워드는 이름·설명뿐 아니라 <b>주소</b>에도 걸립니다 — 받아 둔 URL을
+        그대로 붙여 넣어 그게 무슨 API였는지 되짚을 수 있습니다. 추가 후
         설정의 <span className="mono">url</span>·<span className="mono">api_key</span>는 새 모듈
         수정에서 채웁니다.
       </p>
@@ -394,7 +395,7 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
         <input
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
-          placeholder="예: payment, weather, calendar"
+          placeholder="예: payment, weather — 주소를 그대로 붙여 넣어도 됩니다"
           style={{ flex: 1 }}
         />
         <select

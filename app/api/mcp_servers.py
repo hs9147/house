@@ -1067,6 +1067,8 @@ _APIS_TOOLS = [
         "name": "search_apis",
         "description": (
             "외부 공개 API 카탈로그를 키워드·카테고리·소스로 검색한다(apis.guru + 공공데이터)."
+            " keyword는 이름·설명·카테고리와 **주소**(홈페이지·스펙 URL)에 걸리므로,"
+            " 알고 있는 주소를 그대로 넣어 그 API가 무엇인지 되짚을 수 있다."
             " 세 조건은 AND이고 각각 비우면 그 조건은 걸지 않는다. 셋 다 비면 빈 목록이다."
             f" 카테고리가 없는 항목만 고르려면 category에 \"{apisearch.UNCATEGORIZED}\"를 주고,"
             f" 국내 공공데이터만 보려면 source에 \"{apisearch.SOURCE_PUBLIC_DATA}\"를 준다."

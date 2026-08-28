@@ -266,14 +266,19 @@ def _merge(db: Session, source: str, items: list[dict], stats: dict) -> None:
         # **바뀐 필드만 대입한다.** 전부 대입하면 categories(JSON)가 같은 값이어도
         # dirty로 잡혀 UPDATE가 나가고, onupdate가 updated_at을 매번 밀어 올린다.
         changed = [f for f in _FIELDS if getattr(row, f) != item[f]]
+        # 건초더미는 파생값이라 필드가 그대로여도 낡을 수 있다 — **만드는 방법을 바꾸면**
+        # 이미 쌓인 행이 옛 방식대로 남는다(URL을 넣기 전에 수집한 행이 그랬다).
+        # 결과와 비교해 두면 다음 수집이 알아서 따라잡는다.
+        fresh_text = _haystack(item)
+        stale = row.search_text != fresh_text
         back = row.removed_at is not None
-        if not changed and not back:
+        if not changed and not stale and not back:
             stats["unchanged"] += 1
             continue
         for field in changed:
             setattr(row, field, item[field])
-        if changed:
-            row.search_text = _haystack(item)
+        if stale:
+            row.search_text = fresh_text
         if back:
             row.removed_at = None
         stats["restored" if back else "updated"] += 1
@@ -289,10 +294,25 @@ def _merge(db: Session, source: str, items: list[dict], stats: dict) -> None:
         stats["removed"] += 1
 
 
+def _url_text(value: str) -> str:
+    """URL을 검색용으로 다듬는다 — 스킴과 끝 슬래시를 뗀다.
+
+    주소를 붙여 넣어 찾는 일이 잦은데 브라우저에서 복사하면 https://가 붙고 끝에
+    슬래시가 붙는다. 저장된 값과 한 글자만 어긋나도 부분일치가 깨진다. 그래서 넣을 때와
+    찾을 때 같은 방법으로 다듬어 둔다(URL이 아닌 낱말에는 아무 일도 하지 않는다).
+    """
+    return re.sub(r"^[a-z][a-z0-9+.-]*://", "", value.strip().lower()).rstrip("/")
+
+
 def _haystack(item: dict) -> str:
-    """검색이 훑을 소문자 건초더미 — 예전에 검색마다 메모리에서 만들던 그 문자열이다."""
+    """검색이 훑을 소문자 건초더미.
+
+    **주소도 넣는다.** 붙여 넣어 찾는 대상 중에 URL이 가장 잦은데(스펙 주소를 받아 놓고
+    "이거 뭐였지"를 되짚는 경우), 이름·설명만 넣어 두면 그 주소로는 영영 안 걸린다.
+    """
     return " ".join([
         str(item["id"]), item["title"], item["description"], " ".join(item["categories"]),
+        _url_text(item["homepage"]), _url_text(item["spec_url"]),
     ]).lower()
 
 
@@ -360,6 +380,9 @@ def search_apis(db: Session, keyword: str, category: str = "", source: str = "",
                 limit: int = 30) -> dict:
     """키워드·카테고리·소스로 카탈로그를 찾는다. 셋은 AND, 각각 비우면 그 조건은 안 건다.
 
+    keyword는 이름·설명·카테고리뿐 아니라 **주소(홈페이지·스펙 URL)에도 걸린다** —
+    주소를 그대로 붙여 넣어 찾을 수 있다(스킴과 끝 슬래시는 양쪽에서 떼고 맞춘다).
+
     category가 UNCATEGORIZED("기타")면 카테고리가 없는 항목만 고른다 — 그 항목들은
     카테고리 이름으로는 영영 걸리지 않아서 따로 고를 값이 필요하다.
     source는 SOURCE_LABELS의 키다(공공데이터만 보기 = SOURCE_PUBLIC_DATA).
@@ -369,7 +392,8 @@ def search_apis(db: Session, keyword: str, category: str = "", source: str = "",
     모르는 source는 빈 목록이 아니라 오류다: 라벨("공공데이터")을 키 자리에 넣는 실수가
     조용히 "그런 API가 없다"로 보이면 원인을 찾을 방법이 없다.
     """
-    kw = keyword.strip().lower()
+    # 넣을 때와 같은 방법으로 다듬는다 — 주소를 그대로 붙여 넣어도 걸리게.
+    kw = _url_text(keyword)
     cat = category.strip()
     src = source.strip()
     if src and src not in SOURCE_LABELS:
