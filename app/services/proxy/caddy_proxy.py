@@ -12,9 +12,8 @@ handles/*.caddy를 import하고, 프로젝트별 배포는 handles/ 아래에 �
 메인 Caddyfile은 지금처럼 "import <caddy_sites_dir>/*.caddy" 한 줄이면 되고,
 _base.caddy도 그 디렉터리에 있으니 자동으로 걸린다 — 운영자가 추가로 바꿀 것은 없다.
 
-release 배포에 커스텀 도메인(project.domain)을 지정한 예외만 기존처럼 독립된
-최상위 사이트 파일을 그대로 쓴다(domain_for가 base_domain이 아닌 그 도메인을
-반환하므로 이 파일에서 "공유 사이트인지"를 domain == base_domain으로 판별한다).
+도메인은 언제나 base_domain 하나다 — 프로젝트별 커스텀 도메인은 없다
+(services/proxy/__init__.py의 domain_for).
 """
 import subprocess
 
@@ -36,11 +35,6 @@ def _redirect_lines(redirects: list[RedirectSpec], indent: str = "    ") -> str:
     return "".join(f"{line}\n" for line in lines)
 
 
-def _site_file(project_name: str, profile: BuildProfile):
-    settings = get_settings()
-    return settings.caddy_sites_dir / f"{site_name(project_name, profile)}.caddy"
-
-
 def _handles_dir():
     settings = get_settings()
     d = settings.caddy_sites_dir / "handles"
@@ -50,10 +44,6 @@ def _handles_dir():
 
 def _snippet_file(project_name: str, profile: BuildProfile):
     return _handles_dir() / f"{site_name(project_name, profile)}.caddy"
-
-
-def _is_shared(domain: str) -> bool:
-    return domain == get_settings().base_domain
 
 
 def _ensure_base_site() -> None:
@@ -101,31 +91,20 @@ def _routes_body(routes: list[PathRoute], redirects: list[RedirectSpec]) -> str:
 class CaddyProxy(ReverseProxy):
     def configure(self, project_name, profile, domain, path_prefix, endpoint: Endpoint,
                   redirects: list[RedirectSpec]) -> None:
-        body = _routes_body([PathRoute(path_prefix=path_prefix, endpoint=endpoint)], redirects)
-        if _is_shared(domain):
-            _ensure_base_site()
-            _snippet_file(project_name, profile).write_text(body, encoding="utf-8")
-        else:
-            _site_file(project_name, profile).write_text(
-                f"{domain} {{\n{body}    log\n}}\n", encoding="utf-8",
-            )
-        reload_caddy()
+        self.configure_paths(
+            project_name, profile, domain,
+            [PathRoute(path_prefix=path_prefix, endpoint=endpoint)], redirects,
+        )
 
     def configure_paths(self, project_name, profile, domain, routes: list[PathRoute],
                          redirects: list[RedirectSpec]) -> None:
-        body = _routes_body(routes, redirects)
-        if _is_shared(domain):
-            _ensure_base_site()
-            _snippet_file(project_name, profile).write_text(body, encoding="utf-8")
-        else:
-            _site_file(project_name, profile).write_text(
-                f"{domain} {{\n{body}    log\n}}\n", encoding="utf-8",
-            )
+        # 도메인은 언제나 base_domain 하나다(proxy.domain_for) — 조각 하나를 쓰고 끝난다.
+        _ensure_base_site()
+        _snippet_file(project_name, profile).write_text(
+            _routes_body(routes, redirects), encoding="utf-8")
         reload_caddy()
 
     def remove(self, project_name, profile) -> None:
-        # 공유/전용 어느 쪽으로 만들어졌는지 remove()는 알 수 없으므로 둘 다 시도한다.
-        _site_file(project_name, profile).unlink(missing_ok=True)
         _snippet_file(project_name, profile).unlink(missing_ok=True)
         reload_caddy()
 

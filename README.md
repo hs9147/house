@@ -145,7 +145,7 @@ POST /paas/api/v1/orgs/sync                # {on_missing_repo?: create(기본)|d
 
 GET  /paas/api/v1/projects                 # git_url은 관리자·그 프로젝트 조직 소속 계정에게만 노출
                                       #   (전역 프로젝트는 누구나) — 그 외 응답에는 마스킹
-POST /paas/api/v1/projects                 # {name, type, branch, domain?, ...}
+POST /paas/api/v1/projects                 # {name, type, branch, ...}
                                       #   + organization_id(내부 리포 자동 생성) 또는 git_url(직접 지정) 중 하나
 POST /paas/api/v1/projects/upload          # multipart: zip_file 또는 files[](폴더) 중 하나 + organization_id 필수
                                       #   업로드 내용을 사내 Gitea 신규 리포에 최초 push (대용량/zip bomb/zip slip 방어)

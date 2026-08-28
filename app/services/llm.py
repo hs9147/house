@@ -77,7 +77,7 @@ def resolve_base_url(base_url: str, db: Session | None = None) -> str:
         target = db.execute(select(Project).where(Project.name == name)).scalar_one_or_none()
         if target is not None and target.organization is not None:
             org_name = target.organization.name
-    path = path_prefix_for(org_name, name, None, BuildProfile.release)
+    path = path_prefix_for(org_name, name, BuildProfile.release)
     return f"http://{settings.base_domain}{path}"
 
 

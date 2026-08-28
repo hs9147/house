@@ -9,8 +9,8 @@ routes/ 아래 쓰고, 배포/제거 때마다 그 조각들을 모아 base 사�
 정해지므로(조직 정보 불필요) remove()가 project_name/profile만으로도 정확히
 지울 수 있다 — 기존 인터페이스를 그대로 유지한다.
 
-release 배포에 커스텀 도메인(project.domain)을 지정한 예외만 기존처럼 독립된
-사이트(자기 physicalPath·바인딩)를 그대로 쓴다.
+도메인은 언제나 base_domain 하나다 — 프로젝트별 커스텀 도메인은 없다
+(services/proxy/__init__.py의 domain_for).
 
 web.config는 플랫폼이 전부 새로 쓰는 게 아니라, 기존 파일에 플랫폼이 정의하지 않은
 부분(다른 IIS 기능 설정, 운영자가 직접 추가한 규칙 등)이 있을 수 있다는 전제로
@@ -148,42 +148,6 @@ def _rewrite_target(route: PathRoute) -> str:
     return f"http://{route.endpoint.host}:{route.endpoint.port}/{capture}"
 
 
-def _path_rule_xml(name: str, route: PathRoute) -> str:
-    prefix = route.path_prefix.strip("/")
-    return (
-        f'        <rule name="{name}" stopProcessing="true">\n'
-        f'          <match url="^{prefix}/(.*)" />\n'
-        f'          <action type="Rewrite" url="{_rewrite_target(route)}" />\n'
-        f'        </rule>\n'
-    )
-
-
-def _rule_blocks_for_paths(routes: list[PathRoute], redirects: list[RedirectSpec]) -> str:
-    """비루트(prefix) 규칙을 먼저 매칭시키고, "/"는 캐치올로 마지막에 둔다 —
-    매칭된 접두사는 업스트림에 전달되기 전에 제거된다(handle_path/ProxyPass와 동일 규약).
-    문서 전체가 아니라 <rule> 블록들만 반환한다 — 나머지 web.config 구조는
-    _splice_managed_rules가 기존 파일(또는 최소 골격) 기준으로 채운다."""
-    rule_blocks = "".join(
-        _rule_xml(f"redirect-{i}", r.from_path.lstrip("/"), r) for i, r in enumerate(redirects)
-    )
-    non_root = [r for r in routes if r.path_prefix not in ("/", "")]
-    root = next((r for r in routes if r.path_prefix in ("/", "")), routes[-1])
-    path_blocks = "".join(_path_rule_xml(f"path-{i}", r) for i, r in enumerate(non_root))
-    proxy_target = f"http://{root.endpoint.host}:{root.endpoint.port}/{{R:1}}"
-    return (
-        f"{rule_blocks}"
-        f"{path_blocks}"
-        '        <rule name="reverse-proxy" stopProcessing="true">\n'
-        '          <match url="(.*)" />\n'
-        f'          <action type="Rewrite" url="{proxy_target}" />\n'
-        "        </rule>\n"
-    )
-
-
-def _is_shared(domain: str) -> bool:
-    return domain == get_settings().base_domain
-
-
 def _apps_dir() -> Path:
     settings = get_settings()
     d = settings.iis_sites_root / "apps"
@@ -214,6 +178,22 @@ def _migrate_legacy_routes_if_needed() -> None:
                 f.unlink()
             except OSError:
                 pass
+
+
+def _match_url(path_prefix: str, exclude_dev: bool) -> str:
+    """규칙의 match 패턴. release 루트 규칙에는 dev/ 조각을 빼는 부정 선읽기를 붙인다.
+
+    **dev 경로가 release 경로 안에 있다**(/apps/_/shop/ ⊃ /apps/_/shop/dev/). 그대로 두면
+    어느 규칙이 먼저 놓이느냐가 라우팅을 정하는데, 그 순서를 정하는 것은 조각 파일을
+    합칠 때의 정렬(_regenerate_base_web_config의 sorted(glob))이다 — 눈에 보이지 않는
+    성질이고, 실제로 release("shop")가 dev("shop-dev")보다 앞에 놓여 **dev 요청이 전부
+    release 업스트림으로 갔다**. 두 패턴을 서로소로 만들어 순서에 기대지 않게 한다.
+
+    선읽기는 캡처 그룹이 아니라 {R:1}은 그대로 경로 나머지를 가리킨다.
+    """
+    prefix = path_prefix.strip("/")
+    guard = f"(?!{DEV_SEGMENT}/)" if exclude_dev else ""
+    return f"^{prefix}/{guard}(.*)"
 
 
 def _match_url(path_prefix: str, exclude_dev: bool) -> str:
@@ -395,56 +375,21 @@ class IISProxy(ReverseProxy):
 
     def configure_paths(self, project_name, profile: BuildProfile, domain,
                          routes: list[PathRoute], redirects: list[RedirectSpec]) -> None:
-        # 배포 도메인/경로는 서브패스(Sub Path) 기반으로 통일 관리한다.
-        frag_key = site_name(project_name, profile)
+        # 도메인은 언제나 base_domain 하나다(proxy.domain_for) — 조각 하나를 쓰고
+        # base 사이트의 web.config를 다시 합성한다.
         _route_fragment_file(project_name, profile).write_text(
-            _build_shared_fragment(frag_key, routes, redirects, profile), encoding="utf-8",
+            _build_shared_fragment(
+                site_name(project_name, profile), routes, redirects, profile),
+            encoding="utf-8",
         )
         _regenerate_base_web_config()
         _ensure_base_site()
-        return
-
-        settings = get_settings()
-        name = site_name(project_name, profile)
-        site_dir = settings.iis_sites_root / name
-        site_dir.mkdir(parents=True, exist_ok=True)
-        config_path = site_dir / "web.config"
-        # 이 사이트는 도메인 이름 그대로라 운영자가 이미 다른 용도로 web.config를
-        # 손봐 뒀을 수 있다 — 있으면 읽어서 플랫폼 규칙만 갈아끼운다(전부 새로 쓰지 않음).
-        existing = _read_existing_or_skeleton(config_path)
-        rule_blocks = _rule_blocks_for_paths(routes, redirects)
-        config_path.write_text(_splice_managed_rules(existing, rule_blocks), encoding="utf-8")
-
-        _ensure_arr_proxy_enabled()
-        try:
-            subprocess.run(
-                [settings.iis_appcmd_path, "delete", "site", f"/site.name:{name}"],
-                capture_output=True, text=True,
-            )
-        except FileNotFoundError:
-            pass
-        _run_appcmd(
-            "add", "site",
-            f"/name:{name}", f"/physicalPath:{site_dir}", f"/bindings:http/*:80:{domain}",
-        )
 
     def remove(self, project_name, profile: BuildProfile) -> None:
-        settings = get_settings()
-        # 공유 모드 조각 파일 — 있으면 지우고 base web.config를 다시 합성한다.
         frag = _route_fragment_file(project_name, profile)
         if frag.exists():
             frag.unlink()
             _regenerate_base_web_config()
-
-        # 전용 모드(커스텀 도메인) 사이트 — 없으면 조용히 넘어간다.
-        name = site_name(project_name, profile)
-        try:
-            subprocess.run(
-                [settings.iis_appcmd_path, "delete", "site", f"/site.name:{name}"],
-                capture_output=True, text=True,
-            )
-        except FileNotFoundError:
-            pass
 
     def configured_routes(self) -> list[tuple[str, list[str]]]:
         r"""web.config에 구성된 (site_name, rewrite 타겟 URL 목록) 목록.

@@ -13,7 +13,6 @@ export interface ProjectOut {
   // organization_id로 생성된 프로젝트는 비관리자에게 마스킹된 값이 온다
   git_url: string;
   branch: string;
-  domain: string | null;
   default_profile: BuildProfile;
   created_at: string;
 }
@@ -25,7 +24,6 @@ export interface ProjectCreate {
   organization_id?: number | null;
   git_url?: string;
   branch: string;
-  domain?: string | null;
   health_check_path?: string;
   default_profile?: BuildProfile;
 }

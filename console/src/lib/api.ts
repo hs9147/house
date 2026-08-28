@@ -192,7 +192,6 @@ export const api = {
       type: ProjectType;
       organization_id: number;
       branch: string;
-      domain?: string;
       health_check_path?: string;
       default_profile: BuildProfile;
       deploy_after_upload: boolean;
@@ -204,7 +203,6 @@ export const api = {
     fd.append('type', form.type);
     fd.append('organization_id', String(form.organization_id));
     fd.append('branch', form.branch);
-    if (form.domain) fd.append('domain', form.domain);
     fd.append('health_check_path', form.health_check_path ?? '/');
     fd.append('default_profile', form.default_profile);
     fd.append('deploy_after_upload', String(form.deploy_after_upload));

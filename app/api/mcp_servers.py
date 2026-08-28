@@ -281,8 +281,8 @@ def _ops_call(db: Session, name: str, args: dict) -> str:
             ).scalars().first()
             out["profiles"][profile.value] = {
                 "status": _runtime_status(runtime, project, profile),
-                "domain": domain_for(project.name, project.domain, profile),
-                "path_prefix": path_prefix_for(org_name, project.name, project.domain, profile),
+                "domain": domain_for(project.name, profile),
+                "path_prefix": path_prefix_for(org_name, project.name, profile),
                 "internal_port": running_ports.get(profile),
                 "last_deployment": None if latest is None else {
                     "id": latest.id, "status": latest.status.value, "git_sha": latest.git_sha,

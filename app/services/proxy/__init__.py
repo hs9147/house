@@ -32,18 +32,25 @@ def get_proxy() -> ReverseProxy:
     return CaddyProxy()
 
 
-def domain_for(project_name: str, custom_domain: str | None, profile: BuildProfile) -> str:
-    """모든 배포 도메인은 base_domain 서브패스(Sub Path) 기반으로 통일한다."""
+def domain_for(project_name: str, profile: BuildProfile) -> str:
+    """모든 배포 도메인은 base_domain 서브패스(Sub Path) 기반으로 통일한다.
+
+    **프로젝트별 커스텀 도메인은 없다.** 예전에는 project.domain을 받아 release에만
+    썼는데, small tier에서는 이 함수가 그 값을 보지도 않았고(항상 base_domain) 세 프록시
+    백엔드의 "전용 사이트" 분기는 그래서 한 번도 실행되지 않았다 — 입력만 받고 버리는
+    필드였다. 도메인을 나누려면 프록시 바인딩과 인증서를 함께 다뤄야 하는데 그것은
+    이 플랫폼이 하는 일이 아니다(서브패스로 통일한 이유가 그것이다).
+    """
     settings = get_settings()
     if settings.tier == "enterprise":
         if profile == BuildProfile.development:
             return f"{project_name}-dev.{settings.base_domain}"
-        return custom_domain or f"{project_name}.{settings.base_domain}"
+        return f"{project_name}.{settings.base_domain}"
     return settings.base_domain
 
 
 def path_prefix_for(
-    org_name: str | None, project_name: str, custom_domain: str | None, profile: BuildProfile,
+    org_name: str | None, project_name: str, profile: BuildProfile,
 ) -> str:
     """모든 배포 URL은 /apps/{조직 또는 "_"}/{프로젝트}/[dev/] 서브패스(Sub Path) 구조로 통일한다."""
     settings = get_settings()

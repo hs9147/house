@@ -66,8 +66,6 @@ class Project(Base):
     # 모노레포에서 리포 루트가 아닌 서브디렉터리를 빌드 컨텍스트로 쓸 때 지정
     # (예: "platform/console"). 미지정 시 기존처럼 리포 루트 전체가 컨텍스트.
     source_subdir: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # 미지정 시 {name}.{base_domain} / development는 {name}-dev.{base_domain}
-    domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
     health_check_path: Mapped[str] = mapped_column(String(255), default="/")
     memory_limit: Mapped[str | None] = mapped_column(String(16), nullable=True)
     cpu_limit: Mapped[float | None] = mapped_column(Float, nullable=True)

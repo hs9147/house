@@ -40,7 +40,6 @@ class ProjectCreate(BaseModel):
     branch: str = "main"
     # 모노레포에서 리포 루트가 아닌 서브디렉터리를 빌드 컨텍스트로 쓸 때 지정 (예: "platform/console")
     source_subdir: str | None = None
-    domain: str | None = None
     health_check_path: str = "/"
     memory_limit: str | None = None
     cpu_limit: float | None = None
@@ -67,7 +66,6 @@ class ProjectUploadForm(BaseModel):
     type: ProjectType
     organization_id: int
     branch: str = "main"
-    domain: str | None = None
     health_check_path: str = "/"
     default_profile: BuildProfile = BuildProfile.release
     # 업로드·최초 push 완료 직후 바로 배포 큐에 올릴지 여부 (원클릭 배포)
@@ -87,7 +85,6 @@ class ProjectOut(BaseModel):
     git_url: str
     branch: str
     source_subdir: str | None
-    domain: str | None
     default_profile: BuildProfile
     created_at: datetime
 

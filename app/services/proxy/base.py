@@ -34,9 +34,22 @@ class RedirectSpec:
 DEV_SEGMENT = "dev"
 
 
+# development 배포의 사이트 이름 접미사. **프로젝트 이름 규칙에 없는 문자를 쓴다**
+# (^[a-z0-9][a-z0-9-]{1,40}$ — 하이픈은 있고 +는 없다).
+#
+# 예전에는 "-dev"였는데, 그러면 site_name이 단사가 아니었다: 프로젝트 shop의 dev 배포와
+# 프로젝트 shop-dev의 release 배포가 둘 다 "shop-dev"가 되어 **같은 조각 파일 하나를
+# 공유했다** — 뒤에 배포한 쪽이 앞엣것의 라우트를 덮어쓰고, remove()가 남의 것을 지웠다.
+#
+# 하필 '+'인 이유: Apache는 IncludeOptional handles/*.conf의 글롭 순서(알파벳)가 곧
+# ProxyPass 우선순위이고, dev가 release보다 앞서야 한다(경로가 release 안에 있다).
+# '+'(43)는 '.'(46)보다 작아 "shop+dev.conf" < "shop.conf"가 유지된다 — '_'나 '~'로
+# 바꾸면 그 순서가 뒤집혀 Apache에서 dev가 release로 새어 들어간다.
+DEV_SUFFIX = "+dev"
+
+
 def site_name(project_name: str, profile: BuildProfile) -> str:
-    suffix = "-dev" if profile == BuildProfile.development else ""
-    return f"{project_name}{suffix}"
+    return f"{project_name}{DEV_SUFFIX}" if profile == BuildProfile.development else project_name
 
 
 @dataclass

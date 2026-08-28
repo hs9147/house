@@ -116,8 +116,8 @@ def make_spec(
         image_tag=image_tag,
         internal_port=port,
         profile=profile,
-        domain=proxy.domain_for(project.name, project.domain, profile),
-        base_path=proxy.path_prefix_for(_org_name(project), project.name, project.domain, profile),
+        domain=proxy.domain_for(project.name, profile),
+        base_path=proxy.path_prefix_for(_org_name(project), project.name, profile),
         env=resolve_env(db, project, profile),
         secret_keys=secret_env_keys(db, project),
         memory_limit=project.memory_limit or settings.default_memory_limit,
@@ -191,7 +191,7 @@ def deploy_sync(
                 install_dependencies(
                     workdir, log_path,
                     base_path=proxy.path_prefix_for(
-                        _org_name(project), project.name, project.domain, profile,
+                        _org_name(project), project.name, profile,
                     ),
                     # dev는 dev 서버가 소스를 즉석에서 서빙하므로 빌드 산출물을 쓰지 않는다.
                     build=profile != BuildProfile.development,
@@ -208,7 +208,7 @@ def deploy_sync(
             spec = make_spec(db, project, image_tag, profile)
             endpoint = get_runtime().start(spec)
             if get_settings().tier == "small":
-                path_prefix = proxy.path_prefix_for(_org_name(project), project.name, project.domain, profile)
+                path_prefix = proxy.path_prefix_for(_org_name(project), project.name, profile)
                 proxy.configure(
                     project.name, profile, spec.domain, path_prefix, endpoint,
                     redirects_for(db, project),
@@ -355,7 +355,7 @@ def rollback(db: Session, project: Project, profile: BuildProfile) -> Deployment
     spec = make_spec(db, project, target.image_tag, profile)
     endpoint = get_runtime().start(spec)
     if get_settings().tier == "small":
-        path_prefix = proxy.path_prefix_for(_org_name(project), project.name, project.domain, profile)
+        path_prefix = proxy.path_prefix_for(_org_name(project), project.name, profile)
         proxy.configure(
             project.name, profile, spec.domain, path_prefix, endpoint, redirects_for(db, project),
         )
@@ -494,9 +494,9 @@ def deploy_composite_sync(
 
         if len(endpoints) == len(components):
             if get_settings().tier == "small":
-                domain = proxy.domain_for(project.name, project.domain, profile)
+                domain = proxy.domain_for(project.name, profile)
                 base_prefix = proxy.path_prefix_for(
-                    _org_name(project), project.name, project.domain, profile,
+                    _org_name(project), project.name, profile,
                 )
                 routes = [
                     proxy.PathRoute(path_prefix=base_prefix + "api/", endpoint=endpoints["backend"]),
@@ -618,8 +618,8 @@ def rollback_composite(db: Session, project: Project, profile: BuildProfile) -> 
         endpoints[name] = get_runtime().start(spec)
 
     if get_settings().tier == "small":
-        domain = proxy.domain_for(project.name, project.domain, profile)
-        base_prefix = proxy.path_prefix_for(_org_name(project), project.name, project.domain, profile)
+        domain = proxy.domain_for(project.name, profile)
+        base_prefix = proxy.path_prefix_for(_org_name(project), project.name, profile)
         routes = [
             proxy.PathRoute(path_prefix=base_prefix + "api/", endpoint=endpoints["backend"]),
             proxy.PathRoute(path_prefix=base_prefix, endpoint=endpoints["frontend"]),
