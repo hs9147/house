@@ -335,9 +335,14 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
     setError('');
     setNotice('');
     try {
-      const r = await api.refreshApiCatalog();
-      setNotice(`수집 완료 — 추가 ${r.added} · 갱신 ${r.updated} · 그대로 ${r.unchanged}`
-        + (r.removed ? ` · 사라짐 ${r.removed}` : ''));
+      // 소스를 골라 뒀으면 그것만 받는다 — 공공데이터만 보려는데 apis.guru 수천 건을
+      // 매번 다시 받을 이유가 없다.
+      const r = await api.refreshApiCatalog(source);
+      setNotice(
+        r.sources.length === 0 && r.skipped.length
+          ? '방금 받았습니다 — 잠시 뒤에 다시 시도하세요.'
+          : `수집 완료 — 추가 ${r.added} · 갱신 ${r.updated} · 그대로 ${r.unchanged}`
+            + (r.removed ? ` · 사라짐 ${r.removed}` : ''));
       setError((r.warnings ?? []).join(' / '));
       loadCategories();   // 카테고리와 소스별 건수를 함께 다시 읽는다
     } catch (err) {
@@ -430,9 +435,9 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
           className="secondary"
           onClick={refresh}
           disabled={busy}
-          title="apis.guru·공공데이터에서 카탈로그를 지금 다시 받습니다(아웃바운드)"
+          title="카탈로그를 지금 다시 받습니다(아웃바운드). 소스를 고르면 그 소스만."
         >
-          수집
+          {source ? '이 소스만 수집' : '수집'}
         </button>
       </form>
       {notice && <p className="mutedtext" style={{ fontSize: 12 }}>{notice}</p>}

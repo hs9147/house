@@ -245,30 +245,65 @@ def _sources() -> list[tuple[str, object]]:
     return out
 
 
+# 소스별 마지막 **시도** 시각(monotonic). 갱신 시각(updated_at)과 다르다 — 그쪽은 실제로
+# 바뀐 것이 있을 때만 움직이므로, "방금 받아 봤는데 그대로였다"를 구분하지 못한다.
+# 프로세스 안에만 산다. 이 플랫폼은 단일 프로세스로 뜨고, 이 값이 지키려는 것은
+# 정합성이 아니라 **외부 호출량**이라 재시작으로 초기화돼도 해가 없다.
+_last_attempt: dict[str, float] = {}
+
+
+def reset_sync_throttle() -> None:
+    """최소 간격 기록을 지운다 — 테스트와 수동 복구용."""
+    _last_attempt.clear()
+
+
 # --- 수집 ---
 
-def sync_catalog(db: Session) -> dict:
+def sync_catalog(db: Session, source: str = "", min_interval: float = 0.0) -> dict:
     """소스를 받아 카탈로그를 최신으로 만든다. 바뀐 행만 쓴다.
 
-    소스별로 따로 처리한다 — 한쪽이 죽어도 다른 쪽은 갱신되고, 죽은 쪽의 행은 그대로
-    남는다(다음 검색에서 사라지지 않는다). 전부 죽었을 때만 오류다: 그때는 "바뀐 것이
-    없다"가 아니라 아무 것도 못 받은 것이다.
+    source를 주면 그 소스만 받는다(공공데이터만 최신화 = SOURCE_PUBLIC_DATA). 비우면
+    켜져 있는 소스 전부. 소스별로 따로 처리하므로 한쪽이 죽어도 다른 쪽은 갱신되고,
+    죽은 쪽의 행은 그대로 남는다(다음 검색에서 사라지지 않는다). 전부 죽었을 때만
+    오류다: 그때는 "바뀐 것이 없다"가 아니라 아무 것도 못 받은 것이다.
+
+    min_interval은 **외부 호출량을 지키는 자리**다. 그 시간 안에 이미 받아 본 소스는
+    건너뛰고 skipped에 담는다 — 공공데이터포털 개발계정은 하루 1,000건이라, 부르는
+    쪽이 사람이 아니라 모델이면 몇 분 만에 소진될 수 있다. 사람이 버튼을 누른 경우는
+    0을 주어 항상 받는다.
     """
+    if source and source not in SOURCE_LABELS:
+        raise ApiSearchError(
+            f"모르는 소스입니다: {source} (쓸 수 있는 값: {', '.join(SOURCE_LABELS)})")
+
     stats = {"added": 0, "updated": 0, "restored": 0, "removed": 0, "unchanged": 0}
     warnings: list[str] = []
     synced: list[str] = []
-    for source, load in _sources():
+    skipped: list[str] = []
+    wanted = [(n, load) for n, load in _sources() if not source or n == source]
+    if not wanted:
+        raise ApiSearchError(
+            f"켜져 있지 않은 소스입니다: {source or '(전체)'}"
+            " — 그 소스의 주소가 설정돼 있는지 확인하세요(catalog_status의 enabled).")
+
+    now = time.monotonic()
+    for name, load in wanted:
+        if min_interval and now - _last_attempt.get(name, -min_interval) < min_interval:
+            skipped.append(name)
+            continue
+        _last_attempt[name] = now
         try:
             items = load()
         except ApiSearchError as e:
             warnings.append(str(e))
             continue
-        _merge(db, source, items, stats)
-        synced.append(source)
-    if not synced:
+        _merge(db, name, items, stats)
+        synced.append(name)
+
+    if not synced and not skipped:
         raise ApiSearchError(" / ".join(warnings) or "수집할 소스가 없습니다")
     db.commit()
-    return {**stats, "sources": synced, "warnings": warnings}
+    return {**stats, "sources": synced, "skipped": skipped, "warnings": warnings}
 
 
 def _merge(db: Session, source: str, items: list[dict], stats: dict) -> None:

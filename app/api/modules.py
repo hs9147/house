@@ -203,15 +203,20 @@ def api_catalog_status(
 
 @router.post("/modules/search/refresh")
 def refresh_external_api_directory(
+    source: str = "",
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_admin),
 ):
-    """카탈로그를 1일 1회 주기 외에 즉시 수집한다 — **여기가 유일한 아웃바운드 경로다**.
+    """카탈로그를 1일 1회 주기 외에 즉시 수집한다(아웃바운드).
 
+    source를 주면 그 소스만 받는다(공공데이터만 최신화 = source=publicdata).
     응답의 added/updated/unchanged는 이번 수집이 실제로 무엇을 바꿨는지다(대부분은
-    unchanged다). warnings는 실패한 소스이고, 그 소스의 행은 손대지 않는다."""
+    unchanged다). warnings는 실패한 소스이고, 그 소스의 행은 손대지 않는다.
+
+    최소 간격을 걸지 않는다 — 사람이 버튼을 한 번 누른 행위다. 모델이 부르는
+    /mcp/apis의 sync_catalog에는 간격이 걸려 있다."""
     try:
-        return apisearch.sync_catalog(db)
+        return apisearch.sync_catalog(db, source)
     except apisearch.ApiSearchError as e:
         raise HTTPException(status_code=502, detail=str(e))
 

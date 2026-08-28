@@ -606,3 +606,70 @@ def test_an_xml_response_says_what_came_back(monkeypatch, db):
         apisearch._public_data_items()
     assert "resultCode" in str(e.value)      # 받은 앞부분을 그대로 보여 준다
     assert "_type=json" in str(e.value)      # 고치는 방법도 함께
+
+
+
+# --- 요청이 있을 때 최신화 ---
+
+def test_sync_can_target_one_source(monkeypatch, db):
+    """공공데이터만 최신화한다 — apis.guru 2,400건을 매번 다시 받을 이유가 없다."""
+    _stub_public(monkeypatch, {"data": [{"apiNm": "대기오염정보"}]})
+    apisearch.sync_catalog(db)
+
+    calls: list[str] = []
+    original = httpx_retry.httpx.get
+
+    def counting(url, **kw):
+        calls.append(url)
+        return original(url, **kw)
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", counting)
+    stats = apisearch.sync_catalog(db, apisearch.SOURCE_PUBLIC_DATA)
+    assert stats["sources"] == [apisearch.SOURCE_PUBLIC_DATA]
+    # apis.guru로는 나가지 않았다
+    assert all("catalog.example" in u for u in calls), calls
+
+
+def test_sync_of_a_source_that_is_off_is_an_error(monkeypatch, db):
+    """끈 소스를 콕 집었는데 조용히 "받았다"로 끝나면 왜 안 채워지는지 알 수 없다."""
+    _stub_directory(monkeypatch)   # 공공데이터는 꺼져 있다
+    with pytest.raises(apisearch.ApiSearchError) as e:
+        apisearch.sync_catalog(db, apisearch.SOURCE_PUBLIC_DATA)
+    assert "켜져 있지 않은" in str(e.value)
+
+    with pytest.raises(apisearch.ApiSearchError) as bad:
+        apisearch.sync_catalog(db, "공공데이터")   # 라벨이지 키가 아니다
+    assert "publicdata" in str(bad.value)
+
+
+def test_min_interval_skips_a_source_that_was_just_fetched(monkeypatch, db):
+    """외부 호출량을 지키는 자리 — 공공데이터포털 개발계정은 하루 1,000건이다."""
+    _stub_directory(monkeypatch)
+    first = apisearch.sync_catalog(db, min_interval=300.0)
+    assert (first["sources"], first["skipped"]) == ([apisearch.SOURCE_APISGURU], [])
+
+    def boom(url, **kw):
+        raise AssertionError(f"간격 안인데 밖으로 나갔다: {url}")
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", boom)
+    second = apisearch.sync_catalog(db, min_interval=300.0)
+    assert (second["sources"], second["skipped"]) == ([], [apisearch.SOURCE_APISGURU])
+
+    # 사람이 누르는 수집은 간격을 걸지 않는다 — 0을 주면 그대로 나간다
+    apisearch.reset_sync_throttle()
+    _stub_directory(monkeypatch)
+    assert apisearch.sync_catalog(db)["sources"] == [apisearch.SOURCE_APISGURU]
+
+
+def test_refresh_endpoint_takes_a_source(monkeypatch, db):
+    _stub_directory(monkeypatch)
+    c = TestClient(create_app())
+    r = c.post(f"{API}/modules/search/refresh",
+               params={"source": apisearch.SOURCE_APISGURU}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["sources"] == [apisearch.SOURCE_APISGURU]
+
+    off = c.post(f"{API}/modules/search/refresh",
+                 params={"source": apisearch.SOURCE_PUBLIC_DATA}, headers=ADMIN)
+    assert off.status_code == 502
+    assert "켜져 있지 않은" in off.json()["detail"]

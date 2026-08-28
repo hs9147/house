@@ -777,7 +777,7 @@ def test_apis_server_searches_the_collected_catalog(monkeypatch, fresh_settings)
 
     c = _apis_client(monkeypatch)
     tools = {t["name"] for t in _rpc(c, "/mcp/apis", "tools/list")["result"]["tools"]}
-    assert tools == {"search_apis", "list_api_categories", "catalog_status"}
+    assert tools == {"search_apis", "list_api_categories", "catalog_status", "sync_catalog"}
 
     hits = json.loads(_text(_call(c, "/mcp/apis", "search_apis", {"keyword": "payment"})))
     assert [h["id"] for h in hits] == ["stripe.com"]
@@ -786,14 +786,30 @@ def test_apis_server_searches_the_collected_catalog(monkeypatch, fresh_settings)
     assert json.loads(_text(_call(c, "/mcp/apis", "catalog_status")))["total"] == 1
 
 
-def test_apis_server_has_no_collect_tool(monkeypatch, fresh_settings):
-    """수집 도구를 두면 이 서버가 아웃바운드 호출을 여는 셈이고, 그러면 admin 없이 열
-    수 있는 근거가 그대로 무너진다."""
+def test_apis_server_sync_is_throttled_and_audited(monkeypatch, fresh_settings):
+    """모델이 부르는 수집이다 — 넓히는 것은 권한이 아니라 호출 횟수뿐이므로 거기를 막는다.
+
+    _apis_client는 수집을 한 번 끝낸 뒤 httpx를 폭탄으로 바꿔 둔다. 최소 간격이 걸려
+    있으면 두 번째 호출은 밖으로 나가지 않고 skipped로 돌아온다 — 폭탄이 안 터지는
+    것이 곧 "안 나갔다"의 증거다.
+    """
+    import json
+
+    from app.services import apisearch
+
     c = _apis_client(monkeypatch)
-    tools = {t["name"] for t in _rpc(c, "/mcp/apis", "tools/list")["result"]["tools"]}
-    assert not [t for t in tools if "sync" in t or "refresh" in t]
-    reply = _call(c, "/mcp/apis", "sync_catalog")
-    assert "unknown tool" in reply["error"]["message"]
+    body = json.loads(_text(_call(c, "/mcp/apis", "sync_catalog")))
+    assert body["skipped"] == [apisearch.SOURCE_APISGURU]
+    assert body["sources"] == []
+
+    # 밖으로 나가는 유일한 도구라 감사에 남는다
+    actions = {row["action"] for row in c.get(f"{API}/audit", headers=ADMIN).json()}
+    assert "mcp.apis.sync" in actions
+
+    # 켜져 있지 않은 소스를 콕 집으면 조용한 빈 결과가 아니라 오류다
+    bad = _call(c, "/mcp/apis", "sync_catalog",
+                {"source": apisearch.SOURCE_PUBLIC_DATA})
+    assert "켜져 있지 않은" in bad["error"]["message"]
 
 
 def test_apis_server_works_without_an_admin_key(monkeypatch, fresh_settings):
@@ -862,3 +878,41 @@ def test_apis_server_finds_an_api_by_its_url(monkeypatch, fresh_settings):
     hits = json.loads(_text(_call(c, "/mcp/apis", "search_apis",
                                   {"keyword": "https://example.test/swagger.json"})))
     assert [h["id"] for h in hits] == ["stripe.com"]
+
+
+def test_apis_server_sync_refreshes_on_request(monkeypatch, fresh_settings):
+    """요청이 있을 때 최신화한다 — 도구가 실제로 나가서 표를 갱신하는지 본다."""
+    import json
+
+    from app.services import apisearch, httpx_retry
+
+    httpx_retry.reset_breakers()
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_URL", "")
+    get_settings.cache_clear()
+    catalog = {"stripe.com": {"preferred": "1.0", "versions": {"1.0": {
+        "info": {"title": "Stripe", "description": "결제"},
+        "swaggerUrl": "https://example.test/s.json"}}}}
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return catalog
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", lambda url, **kw: _R())
+    c = _client()
+
+    first = json.loads(_text(_call(c, "/mcp/apis", "sync_catalog")))
+    assert (first["added"], first["skipped"]) == (1, [])
+    assert json.loads(_text(_call(c, "/mcp/apis", "search_apis",
+                                  {"keyword": "결제"})))[0]["id"] == "stripe.com"
+
+    # 최소 간격 안에 다시 부르면 나가지 않는다 — 오류가 아니라 "방금 받았다"
+    again = json.loads(_text(_call(c, "/mcp/apis", "sync_catalog")))
+    assert again["skipped"] == [apisearch.SOURCE_APISGURU]
+    assert again["added"] == 0
+
+    # 간격을 비우면 다시 나간다. 이번에는 바뀐 것이 없으므로 unchanged다
+    apisearch.reset_sync_throttle()
+    third = json.loads(_text(_call(c, "/mcp/apis", "sync_catalog")))
+    assert (third["added"], third["updated"], third["unchanged"]) == (0, 0, 1)

@@ -283,11 +283,11 @@ export const api = {
       'GET', '/modules/search/categories'),
   // 카탈로그 수집 — **여기가 유일한 아웃바운드 경로다**(검색은 표만 읽는다).
   // 평소에는 하루 한 번 백그라운드로 돌고, 이 버튼은 그 사이에 당겨 쓰는 자리다.
-  refreshApiCatalog: () =>
+  refreshApiCatalog: (source?: string) =>
     request<{
       added: number; updated: number; restored: number; removed: number; unchanged: number;
-      sources: string[]; warnings: string[];
-    }>('POST', '/modules/search/refresh'),
+      sources: string[]; skipped: string[]; warnings: string[];
+    }>('POST', '/modules/search/refresh', undefined, { ...(source ? { source } : {}) }),
   importApiModule: (name: string, url: string, category?: string) =>
     request<ModuleOut>('POST', '/modules/import', { name, url, category: category || null }),
 
