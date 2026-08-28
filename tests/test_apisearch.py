@@ -383,3 +383,40 @@ def test_both_sources_dead_is_an_error_not_an_empty_result(monkeypatch, db):
     monkeypatch.setattr(httpx_retry.httpx, "get", lambda url, **kw: _R(500, {}))
     with pytest.raises(apisearch.ApiSearchError):
         apisearch.sync_catalog(db)
+
+
+# --- 카테고리 자리에 문자열이 오는 경우 ---
+
+def test_a_category_given_as_a_string_is_not_split_into_letters(monkeypatch, db):
+    """소스가 카테고리 자리에 리스트가 아니라 문자열 하나를 넣어 주는 일이 있다.
+
+    그대로 두면 리스트처럼 순회되는 곳마다 글자 단위로 쪼개진다 — 카테고리 목록에
+    s·e·c·u·r·i·t·y가 따로 서고, 검색용 건초더미도 "s e c u r i t y"가 된다.
+    """
+    directory = {"acme.io": {"preferred": "1.0", "versions": {"1.0": {
+        "info": {"title": "Acme", "description": "auth 게이트웨이",
+                 "x-apisguru-categories": "security"},
+        "swaggerUrl": "https://example.test/s.json"}}}}
+    _synced(monkeypatch, db, directory)
+
+    assert apisearch.list_categories(db) == [{"name": "security", "count": 1}]
+    assert _row(db, "acme.io").categories == ["security"]
+    # 카테고리로 고를 수 있어야 하고
+    assert [h["id"] for h in apisearch.search_apis(db, "", "security")["results"]] == ["acme.io"]
+    # 건초더미가 쪼개졌으면 낱말로는 안 걸린다
+    assert apisearch.search_apis(db, "security")["results"][0]["id"] == "acme.io"
+    # 카테고리가 있는 항목이므로 "기타"에는 안 걸린다
+    assert apisearch.search_apis(db, "", apisearch.UNCATEGORIZED)["results"] == []
+
+
+def test_a_string_already_in_the_table_still_reads_as_one_category(db):
+    """고치기 전에 들어간 행이 이미 있다 — 다시 수집하기 전에도 화면이 맞아야 한다."""
+    db.add(ApiCatalogEntry(
+        source=apisearch.SOURCE_APISGURU, ext_id="acme.io", title="Acme",
+        description="auth", provider="acme.io", categories="security",
+        homepage="", spec_url="", search_text="acme.io acme auth security",
+    ))
+    db.commit()
+    assert apisearch.list_categories(db) == [{"name": "security", "count": 1}]
+    hit = apisearch.search_apis(db, "", "security")["results"][0]
+    assert hit["categories"] == ["security"]

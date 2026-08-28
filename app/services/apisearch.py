@@ -54,6 +54,24 @@ class ApiSearchError(RuntimeError):
     """카탈로그 수집 실패 — 502로 매핑."""
 
 
+def _as_categories(value) -> list[str]:
+    """카테고리를 **언제나** 문자열 리스트로 만든다.
+
+    소스가 이 자리에 리스트가 아니라 문자열 하나를 넣어 주는 일이 있다
+    (x-apisguru-categories: "security"). 그대로 두면 리스트처럼 순회되는 곳마다 글자
+    단위로 쪼개진다 — 카테고리 목록에 s·e·c·u·r·i·t·y가 따로 서고, 검색용 건초더미도
+    "s e c u r i t y"가 되어 낱말로는 아무 것도 안 걸린다.
+
+    읽는 쪽에서도 이 함수를 거친다: 고치기 전에 문자열로 저장된 행이 이미 표에 있고,
+    그 행도 다시 수집하기 전까지 화면에서 맞게 보여야 한다.
+    """
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
+
+
 # --- 소스 1: apis.guru ---
 
 def _apisguru_items() -> list[dict]:
@@ -93,7 +111,7 @@ def _entry_to_result(api_id: str, entry: dict) -> dict | None:
         "title": info.get("title") or api_id,
         "description": (info.get("description") or "").strip()[:300],
         "provider": info.get("x-providerName") or api_id.split(":")[0],
-        "categories": info.get("x-apisguru-categories") or [],
+        "categories": _as_categories(info.get("x-apisguru-categories")),
         "homepage": homepage,
         "spec_url": ver.get("swaggerUrl") or ver.get("swaggerYamlUrl") or "",
     }
@@ -178,7 +196,7 @@ def _public_data_items() -> list[dict]:
             "title": title,
             "description": _pick(row, _DESC_KEYS)[:300],
             "provider": "공공데이터",
-            "categories": [category] if category else [],
+            "categories": _as_categories(category),
             "homepage": _pick(row, _URL_KEYS),
             "spec_url": "",
         })
@@ -324,7 +342,7 @@ def _to_result(row: ApiCatalogEntry) -> dict:
         "title": row.title,
         "description": row.description,
         "provider": row.provider,
-        "categories": row.categories or [],
+        "categories": _as_categories(row.categories),
         "homepage": row.homepage,
         "spec_url": row.spec_url,
         "source": row.source,
@@ -353,7 +371,7 @@ def search_apis(db: Session, keyword: str, category: str = "", limit: int = 30) 
         query = query.where(ApiCatalogEntry.search_text.contains(kw))
     results = []
     for row in db.execute(query.order_by(ApiCatalogEntry.title, ApiCatalogEntry.id)).scalars():
-        if not _matches_category(row.categories or [], cat):
+        if not _matches_category(_as_categories(row.categories), cat):
             continue
         results.append(_to_result(row))
         if len(results) >= limit:
@@ -380,11 +398,12 @@ def list_categories(db: Session) -> list[dict]:
     """
     counts: dict[str, int] = {}
     uncategorized = 0
-    for categories in db.execute(_live(select(ApiCatalogEntry.categories))).scalars():
-        if not categories:
+    for raw in db.execute(_live(select(ApiCatalogEntry.categories))).scalars():
+        names = _as_categories(raw)
+        if not names:
             uncategorized += 1
             continue
-        for name in categories:
+        for name in names:
             counts[name] = counts.get(name, 0) + 1
     items = [{"name": name, "count": counts[name]} for name in sorted(counts)]
     if uncategorized:
