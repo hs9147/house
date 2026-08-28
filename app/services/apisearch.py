@@ -35,6 +35,9 @@ from .httpx_retry import get_with_retry
 
 SOURCE_APISGURU = "apisguru"
 SOURCE_PUBLIC_DATA = "publicdata"
+# 화면에 그대로 쓰는 이름. 서버가 들고 있는 이유: 소스를 하나 더 붙일 때 콘솔을 같이
+# 고쳐야 한다면 그 소스는 화면에서 "publicdata" 같은 내부 이름으로 보이게 된다.
+SOURCE_LABELS = {SOURCE_APISGURU: "apis.guru", SOURCE_PUBLIC_DATA: "공공데이터"}
 
 # 소스가 주는 값 그대로인 필드. 갱신할 때 이 목록만 비교한다 — search_text는 여기서
 # 파생되고, created_at·updated_at·removed_at은 표가 스스로 관리한다.
@@ -353,19 +356,31 @@ def _live(query):
     return query.where(ApiCatalogEntry.removed_at.is_(None))
 
 
-def search_apis(db: Session, keyword: str, category: str = "", limit: int = 30) -> dict:
-    """키워드·카테고리로 카탈로그를 찾는다. 두 조건은 AND, 각각 비우면 그 조건은 안 건다.
+def search_apis(db: Session, keyword: str, category: str = "", source: str = "",
+                limit: int = 30) -> dict:
+    """키워드·카테고리·소스로 카탈로그를 찾는다. 셋은 AND, 각각 비우면 그 조건은 안 건다.
 
     category가 UNCATEGORIZED("기타")면 카테고리가 없는 항목만 고른다 — 그 항목들은
     카테고리 이름으로는 영영 걸리지 않아서 따로 고를 값이 필요하다.
-    둘 다 비면 빈 목록이다(카탈로그 전체를 쏟아내지 않는다).
+    source는 SOURCE_LABELS의 키다(공공데이터만 보기 = SOURCE_PUBLIC_DATA).
+    셋 다 비면 빈 목록이다(카탈로그 전체를 쏟아내지 않는다) — 소스만 골라도 조건이므로
+    그때는 그 소스를 훑는다.
+
+    모르는 source는 빈 목록이 아니라 오류다: 라벨("공공데이터")을 키 자리에 넣는 실수가
+    조용히 "그런 API가 없다"로 보이면 원인을 찾을 방법이 없다.
     """
     kw = keyword.strip().lower()
     cat = category.strip()
-    if not kw and not cat:
+    src = source.strip()
+    if src and src not in SOURCE_LABELS:
+        raise ApiSearchError(
+            f"모르는 소스입니다: {src} (쓸 수 있는 값: {', '.join(SOURCE_LABELS)})")
+    if not kw and not cat and not src:
         return {"results": [], "warnings": []}
 
     query = _live(select(ApiCatalogEntry))
+    if src:
+        query = query.where(ApiCatalogEntry.source == src)
     if kw:
         # 카테고리는 리스트라 SQL에서 걸 수 없다 — 키워드로 먼저 좁히고 아래에서 본다.
         query = query.where(ApiCatalogEntry.search_text.contains(kw))
@@ -419,13 +434,26 @@ def catalog_status(db: Session) -> dict:
     """수집 현황 — 소스별 건수와 마지막으로 바뀐 시각.
 
     "검색 결과가 없다"가 질의 탓인지 수집이 안 된 탓인지 여기서 갈린다.
+
+    **행이 하나도 없는 소스도 0건으로 내보낸다.** 표에 있는 소스만 세면 공공데이터를
+    한 번도 못 받은 설치본에서는 그 소스가 아예 없는 것처럼 보이고, 화면에서 고를 수도
+    없어서 "왜 공공데이터가 안 나오지"에 답할 자리가 사라진다. enabled가 그 답이다 —
+    주소를 넣지 않아 아예 부르지 않는 소스인지, 불렀는데 못 받은 것인지 구분해 준다.
     """
-    per_source: dict[str, dict] = {}
+    enabled = {name for name, _load in _sources()}
+    per_source: dict[str, dict] = {
+        name: {"label": label, "enabled": name in enabled,
+               "total": 0, "removed": 0, "updated_at": None}
+        for name, label in SOURCE_LABELS.items()
+    }
     rows = db.execute(select(
         ApiCatalogEntry.source, ApiCatalogEntry.removed_at, ApiCatalogEntry.updated_at,
     )).all()
     for source, removed_at, updated_at in rows:
-        stat = per_source.setdefault(source, {"total": 0, "removed": 0, "updated_at": None})
+        stat = per_source.setdefault(source, {
+            "label": SOURCE_LABELS.get(source, source), "enabled": source in enabled,
+            "total": 0, "removed": 0, "updated_at": None,
+        })
         if removed_at is None:
             stat["total"] += 1
         else:

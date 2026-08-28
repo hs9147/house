@@ -828,3 +828,27 @@ def test_apis_server_appears_in_the_internal_directory(monkeypatch, fresh_settin
     get_settings.cache_clear()
     items = {i["id"]: i for i in _client().get(f"{API}/mcp/search", headers=ADMIN).json()}
     assert items["paas-apis"]["url"] == "http://localhost:7000/paas/api/v1/mcp/apis"
+
+
+def test_apis_server_can_narrow_to_one_source(monkeypatch, fresh_settings):
+    """LLM도 "국내 공공데이터만"이라고 좁힐 수 있어야 한다."""
+    import json
+
+    from app.services import apisearch
+
+    c = _apis_client(monkeypatch)
+    guru = json.loads(_text(_call(c, "/mcp/apis", "search_apis",
+                                  {"source": apisearch.SOURCE_APISGURU})))
+    assert [h["id"] for h in guru] == ["stripe.com"]
+    # 수집한 적 없는 소스는 빈 목록이다(오류가 아니다 — 조건이 맞는 항목이 없는 것이다)
+    assert _text(_call(c, "/mcp/apis", "search_apis",
+                       {"source": apisearch.SOURCE_PUBLIC_DATA})) == "[]"
+
+    # 모르는 소스는 빈 목록이 아니라 오류다
+    bad = _call(c, "/mcp/apis", "search_apis", {"source": "공공데이터"})
+    assert "모르는 소스" in bad["error"]["message"]
+
+    # 현황에는 두 소스가 다 나온다 — 왜 비었는지 모델이 여기서 확인한다
+    status = json.loads(_text(_call(c, "/mcp/apis", "catalog_status")))
+    assert status["sources"]["publicdata"]["enabled"] is False
+    assert status["sources"]["publicdata"]["total"] == 0

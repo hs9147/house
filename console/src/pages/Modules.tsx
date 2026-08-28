@@ -305,7 +305,9 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
 function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [keyword, setKeyword] = useState('');
   const [category, setCategory] = useState('');   // '' = 전체(기본값)
+  const [source, setSource] = useState('');       // '' = 전체 소스
   const [categories, setCategories] = useState<import('../lib/types').ApiCategory[]>([]);
+  const [status, setStatus] = useState<import('../lib/types').ApiCatalogStatus | null>(null);
   const [results, setResults] = useState<ApiSearchResult[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -319,6 +321,9 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
       .listApiCategories()
       .then((res) => setCategories(res.categories))
       .catch(() => setCategories([]));   // 목록을 못 받아도 키워드 검색은 되어야 한다
+    // 소스 선택지는 수집 현황에서 나온다 — 0건인 소스도 내려오므로, 공공데이터가
+    // 비어 있으면 "왜 없는지"(주소 미설정인지 수집 실패인지)를 여기서 보여 줄 수 있다.
+    api.apiCatalogStatus().then(setStatus).catch(() => setStatus(null));
   };
   useEffect(loadCategories, []);
 
@@ -334,7 +339,7 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
       setNotice(`수집 완료 — 추가 ${r.added} · 갱신 ${r.updated} · 그대로 ${r.unchanged}`
         + (r.removed ? ` · 사라짐 ${r.removed}` : ''));
       setError((r.warnings ?? []).join(' / '));
-      loadCategories();
+      loadCategories();   // 카테고리와 소스별 건수를 함께 다시 읽는다
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -344,13 +349,13 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
 
   const search = async (e: React.FormEvent) => {
     e.preventDefault();
-    // 키워드·카테고리 둘 다 비면 서버가 빈 목록을 준다 — 미리 막는다.
-    if (!keyword.trim() && !category) return;
+    // 셋 다 비면 서버가 빈 목록을 준다 — 미리 막는다(소스만 골라도 조건이다).
+    if (!keyword.trim() && !category && !source) return;
     setBusy(true);
     setError('');
     try {
       setNotice('');
-      const res = await api.searchApis(keyword.trim(), category);
+      const res = await api.searchApis(keyword.trim(), category, source);
       setResults(res.results);
       // 아직 수집하지 않았으면 그렇다고 말한다 — 그 사실을 감추면 결과가 없는 이유를
       // 알 수 없다.
@@ -393,6 +398,18 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
           style={{ flex: 1 }}
         />
         <select
+          value={source}
+          onChange={(e) => setSource(e.target.value)}
+          title="어느 카탈로그에서 찾을지 — 기본은 전체입니다"
+        >
+          <option value="">모든 소스</option>
+          {Object.entries(status?.sources ?? {}).map(([key, s]) => (
+            <option key={key} value={key}>
+              {s.label} ({s.total})
+            </option>
+          ))}
+        </select>
+        <select
           value={category}
           onChange={(e) => setCategory(e.target.value)}
           title="카테고리 조건 — 기본은 전체입니다"
@@ -404,7 +421,7 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
             </option>
           ))}
         </select>
-        <button type="submit" disabled={busy || (!keyword.trim() && !category)}>
+        <button type="submit" disabled={busy || (!keyword.trim() && !category && !source)}>
           {busy ? '검색 중...' : '검색'}
         </button>
         <button
@@ -418,6 +435,16 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
         </button>
       </form>
       {notice && <p className="mutedtext" style={{ fontSize: 12 }}>{notice}</p>}
+      {/* 고른 소스가 0건이면 검색하기 전에 이유를 말해 준다 — 빈 결과만 보고
+          "그런 API가 없다"로 읽으면 설정을 고칠 생각을 못 한다. */}
+      {source && status?.sources[source]?.total === 0 && (
+        <p className="mutedtext" style={{ fontSize: 12 }}>
+          {status.sources[source].label}에서 받아 둔 것이 없습니다 —{' '}
+          {status.sources[source].enabled
+            ? '수집 버튼을 눌러 보세요.'
+            : '서버에 이 소스의 주소가 설정돼 있지 않아 아예 부르지 않습니다(PAAS_PUBLIC_DATA_URL).'}
+        </p>
+      )}
       {error && <p className="error">{error}</p>}
       {results && results.length === 0 && (
         <p className="mutedtext">검색 결과가 없습니다.</p>
@@ -442,6 +469,7 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
                 </td>
                 <td className="mutedtext" style={{ fontSize: 12 }}>
                   {r.categories.join(', ') || '—'}
+                  <div>{status?.sources[r.source]?.label ?? r.source}</div>
                 </td>
                 <td>
                   {added[r.id] ? (

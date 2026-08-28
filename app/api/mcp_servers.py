@@ -1066,15 +1066,23 @@ _APIS_TOOLS = [
     {
         "name": "search_apis",
         "description": (
-            "외부 공개 API 카탈로그를 키워드·카테고리로 검색한다(apis.guru + 공공데이터)."
-            " 두 조건은 AND이고 각각 비우면 그 조건은 걸지 않는다. 둘 다 비면 빈 목록이다."
-            f" 카테고리가 없는 항목만 고르려면 category에 \"{apisearch.UNCATEGORIZED}\"를 준다."
+            "외부 공개 API 카탈로그를 키워드·카테고리·소스로 검색한다(apis.guru + 공공데이터)."
+            " 세 조건은 AND이고 각각 비우면 그 조건은 걸지 않는다. 셋 다 비면 빈 목록이다."
+            f" 카테고리가 없는 항목만 고르려면 category에 \"{apisearch.UNCATEGORIZED}\"를 주고,"
+            f" 국내 공공데이터만 보려면 source에 \"{apisearch.SOURCE_PUBLIC_DATA}\"를 준다."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "keyword": {"type": "string"},
                 "category": {"type": "string", "description": "list_api_categories로 확인"},
+                "source": {
+                    "type": "string",
+                    "description": (
+                        f"{' | '.join(apisearch.SOURCE_LABELS)}"
+                        " (생략 = 전체, catalog_status로 건수 확인)"
+                    ),
+                },
                 "limit": {"type": "integer", "description": f"기본 30, 최대 {_MAX_LIST}"},
             },
         },
@@ -1127,12 +1135,17 @@ def _apis_call(db: Session, name: str, args: dict) -> str:
         return _dump(apisearch.catalog_status(db))
 
     # search_apis
-    result = apisearch.search_apis(
-        db,
-        _str_arg(args, "keyword", required=False),
-        _str_arg(args, "category", required=False),
-        _int_arg(args, "limit", 30, _MAX_LIST),
-    )
+    try:
+        result = apisearch.search_apis(
+            db,
+            _str_arg(args, "keyword", required=False),
+            _str_arg(args, "category", required=False),
+            _str_arg(args, "source", required=False),
+            _int_arg(args, "limit", 30, _MAX_LIST),
+        )
+    except apisearch.ApiSearchError as e:
+        # 모르는 source — 빈 목록으로 돌려주면 모델은 "그런 API가 없다"로 읽는다.
+        raise mcp_server.McpToolError(str(e))
     if result["warnings"]:
         # 카탈로그가 비어 있는 것과 "그런 API가 없다"는 다른 문제다 — 빈 목록으로
         # 돌려주면 모델은 질의를 바꿔 가며 헛돌게 된다.

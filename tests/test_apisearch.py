@@ -320,10 +320,18 @@ def _stub_public(monkeypatch, payload, status=200, guru=FAKE_DIRECTORY):
 
 
 def test_public_data_source_is_off_until_configured(monkeypatch, db):
-    """설정하지 않은 설치본에 아웃바운드 호출을 새로 만들지 않는다."""
+    """설정하지 않은 설치본에 아웃바운드 호출을 새로 만들지 않는다.
+
+    그래도 소스 자체는 현황에 남는다 — 빼 버리면 "공공데이터가 왜 안 나오지"에 답할
+    자리가 없어진다. enabled=false가 "주소를 안 넣어 아예 안 부른다"는 답이다.
+    """
     _synced(monkeypatch, db)
     assert apisearch._public_data_items() == []
-    assert list(apisearch.catalog_status(db)["sources"]) == ["apisguru"]
+
+    sources = apisearch.catalog_status(db)["sources"]
+    assert sources["apisguru"]["enabled"] is True
+    assert sources["publicdata"] == {
+        "label": "공공데이터", "enabled": False, "total": 0, "removed": 0, "updated_at": None}
 
 
 def test_public_data_items_merge_with_apisguru(monkeypatch, db):
@@ -420,3 +428,68 @@ def test_a_string_already_in_the_table_still_reads_as_one_category(db):
     assert apisearch.list_categories(db) == [{"name": "security", "count": 1}]
     hit = apisearch.search_apis(db, "", "security")["results"][0]
     assert hit["categories"] == ["security"]
+
+
+
+# --- 소스로 좁히기 ---
+
+def test_search_can_narrow_to_one_source(monkeypatch, db):
+    """공공데이터만 보고 싶을 때가 있다 — 합쳐 놓기만 하면 고를 방법이 없다."""
+    _stub_public(monkeypatch, {"data": [
+        {"apiNm": "기상청 단기예보 조회", "apiDesc": "동네예보 정보", "categoryNm": "공공행정"},
+    ]})
+    apisearch.sync_catalog(db)
+
+    only_public = apisearch.search_apis(db, "", "", apisearch.SOURCE_PUBLIC_DATA)["results"]
+    assert [h["title"] for h in only_public] == ["기상청 단기예보 조회"]
+    assert {h["source"] for h in only_public} == {apisearch.SOURCE_PUBLIC_DATA}
+
+    # 소스만 골라도 조건이다 — 키워드 없이 그 소스를 훑는다
+    only_guru = apisearch.search_apis(db, "", "", apisearch.SOURCE_APISGURU)["results"]
+    assert {h["source"] for h in only_guru} == {apisearch.SOURCE_APISGURU}
+    assert len(only_guru) == 3
+
+    # 키워드·카테고리와는 AND로 걸린다
+    assert apisearch.search_apis(
+        db, "payment", "", apisearch.SOURCE_PUBLIC_DATA)["results"] == []
+    assert apisearch.search_apis(
+        db, "payment", "", apisearch.SOURCE_APISGURU)["results"][0]["id"] == "stripe.com"
+
+    # 소스도 조건이 아니었다면 셋 다 빈 것과 같아 빈 목록이 나온다
+    assert apisearch.search_apis(db, "", "", "")["results"] == []
+
+
+def test_an_unknown_source_fails_instead_of_answering_empty(monkeypatch, db):
+    """라벨을 키 자리에 넣는 실수가 "그런 API가 없다"로 보이면 원인을 찾을 수 없다."""
+    _synced(monkeypatch, db)
+    with pytest.raises(apisearch.ApiSearchError) as e:
+        apisearch.search_apis(db, "", "", "공공데이터")   # 라벨이지 키가 아니다
+    assert "publicdata" in str(e.value)   # 쓸 수 있는 값을 함께 보여 준다
+
+
+def test_search_endpoint_takes_a_source_and_rejects_an_unknown_one(monkeypatch, db):
+    _stub_directory(monkeypatch)
+    c = TestClient(create_app())
+    c.post(f"{API}/modules/search/refresh", headers=ADMIN)
+
+    hits = c.get(f"{API}/modules/search",
+                 params={"source": apisearch.SOURCE_APISGURU}, headers=ADMIN).json()["results"]
+    assert len(hits) == 3
+
+    bad = c.get(f"{API}/modules/search", params={"source": "nope"}, headers=ADMIN)
+    assert bad.status_code == 400   # 상류 장애(502)가 아니라 인자가 틀린 것이다
+    assert "nope" in bad.json()["detail"]
+
+
+def test_status_endpoint_shows_every_source_even_at_zero(monkeypatch, db):
+    _stub_directory(monkeypatch)
+    c = TestClient(create_app())
+    c.post(f"{API}/modules/search/refresh", headers=ADMIN)
+
+    body = c.get(f"{API}/modules/search/status", headers=ADMIN).json()
+    assert body["total"] == 3
+    assert body["sources"]["apisguru"]["total"] == 3
+    assert body["sources"]["apisguru"]["label"] == "apis.guru"
+    # 한 번도 못 받은 소스도 나온다 — 화면에서 고를 수 있어야 이유를 확인할 수 있다
+    assert body["sources"]["publicdata"] == {
+        "label": "공공데이터", "enabled": False, "total": 0, "removed": 0, "updated_at": None}
