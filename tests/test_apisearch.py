@@ -538,3 +538,71 @@ def test_sync_rebuilds_a_stale_haystack(monkeypatch, db):
     stats = _synced(monkeypatch, db)
     assert (stats["updated"], stats["unchanged"]) == (1, 2)
     assert apisearch.search_apis(db, spec)["results"][0]["title"] == "Calendar API"
+
+
+# --- 공공데이터포털 호출 규약 ---
+
+def _capture_public_request(monkeypatch, url, key=""):
+    """공공데이터 소스로 나간 요청의 url·params를 잡아 온다."""
+    httpx_retry.reset_breakers()
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_URL", url)
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_KEY", key)
+    get_settings.cache_clear()
+    seen: dict = {}
+
+    def fake_get(u, **kw):
+        seen["url"] = u
+        seen["params"] = kw.get("params")
+        return _R(200, {"data": [{"title": "대기오염정보"}]})
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", fake_get)
+    apisearch._public_data_items()
+    return seen
+
+
+def test_query_written_in_the_url_survives(monkeypatch):
+    """httpx는 params를 주면 URL의 질의문자열을 덮어쓴다 — 적어 둔 값이 통째로 사라졌다."""
+    seen = _capture_public_request(
+        monkeypatch, "https://apis.data.go.kr/x?pageNo=2&numOfRows=50", key="abc")
+    assert seen["params"]["pageNo"] == "2"
+    assert seen["params"]["numOfRows"] == "50"   # 주소에 적은 쪽이 이긴다
+
+
+def test_json_and_page_size_are_filled_in_when_missing(monkeypatch):
+    """이 계열은 _type을 안 주면 XML을 주고, numOfRows 기본값이 10이다."""
+    seen = _capture_public_request(monkeypatch, "https://apis.data.go.kr/x")
+    assert seen["params"]["_type"] == "json"
+    assert int(seen["params"]["numOfRows"]) > 10
+    # 키를 안 넣었으면 serviceKey를 만들어 붙이지 않는다
+    assert "serviceKey" not in seen["params"]
+
+
+def test_an_encoded_service_key_is_not_encoded_twice(monkeypatch):
+    """포털은 인증키를 인코딩된 것과 아닌 것 두 벌로 준다. 인코딩된 쪽을 그대로 넘기면
+    httpx가 %를 다시 인코딩해서(%2B → %252B) '등록되지 않은 키'가 된다."""
+    seen = _capture_public_request(
+        monkeypatch, "https://apis.data.go.kr/x", key="ab%2Bcd%3D%3D")
+    assert seen["params"]["serviceKey"] == "ab+cd=="
+    # 인코딩 안 된 키를 넣어도 그대로다(한 번 푸는 것은 이 경우 아무 일도 하지 않는다)
+    plain = _capture_public_request(monkeypatch, "https://apis.data.go.kr/x", key="ab+cd==")
+    assert plain["params"]["serviceKey"] == "ab+cd=="
+
+
+def test_an_xml_response_says_what_came_back(monkeypatch, db):
+    """XML을 받아 놓고 "JSON이 아닙니다"만 말하면 무엇을 고쳐야 하는지 알 수 없다."""
+    httpx_retry.reset_breakers()
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_URL", "https://apis.data.go.kr/x")
+    get_settings.cache_clear()
+
+    class _Xml:
+        status_code = 200
+        text = "<response><header><resultCode>00</resultCode></header></response>"
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", lambda u, **kw: _Xml())
+    with pytest.raises(apisearch.ApiSearchError) as e:
+        apisearch._public_data_items()
+    assert "resultCode" in str(e.value)      # 받은 앞부분을 그대로 보여 준다
+    assert "_type=json" in str(e.value)      # 고치는 방법도 함께

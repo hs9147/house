@@ -25,6 +25,7 @@ updated_at도 그대로다 — "언제 바뀌었나"가 "언제 받았나"에 �
 import re
 import threading
 import time
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -134,6 +135,31 @@ _URL_KEYS = ("url", "link", "endpoint", "apiUrl", "linkUrl", "detailUrl")
 _ID_KEYS = ("id", "apiId", "listId", "publicDataPk", "serviceId")
 _CATEGORY_KEYS = ("category", "categoryNm", "classification", "분류")
 
+# 공공데이터포털(data.go.kr) 계열이 요구하는 것. **주소에 이미 있으면 건드리지 않는다.**
+#   _type=json   이 계열은 지정하지 않으면 XML을 준다 — 그러면 "JSON이 아닙니다"로 끝난다.
+#   numOfRows    기본값이 10이라, 지정하지 않으면 카탈로그에서 열 건만 받아 온다.
+# 다른 카탈로그(odcloud 등)는 모르는 파라미터를 무시하므로 붙어 있어도 해가 없다.
+_PUBLIC_DATA_DEFAULTS = {"_type": "json", "numOfRows": "1000"}
+
+
+def _public_data_params(url: str, key: str) -> dict:
+    """주소에 적힌 질의를 살린 채 필요한 것만 채운 요청 파라미터.
+
+    **httpx는 params를 주면 URL의 질의문자열을 덮어쓴다**(합치지 않는다 — 확인했다).
+    그래서 주소에 pageNo·numOfRows를 적어 두고 인증키까지 설정하면 적어 둔 값이 통째로
+    사라졌다. 여기서 먼저 합쳐 두면 주소에 적은 쪽이 이긴다.
+
+    serviceKey는 한 번 풀어서 넘긴다. 포털은 인증키를 인코딩된 것과 아닌 것 두 벌로
+    주는데, 인코딩된 쪽을 붙여 넣으면 httpx가 %를 다시 인코딩해서(%2B → %252B) 등록되지
+    않은 키라는 응답이 온다 — 키를 잘못 넣은 것과 구분되지 않는 실패다.
+    """
+    params = dict(parse_qsl(urlsplit(url).query, keep_blank_values=True))
+    for name, value in _PUBLIC_DATA_DEFAULTS.items():
+        params.setdefault(name, value)
+    if key.strip():
+        params["serviceKey"] = unquote(key.strip())
+    return params
+
 
 def _pick(entry: dict, keys: tuple[str, ...]) -> str:
     for key in keys:
@@ -169,7 +195,7 @@ def _public_data_items() -> list[dict]:
     if not url:
         return []
 
-    params = {"serviceKey": settings.public_data_key} if settings.public_data_key else None
+    params = _public_data_params(url, settings.public_data_key)
     try:
         res = get_with_retry(url, timeout=15, params=params)
     except Exception as e:  # noqa: BLE001 — 네트워크/서킷 오류를 도메인 오류로 변환
@@ -178,8 +204,12 @@ def _public_data_items() -> list[dict]:
         raise ApiSearchError(f"공공데이터 카탈로그 조회 실패 (HTTP {res.status_code})")
     try:
         payload = res.json()
-    except Exception as e:  # noqa: BLE001 — JSON이 아닌 응답(HTML 오류 페이지 등)
-        raise ApiSearchError(f"공공데이터 카탈로그가 JSON이 아닙니다: {e}") from e
+    except Exception as e:  # noqa: BLE001 — JSON이 아닌 응답(XML·HTML 오류 페이지 등)
+        head = (res.text or "")[:200].strip().replace("\n", " ")
+        raise ApiSearchError(
+            f"공공데이터 카탈로그가 JSON이 아닙니다: {e}"
+            f" — 받은 앞부분: {head!r}"
+            " (XML이면 주소에 _type=json을 넣으세요)") from e
 
     rows = _rows_of(payload)
     if not rows:
