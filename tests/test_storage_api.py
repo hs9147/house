@@ -1,7 +1,8 @@
 """파일 저장소 창구 — 저장소 목록·업로드·다운로드·삭제와 경로 탈출 차단.
 
-저장소는 모듈로 등록하지 않는다. PAAS_STORAGE_ROOT가 내부 저장소 하나(쓰기 가능),
-PAAS_DOC_ROOTS가 사내 문서 폴더(읽기 전용)를 정한다.
+저장소는 모듈로 등록하지 않는다. 목록에 나오는 것은 PAAS_DOC_ROOTS가 정한 사내 문서
+폴더들이고 기본이 읽기/쓰기다(PAAS_DOC_ROOTS_READONLY에 적은 것만 잠긴다).
+PAAS_STORAGE_ROOT가 정하는 플랫폼 저장소 `internal`은 목록에서 숨기되 이름으로는 닿는다.
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -14,10 +15,10 @@ ADMIN = {"x-api-key": "test-admin-key"}
 API = "/paas/api/v1"
 
 
-def _client(monkeypatch, tmp_path, doc_roots="", writable="") -> TestClient:
+def _client(monkeypatch, tmp_path, doc_roots="", readonly="") -> TestClient:
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_ROOTS", doc_roots)
-    monkeypatch.setenv("PAAS_DOC_ROOTS_WRITABLE", writable)
+    monkeypatch.setenv("PAAS_DOC_ROOTS_READONLY", readonly)
     get_settings.cache_clear()
     return TestClient(create_app())
 
@@ -83,18 +84,18 @@ def test_stores_listing_shows_what_the_env_vars_opened(monkeypatch, tmp_path, fr
     c = _client(monkeypatch, tmp_path, doc_roots=f"rules={docs},{tmp_path / 'Missing Folder'}")
 
     rows = {s["name"]: s for s in c.get(f"{API}/storage/stores", headers=ADMIN).json()}
-    assert list(rows) == ["internal", "rules", "missing-folder"]
-    assert rows["internal"]["read_only"] is False
+    # 플랫폼 저장소(internal)는 사람이 고를 폴더가 아니라 목록에 없다
+    assert list(rows) == ["rules", "missing-folder"]
     assert rows["rules"] == {
-        "name": "rules", "root": str(docs), "read_only": True, "exists": True,
+        "name": "rules", "root": str(docs), "read_only": False, "exists": True,
         "url": rows["rules"]["url"],
     }
     # 없는 경로도 목록에서 빼지 않는다 — 빠지면 "설정이 안 먹었다"와 구분이 안 된다
     assert rows["missing-folder"]["exists"] is False
 
 
-def test_doc_roots_are_read_only_by_default(monkeypatch, tmp_path, fresh_settings):
-    """기본은 읽기 전용이다 — 쓰기는 허용 목록으로 따로 연다."""
+def test_doc_roots_are_read_write_by_default(monkeypatch, tmp_path, fresh_settings):
+    """기본은 읽기/쓰기다 — 잠글 폴더만 목록으로 따로 막는다."""
     docs = tmp_path / "shared"
     docs.mkdir()
     (docs / "규정.txt").write_text("연차 규정", encoding="utf-8")
@@ -103,10 +104,33 @@ def test_doc_roots_are_read_only_by_default(monkeypatch, tmp_path, fresh_setting
     assert c.get(f"{API}/storage/shared/files", headers=ADMIN).json()["files"] == [
         {"path": "규정.txt", "size": len("연차 규정".encode())}]
     assert c.post(f"{API}/storage/shared/files",
-                  files={"file": ("x.txt", b"hi")}, headers=ADMIN).status_code == 403
+                  files={"file": ("x.txt", b"hi")}, headers=ADMIN).status_code == 201
     assert c.delete(f"{API}/storage/shared/files?path=규정.txt",
-                    headers=ADMIN).status_code == 403
-    assert (docs / "규정.txt").exists()
+                    headers=ADMIN).status_code == 204
+    # 지운 것은 사라지지 않고 폴더 안 휴지통으로 간다
+    assert not (docs / "규정.txt").exists()
+    assert (docs / storage.TRASH_DIRNAME / "규정.txt").read_text(encoding="utf-8") == "연차 규정"
+
+
+def test_internal_is_hidden_from_the_list_but_still_reachable(monkeypatch, tmp_path,
+                                                              fresh_settings):
+    """숨긴다는 것은 "고를 목록에 없다"이지 "닿지 않는다"가 아니다.
+
+    막아 버리면 예전에 파일 관리로 여기 올린 파일을 꺼낼 방법이 없어진다 — 숨긴 것이
+    아니라 잃은 것이 된다.
+    """
+    docs = tmp_path / "shared"
+    docs.mkdir()
+    c = _client(monkeypatch, tmp_path, doc_roots=str(docs))
+
+    listed = [s["name"] for s in c.get(f"{API}/storage/stores", headers=ADMIN).json()]
+    assert "internal" not in listed
+
+    assert c.post(f"{API}/storage/internal/files",
+                  files={"file": ("예전.txt", "내용".encode())},
+                  headers=ADMIN).status_code == 201
+    assert c.get(f"{API}/storage/internal/files",
+                 headers=ADMIN).json()["files"] == [{"path": "예전.txt", "size": 6}]
 
 
 def test_delete_moves_to_trash_and_can_be_recovered(monkeypatch, tmp_path, fresh_settings):
@@ -148,18 +172,18 @@ def test_deleting_the_same_name_twice_keeps_both(monkeypatch, tmp_path, fresh_se
     assert trashed == ["두 번째", "첫 번째"]
 
 
-def test_a_doc_root_can_be_opened_for_writing(monkeypatch, tmp_path, fresh_settings):
-    """폴더별 opt-in — 허용 목록에 적은 폴더만 열린다."""
+def test_a_doc_root_can_be_locked(monkeypatch, tmp_path, fresh_settings):
+    """폴더별 opt-out — 목록에 적은 폴더만 잠긴다."""
     open_dir, locked_dir = tmp_path / "scratch", tmp_path / "contract"
     open_dir.mkdir()
     locked_dir.mkdir()
     (locked_dir / "계약.txt").write_text("원본", encoding="utf-8")
     c = _client(monkeypatch, tmp_path,
-                doc_roots=f"scratch={open_dir},contract={locked_dir}", writable="scratch")
+                doc_roots=f"scratch={open_dir},contract={locked_dir}", readonly="contract")
 
     rows = {s["name"]: s for s in c.get(f"{API}/storage/stores", headers=ADMIN).json()}
     assert rows["scratch"]["read_only"] is False
-    assert rows["contract"]["read_only"] is True   # 같은 설정의 다른 폴더는 그대로 잠긴다
+    assert rows["contract"]["read_only"] is True   # 적은 폴더만 잠긴다
 
     assert c.post(f"{API}/storage/scratch/files",
                   files={"file": ("메모.txt", "내용".encode())},
@@ -168,20 +192,20 @@ def test_a_doc_root_can_be_opened_for_writing(monkeypatch, tmp_path, fresh_setti
     assert c.delete(f"{API}/storage/scratch/files?path=메모.txt",
                     headers=ADMIN).status_code == 204
 
-    # 열지 않은 폴더는 여전히 막힌다
+    # 잠근 폴더는 막힌다
     assert c.post(f"{API}/storage/contract/files",
                   files={"file": ("x.txt", b"hi")}, headers=ADMIN).status_code == 403
     assert (locked_dir / "계약.txt").read_text(encoding="utf-8") == "원본"
 
 
-def test_writable_name_that_is_not_a_doc_root_is_rejected(monkeypatch, tmp_path, fresh_settings):
-    """오타를 조용히 넘기면 그 폴더는 읽기 전용으로 남고 이유를 알 수 없다.
+def test_readonly_name_that_is_not_a_doc_root_is_rejected(monkeypatch, tmp_path, fresh_settings):
+    """오타를 조용히 넘기면 잠근 줄 알았던 폴더가 열린 채로 남는다.
 
-    권한이 안 먹는 것과 설정이 틀린 것은 밖에서 구분되지 않는다 — 그래서 막는다.
+    잠금이 안 먹는 것과 설정이 틀린 것은 밖에서 구분되지 않는다 — 그래서 막는다.
     """
     docs = tmp_path / "scratch"
     docs.mkdir()
-    c = _client(monkeypatch, tmp_path, doc_roots=f"scratch={docs}", writable="scrach")
+    c = _client(monkeypatch, tmp_path, doc_roots=f"scratch={docs}", readonly="scrach")
     r = c.get(f"{API}/storage/stores", headers=ADMIN)
     assert r.status_code == 500
     assert "scrach" in r.json()["detail"]

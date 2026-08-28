@@ -40,17 +40,22 @@ export default function Storage() {
     <div className="panel">
       <h2>파일 관리</h2>
       <p className="mutedtext" style={{ fontSize: 12 }}>
-        저장소 목록은 서버 환경변수가 정합니다 — 내부 저장소는 <code>PAAS_STORAGE_ROOT</code>,
-        사내 문서 폴더는 <code>PAAS_DOC_ROOTS</code>(기본 읽기 전용 —
-        <code>PAAS_DOC_ROOTS_WRITABLE</code>에 적은 폴더만 쓰기가 열립니다). 같은 파일을
-        LLM이 본문으로 검색하는 창구는 사내 MCP 서버 <code>paas-docs</code>입니다.
-        삭제는 저장소 안 <code>.trash</code>로 옮기는 것이라 되돌릴 수 있습니다.
+        여기 나오는 폴더는 서버 환경변수 <code>PAAS_DOC_ROOTS</code>가 정하고 기본이
+        읽기/쓰기입니다 — 잠글 폴더만 <code>PAAS_DOC_ROOTS_READONLY</code>에 적습니다.
+        전 폴더를 가로질러 <b>읽는</b> 창구는 사내 MCP 서버 <code>paas-docs</code>이고,
+        폴더 하나를 다루는 창구는 <code>paas-storage-{'{'}폴더{'}'}</code>입니다.
+        삭제는 폴더 안 <code>.trash</code>로 옮기는 것이라 되돌릴 수 있습니다.
       </p>
 
       <Async state={storesState}>
         {() =>
           !active ? (
-            <p className="mutedtext">열려 있는 저장소가 없습니다.</p>
+            // 경로를 어디서 정하는지 함께 적는다 — "없습니다"만 두면 서버에서 무엇을
+            // 해야 하는지 알 방법이 없다.
+            <p className="mutedtext">
+              열려 있는 폴더가 없습니다 — 서버의 <code>PAAS_DOC_ROOTS</code>에 경로를
+              적고 재시작하세요.
+            </p>
           ) : (
             <>
               <div className="row" style={{ marginBottom: 12 }}>
@@ -75,7 +80,8 @@ export default function Storage() {
 
               {active.read_only ? (
                 <p className="mutedtext" style={{ fontSize: 12 }}>
-                  사내 문서 폴더는 읽으러 붙인 것이라 업로드가 열려 있지 않습니다.
+                  이 폴더는 <code>PAAS_DOC_ROOTS_READONLY</code>에 적혀 있어 업로드가
+                  막혀 있습니다.
                 </p>
               ) : (
                 <form className="row" onSubmit={upload}>

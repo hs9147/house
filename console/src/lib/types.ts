@@ -345,6 +345,23 @@ export interface ApiSearchResult {
   categories: string[];
   homepage: string;
   spec_url: string;
+  /** 어느 카탈로그에서 온 항목인지(apisguru | publicdata). 검색 조건으로도 쓴다. */
+  source: string;
+}
+
+/** 수집 현황 — 소스별 건수. 한 번도 못 받은 소스도 0건으로 내려온다(enabled로 구분). */
+export interface ApiCatalogSource {
+  label: string;
+  /** 서버에 그 소스의 주소가 설정돼 있는가. false면 애초에 부르지 않는다. */
+  enabled: boolean;
+  total: number;
+  removed: number;
+  updated_at: string | null;
+}
+
+export interface ApiCatalogStatus {
+  total: number;
+  sources: Record<string, ApiCatalogSource>;
 }
 
 export interface ProjectFileContentOut {

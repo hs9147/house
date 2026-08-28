@@ -40,12 +40,20 @@ def _require_writable(store: Store) -> None:
 
 @router.get("/storage/stores")
 def list_stores(_: ApiKey = Depends(require_api_key)):
-    """열려 있는 저장소 목록. root를 함께 준다 — 환경변수로 정하는 값이라 "무엇이
-    붙었는지"를 되비춰 주지 않으면 운영자가 확인할 방법이 없다."""
+    """고를 수 있는 저장소 목록 — 사내 문서 폴더들. root를 함께 준다: 환경변수로 정하는
+    값이라 "무엇이 붙었는지"를 되비춰 주지 않으면 운영자가 확인할 방법이 없다.
+
+    플랫폼 자신의 저장소(internal)는 빠진다. 아래 파일 엔드포인트는 이름을 주면 그대로
+    받으므로, 예전에 거기 올린 파일은 계속 꺼낼 수 있다.
+    """
+    try:
+        visible = storage_service.visible_stores()
+    except storage_service.StorageError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     return [
         {"name": s.name, "root": str(s.root), "read_only": s.read_only,
          "exists": s.root.is_dir(), "url": storage_service.url_for(s.name)}
-        for s in _stores()
+        for s in visible
     ]
 
 

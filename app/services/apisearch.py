@@ -25,6 +25,7 @@ updated_at도 그대로다 — "언제 바뀌었나"가 "언제 받았나"에 �
 import re
 import threading
 import time
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -35,6 +36,9 @@ from .httpx_retry import get_with_retry
 
 SOURCE_APISGURU = "apisguru"
 SOURCE_PUBLIC_DATA = "publicdata"
+# 화면에 그대로 쓰는 이름. 서버가 들고 있는 이유: 소스를 하나 더 붙일 때 콘솔을 같이
+# 고쳐야 한다면 그 소스는 화면에서 "publicdata" 같은 내부 이름으로 보이게 된다.
+SOURCE_LABELS = {SOURCE_APISGURU: "apis.guru", SOURCE_PUBLIC_DATA: "공공데이터"}
 
 # 소스가 주는 값 그대로인 필드. 갱신할 때 이 목록만 비교한다 — search_text는 여기서
 # 파생되고, created_at·updated_at·removed_at은 표가 스스로 관리한다.
@@ -52,6 +56,24 @@ EMPTY_CATALOG = (
 
 class ApiSearchError(RuntimeError):
     """카탈로그 수집 실패 — 502로 매핑."""
+
+
+def _as_categories(value) -> list[str]:
+    """카테고리를 **언제나** 문자열 리스트로 만든다.
+
+    소스가 이 자리에 리스트가 아니라 문자열 하나를 넣어 주는 일이 있다
+    (x-apisguru-categories: "security"). 그대로 두면 리스트처럼 순회되는 곳마다 글자
+    단위로 쪼개진다 — 카테고리 목록에 s·e·c·u·r·i·t·y가 따로 서고, 검색용 건초더미도
+    "s e c u r i t y"가 되어 낱말로는 아무 것도 안 걸린다.
+
+    읽는 쪽에서도 이 함수를 거친다: 고치기 전에 문자열로 저장된 행이 이미 표에 있고,
+    그 행도 다시 수집하기 전까지 화면에서 맞게 보여야 한다.
+    """
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
 
 
 # --- 소스 1: apis.guru ---
@@ -93,7 +115,7 @@ def _entry_to_result(api_id: str, entry: dict) -> dict | None:
         "title": info.get("title") or api_id,
         "description": (info.get("description") or "").strip()[:300],
         "provider": info.get("x-providerName") or api_id.split(":")[0],
-        "categories": info.get("x-apisguru-categories") or [],
+        "categories": _as_categories(info.get("x-apisguru-categories")),
         "homepage": homepage,
         "spec_url": ver.get("swaggerUrl") or ver.get("swaggerYamlUrl") or "",
     }
@@ -112,6 +134,31 @@ _DESC_KEYS = ("description", "desc", "apiDesc", "listDesc", "설명", "api_desc"
 _URL_KEYS = ("url", "link", "endpoint", "apiUrl", "linkUrl", "detailUrl")
 _ID_KEYS = ("id", "apiId", "listId", "publicDataPk", "serviceId")
 _CATEGORY_KEYS = ("category", "categoryNm", "classification", "분류")
+
+# 공공데이터포털(data.go.kr) 계열이 요구하는 것. **주소에 이미 있으면 건드리지 않는다.**
+#   _type=json   이 계열은 지정하지 않으면 XML을 준다 — 그러면 "JSON이 아닙니다"로 끝난다.
+#   numOfRows    기본값이 10이라, 지정하지 않으면 카탈로그에서 열 건만 받아 온다.
+# 다른 카탈로그(odcloud 등)는 모르는 파라미터를 무시하므로 붙어 있어도 해가 없다.
+_PUBLIC_DATA_DEFAULTS = {"_type": "json", "numOfRows": "1000"}
+
+
+def _public_data_params(url: str, key: str) -> dict:
+    """주소에 적힌 질의를 살린 채 필요한 것만 채운 요청 파라미터.
+
+    **httpx는 params를 주면 URL의 질의문자열을 덮어쓴다**(합치지 않는다 — 확인했다).
+    그래서 주소에 pageNo·numOfRows를 적어 두고 인증키까지 설정하면 적어 둔 값이 통째로
+    사라졌다. 여기서 먼저 합쳐 두면 주소에 적은 쪽이 이긴다.
+
+    serviceKey는 한 번 풀어서 넘긴다. 포털은 인증키를 인코딩된 것과 아닌 것 두 벌로
+    주는데, 인코딩된 쪽을 붙여 넣으면 httpx가 %를 다시 인코딩해서(%2B → %252B) 등록되지
+    않은 키라는 응답이 온다 — 키를 잘못 넣은 것과 구분되지 않는 실패다.
+    """
+    params = dict(parse_qsl(urlsplit(url).query, keep_blank_values=True))
+    for name, value in _PUBLIC_DATA_DEFAULTS.items():
+        params.setdefault(name, value)
+    if key.strip():
+        params["serviceKey"] = unquote(key.strip())
+    return params
 
 
 def _pick(entry: dict, keys: tuple[str, ...]) -> str:
@@ -148,7 +195,7 @@ def _public_data_items() -> list[dict]:
     if not url:
         return []
 
-    params = {"serviceKey": settings.public_data_key} if settings.public_data_key else None
+    params = _public_data_params(url, settings.public_data_key)
     try:
         res = get_with_retry(url, timeout=15, params=params)
     except Exception as e:  # noqa: BLE001 — 네트워크/서킷 오류를 도메인 오류로 변환
@@ -157,8 +204,12 @@ def _public_data_items() -> list[dict]:
         raise ApiSearchError(f"공공데이터 카탈로그 조회 실패 (HTTP {res.status_code})")
     try:
         payload = res.json()
-    except Exception as e:  # noqa: BLE001 — JSON이 아닌 응답(HTML 오류 페이지 등)
-        raise ApiSearchError(f"공공데이터 카탈로그가 JSON이 아닙니다: {e}") from e
+    except Exception as e:  # noqa: BLE001 — JSON이 아닌 응답(XML·HTML 오류 페이지 등)
+        head = (res.text or "")[:200].strip().replace("\n", " ")
+        raise ApiSearchError(
+            f"공공데이터 카탈로그가 JSON이 아닙니다: {e}"
+            f" — 받은 앞부분: {head!r}"
+            " (XML이면 주소에 _type=json을 넣으세요)") from e
 
     rows = _rows_of(payload)
     if not rows:
@@ -178,7 +229,7 @@ def _public_data_items() -> list[dict]:
             "title": title,
             "description": _pick(row, _DESC_KEYS)[:300],
             "provider": "공공데이터",
-            "categories": [category] if category else [],
+            "categories": _as_categories(category),
             "homepage": _pick(row, _URL_KEYS),
             "spec_url": "",
         })
@@ -194,30 +245,65 @@ def _sources() -> list[tuple[str, object]]:
     return out
 
 
+# 소스별 마지막 **시도** 시각(monotonic). 갱신 시각(updated_at)과 다르다 — 그쪽은 실제로
+# 바뀐 것이 있을 때만 움직이므로, "방금 받아 봤는데 그대로였다"를 구분하지 못한다.
+# 프로세스 안에만 산다. 이 플랫폼은 단일 프로세스로 뜨고, 이 값이 지키려는 것은
+# 정합성이 아니라 **외부 호출량**이라 재시작으로 초기화돼도 해가 없다.
+_last_attempt: dict[str, float] = {}
+
+
+def reset_sync_throttle() -> None:
+    """최소 간격 기록을 지운다 — 테스트와 수동 복구용."""
+    _last_attempt.clear()
+
+
 # --- 수집 ---
 
-def sync_catalog(db: Session) -> dict:
+def sync_catalog(db: Session, source: str = "", min_interval: float = 0.0) -> dict:
     """소스를 받아 카탈로그를 최신으로 만든다. 바뀐 행만 쓴다.
 
-    소스별로 따로 처리한다 — 한쪽이 죽어도 다른 쪽은 갱신되고, 죽은 쪽의 행은 그대로
-    남는다(다음 검색에서 사라지지 않는다). 전부 죽었을 때만 오류다: 그때는 "바뀐 것이
-    없다"가 아니라 아무 것도 못 받은 것이다.
+    source를 주면 그 소스만 받는다(공공데이터만 최신화 = SOURCE_PUBLIC_DATA). 비우면
+    켜져 있는 소스 전부. 소스별로 따로 처리하므로 한쪽이 죽어도 다른 쪽은 갱신되고,
+    죽은 쪽의 행은 그대로 남는다(다음 검색에서 사라지지 않는다). 전부 죽었을 때만
+    오류다: 그때는 "바뀐 것이 없다"가 아니라 아무 것도 못 받은 것이다.
+
+    min_interval은 **외부 호출량을 지키는 자리**다. 그 시간 안에 이미 받아 본 소스는
+    건너뛰고 skipped에 담는다 — 공공데이터포털 개발계정은 하루 1,000건이라, 부르는
+    쪽이 사람이 아니라 모델이면 몇 분 만에 소진될 수 있다. 사람이 버튼을 누른 경우는
+    0을 주어 항상 받는다.
     """
+    if source and source not in SOURCE_LABELS:
+        raise ApiSearchError(
+            f"모르는 소스입니다: {source} (쓸 수 있는 값: {', '.join(SOURCE_LABELS)})")
+
     stats = {"added": 0, "updated": 0, "restored": 0, "removed": 0, "unchanged": 0}
     warnings: list[str] = []
     synced: list[str] = []
-    for source, load in _sources():
+    skipped: list[str] = []
+    wanted = [(n, load) for n, load in _sources() if not source or n == source]
+    if not wanted:
+        raise ApiSearchError(
+            f"켜져 있지 않은 소스입니다: {source or '(전체)'}"
+            " — 그 소스의 주소가 설정돼 있는지 확인하세요(catalog_status의 enabled).")
+
+    now = time.monotonic()
+    for name, load in wanted:
+        if min_interval and now - _last_attempt.get(name, -min_interval) < min_interval:
+            skipped.append(name)
+            continue
+        _last_attempt[name] = now
         try:
             items = load()
         except ApiSearchError as e:
             warnings.append(str(e))
             continue
-        _merge(db, source, items, stats)
-        synced.append(source)
-    if not synced:
+        _merge(db, name, items, stats)
+        synced.append(name)
+
+    if not synced and not skipped:
         raise ApiSearchError(" / ".join(warnings) or "수집할 소스가 없습니다")
     db.commit()
-    return {**stats, "sources": synced, "warnings": warnings}
+    return {**stats, "sources": synced, "skipped": skipped, "warnings": warnings}
 
 
 def _merge(db: Session, source: str, items: list[dict], stats: dict) -> None:
@@ -245,14 +331,19 @@ def _merge(db: Session, source: str, items: list[dict], stats: dict) -> None:
         # **바뀐 필드만 대입한다.** 전부 대입하면 categories(JSON)가 같은 값이어도
         # dirty로 잡혀 UPDATE가 나가고, onupdate가 updated_at을 매번 밀어 올린다.
         changed = [f for f in _FIELDS if getattr(row, f) != item[f]]
+        # 건초더미는 파생값이라 필드가 그대로여도 낡을 수 있다 — **만드는 방법을 바꾸면**
+        # 이미 쌓인 행이 옛 방식대로 남는다(URL을 넣기 전에 수집한 행이 그랬다).
+        # 결과와 비교해 두면 다음 수집이 알아서 따라잡는다.
+        fresh_text = _haystack(item)
+        stale = row.search_text != fresh_text
         back = row.removed_at is not None
-        if not changed and not back:
+        if not changed and not stale and not back:
             stats["unchanged"] += 1
             continue
         for field in changed:
             setattr(row, field, item[field])
-        if changed:
-            row.search_text = _haystack(item)
+        if stale:
+            row.search_text = fresh_text
         if back:
             row.removed_at = None
         stats["restored" if back else "updated"] += 1
@@ -268,10 +359,25 @@ def _merge(db: Session, source: str, items: list[dict], stats: dict) -> None:
         stats["removed"] += 1
 
 
+def _url_text(value: str) -> str:
+    """URL을 검색용으로 다듬는다 — 스킴과 끝 슬래시를 뗀다.
+
+    주소를 붙여 넣어 찾는 일이 잦은데 브라우저에서 복사하면 https://가 붙고 끝에
+    슬래시가 붙는다. 저장된 값과 한 글자만 어긋나도 부분일치가 깨진다. 그래서 넣을 때와
+    찾을 때 같은 방법으로 다듬어 둔다(URL이 아닌 낱말에는 아무 일도 하지 않는다).
+    """
+    return re.sub(r"^[a-z][a-z0-9+.-]*://", "", value.strip().lower()).rstrip("/")
+
+
 def _haystack(item: dict) -> str:
-    """검색이 훑을 소문자 건초더미 — 예전에 검색마다 메모리에서 만들던 그 문자열이다."""
+    """검색이 훑을 소문자 건초더미.
+
+    **주소도 넣는다.** 붙여 넣어 찾는 대상 중에 URL이 가장 잦은데(스펙 주소를 받아 놓고
+    "이거 뭐였지"를 되짚는 경우), 이름·설명만 넣어 두면 그 주소로는 영영 안 걸린다.
+    """
     return " ".join([
         str(item["id"]), item["title"], item["description"], " ".join(item["categories"]),
+        _url_text(item["homepage"]), _url_text(item["spec_url"]),
     ]).lower()
 
 
@@ -324,7 +430,7 @@ def _to_result(row: ApiCatalogEntry) -> dict:
         "title": row.title,
         "description": row.description,
         "provider": row.provider,
-        "categories": row.categories or [],
+        "categories": _as_categories(row.categories),
         "homepage": row.homepage,
         "spec_url": row.spec_url,
         "source": row.source,
@@ -335,25 +441,41 @@ def _live(query):
     return query.where(ApiCatalogEntry.removed_at.is_(None))
 
 
-def search_apis(db: Session, keyword: str, category: str = "", limit: int = 30) -> dict:
-    """키워드·카테고리로 카탈로그를 찾는다. 두 조건은 AND, 각각 비우면 그 조건은 안 건다.
+def search_apis(db: Session, keyword: str, category: str = "", source: str = "",
+                limit: int = 30) -> dict:
+    """키워드·카테고리·소스로 카탈로그를 찾는다. 셋은 AND, 각각 비우면 그 조건은 안 건다.
+
+    keyword는 이름·설명·카테고리뿐 아니라 **주소(홈페이지·스펙 URL)에도 걸린다** —
+    주소를 그대로 붙여 넣어 찾을 수 있다(스킴과 끝 슬래시는 양쪽에서 떼고 맞춘다).
 
     category가 UNCATEGORIZED("기타")면 카테고리가 없는 항목만 고른다 — 그 항목들은
     카테고리 이름으로는 영영 걸리지 않아서 따로 고를 값이 필요하다.
-    둘 다 비면 빈 목록이다(카탈로그 전체를 쏟아내지 않는다).
+    source는 SOURCE_LABELS의 키다(공공데이터만 보기 = SOURCE_PUBLIC_DATA).
+    셋 다 비면 빈 목록이다(카탈로그 전체를 쏟아내지 않는다) — 소스만 골라도 조건이므로
+    그때는 그 소스를 훑는다.
+
+    모르는 source는 빈 목록이 아니라 오류다: 라벨("공공데이터")을 키 자리에 넣는 실수가
+    조용히 "그런 API가 없다"로 보이면 원인을 찾을 방법이 없다.
     """
-    kw = keyword.strip().lower()
+    # 넣을 때와 같은 방법으로 다듬는다 — 주소를 그대로 붙여 넣어도 걸리게.
+    kw = _url_text(keyword)
     cat = category.strip()
-    if not kw and not cat:
+    src = source.strip()
+    if src and src not in SOURCE_LABELS:
+        raise ApiSearchError(
+            f"모르는 소스입니다: {src} (쓸 수 있는 값: {', '.join(SOURCE_LABELS)})")
+    if not kw and not cat and not src:
         return {"results": [], "warnings": []}
 
     query = _live(select(ApiCatalogEntry))
+    if src:
+        query = query.where(ApiCatalogEntry.source == src)
     if kw:
         # 카테고리는 리스트라 SQL에서 걸 수 없다 — 키워드로 먼저 좁히고 아래에서 본다.
         query = query.where(ApiCatalogEntry.search_text.contains(kw))
     results = []
     for row in db.execute(query.order_by(ApiCatalogEntry.title, ApiCatalogEntry.id)).scalars():
-        if not _matches_category(row.categories or [], cat):
+        if not _matches_category(_as_categories(row.categories), cat):
             continue
         results.append(_to_result(row))
         if len(results) >= limit:
@@ -380,11 +502,12 @@ def list_categories(db: Session) -> list[dict]:
     """
     counts: dict[str, int] = {}
     uncategorized = 0
-    for categories in db.execute(_live(select(ApiCatalogEntry.categories))).scalars():
-        if not categories:
+    for raw in db.execute(_live(select(ApiCatalogEntry.categories))).scalars():
+        names = _as_categories(raw)
+        if not names:
             uncategorized += 1
             continue
-        for name in categories:
+        for name in names:
             counts[name] = counts.get(name, 0) + 1
     items = [{"name": name, "count": counts[name]} for name in sorted(counts)]
     if uncategorized:
@@ -400,13 +523,26 @@ def catalog_status(db: Session) -> dict:
     """수집 현황 — 소스별 건수와 마지막으로 바뀐 시각.
 
     "검색 결과가 없다"가 질의 탓인지 수집이 안 된 탓인지 여기서 갈린다.
+
+    **행이 하나도 없는 소스도 0건으로 내보낸다.** 표에 있는 소스만 세면 공공데이터를
+    한 번도 못 받은 설치본에서는 그 소스가 아예 없는 것처럼 보이고, 화면에서 고를 수도
+    없어서 "왜 공공데이터가 안 나오지"에 답할 자리가 사라진다. enabled가 그 답이다 —
+    주소를 넣지 않아 아예 부르지 않는 소스인지, 불렀는데 못 받은 것인지 구분해 준다.
     """
-    per_source: dict[str, dict] = {}
+    enabled = {name for name, _load in _sources()}
+    per_source: dict[str, dict] = {
+        name: {"label": label, "enabled": name in enabled,
+               "total": 0, "removed": 0, "updated_at": None}
+        for name, label in SOURCE_LABELS.items()
+    }
     rows = db.execute(select(
         ApiCatalogEntry.source, ApiCatalogEntry.removed_at, ApiCatalogEntry.updated_at,
     )).all()
     for source, removed_at, updated_at in rows:
-        stat = per_source.setdefault(source, {"total": 0, "removed": 0, "updated_at": None})
+        stat = per_source.setdefault(source, {
+            "label": SOURCE_LABELS.get(source, source), "enabled": source in enabled,
+            "total": 0, "removed": 0, "updated_at": None,
+        })
         if removed_at is None:
             stat["total"] += 1
         else:

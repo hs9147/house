@@ -11,12 +11,13 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
   POST /mcp/docs                 사내 문서 본문 검색 — 저장소를 가로질러 한 번에(읽기 전용)
   POST /mcp/storage/{저장소}      저장소 파일 — 저장소 루트 밖으로 나갈 수 없다
   POST /mcp/db/{module}          database 모듈 조회 — SELECT 전용, 허용 목록에 있는 모듈만
-  POST /mcp/apis                 외부 API 카탈로그 검색 — 수집해 둔 표만 읽는다(읽기 전용)
+  POST /mcp/apis                 외부 API 카탈로그 — 검색은 표만 읽고, 수집만 밖으로 나간다
 
 저장소 목록은 모듈 레지스트리가 아니라 환경변수가 정한다(PAAS_STORAGE_ROOT ·
 PAAS_DOC_ROOTS, services/storage.py) — 디스크 경로는 서버를 설치한 사람이 아는
-사실이지 콘솔에서 등록할 일이 아니다. 문서 폴더는 **전부 읽기 전용이 기본**이고,
-PAAS_DOC_ROOTS_WRITABLE에 적은 폴더에서만 쓰기·삭제 도구가 붙는다.
+사실이지 콘솔에서 등록할 일이 아니다. 문서 폴더는 **기본이 읽기/쓰기**이고,
+PAAS_DOC_ROOTS_READONLY에 적은 폴더에서만 쓰기·삭제 도구가 빠진다. 플랫폼 자신의
+저장소(internal)는 서버 목록에 올리지 않는다 — 주소로는 그대로 닿는다.
 
 문서 검색이 두 곳에 있는 이유: /mcp/storage/{저장소}는 **그 저장소 안**을 다루는 도구
 묶음이고(목록·읽기·쓰기와 함께 검색), /mcp/docs는 "사내 문서에서 찾아라"는 하나의 일을
@@ -544,6 +545,9 @@ async def docs_mcp_server(
 
 
 def _all_stores() -> list[storage_service.Store]:
+    """**숨긴 저장소까지 포함한 전부.** /mcp/docs는 "사내 문서 전체에서 찾아라"는 창구라
+    목록에 안 보이는 저장소의 파일도 찾혀야 한다 — 숨긴 것은 고르는 자리에서 뺀 것이지
+    없는 것이 아니다."""
     try:
         return storage_service.stores()
     except storage_service.StorageError as e:
@@ -767,9 +771,8 @@ async def storage_mcp_server(
     경로는 storage.resolve가 저장소 루트 안으로 가둔다 — 이 서버의 존재 이유가 그
     가둠이다(공개 filesystem MCP 서버는 호스트 디스크를 그대로 연다).
 
-    문서 폴더는 기본이 읽기 전용이라 쓰기·삭제 도구를 아예 광고하지 않는다 — 플랫폼이
-    만든 것이 아닌 디렉터리이기 때문이다. 목록에 없는 도구는 모델이 부르지도 않고, 불러도
-    unknown tool로 막힌다. PAAS_DOC_ROOTS_WRITABLE에 적은 폴더에서만 그 둘이 붙는다.
+    잠근 폴더(PAAS_DOC_ROOTS_READONLY)에는 쓰기·삭제 도구를 아예 광고하지 않는다.
+    목록에 없는 도구는 모델이 부르지도 않고, 불러도 unknown tool로 막힌다.
 
     **이 성질은 폴더가 URL에 있어서 성립한다.** 이 서버를 하나로 합쳐 폴더를 인자로 받게
     하면 쓰기 도구가 항상 목록에 떠서, 계약 폴더를 다루는 문맥에서도 모델이 그것을 보게
@@ -1056,22 +1059,44 @@ def _db_call(db: Session, actor: str, module: Module, name: str, args: dict) -> 
 
 # --- 외부 API 카탈로그 서버 (/mcp/apis) ---
 #
-# 수집(services/apisearch.sync_catalog)은 여기 없다. 그 도구를 두면 이 서버가 아웃바운드
-# 호출을 여는 셈이고, 그러면 아래 docstring이 말하는 성질이 그대로 무너진다.
+# 수집(sync_catalog)도 여기 있다. 처음에는 "이 서버는 밖으로 안 나간다"를 지키려고 빼
+# 두었는데, 다시 따져 보니 지켜야 했던 것은 그 문장이 아니라 그것이 막으려던 위험이었다:
+#
+#   * 목적지를 부르는 쪽이 고르지 못한다 — 주소는 환경변수가 정한다(SSRF가 아니다).
+#   * 쓰는 곳이 카탈로그 표 하나뿐이다 — 인자로 대상이 바뀌지 않는다.
+#   * 남는 위험은 **외부 호출량**이다(공공데이터포털 개발계정은 하루 1,000건).
+#     그건 권한이 아니라 빈도의 문제라서, 최소 간격으로 막는다(_MCP_SYNC_MIN_INTERVAL).
+#
+# 사람이 콘솔에서 누르는 수집(POST /modules/search/refresh, admin)에는 간격을 걸지
+# 않는다 — 그쪽은 사람이 한 번 누른 행위이고, 모델이 되풀이하는 호출과 다르다.
+
+# MCP로 부르는 수집의 최소 간격(초). 모델은 "최신 상태인지 확인"을 도구 호출 한 번으로
+# 여기므로, 한 대화에서 같은 수집을 여러 번 부르는 일이 흔하다.
+_MCP_SYNC_MIN_INTERVAL = 300.0
 
 _APIS_TOOLS = [
     {
         "name": "search_apis",
         "description": (
-            "외부 공개 API 카탈로그를 키워드·카테고리로 검색한다(apis.guru + 공공데이터)."
-            " 두 조건은 AND이고 각각 비우면 그 조건은 걸지 않는다. 둘 다 비면 빈 목록이다."
-            f" 카테고리가 없는 항목만 고르려면 category에 \"{apisearch.UNCATEGORIZED}\"를 준다."
+            "외부 공개 API 카탈로그를 키워드·카테고리·소스로 검색한다(apis.guru + 공공데이터)."
+            " keyword는 이름·설명·카테고리와 **주소**(홈페이지·스펙 URL)에 걸리므로,"
+            " 알고 있는 주소를 그대로 넣어 그 API가 무엇인지 되짚을 수 있다."
+            " 세 조건은 AND이고 각각 비우면 그 조건은 걸지 않는다. 셋 다 비면 빈 목록이다."
+            f" 카테고리가 없는 항목만 고르려면 category에 \"{apisearch.UNCATEGORIZED}\"를 주고,"
+            f" 국내 공공데이터만 보려면 source에 \"{apisearch.SOURCE_PUBLIC_DATA}\"를 준다."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "keyword": {"type": "string"},
                 "category": {"type": "string", "description": "list_api_categories로 확인"},
+                "source": {
+                    "type": "string",
+                    "description": (
+                        f"{' | '.join(apisearch.SOURCE_LABELS)}"
+                        " (생략 = 전체, catalog_status로 건수 확인)"
+                    ),
+                },
                 "limit": {"type": "integer", "description": f"기본 30, 최대 {_MAX_LIST}"},
             },
         },
@@ -1089,6 +1114,28 @@ _APIS_TOOLS = [
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "sync_catalog",
+        "description": (
+            "카탈로그를 지금 다시 받아 최신으로 만든다(원본 카탈로그로 나가는 호출)."
+            f" source를 주면 그 소스만 받는다 — 국내 공공데이터만 최신화하려면"
+            f" \"{apisearch.SOURCE_PUBLIC_DATA}\". 응답의 added/updated/unchanged가 이번에"
+            " 실제로 바뀐 것이고, 대부분은 unchanged다."
+            f" 외부 호출량을 아끼려고 소스마다 {int(_MCP_SYNC_MIN_INTERVAL)}초 안에 다시"
+            " 부르면 받지 않고 skipped에 담아 돌려준다 — 오류가 아니라 '방금 받았다'는 뜻이다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": (
+                        f"{' | '.join(apisearch.SOURCE_LABELS)} (생략 = 켜져 있는 소스 전부)"
+                    ),
+                },
+            },
+        },
+    },
 ]
 
 
@@ -1096,7 +1143,7 @@ _APIS_TOOLS = [
 async def apis_mcp_server(
     request: Request,
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_api_key),
 ):
     """외부 API 카탈로그 검색 MCP 서버(JSON-RPC 2.0) — 읽기 전용, DB만 읽는다.
 
@@ -1105,31 +1152,48 @@ async def apis_mcp_server(
     관리자 키로 묶을 수밖에 없었는데, 수집을 sync_catalog로 떼어 낸 뒤로 이 경로는 이미
     받아 둔 표를 읽는 것이 전부다. 나가는 호출도 쓰기도 없다.
 
-    수집은 여전히 admin 전용(POST /modules/search/refresh)이고 이 서버에는 그 도구를 두지
-    않는다 — mcp 모듈의 api_key는 배포된 앱의 환경변수로도 주입되므로, 여기에 붙는 키로
-    할 수 있는 일은 읽기여야 한다.
+    수집(sync_catalog)만 밖으로 나간다. mcp 모듈의 api_key는 배포된 앱의 환경변수로도
+    주입되므로 이 키로 할 수 있는 일을 좁혀 두어야 하는데, 이 도구가 넓히는 것은 권한이
+    아니라 호출 횟수뿐이다: 목적지는 환경변수가 정하고(인자로 못 바꾼다), 쓰는 곳은
+    카탈로그 표 하나이며, 되풀이 호출은 최소 간격이 막는다. 위 주석에 그 판단을 적어 뒀다.
     """
     return mcp_server.dispatch(
         await mcp_server.read_payload(request),
         server_name="paas-apis",
         tools=_APIS_TOOLS,
-        call=lambda name, args: _apis_call(db, name, args),
+        call=lambda name, args: _apis_call(db, key.name, name, args),
     )
 
 
-def _apis_call(db: Session, name: str, args: dict) -> str:
+def _apis_call(db: Session, actor: str, name: str, args: dict) -> str:
     if name == "list_api_categories":
         return _dump(apisearch.list_categories(db))
     if name == "catalog_status":
         return _dump(apisearch.catalog_status(db))
 
+    if name == "sync_catalog":
+        source = _str_arg(args, "source", required=False)
+        try:
+            result = apisearch.sync_catalog(
+                db, source, min_interval=_MCP_SYNC_MIN_INTERVAL)
+        except apisearch.ApiSearchError as e:
+            raise mcp_server.McpToolError(str(e))
+        # 밖으로 나가는 유일한 도구다 — 누가 언제 불렀는지 남긴다.
+        audit.record(db, actor, "mcp.apis.sync", source or "*", result)
+        return _dump(result)
+
     # search_apis
-    result = apisearch.search_apis(
-        db,
-        _str_arg(args, "keyword", required=False),
-        _str_arg(args, "category", required=False),
-        _int_arg(args, "limit", 30, _MAX_LIST),
-    )
+    try:
+        result = apisearch.search_apis(
+            db,
+            _str_arg(args, "keyword", required=False),
+            _str_arg(args, "category", required=False),
+            _str_arg(args, "source", required=False),
+            _int_arg(args, "limit", 30, _MAX_LIST),
+        )
+    except apisearch.ApiSearchError as e:
+        # 모르는 source — 빈 목록으로 돌려주면 모델은 "그런 API가 없다"로 읽는다.
+        raise mcp_server.McpToolError(str(e))
     if result["warnings"]:
         # 카탈로그가 비어 있는 것과 "그런 API가 없다"는 다른 문제다 — 빈 목록으로
         # 돌려주면 모델은 질의를 바꿔 가며 헛돌게 된다.

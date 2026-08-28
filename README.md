@@ -256,7 +256,8 @@ POST /paas/api/v1/mcp/docs                          # 사내 MCP 서버 — 사�
                                                 #   list_sources·search_docs·read_doc·reindex_docs·index_status
 POST /paas/api/v1/mcp/storage/{저장소}              # 사내 MCP 서버 — 저장소 파일(루트 밖으로 못 나감)
                                                 #   list_files·read_file + search_docs·reindex_docs·index_status
-                                                #   문서 폴더는 기본 읽기 전용 — PAAS_DOC_ROOTS_WRITABLE에 적은 폴더만 쓰기·삭제 도구가 붙음
+                                                #   문서 폴더는 기본 읽기/쓰기 — PAAS_DOC_ROOTS_READONLY에 적은 폴더만 쓰기·삭제 도구가 빠짐
+                                                #   플랫폼 저장소(internal)는 서버 목록에 안 나오지만 주소로는 닿음
 POST /paas/api/v1/mcp/db/{module}                   # 사내 MCP 서버 — database 모듈 조회(SELECT 전용)
                                                 #   PAAS_MCP_DB_MODULES에 이름이 있는 모듈만 열림(기본 전부 차단)
 
@@ -289,7 +290,9 @@ DELETE /paas/api/v1/previews/{id}
   ```
   PAAS_STORAGE_ROOT=D:\paas\data\storage
   PAAS_DOC_ROOTS=rules=D:\공유\사내규정,costdb=D:\cost db
-  PAAS_DOC_ROOTS_WRITABLE=costdb        # 쓰기를 열 폴더만 (기본: 전부 읽기 전용)
+  PAAS_DOC_ROOTS_READONLY=rules         # 잠글 폴더만 (기본: 전부 읽기/쓰기)
+  # PAAS_STORAGE_ROOT는 플랫폼 자신의 저장소입니다 — 파일 관리 화면과 MCP 서버
+  # 목록에는 안 나오고, 이름(internal)으로는 그대로 닿습니다.
 
   삭제는 완전 삭제가 아니라 저장소 안 `.trash`로 옮기는 것입니다 — 목록·검색에서는 곧바로
   빠지지만 파일은 남아 있어 되돌릴 수 있습니다. 사내 공유 폴더에는 되돌리기가 없고
@@ -312,10 +315,42 @@ DELETE /paas/api/v1/previews/{id}
   JS/TS 정규식)으로 만든 파일→클래스/함수 계층 트리를 확대/축소로 확인할 수 있고,
   **같은 개요가 에이전트 기획의 LLM 컨텍스트에도 주입**되어 전체 구조·항목별 기능 요약을
   참조해 문서를 작성합니다(`services/codemap.py`, `GET /projects/{id}/codemap`).
-- **외부 API 검색 → 모듈 자동 추가**: 모듈 레지스트리에서 키워드로 공개 API 디렉터리
-  (기본 apis.guru, `PAAS_API_DIRECTORY_URL`로 사내 미러 교체 가능)를 검색해 선택 결과를
-  external_api 모듈로 바로 추가합니다(admin 전용 — 아웃바운드 메타데이터 조회이므로).
-  이름은 모듈 규약으로 자동 정규화(`services/apisearch.py`).
+- **외부 API 검색 → 모듈 자동 추가**: 수집해 둔 API 카탈로그(`api_catalog` 표)를
+  키워드·카테고리·소스로 검색해 선택 결과를 external_api 모듈로 바로 추가합니다.
+  키워드는 이름·설명·카테고리와 **주소**(홈페이지·스펙 URL)에 걸립니다 — 받아 둔 URL을
+  붙여 넣어 그게 무슨 API였는지 되짚을 수 있습니다. 이름은 모듈 규약으로 자동 정규화
+  (`services/apisearch.py`).
+
+  **검색은 표만 읽습니다**(아웃바운드 없음) — 그래서 같은 검색을 사내 MCP 서버
+  `/mcp/apis`로도 열어 두었습니다. 밖으로 나가는 것은 수집뿐이고, 수집은 하루 한 번
+  자동으로 돌거나 `POST /modules/search/refresh`(admin, 콘솔의 "수집" 버튼)로 당깁니다.
+  `/mcp/apis`에도 `sync_catalog` 도구가 있어 **요청이 있을 때 최신화**할 수 있습니다
+  (`source`로 공공데이터만 골라 받을 수 있음). 이 도구가 넓히는 것은 권한이 아니라
+  호출 횟수뿐이라 — 목적지는 환경변수가 정하고 쓰는 곳은 카탈로그 표 하나입니다 —
+  소스마다 최소 간격(5분)을 두고, 그 안에 다시 부르면 받지 않고 `skipped`로 답합니다.
+  사람이 누르는 수집에는 간격을 걸지 않습니다.
+
+  소스는 둘입니다:
+
+  ```
+  PAAS_API_DIRECTORY_URL   # apis.guru(기본값 있음) — 사내 미러로 교체 가능
+  PAAS_PUBLIC_DATA_URL     # 국내 공공데이터 카탈로그 (기본 비어 있음 = 아예 안 부름)
+  PAAS_PUBLIC_DATA_KEY     # 위 주소의 인증키 — serviceKey로 실립니다
+  ```
+
+  공공데이터포털(data.go.kr) 계열을 붙일 때 알아 둘 것:
+
+  - 주소에 적은 질의(`pageNo` 등)는 그대로 살아갑니다. `_type=json`과 `numOfRows`는
+    비어 있을 때만 채워 넣습니다 — 이 계열은 `_type`을 안 주면 XML을 주고 `numOfRows`
+    기본값이 10입니다.
+  - 인증키는 포털이 인코딩된 것/아닌 것 두 벌로 줍니다. **어느 쪽을 넣어도 됩니다** —
+    한 번 풀어서 실으므로 이중 인코딩(`%2B` → `%252B`)으로 "등록되지 않은 키"가 되는
+    일은 없습니다.
+  - **한 번에 한 페이지만 받습니다.** 카탈로그가 `numOfRows`보다 크면 주소에
+    `numOfRows`를 키워 적으세요(페이지 순회는 아직 없습니다).
+  - 응답 형식은 카탈로그마다 다릅니다. 목록은 어느 깊이에 있든 찾고 필드 이름은 후보를
+    훑지만, 못 알아보면 **받은 최상위 키를 적어 실패합니다** — 그 메시지를 보고 후보를
+    늘리면 됩니다.
 - **mcp 모듈 — MCP(Model Context Protocol) 서버**: `config: {url, api_key?}`로
   등록하면 다른 모듈처럼 배포 앱에 `{PREFIX}_URL`/`{PREFIX}_API_KEY`가 주입되고,
   가용 모듈 제약에 실려 외부 빌더가 게이트웨이 경유로 쓸 수 있게 됩니다.

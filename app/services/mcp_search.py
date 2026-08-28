@@ -77,8 +77,10 @@ def list_internal_servers(db: Session) -> list[dict]:
     ))
     # 저장소 목록은 환경변수가 정한다 — 설정이 잘못돼 있으면 저장소 항목만 빠지고
     # 나머지 서버는 그대로 나간다(디렉터리 전체가 500으로 죽으면 더 나쁘다).
+    # 숨긴 저장소(internal)는 올리지 않는다: 서버 자체는 살아 있지만 사람이 가져다
+    # 등록할 대상이 아니다.
     try:
-        found = storage.stores()
+        found = storage.visible_stores()
     except storage.StorageError:
         found = []
     for store in found:

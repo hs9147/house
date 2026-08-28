@@ -320,10 +320,18 @@ def _stub_public(monkeypatch, payload, status=200, guru=FAKE_DIRECTORY):
 
 
 def test_public_data_source_is_off_until_configured(monkeypatch, db):
-    """설정하지 않은 설치본에 아웃바운드 호출을 새로 만들지 않는다."""
+    """설정하지 않은 설치본에 아웃바운드 호출을 새로 만들지 않는다.
+
+    그래도 소스 자체는 현황에 남는다 — 빼 버리면 "공공데이터가 왜 안 나오지"에 답할
+    자리가 없어진다. enabled=false가 "주소를 안 넣어 아예 안 부른다"는 답이다.
+    """
     _synced(monkeypatch, db)
     assert apisearch._public_data_items() == []
-    assert list(apisearch.catalog_status(db)["sources"]) == ["apisguru"]
+
+    sources = apisearch.catalog_status(db)["sources"]
+    assert sources["apisguru"]["enabled"] is True
+    assert sources["publicdata"] == {
+        "label": "공공데이터", "enabled": False, "total": 0, "removed": 0, "updated_at": None}
 
 
 def test_public_data_items_merge_with_apisguru(monkeypatch, db):
@@ -383,3 +391,285 @@ def test_both_sources_dead_is_an_error_not_an_empty_result(monkeypatch, db):
     monkeypatch.setattr(httpx_retry.httpx, "get", lambda url, **kw: _R(500, {}))
     with pytest.raises(apisearch.ApiSearchError):
         apisearch.sync_catalog(db)
+
+
+# --- 카테고리 자리에 문자열이 오는 경우 ---
+
+def test_a_category_given_as_a_string_is_not_split_into_letters(monkeypatch, db):
+    """소스가 카테고리 자리에 리스트가 아니라 문자열 하나를 넣어 주는 일이 있다.
+
+    그대로 두면 리스트처럼 순회되는 곳마다 글자 단위로 쪼개진다 — 카테고리 목록에
+    s·e·c·u·r·i·t·y가 따로 서고, 검색용 건초더미도 "s e c u r i t y"가 된다.
+    """
+    directory = {"acme.io": {"preferred": "1.0", "versions": {"1.0": {
+        "info": {"title": "Acme", "description": "auth 게이트웨이",
+                 "x-apisguru-categories": "security"},
+        "swaggerUrl": "https://example.test/s.json"}}}}
+    _synced(monkeypatch, db, directory)
+
+    assert apisearch.list_categories(db) == [{"name": "security", "count": 1}]
+    assert _row(db, "acme.io").categories == ["security"]
+    # 카테고리로 고를 수 있어야 하고
+    assert [h["id"] for h in apisearch.search_apis(db, "", "security")["results"]] == ["acme.io"]
+    # 건초더미가 쪼개졌으면 낱말로는 안 걸린다
+    assert apisearch.search_apis(db, "security")["results"][0]["id"] == "acme.io"
+    # 카테고리가 있는 항목이므로 "기타"에는 안 걸린다
+    assert apisearch.search_apis(db, "", apisearch.UNCATEGORIZED)["results"] == []
+
+
+def test_a_string_already_in_the_table_still_reads_as_one_category(db):
+    """고치기 전에 들어간 행이 이미 있다 — 다시 수집하기 전에도 화면이 맞아야 한다."""
+    db.add(ApiCatalogEntry(
+        source=apisearch.SOURCE_APISGURU, ext_id="acme.io", title="Acme",
+        description="auth", provider="acme.io", categories="security",
+        homepage="", spec_url="", search_text="acme.io acme auth security",
+    ))
+    db.commit()
+    assert apisearch.list_categories(db) == [{"name": "security", "count": 1}]
+    hit = apisearch.search_apis(db, "", "security")["results"][0]
+    assert hit["categories"] == ["security"]
+
+
+
+# --- 소스로 좁히기 ---
+
+def test_search_can_narrow_to_one_source(monkeypatch, db):
+    """공공데이터만 보고 싶을 때가 있다 — 합쳐 놓기만 하면 고를 방법이 없다."""
+    _stub_public(monkeypatch, {"data": [
+        {"apiNm": "기상청 단기예보 조회", "apiDesc": "동네예보 정보", "categoryNm": "공공행정"},
+    ]})
+    apisearch.sync_catalog(db)
+
+    only_public = apisearch.search_apis(db, "", "", apisearch.SOURCE_PUBLIC_DATA)["results"]
+    assert [h["title"] for h in only_public] == ["기상청 단기예보 조회"]
+    assert {h["source"] for h in only_public} == {apisearch.SOURCE_PUBLIC_DATA}
+
+    # 소스만 골라도 조건이다 — 키워드 없이 그 소스를 훑는다
+    only_guru = apisearch.search_apis(db, "", "", apisearch.SOURCE_APISGURU)["results"]
+    assert {h["source"] for h in only_guru} == {apisearch.SOURCE_APISGURU}
+    assert len(only_guru) == 3
+
+    # 키워드·카테고리와는 AND로 걸린다
+    assert apisearch.search_apis(
+        db, "payment", "", apisearch.SOURCE_PUBLIC_DATA)["results"] == []
+    assert apisearch.search_apis(
+        db, "payment", "", apisearch.SOURCE_APISGURU)["results"][0]["id"] == "stripe.com"
+
+    # 소스도 조건이 아니었다면 셋 다 빈 것과 같아 빈 목록이 나온다
+    assert apisearch.search_apis(db, "", "", "")["results"] == []
+
+
+def test_an_unknown_source_fails_instead_of_answering_empty(monkeypatch, db):
+    """라벨을 키 자리에 넣는 실수가 "그런 API가 없다"로 보이면 원인을 찾을 수 없다."""
+    _synced(monkeypatch, db)
+    with pytest.raises(apisearch.ApiSearchError) as e:
+        apisearch.search_apis(db, "", "", "공공데이터")   # 라벨이지 키가 아니다
+    assert "publicdata" in str(e.value)   # 쓸 수 있는 값을 함께 보여 준다
+
+
+def test_search_endpoint_takes_a_source_and_rejects_an_unknown_one(monkeypatch, db):
+    _stub_directory(monkeypatch)
+    c = TestClient(create_app())
+    c.post(f"{API}/modules/search/refresh", headers=ADMIN)
+
+    hits = c.get(f"{API}/modules/search",
+                 params={"source": apisearch.SOURCE_APISGURU}, headers=ADMIN).json()["results"]
+    assert len(hits) == 3
+
+    bad = c.get(f"{API}/modules/search", params={"source": "nope"}, headers=ADMIN)
+    assert bad.status_code == 400   # 상류 장애(502)가 아니라 인자가 틀린 것이다
+    assert "nope" in bad.json()["detail"]
+
+
+def test_status_endpoint_shows_every_source_even_at_zero(monkeypatch, db):
+    _stub_directory(monkeypatch)
+    c = TestClient(create_app())
+    c.post(f"{API}/modules/search/refresh", headers=ADMIN)
+
+    body = c.get(f"{API}/modules/search/status", headers=ADMIN).json()
+    assert body["total"] == 3
+    assert body["sources"]["apisguru"]["total"] == 3
+    assert body["sources"]["apisguru"]["label"] == "apis.guru"
+    # 한 번도 못 받은 소스도 나온다 — 화면에서 고를 수 있어야 이유를 확인할 수 있다
+    assert body["sources"]["publicdata"] == {
+        "label": "공공데이터", "enabled": False, "total": 0, "removed": 0, "updated_at": None}
+
+
+# --- 주소로 찾기 ---
+
+def test_search_finds_an_api_by_its_url(monkeypatch, db):
+    """받아 놓은 주소를 되짚는 일이 잦다 — 이름·설명만 훑으면 그 주소로는 영영 안 걸린다."""
+    _synced(monkeypatch, db)
+    # 홈페이지(contact.url)
+    assert apisearch.search_apis(db, "stripe.com")["results"][0]["id"] == "stripe.com"
+    # 스펙 주소 — 이름·설명 어디에도 없는 문자열이다
+    spec = "api.apis.guru/v2/specs/google/calendar/v3/swagger.json"
+    assert apisearch.search_apis(db, spec)["results"][0]["title"] == "Calendar API"
+
+
+def test_a_pasted_url_matches_despite_scheme_and_trailing_slash(monkeypatch, db):
+    """브라우저에서 복사하면 https://가 붙고 끝에 슬래시가 붙는다 — 한 글자만 어긋나도
+    부분일치가 깨진다."""
+    _synced(monkeypatch, db)
+    for pasted in (
+        "https://stripe.com",
+        "https://stripe.com/",
+        "http://stripe.com",
+        "STRIPE.COM",
+    ):
+        hits = apisearch.search_apis(db, pasted)["results"]
+        assert [h["id"] for h in hits] == ["stripe.com"], pasted
+
+
+def test_sync_rebuilds_a_stale_haystack(monkeypatch, db):
+    """건초더미 만드는 방법이 바뀌면 이미 쌓인 행도 따라와야 한다.
+
+    URL을 넣기 전에 수집한 행은 필드가 그대로라 "안 바뀜"으로 지나가고, 주소로는
+    영영 안 걸린 채 남는다.
+    """
+    spec = "api.apis.guru/v2/specs/google/calendar/v3/swagger.json"
+    _synced(monkeypatch, db)
+    row = _row(db, "googleapis.com:calendar")
+    # 주소가 빠진 옛 방식 — 이름·설명·카테고리만 들어 있다
+    row.search_text = "googleapis.com:calendar calendar api manipulates events productivity"
+    db.commit()
+    assert apisearch.search_apis(db, spec)["results"] == []
+
+    stats = _synced(monkeypatch, db)
+    assert (stats["updated"], stats["unchanged"]) == (1, 2)
+    assert apisearch.search_apis(db, spec)["results"][0]["title"] == "Calendar API"
+
+
+# --- 공공데이터포털 호출 규약 ---
+
+def _capture_public_request(monkeypatch, url, key=""):
+    """공공데이터 소스로 나간 요청의 url·params를 잡아 온다."""
+    httpx_retry.reset_breakers()
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_URL", url)
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_KEY", key)
+    get_settings.cache_clear()
+    seen: dict = {}
+
+    def fake_get(u, **kw):
+        seen["url"] = u
+        seen["params"] = kw.get("params")
+        return _R(200, {"data": [{"title": "대기오염정보"}]})
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", fake_get)
+    apisearch._public_data_items()
+    return seen
+
+
+def test_query_written_in_the_url_survives(monkeypatch):
+    """httpx는 params를 주면 URL의 질의문자열을 덮어쓴다 — 적어 둔 값이 통째로 사라졌다."""
+    seen = _capture_public_request(
+        monkeypatch, "https://apis.data.go.kr/x?pageNo=2&numOfRows=50", key="abc")
+    assert seen["params"]["pageNo"] == "2"
+    assert seen["params"]["numOfRows"] == "50"   # 주소에 적은 쪽이 이긴다
+
+
+def test_json_and_page_size_are_filled_in_when_missing(monkeypatch):
+    """이 계열은 _type을 안 주면 XML을 주고, numOfRows 기본값이 10이다."""
+    seen = _capture_public_request(monkeypatch, "https://apis.data.go.kr/x")
+    assert seen["params"]["_type"] == "json"
+    assert int(seen["params"]["numOfRows"]) > 10
+    # 키를 안 넣었으면 serviceKey를 만들어 붙이지 않는다
+    assert "serviceKey" not in seen["params"]
+
+
+def test_an_encoded_service_key_is_not_encoded_twice(monkeypatch):
+    """포털은 인증키를 인코딩된 것과 아닌 것 두 벌로 준다. 인코딩된 쪽을 그대로 넘기면
+    httpx가 %를 다시 인코딩해서(%2B → %252B) '등록되지 않은 키'가 된다."""
+    seen = _capture_public_request(
+        monkeypatch, "https://apis.data.go.kr/x", key="ab%2Bcd%3D%3D")
+    assert seen["params"]["serviceKey"] == "ab+cd=="
+    # 인코딩 안 된 키를 넣어도 그대로다(한 번 푸는 것은 이 경우 아무 일도 하지 않는다)
+    plain = _capture_public_request(monkeypatch, "https://apis.data.go.kr/x", key="ab+cd==")
+    assert plain["params"]["serviceKey"] == "ab+cd=="
+
+
+def test_an_xml_response_says_what_came_back(monkeypatch, db):
+    """XML을 받아 놓고 "JSON이 아닙니다"만 말하면 무엇을 고쳐야 하는지 알 수 없다."""
+    httpx_retry.reset_breakers()
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_URL", "https://apis.data.go.kr/x")
+    get_settings.cache_clear()
+
+    class _Xml:
+        status_code = 200
+        text = "<response><header><resultCode>00</resultCode></header></response>"
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", lambda u, **kw: _Xml())
+    with pytest.raises(apisearch.ApiSearchError) as e:
+        apisearch._public_data_items()
+    assert "resultCode" in str(e.value)      # 받은 앞부분을 그대로 보여 준다
+    assert "_type=json" in str(e.value)      # 고치는 방법도 함께
+
+
+
+# --- 요청이 있을 때 최신화 ---
+
+def test_sync_can_target_one_source(monkeypatch, db):
+    """공공데이터만 최신화한다 — apis.guru 2,400건을 매번 다시 받을 이유가 없다."""
+    _stub_public(monkeypatch, {"data": [{"apiNm": "대기오염정보"}]})
+    apisearch.sync_catalog(db)
+
+    calls: list[str] = []
+    original = httpx_retry.httpx.get
+
+    def counting(url, **kw):
+        calls.append(url)
+        return original(url, **kw)
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", counting)
+    stats = apisearch.sync_catalog(db, apisearch.SOURCE_PUBLIC_DATA)
+    assert stats["sources"] == [apisearch.SOURCE_PUBLIC_DATA]
+    # apis.guru로는 나가지 않았다
+    assert all("catalog.example" in u for u in calls), calls
+
+
+def test_sync_of_a_source_that_is_off_is_an_error(monkeypatch, db):
+    """끈 소스를 콕 집었는데 조용히 "받았다"로 끝나면 왜 안 채워지는지 알 수 없다."""
+    _stub_directory(monkeypatch)   # 공공데이터는 꺼져 있다
+    with pytest.raises(apisearch.ApiSearchError) as e:
+        apisearch.sync_catalog(db, apisearch.SOURCE_PUBLIC_DATA)
+    assert "켜져 있지 않은" in str(e.value)
+
+    with pytest.raises(apisearch.ApiSearchError) as bad:
+        apisearch.sync_catalog(db, "공공데이터")   # 라벨이지 키가 아니다
+    assert "publicdata" in str(bad.value)
+
+
+def test_min_interval_skips_a_source_that_was_just_fetched(monkeypatch, db):
+    """외부 호출량을 지키는 자리 — 공공데이터포털 개발계정은 하루 1,000건이다."""
+    _stub_directory(monkeypatch)
+    first = apisearch.sync_catalog(db, min_interval=300.0)
+    assert (first["sources"], first["skipped"]) == ([apisearch.SOURCE_APISGURU], [])
+
+    def boom(url, **kw):
+        raise AssertionError(f"간격 안인데 밖으로 나갔다: {url}")
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", boom)
+    second = apisearch.sync_catalog(db, min_interval=300.0)
+    assert (second["sources"], second["skipped"]) == ([], [apisearch.SOURCE_APISGURU])
+
+    # 사람이 누르는 수집은 간격을 걸지 않는다 — 0을 주면 그대로 나간다
+    apisearch.reset_sync_throttle()
+    _stub_directory(monkeypatch)
+    assert apisearch.sync_catalog(db)["sources"] == [apisearch.SOURCE_APISGURU]
+
+
+def test_refresh_endpoint_takes_a_source(monkeypatch, db):
+    _stub_directory(monkeypatch)
+    c = TestClient(create_app())
+    r = c.post(f"{API}/modules/search/refresh",
+               params={"source": apisearch.SOURCE_APISGURU}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["sources"] == [apisearch.SOURCE_APISGURU]
+
+    off = c.post(f"{API}/modules/search/refresh",
+                 params={"source": apisearch.SOURCE_PUBLIC_DATA}, headers=ADMIN)
+    assert off.status_code == 502
+    assert "켜져 있지 않은" in off.json()["detail"]

@@ -157,6 +157,7 @@ def unbind_module(
 def search_external_apis(
     keyword: str = "",
     category: str = "",
+    source: str = "",
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_admin),
 ):
@@ -166,10 +167,15 @@ def search_external_apis(
     이 화면이 모듈 등록(admin 전용)으로 이어지기 때문이고, 읽기만 필요한 쪽에는 같은
     검색을 MCP로 열어 두었다(/mcp/apis).
 
-    두 조건은 AND이고 각각 비우면 그 조건은 걸지 않는다(category 기본값 = 전체).
-    category="기타"는 카테고리가 없는 항목만 고른다.
+    세 조건(keyword·category·source)은 AND이고 각각 비우면 그 조건은 걸지 않는다.
+    category="기타"는 카테고리가 없는 항목만 고르고, source는 소스 하나만 본다
+    (공공데이터만 보기 = source=publicdata — 값은 /modules/search/status에서 얻는다).
     반환된 항목은 POST /modules/import로 external_api 모듈에 추가할 수 있다."""
-    return apisearch.search_apis(db, keyword, category)
+    try:
+        return apisearch.search_apis(db, keyword, category, source)
+    except apisearch.ApiSearchError as e:
+        # 여기서 나는 오류는 상류 장애가 아니라 인자가 틀린 것이다(모르는 source).
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/modules/search/categories")
@@ -182,17 +188,35 @@ def list_api_categories(
             "uncategorized_label": apisearch.UNCATEGORIZED}
 
 
-@router.post("/modules/search/refresh")
-def refresh_external_api_directory(
+@router.get("/modules/search/status")
+def api_catalog_status(
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_admin),
 ):
-    """카탈로그를 1일 1회 주기 외에 즉시 수집한다 — **여기가 유일한 아웃바운드 경로다**.
+    """수집 현황 — 소스별 건수·마지막 갱신 시각과 그 소스를 켜 두었는지(enabled).
 
+    검색 화면의 소스 선택지가 여기서 나온다. 0건인 소스도 함께 내려간다: 빼 버리면
+    "공공데이터가 안 나온다"에 답할 자리가 사라진다 — 주소를 안 넣어 아예 안 부르는
+    것인지(enabled=false), 불렀는데 못 받은 것인지가 여기서 갈린다."""
+    return apisearch.catalog_status(db)
+
+
+@router.post("/modules/search/refresh")
+def refresh_external_api_directory(
+    source: str = "",
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_admin),
+):
+    """카탈로그를 1일 1회 주기 외에 즉시 수집한다(아웃바운드).
+
+    source를 주면 그 소스만 받는다(공공데이터만 최신화 = source=publicdata).
     응답의 added/updated/unchanged는 이번 수집이 실제로 무엇을 바꿨는지다(대부분은
-    unchanged다). warnings는 실패한 소스이고, 그 소스의 행은 손대지 않는다."""
+    unchanged다). warnings는 실패한 소스이고, 그 소스의 행은 손대지 않는다.
+
+    최소 간격을 걸지 않는다 — 사람이 버튼을 한 번 누른 행위다. 모델이 부르는
+    /mcp/apis의 sync_catalog에는 간격이 걸려 있다."""
     try:
-        return apisearch.sync_catalog(db)
+        return apisearch.sync_catalog(db, source)
     except apisearch.ApiSearchError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -454,7 +478,9 @@ def get_platform_module_report(
             actor=r.actor,
             action=r.action,
             target=r.target,
-            payload=r.payload or {},
+            # 감사 표의 컬럼 이름은 detail이다(models.AuditEvent) — 응답 필드 이름만
+            # payload로 나간다.
+            payload=r.detail or {},
             created_at=r.created_at,
         )
         for r in audit_rows

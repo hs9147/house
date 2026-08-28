@@ -280,9 +280,10 @@ def test_code_server_unknown_project_points_at_the_right_discovery_tool(
 # --- 파일 저장소 서버 ---
 
 def _storage_client(monkeypatch, tmp_path):
-    """쓰기가 열려 있는 저장소는 내부 저장소 하나뿐이고 이름은 'internal'이다.
+    """플랫폼 저장소 'internal' 하나로 저장소 서버의 기본 동작을 본다.
 
-    (사내 문서 폴더는 PAAS_DOC_ROOTS로 붙고 읽기 전용이다 — 아래 별도 테스트.)
+    이 저장소는 목록에서 숨겨져 있지만 서버는 그대로 산다 — 숨긴 것은 고르는 자리에서
+    뺀 것이지 닿지 못하게 한 것이 아니다.
     """
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "assets"))
     monkeypatch.setenv("PAAS_DOC_ROOTS", "")
@@ -321,12 +322,13 @@ def test_storage_server_cannot_escape_store_root(monkeypatch, fresh_settings, tm
     assert not (tmp_path / "outside.txt").exists()
 
 
-def test_doc_root_store_hides_write_tools(monkeypatch, fresh_settings, tmp_path):
-    """PAAS_DOC_ROOTS로 붙인 사내 문서 폴더는 플랫폼이 만든 것이 아니다 — 목록에 없는
-    도구는 모델이 부르지 않고, 불러도 막힌다."""
+def test_locked_doc_root_hides_write_tools(monkeypatch, fresh_settings, tmp_path):
+    """잠근 폴더에서는 쓰기 도구를 아예 광고하지 않는다 — 목록에 없는 도구는 모델이
+    부르지 않고, 불러도 막힌다."""
     (tmp_path / "company-docs").mkdir()
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_ROOTS", str(tmp_path / "company-docs"))
+    monkeypatch.setenv("PAAS_DOC_ROOTS_READONLY", "company-docs")
     get_settings.cache_clear()
     c = _client()
 
@@ -345,8 +347,8 @@ def test_doc_root_store_hides_write_tools(monkeypatch, fresh_settings, tmp_path)
     assert rm.status_code == 403
 
 
-def test_writable_doc_root_advertises_write_tools(monkeypatch, fresh_settings, tmp_path):
-    """쓰기를 연 폴더의 서버에만 쓰기 도구가 뜬다.
+def test_unlocked_doc_root_advertises_write_tools(monkeypatch, fresh_settings, tmp_path):
+    """잠그지 않은 폴더의 서버에만 쓰기 도구가 뜬다.
 
     **이 성질은 폴더가 URL에 있어서 성립한다.** 저장소 서버를 하나로 합쳐 폴더를 인자로
     받게 하면 write_file·delete_file이 항상 목록에 뜨고, 계약 폴더를 다루는 문맥에서도
@@ -358,7 +360,7 @@ def test_writable_doc_root_advertises_write_tools(monkeypatch, fresh_settings, t
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_ROOTS",
                        f"scratch={tmp_path / 'scratch'},contract={tmp_path / 'contract'}")
-    monkeypatch.setenv("PAAS_DOC_ROOTS_WRITABLE", "scratch")
+    monkeypatch.setenv("PAAS_DOC_ROOTS_READONLY", "contract")
     get_settings.cache_clear()
     c = _client()
 
@@ -716,9 +718,9 @@ def test_docs_server_lists_sources_with_coverage(monkeypatch, fresh_settings, tm
                json.loads(_text(_call(c, "/mcp/docs", "list_sources")))}
     assert sources["company-docs"] == {
         "source": "company-docs", "root": str(tmp_path / "shared" / "company-docs"),
-        "exists": True, "read_only": True,
+        "exists": True, "read_only": False,
         "index": {"total": 2, "indexed": 1, "failed": 1}}
-    # 내부 저장소도 같은 창구로 검색된다(쓰기가 열려 있다는 것만 다르다)
+    # 숨긴 저장소도 여기서는 나온다 — /mcp/docs는 "전체에서 찾아라"는 창구다
     assert sources["internal"]["read_only"] is False
     status = json.loads(_text(_call(c, "/mcp/docs", "index_status")))
     assert "97-2003" in " ".join(status["company-docs"]["failure_reasons"])
@@ -775,7 +777,7 @@ def test_apis_server_searches_the_collected_catalog(monkeypatch, fresh_settings)
 
     c = _apis_client(monkeypatch)
     tools = {t["name"] for t in _rpc(c, "/mcp/apis", "tools/list")["result"]["tools"]}
-    assert tools == {"search_apis", "list_api_categories", "catalog_status"}
+    assert tools == {"search_apis", "list_api_categories", "catalog_status", "sync_catalog"}
 
     hits = json.loads(_text(_call(c, "/mcp/apis", "search_apis", {"keyword": "payment"})))
     assert [h["id"] for h in hits] == ["stripe.com"]
@@ -784,14 +786,30 @@ def test_apis_server_searches_the_collected_catalog(monkeypatch, fresh_settings)
     assert json.loads(_text(_call(c, "/mcp/apis", "catalog_status")))["total"] == 1
 
 
-def test_apis_server_has_no_collect_tool(monkeypatch, fresh_settings):
-    """수집 도구를 두면 이 서버가 아웃바운드 호출을 여는 셈이고, 그러면 admin 없이 열
-    수 있는 근거가 그대로 무너진다."""
+def test_apis_server_sync_is_throttled_and_audited(monkeypatch, fresh_settings):
+    """모델이 부르는 수집이다 — 넓히는 것은 권한이 아니라 호출 횟수뿐이므로 거기를 막는다.
+
+    _apis_client는 수집을 한 번 끝낸 뒤 httpx를 폭탄으로 바꿔 둔다. 최소 간격이 걸려
+    있으면 두 번째 호출은 밖으로 나가지 않고 skipped로 돌아온다 — 폭탄이 안 터지는
+    것이 곧 "안 나갔다"의 증거다.
+    """
+    import json
+
+    from app.services import apisearch
+
     c = _apis_client(monkeypatch)
-    tools = {t["name"] for t in _rpc(c, "/mcp/apis", "tools/list")["result"]["tools"]}
-    assert not [t for t in tools if "sync" in t or "refresh" in t]
-    reply = _call(c, "/mcp/apis", "sync_catalog")
-    assert "unknown tool" in reply["error"]["message"]
+    body = json.loads(_text(_call(c, "/mcp/apis", "sync_catalog")))
+    assert body["skipped"] == [apisearch.SOURCE_APISGURU]
+    assert body["sources"] == []
+
+    # 밖으로 나가는 유일한 도구라 감사에 남는다
+    actions = {row["action"] for row in c.get(f"{API}/audit", headers=ADMIN).json()}
+    assert "mcp.apis.sync" in actions
+
+    # 켜져 있지 않은 소스를 콕 집으면 조용한 빈 결과가 아니라 오류다
+    bad = _call(c, "/mcp/apis", "sync_catalog",
+                {"source": apisearch.SOURCE_PUBLIC_DATA})
+    assert "켜져 있지 않은" in bad["error"]["message"]
 
 
 def test_apis_server_works_without_an_admin_key(monkeypatch, fresh_settings):
@@ -826,3 +844,75 @@ def test_apis_server_appears_in_the_internal_directory(monkeypatch, fresh_settin
     get_settings.cache_clear()
     items = {i["id"]: i for i in _client().get(f"{API}/mcp/search", headers=ADMIN).json()}
     assert items["paas-apis"]["url"] == "http://localhost:7000/paas/api/v1/mcp/apis"
+
+
+def test_apis_server_can_narrow_to_one_source(monkeypatch, fresh_settings):
+    """LLM도 "국내 공공데이터만"이라고 좁힐 수 있어야 한다."""
+    import json
+
+    from app.services import apisearch
+
+    c = _apis_client(monkeypatch)
+    guru = json.loads(_text(_call(c, "/mcp/apis", "search_apis",
+                                  {"source": apisearch.SOURCE_APISGURU})))
+    assert [h["id"] for h in guru] == ["stripe.com"]
+    # 수집한 적 없는 소스는 빈 목록이다(오류가 아니다 — 조건이 맞는 항목이 없는 것이다)
+    assert _text(_call(c, "/mcp/apis", "search_apis",
+                       {"source": apisearch.SOURCE_PUBLIC_DATA})) == "[]"
+
+    # 모르는 소스는 빈 목록이 아니라 오류다
+    bad = _call(c, "/mcp/apis", "search_apis", {"source": "공공데이터"})
+    assert "모르는 소스" in bad["error"]["message"]
+
+    # 현황에는 두 소스가 다 나온다 — 왜 비었는지 모델이 여기서 확인한다
+    status = json.loads(_text(_call(c, "/mcp/apis", "catalog_status")))
+    assert status["sources"]["publicdata"]["enabled"] is False
+    assert status["sources"]["publicdata"]["total"] == 0
+
+
+def test_apis_server_finds_an_api_by_its_url(monkeypatch, fresh_settings):
+    """받아 둔 주소가 무슨 API였는지 되짚는 것도 검색이다."""
+    import json
+
+    c = _apis_client(monkeypatch)
+    hits = json.loads(_text(_call(c, "/mcp/apis", "search_apis",
+                                  {"keyword": "https://example.test/swagger.json"})))
+    assert [h["id"] for h in hits] == ["stripe.com"]
+
+
+def test_apis_server_sync_refreshes_on_request(monkeypatch, fresh_settings):
+    """요청이 있을 때 최신화한다 — 도구가 실제로 나가서 표를 갱신하는지 본다."""
+    import json
+
+    from app.services import apisearch, httpx_retry
+
+    httpx_retry.reset_breakers()
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_URL", "")
+    get_settings.cache_clear()
+    catalog = {"stripe.com": {"preferred": "1.0", "versions": {"1.0": {
+        "info": {"title": "Stripe", "description": "결제"},
+        "swaggerUrl": "https://example.test/s.json"}}}}
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return catalog
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", lambda url, **kw: _R())
+    c = _client()
+
+    first = json.loads(_text(_call(c, "/mcp/apis", "sync_catalog")))
+    assert (first["added"], first["skipped"]) == (1, [])
+    assert json.loads(_text(_call(c, "/mcp/apis", "search_apis",
+                                  {"keyword": "결제"})))[0]["id"] == "stripe.com"
+
+    # 최소 간격 안에 다시 부르면 나가지 않는다 — 오류가 아니라 "방금 받았다"
+    again = json.loads(_text(_call(c, "/mcp/apis", "sync_catalog")))
+    assert again["skipped"] == [apisearch.SOURCE_APISGURU]
+    assert again["added"] == 0
+
+    # 간격을 비우면 다시 나간다. 이번에는 바뀐 것이 없으므로 unchanged다
+    apisearch.reset_sync_throttle()
+    third = json.loads(_text(_call(c, "/mcp/apis", "sync_catalog")))
+    assert (third["added"], third["updated"], third["unchanged"]) == (0, 0, 1)

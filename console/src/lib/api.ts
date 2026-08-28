@@ -1,6 +1,7 @@
 import { getKey, logout } from './auth';
 import type {
   ApiKeyIssued,
+  ApiCatalogStatus,
   ApiCategory,
   ApiSearchResult,
   AuditRow,
@@ -265,7 +266,7 @@ export const api = {
   getPlatformModuleReport: () =>
     request<PlatformModuleReportOut>('GET', '/modules/usage-report'),
   // 외부 API 카탈로그 검색 + external_api 모듈 자동 추가 (admin)
-  searchApis: (keyword: string, category?: string) =>
+  searchApis: (keyword: string, category?: string, source?: string) =>
     // 검색은 수집해 둔 표만 읽는다(아웃바운드 아님). warnings = 카탈로그가 비어 있다는
     // 사실. 결과가 적은 것이 "그런 API가 없다"인지 "아직 수집하지 않았다"인지 화면에서
     // 구분되어야 한다.
@@ -273,17 +274,20 @@ export const api = {
       keyword,
       // 빈 값이면 조건을 안 건다(= 전체). 서버 기본값과 같은 뜻이라 굳이 보내지 않는다.
       ...(category ? { category } : {}),
+      ...(source ? { source } : {}),
     }),
+  // 소스별 수집 현황 — 검색 화면의 소스 선택지가 여기서 나온다.
+  apiCatalogStatus: () => request<ApiCatalogStatus>('GET', '/modules/search/status'),
   listApiCategories: () =>
     request<{ categories: ApiCategory[]; uncategorized_label: string }>(
       'GET', '/modules/search/categories'),
   // 카탈로그 수집 — **여기가 유일한 아웃바운드 경로다**(검색은 표만 읽는다).
   // 평소에는 하루 한 번 백그라운드로 돌고, 이 버튼은 그 사이에 당겨 쓰는 자리다.
-  refreshApiCatalog: () =>
+  refreshApiCatalog: (source?: string) =>
     request<{
       added: number; updated: number; restored: number; removed: number; unchanged: number;
-      sources: string[]; warnings: string[];
-    }>('POST', '/modules/search/refresh'),
+      sources: string[]; skipped: string[]; warnings: string[];
+    }>('POST', '/modules/search/refresh', undefined, { ...(source ? { source } : {}) }),
   importApiModule: (name: string, url: string, category?: string) =>
     request<ModuleOut>('POST', '/modules/import', { name, url, category: category || null }),
 

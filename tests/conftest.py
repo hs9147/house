@@ -47,6 +47,16 @@ def _no_background_api_sync():
 
 
 @pytest.fixture(autouse=True)
+def _clear_api_sync_throttle():
+    """카탈로그 수집의 최소 간격 기록은 프로세스 전역이라 테스트 사이에 남는다 —
+    앞 테스트가 찍어 둔 시각 때문에 다음 테스트의 수집이 조용히 건너뛰어지지 않게 비운다."""
+    from app.services import apisearch
+
+    apisearch.reset_sync_throttle()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_mcp_tools_cache():
     """MCP tools/list 캐시(TTL 60초)는 프로세스 전역이라 테스트 사이에 남는다 —
     앞 테스트가 같은 URL로 캐시해 둔 값이 다음 테스트의 목킹을 덮지 않게 비운다."""

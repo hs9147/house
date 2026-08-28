@@ -374,6 +374,10 @@ class Module(Base):
     organization_id: Mapped[int | None] = mapped_column(
         ForeignKey("organizations.id"), nullable=True
     )
+    # 사용 이력 리포트가 조직 이름을 붙여 준다(api/modules.get_platform_module_report).
+    # LlmProvider와 같은 모양 — back_populates를 두지 않는 이유도 같다(Organization
+    # 쪽에서 모듈을 거슬러 올라갈 일이 없다).
+    organization: Mapped["Organization | None"] = relationship()
     # 민감 필드(api_key, dsn, password, secret)는 저장 시 Fernet 암호화됨
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
