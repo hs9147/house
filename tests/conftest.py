@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -15,6 +16,11 @@ os.environ.setdefault("PAAS_FEATURES", "deploy,workspace")
 # 정책 자체를 검증하는 test_git_policy.py/test_project_org_flow.py는 필요시 개별적으로
 # monkeypatch로 켠다.
 os.environ.setdefault("PAAS_GIT_INTERNAL_ONLY", "false")
+# 색인 자리는 기본이 ./data/doc-index다 — 테스트가 거기에 쓰면 실행 사이에 남아
+# "앞 테스트가 넣어 둔 문서가 다음 테스트 검색에 걸리는" 순서 의존 실패가 된다.
+# 업로드가 색인을 바로 갱신하게 되면서 그런 테스트가 부쩍 늘었다. 개별 픽스처가
+# tmp_path로 덮는 것과 별개로, 아무도 안 덮었을 때의 바닥을 여기서 옮긴다.
+os.environ.setdefault("PAAS_DOC_INDEX_DIR", tempfile.mkdtemp(prefix="paas-test-index-"))
 
 import pytest  # noqa: E402
 

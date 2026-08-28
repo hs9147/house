@@ -106,7 +106,7 @@ def upload_storage_file(
     if not rel:
         raise HTTPException(status_code=400, detail="file name required")
     try:
-        saved = storage_service.write_file(store.root, rel, file.file.read())
+        saved = storage_service.write_file(store, rel, file.file.read())
     except storage_service.StorageError as e:
         raise HTTPException(status_code=400, detail=str(e))
     audit.record(db, key.name, "storage.upload", store.name, {"path": saved})
@@ -123,7 +123,7 @@ def delete_storage_file(
     store = _store(store_name)
     _require_writable(store)
     try:
-        grave = storage_service.delete_file(store.root, path)
+        grave = storage_service.delete_file(store, path)
     except storage_service.StorageError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError:

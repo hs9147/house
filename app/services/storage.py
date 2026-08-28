@@ -195,14 +195,38 @@ def list_files(root: Path) -> list[dict]:
     )
 
 
-def write_file(root: Path, rel: str, data: bytes) -> str:
-    target = resolve(root, rel)
+def _touch_index(store: "Store", rel: str, *, removed: bool = False) -> None:
+    """방금 바뀐 파일 하나를 색인·그래프에 반영한다 — **실패는 삼킨다**.
+
+    파일은 이미 디스크에 있다(또는 이미 휴지통으로 갔다). 여기서 예외를 올리면 저장에
+    성공한 업로드가 500이 되고, 사용자는 같은 파일을 다시 올린다. 색인은 파생 데이터고
+    주기 작업이 어차피 맞추므로, 못 하고 넘어가면 늦어질 뿐 틀리지 않는다.
+    """
+    from . import docsearch  # noqa: PLC0415 — 색인은 저장소의 파생 데이터다(역참조 최소화)
+
+    try:
+        if removed:
+            docsearch.forget_one(store.name, rel)
+        else:
+            docsearch.index_one(store.name, store.root, rel)
+    except Exception as e:  # noqa: BLE001
+        # 조용히 넘기지는 않는다 — 늘 늦는다면 원인을 찾을 실마리가 여기밖에 없다.
+        print(f"[paas] 색인 즉시 갱신 실패({store.name}:{rel}) — 주기 색인에 맡깁니다: {e}")
+
+
+# 아래 둘만 Store를 받는다(읽기 쪽은 root면 충분하다): 쓰기는 색인을 함께 건드려야 하고,
+# 색인은 저장소 **이름**으로 갈린다. 인자를 root로 두면 새 창구가 생길 때마다 색인 갱신을
+# 따로 기억해야 하는데, 그건 잊는다 — 실제로 업로드·삭제 창구 넷이 다 잊고 있었다.
+def write_file(store: "Store", rel: str, data: bytes) -> str:
+    target = resolve(store.root, rel)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
-    return target.relative_to(root).as_posix()
+    saved = target.relative_to(store.root).as_posix()
+    _touch_index(store, saved)
+    return saved
 
 
-def delete_file(root: Path, rel: str) -> str:
+def delete_file(store: "Store", rel: str) -> str:
     """지우지 않고 저장소 안 휴지통으로 옮긴다. 옮겨진 자리(저장소 기준 상대경로)를 돌려준다.
 
     **사내 공유 폴더에는 되돌리기가 없다.** 서비스 계정이 SMB로 지우면 윈도우 휴지통에
@@ -213,6 +237,7 @@ def delete_file(root: Path, rel: str) -> str:
     복사 후 삭제가 되어 큰 파일에서 실패할 여지가 생긴다), 사람이 그 폴더에서 바로 찾아
     되돌릴 수 있다. 점으로 시작해서 색인·목록에서 함께 빠진다.
     """
+    root = store.root
     target = resolve(root, rel)
     if not target.is_file():
         raise FileNotFoundError(rel)
@@ -224,4 +249,6 @@ def delete_file(root: Path, rel: str) -> str:
         grave = grave.with_name(f"{grave.stem}.{stamp}{grave.suffix}")
     grave.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(target), str(grave))
+    # 옮긴 자리는 점 폴더라 색인에 들어가지 않는다 — 원래 자리만 빼면 된다.
+    _touch_index(store, target.relative_to(root).as_posix(), removed=True)
     return grave.relative_to(root).as_posix()

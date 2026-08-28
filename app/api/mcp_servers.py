@@ -938,7 +938,7 @@ def _storage_call(db: Session, actor: str, store: storage_service.Store, name: s
     if name == "write_file":
         content = str(args.get("content") or "")
         try:
-            saved = storage_service.write_file(root, path, content.encode("utf-8"))
+            saved = storage_service.write_file(store, path, content.encode("utf-8"))
         except storage_service.StorageError as e:
             raise mcp_server.McpToolError(str(e))
         audit.record(db, actor, "mcp.storage.write", store.name,
@@ -947,7 +947,7 @@ def _storage_call(db: Session, actor: str, store: storage_service.Store, name: s
 
     # delete_file
     try:
-        grave = storage_service.delete_file(root, path)
+        grave = storage_service.delete_file(store, path)
     except storage_service.StorageError as e:
         raise mcp_server.McpToolError(str(e))
     except FileNotFoundError:

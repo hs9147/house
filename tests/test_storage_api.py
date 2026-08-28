@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.config import get_settings
 from app.main import create_app
-from app.services import storage
+from app.services import docsearch, storage
 
 ADMIN = {"x-api-key": "test-admin-key"}
 API = "/paas/api/v1"
@@ -17,6 +17,8 @@ API = "/paas/api/v1"
 
 def _client(monkeypatch, tmp_path, doc_roots="", readonly="") -> TestClient:
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
+    # 업로드·삭제가 색인을 바로 갱신하므로 색인 자리도 tmp_path 안으로 옮긴다
+    monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
     monkeypatch.setenv("PAAS_DOC_ROOTS", doc_roots)
     monkeypatch.setenv("PAAS_DOC_ROOTS_READONLY", readonly)
     get_settings.cache_clear()
@@ -285,3 +287,53 @@ def test_a_korean_folder_asks_for_an_explicit_name(monkeypatch, fresh_settings):
     monkeypatch.setenv("PAAS_DOC_ROOTS", r"rules=D:\공유\사내규정")
     get_settings.cache_clear()
     assert [s.name for s in storage.stores()] == ["internal", "rules"]
+
+
+# --- 업로드·삭제가 색인을 바로 갱신한다 ---
+
+def test_upload_is_searchable_immediately(monkeypatch, tmp_path, fresh_settings):
+    """예전에는 주기 색인(15분)을 기다려야 방금 올린 문서가 검색에 잡혔다."""
+    docs = tmp_path / "규정"
+    docs.mkdir()
+    c = _client(monkeypatch, tmp_path, doc_roots=f"rules={docs}")
+
+    assert c.post(f"{API}/storage/rules/files",
+                  files={"file": ("반출절차.md", "# 반출절차\n\n승인 후 3일 내".encode())},
+                  headers=ADMIN).status_code == 201
+
+    hits = docsearch.search("rules", "승인")["hits"]
+    assert [h["path"] for h in hits] == ["반출절차.md"]
+    # 온톨로지도 같이 선다 — /mcp/graph가 방금 올린 문서를 안다
+    assert docsearch.find_nodes("rules", kind="document", q="반출절차")
+
+
+def test_delete_stops_being_findable_immediately(monkeypatch, tmp_path, fresh_settings):
+    """지운 쪽이 더 나쁘다: 검색에는 남고 읽으러 가면 '파일이 없습니다'가 났다."""
+    docs = tmp_path / "규정"
+    docs.mkdir()
+    (docs / "폐기.md").write_text("# 폐기\n\n반출 대장 폐기", encoding="utf-8")
+    c = _client(monkeypatch, tmp_path, doc_roots=f"rules={docs}")
+    docsearch.reindex("rules", docs)
+    assert docsearch.search("rules", "폐기")["hits"]
+
+    assert c.delete(f"{API}/storage/rules/files?path=폐기.md",
+                    headers=ADMIN).status_code == 204
+    assert docsearch.search("rules", "폐기")["hits"] == []
+    assert docsearch.find_nodes("rules", kind="document", q="폐기") == []
+
+
+def test_upload_succeeds_even_if_indexing_fails(monkeypatch, tmp_path, fresh_settings):
+    """파일은 이미 디스크에 있다 — 색인이 터졌다고 500을 주면 사용자는 다시 올린다.
+    (색인은 파생 데이터고 주기 작업이 어차피 맞춘다.)"""
+    docs = tmp_path / "규정"
+    docs.mkdir()
+    c = _client(monkeypatch, tmp_path, doc_roots=f"rules={docs}")
+
+    def _boom(*args, **kwargs):
+        raise OSError("색인 디스크가 가득 찼습니다")
+
+    monkeypatch.setattr(docsearch, "index_one", _boom)
+    r = c.post(f"{API}/storage/rules/files",
+               files={"file": ("메모.md", "# 메모\n".encode())}, headers=ADMIN)
+    assert r.status_code == 201, r.text
+    assert (docs / "메모.md").read_text(encoding="utf-8") == "# 메모\n"

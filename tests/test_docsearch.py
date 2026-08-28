@@ -362,3 +362,104 @@ def test_a_clean_folder_reports_no_unreadable_key(tmp_path, ready_index):
     docs.mkdir()
     (docs / "규정.txt").write_text("연차 규정", encoding="utf-8")
     assert "unreadable_dirs" not in docsearch.reindex("s", docs)
+
+
+# --- 단건 색인(업로드 직후의 빠른 경로) ---
+
+def test_index_one_makes_a_new_file_searchable_without_a_full_scan(tmp_path, ready_index):
+    """전체를 훑지 않고 그 파일 하나만 넣는다 — 업로드 시점에는 무엇이 바뀌었는지
+    이미 알고 있고, 그걸 버리고 15분 뒤 공유 폴더 전체를 다시 훑을 이유가 없다."""
+    docs = tmp_path / "docs"
+    (docs / "2025규정").mkdir(parents=True)
+    (docs / "2025규정" / "휴가규정.txt").write_text("연차 이월 규정", encoding="utf-8")
+
+    assert docsearch.search("s", "이월")["hits"] == []
+    assert docsearch.index_one("s", docs, "2025규정/휴가규정.txt")["status"] == "indexed"
+    assert [h["path"] for h in docsearch.search("s", "이월")["hits"]] == ["2025규정/휴가규정.txt"]
+
+    # 온톨로지도 같은 자리에서 함께 만들어진다 — 검색만 맞고 그래프가 비면 반쪽이다.
+    assert docsearch.find_nodes("s", kind="document", q="휴가규정")
+
+    # 뒤이어 도는 주기 색인은 이 파일을 다시 추출하지 않는다(크기·mtime이 같다)
+    assert docsearch.reindex("s", docs)["skipped"] == 1
+
+
+def test_index_one_replaces_the_previous_content(tmp_path, ready_index):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    target = docs / "규정.md"
+    target.write_text("# 규정\n\n반출 승인 절차", encoding="utf-8")
+    docsearch.index_one("s", docs, "규정.md")
+    assert docsearch.search("s", "반출")["hits"]
+
+    time.sleep(0.01)
+    target.write_text("# 규정\n\n폐기 절차", encoding="utf-8")
+    docsearch.index_one("s", docs, "규정.md")
+    assert docsearch.search("s", "반출")["hits"] == []
+    assert docsearch.search("s", "폐기")["hits"]
+
+
+def test_index_one_skips_what_a_full_scan_would_skip(tmp_path, ready_index):
+    """거르는 규칙이 두 경로에서 갈리면, 전체 스캔은 안 넣는 것을 업로드가 넣는다."""
+    docs = tmp_path / "docs"
+    (docs / ".trash").mkdir(parents=True)
+    (docs / "로고.png").write_bytes(b"\x89PNG binary")
+    (docs / "~$규정.docx").write_bytes(b"lock")
+    (docs / ".trash" / "지운규정.md").write_text("지운 내용", encoding="utf-8")
+
+    for rel in ("로고.png", "~$규정.docx", ".trash/지운규정.md"):
+        assert docsearch.index_one("s", docs, rel)["status"] == "skipped"
+    assert docsearch.status("s")["total"] == 0
+
+
+def test_index_one_defers_oversized_files_to_the_periodic_scan(tmp_path, ready_index,
+                                                               monkeypatch):
+    """업로드 응답에 큰 파일의 추출 시간을 얹지 않는다 — 놓치는 것이 아니라 미룬다."""
+    monkeypatch.setattr(docsearch, "INLINE_MAX_BYTES", 100)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "대형.txt").write_text("반출 승인" * 100, encoding="utf-8")
+
+    assert docsearch.index_one("s", docs, "대형.txt")["status"] == "deferred"
+    assert docsearch.search("s", "반출")["hits"] == []
+    # 미룬 것뿐이라 주기 색인이 가져간다
+    docsearch.reindex("s", docs)
+    assert docsearch.search("s", "반출")["hits"]
+
+
+def test_forget_one_removes_body_and_graph(tmp_path, ready_index):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "규정.md").write_text("# 규정\n\n반출 승인 절차", encoding="utf-8")
+    docsearch.reindex("s", docs)
+    assert docsearch.find_nodes("s", kind="document", q="규정")
+
+    docsearch.forget_one("s", "규정.md")
+    assert docsearch.search("s", "반출")["hits"] == []
+    assert docsearch.find_nodes("s", kind="document", q="규정") == []
+    assert docready.path_for("s", "규정.md").exists() is False
+
+
+def test_batch_reindex_does_not_hold_the_write_lock_for_its_whole_budget(tmp_path,
+                                                                        ready_index,
+                                                                        monkeypatch):
+    """예산(20초) 내내 트랜잭션을 붙잡으면, 그 사이 업로드가 여는 연결이 쓰기 락에서
+    `database is locked`로 터진다 — 파일은 저장됐는데 500이 나가는 자리다."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    for i in range(5):
+        (docs / f"규정{i}.md").write_text(f"# 규정 {i}\n\n반출 승인", encoding="utf-8")
+
+    monkeypatch.setattr(docsearch, "_COMMIT_EVERY", 0.0)  # 문서마다 끊는다
+    seen: list[int] = []
+    real = docsearch._index_file
+
+    def counting(conn, *args, **kwargs):
+        result = real(conn, *args, **kwargs)
+        # 다른 연결에서 지금 보이는 건수 — 커밋이 안 끊기면 배치가 끝날 때까지 0이다
+        seen.append(docsearch.status("s")["total"])
+        return result
+
+    monkeypatch.setattr(docsearch, "_index_file", counting)
+    docsearch.reindex("s", docs)
+    assert seen[-1] > 0, "배치 도중 커밋이 한 번도 보이지 않았다"

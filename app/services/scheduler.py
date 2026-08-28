@@ -103,6 +103,12 @@ def due(db: Session, now: datetime | None = None) -> list[ScheduledJob]:
             last = last.replace(tzinfo=timezone.utc)
         if now - last >= timedelta(seconds=job.interval_seconds):
             out.append(job)
+        elif isinstance(job.last_detail, dict) and job.last_detail.get("done") is False:
+            # 한 번에 못 끝낸 작업은 다음 주기까지 기다리지 않는다. 색인은 호출마다
+            # 예산(20초)만큼만 진행하고 `done: false`로 답하는데, 그걸 15분 재우면
+            # 듀티 사이클이 2%다 — 문서가 몇 천 건인 저장소는 첫 색인에 하루가 걸린다.
+            # 예전에는 사람이 reindex_docs를 done이 될 때까지 다시 눌러서 안 드러났다.
+            out.append(job)
     return sorted(out, key=lambda j: (j.last_run_at is not None, j.last_run_at or j.id))
 
 
