@@ -12,13 +12,13 @@ from ...config import get_settings
 from ...models import BuildProfile, RedirectRule
 from ..runtime.base import Endpoint
 from .apache_proxy import ApacheProxy
-from .base import DEV_SEGMENT, PathRoute, RedirectSpec, ReverseProxy
+from .base import DEV_SUFFIX, PathRoute, RedirectSpec, ReverseProxy
 from .caddy_proxy import CaddyProxy
 from .iis_proxy import IISProxy
 
 __all__ = [
     "RedirectSpec", "ReverseProxy", "PathRoute", "get_proxy", "domain_for", "path_prefix_for",
-    "DEV_SEGMENT",
+    "DEV_SUFFIX",
     "configure", "configure_paths", "remove",
 ]
 
@@ -52,13 +52,20 @@ def domain_for(project_name: str, profile: BuildProfile) -> str:
 def path_prefix_for(
     org_name: str | None, project_name: str, profile: BuildProfile,
 ) -> str:
-    """모든 배포 URL은 /apps/{조직 또는 "_"}/{프로젝트}/[dev/] 서브패스(Sub Path) 구조로 통일한다."""
+    """모든 배포 URL은 /apps/{조직 또는 "_"}/{프로젝트}[~dev]/ 서브패스로 통일한다.
+
+    **dev는 release의 형제다**(자식이 아니다). 예전에는 /apps/{조직}/{프로젝트}/dev/ 로
+    release 안에 넣었는데, 그러면 release 규칙이 dev 요청까지 매칭해서 어느 규칙이 먼저
+    놓이느냐가 라우팅을 정했다 — 그 순서를 정하는 것은 프록시 설정 조각의 파일 정렬이라는
+    눈에 안 보이는 성질이었다(그리고 실제로 뒤집혀 있었다). 형제로 떼어 놓으면 두 경로가
+    서로소라 순서가 무관해지고, release 앱이 자기 /dev/ 경로를 되찾는다.
+    """
     settings = get_settings()
     if settings.tier == "enterprise":
         return "/"
     org_segment = org_name or "_"
-    dev_segment = f"{DEV_SEGMENT}/" if profile == BuildProfile.development else ""
-    return f"/apps/{org_segment}/{project_name}/{dev_segment}"
+    suffix = DEV_SUFFIX if profile == BuildProfile.development else ""
+    return f"/apps/{org_segment}/{project_name}{suffix}/"
 
 
 def configure(

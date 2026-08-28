@@ -51,7 +51,8 @@ def test_domain_for_is_shared_base_domain_by_default(fresh_settings):
 
 def test_path_prefix_for_org_and_legacy_and_dev(fresh_settings):
     assert proxy.path_prefix_for("acme", "shop", BuildProfile.release) == "/apps/acme/shop/"
-    assert proxy.path_prefix_for("acme", "shop", BuildProfile.development) == "/apps/acme/shop/dev/"
+    # dev는 release의 자식이 아니라 **형제**다 — 두 경로가 서로소여야 규칙 순서가 무관해진다
+    assert proxy.path_prefix_for("acme", "shop", BuildProfile.development) == "/apps/acme/shop~dev/"
     assert proxy.path_prefix_for(None, "shop", BuildProfile.release) == "/apps/_/shop/"
 
 
@@ -98,8 +99,7 @@ def test_iis_configure_shared_writes_fragment_and_regenerates_base(monkeypatch, 
     IISProxy().configure("shop", BuildProfile.release, "apps.test", "/acme/shop/", ENDPOINT, REDIRECTS)
 
     fragment = (tmp_path / "sites" / "apps" / "shop" / "route.xml").read_text(encoding="utf-8")
-    # release 규칙은 dev/ 조각을 뺀다 — 아래 test_release_rule_does_not_swallow_dev 참고
-    assert 'match url="^acme/shop/(?!dev/)(.*)"' in fragment
+    assert 'match url="^acme/shop/(.*)"' in fragment
     assert "http://127.0.0.1:8123/{R:1}" in fragment
     assert 'match url="^acme/shop/old$"' in fragment  # redirect가 조직/프로젝트 접두사를 명시적으로 반영
 
@@ -549,68 +549,6 @@ def _route(rules, url: str) -> str:
     return "(매칭 없음)"
 
 
-def test_release_rule_does_not_swallow_dev(monkeypatch, tmp_path, fresh_settings):
-    """**dev 경로가 release 경로 안에 있다**(/apps/_/shop/ ⊃ /apps/_/shop/dev/).
-
-    두 규칙을 겹친 채로 두면 어느 쪽이 먼저 놓이느냐가 라우팅을 정하는데, 그 순서를
-    정하는 것은 조각 파일 정렬이라는 눈에 안 보이는 성질이었다 — 그리고 실제로 release가
-    앞에 놓여 dev 요청이 전부 release 업스트림으로 갔다. 패턴을 서로소로 만들어 순서에
-    기대지 않는다.
-    """
-    _iis_env(monkeypatch, tmp_path)
-    release = proxy.path_prefix_for(None, "shop", BuildProfile.release)
-    dev = proxy.path_prefix_for(None, "shop", BuildProfile.development)
-    assert dev.startswith(release)   # 이 포함관계가 문제의 뿌리다
-
-    IISProxy().configure("shop", BuildProfile.release, "apps.test", release,
-                         Endpoint(host="127.0.0.1", port=8001), [])
-    IISProxy().configure("shop", BuildProfile.development, "apps.test", dev,
-                         Endpoint(host="127.0.0.1", port=8002), [])
-
-    rules = _composed_rules(tmp_path)
-    assert _route(rules, "apps/_/shop/index.html") == "http://127.0.0.1:8001/index.html"
-    assert _route(rules, "apps/_/shop/dev/index.html") == "http://127.0.0.1:8002/index.html"
-    # 조각 경계까지 본다 — "dev"로 시작하는 파일 이름은 dev 배포가 아니다
-    assert _route(rules, "apps/_/shop/devtools.js") == "http://127.0.0.1:8001/devtools.js"
-
-    # 그리고 **순서가 뒤바뀌어도** 같은 답이 나온다(그것이 서로소의 뜻이다)
-    assert _route(list(reversed(rules)), "apps/_/shop/dev/a") == "http://127.0.0.1:8002/a"
-    assert _route(list(reversed(rules)), "apps/_/shop/a") == "http://127.0.0.1:8001/a"
-
-
-def test_dev_fragment_itself_is_not_guarded(monkeypatch, tmp_path, fresh_settings):
-    """선읽기는 release 쪽에만 붙는다 — dev 규칙에 붙으면 /dev/dev/... 를 스스로 막는다."""
-    _iis_env(monkeypatch, tmp_path)
-    dev = proxy.path_prefix_for(None, "shop", BuildProfile.development)
-    IISProxy().configure("shop", BuildProfile.development, "apps.test", dev,
-                         Endpoint(host="127.0.0.1", port=8002), [])
-    from app.services.proxy.base import site_name
-
-    frag_dir = site_name("shop", BuildProfile.development)
-    fragment = (tmp_path / "sites" / "apps" / frag_dir / "route.xml").read_text(encoding="utf-8")
-    assert 'match url="^apps/_/shop/dev/(.*)"' in fragment
-    assert "(?!" not in fragment
-
-
-def test_composite_subpaths_are_not_guarded(monkeypatch, tmp_path, fresh_settings):
-    """dev를 삼킬 수 있는 것은 프로젝트 루트 규칙 하나뿐이다.
-
-    /api/ 같은 하위 경로에까지 선읽기를 붙이면 앱이 실제로 가진 /api/dev/... 경로를
-    플랫폼이 막아 버린다.
-    """
-    _iis_env(monkeypatch, tmp_path)
-    base = proxy.path_prefix_for(None, "shop", BuildProfile.release)
-    IISProxy().configure_paths("shop", BuildProfile.release, "apps.test",
-                               _composite_routes(base), [])
-
-    rules = _composed_rules(tmp_path)
-    assert _route(rules, "apps/_/shop/api/dev/report") == "http://127.0.0.1:8001/dev/report"
-    assert _route(rules, "apps/_/shop/dev/index.html") == "(매칭 없음)"   # dev 배포가 받는다
-
-
-
-# --- site_name이 단사인가 ---
-
 def test_site_name_cannot_collide_between_a_project_and_another_projects_dev(fresh_settings):
     """프로젝트 이름 규칙(^[a-z0-9][a-z0-9-]{1,40}$)에 하이픈이 있다.
 
@@ -640,25 +578,60 @@ def test_two_projects_that_used_to_collide_keep_separate_fragments(
             Endpoint(host="127.0.0.1", port=port), [])
 
     rules = _composed_rules(tmp_path)
-    assert _route(rules, "apps/_/shop/dev/a") == "http://127.0.0.1:8002/a"
+    assert _route(rules, "apps/_/shop~dev/a") == "http://127.0.0.1:8002/a"
     assert _route(rules, "apps/_/shop-dev/a") == "http://127.0.0.1:9001/a"
 
     # remove가 남의 조각을 지우지 않는다
     IISProxy().remove("shop-dev", BuildProfile.release)
     rules = _composed_rules(tmp_path)
-    assert _route(rules, "apps/_/shop/dev/a") == "http://127.0.0.1:8002/a"
+    assert _route(rules, "apps/_/shop~dev/a") == "http://127.0.0.1:8002/a"
     assert _route(rules, "apps/_/shop-dev/a") == "(매칭 없음)"
 
 
-def test_dev_suffix_keeps_apache_glob_ordering(fresh_settings):
-    """Apache는 IncludeOptional handles/*.conf의 **글롭 순서**가 곧 ProxyPass 우선순위다.
+def test_release_and_dev_are_disjoint_whatever_the_rule_order(
+        monkeypatch, tmp_path, fresh_settings):
+    """**이것이 형제 경로로 바꾼 이유다.**
 
-    dev 경로가 release 경로 안에 있으므로 dev 조각이 먼저 읽혀야 한다. 접미사 문자의
-    ASCII가 '.'(46)보다 크면 그 순서가 뒤집혀 dev가 release로 새어 들어간다 —
-    '_'(95)나 '~'(126)로 바꾸면 그렇게 된다. 눈에 안 보이는 제약이라 여기에 못 박아 둔다.
+    예전에는 dev가 release 안에 있어서(/apps/_/shop/ ⊃ /apps/_/shop/dev/) 어느 규칙이
+    먼저 놓이느냐가 라우팅을 정했고, 그 순서는 조각 파일 정렬이 정했다 — 눈에 안 보이는
+    성질이었고 실제로 뒤집혀 있어서 dev 요청이 전부 release로 갔다. 형제가 되면 어느
+    패턴도 상대의 URL에 매칭되지 않으므로 순서를 물을 필요가 없다.
     """
-    from app.services.proxy.base import site_name
+    _iis_env(monkeypatch, tmp_path)
+    for profile, port in ((BuildProfile.release, 8001), (BuildProfile.development, 8002)):
+        IISProxy().configure(
+            "shop", profile, "apps.test", proxy.path_prefix_for(None, "shop", profile),
+            Endpoint(host="127.0.0.1", port=port), [])
 
-    release = f"{site_name('shop', BuildProfile.release)}.conf"
-    dev = f"{site_name('shop', BuildProfile.development)}.conf"
-    assert sorted([release, dev])[0] == dev
+    rules = _composed_rules(tmp_path)
+    for order in (rules, list(reversed(rules))):
+        assert _route(order, "apps/_/shop/index.html") == "http://127.0.0.1:8001/index.html"
+        assert _route(order, "apps/_/shop~dev/index.html") == "http://127.0.0.1:8002/index.html"
+
+    # 그리고 release 앱이 **자기 /dev/ 경로를 되찾는다** — 예전에는 플랫폼이 가져갔다
+    assert _route(rules, "apps/_/shop/dev/tools.html") == "http://127.0.0.1:8001/dev/tools.html"
+
+
+def test_no_rule_needs_a_lookahead_any_more(monkeypatch, tmp_path, fresh_settings):
+    """서로소가 됐으니 패턴에 예외를 새길 이유가 없다 — 남아 있으면 서로소가 아니라는 뜻이다."""
+    _iis_env(monkeypatch, tmp_path)
+    base = proxy.path_prefix_for(None, "shop", BuildProfile.release)
+    IISProxy().configure_paths("shop", BuildProfile.release, "apps.test",
+                               _composite_routes(base), [])
+    xml = (tmp_path / "sites" / "_base" / "web.config").read_text(encoding="utf-8")
+    assert "(?!" not in xml
+    # composite 하위 경로도 그대로다 — 앱의 /api/dev/... 를 막지 않는다
+    rules = _composed_rules(tmp_path)
+    assert _route(rules, "apps/_/shop/api/dev/report") == "http://127.0.0.1:8001/dev/report"
+
+
+def test_dev_suffix_is_not_a_regex_metacharacter(fresh_settings):
+    """이 값은 IIS match 패턴에 그대로 들어간다 — '+'였다면 패턴이 깨진다."""
+    import re
+
+    from app.services.proxy.base import DEV_SUFFIX
+
+    prefix = f"apps/_/shop{DEV_SUFFIX}"
+    assert re.match(f"^{prefix}/(.*)", f"{prefix}/x").group(1) == "x"
+    # 프로젝트 이름에 못 쓰는 문자여야 site_name도 경로도 충돌하지 않는다
+    assert not re.match(r"^[a-z0-9][a-z0-9-]{1,40}$", DEV_SUFFIX)

@@ -25,7 +25,7 @@ React · HTML(정적) · Python(FastAPI) · Streamlit · Node · LLM 앱을 배�
 | 실행 방식 | dev 서버 (Vite HMR, uvicorn `--reload`) | 프로덕션 빌드 (minify, 멀티스테이지, non-root) |
 | 이미지 태그 | `{name}:{sha}-dev` | `{name}:{sha}` |
 | 환경변수 | `APP_ENV/NODE_ENV=development` | `production` |
-| URL (1차/small) | `{base_domain}/apps/{조직 또는 "_"}/{name}/dev/` | 지정 도메인 또는 `{base_domain}/apps/{조직 또는 "_"}/{name}/` |
+| URL (1차/small) | `{base_domain}/apps/{조직 또는 "_"}/{name}~dev/` | `{base_domain}/apps/{조직 또는 "_"}/{name}/` |
 | URL (2차/enterprise) | `{name}-dev.{base_domain}` | `{name}.{base_domain}` |
 | 리소스 | release의 50% | 100% |
 | replicas (k8s) | 1, Recreate | 2, RollingUpdate |
@@ -182,7 +182,7 @@ ADMIN=... BASE=http://localhost:7000/paas/api/v1
 curl -X POST $BASE/projects -H "x-api-key: $ADMIN" -H 'content-type: application/json' \
   -d '{"name":"front","type":"react","git_url":"https://git.example.com/org/portal-front"}'
 
-# development 배포 → {base_domain}/apps/_/front/dev/ (organization_id로 등록했다면 /apps/_/ 대신 /apps/{조직}/)
+# development 배포 → {base_domain}/apps/_/front~dev/ (organization_id로 등록했다면 /apps/_/ 대신 /apps/{조직}/)
 curl -X POST $BASE/projects/1/deploy -H "x-api-key: $ADMIN" \
   -H 'content-type: application/json' -d '{"profile":"development"}'
 

@@ -27,25 +27,28 @@ class RedirectSpec:
         )
 
 
-# development 배포가 쓰는 경로 조각. **release 경로 바로 아래에 들어간다** —
-# /apps/{조직}/{프로젝트}/ 안에 /apps/{조직}/{프로젝트}/dev/ 가 있는 모양이라, 두 규칙을
-# 그대로 두면 release 쪽이 dev 요청까지 삼킨다(services/proxy/__init__.py의
-# path_prefix_for가 이 값을 붙이고, iis_proxy._match_url이 그 둘을 갈라 놓는다).
-DEV_SEGMENT = "dev"
-
-
-# development 배포의 사이트 이름 접미사. **프로젝트 이름 규칙에 없는 문자를 쓴다**
-# (^[a-z0-9][a-z0-9-]{1,40}$ — 하이픈은 있고 +는 없다).
+# development 배포를 가리키는 접미사. **경로와 사이트 이름이 같은 것을 쓴다.**
 #
-# 예전에는 "-dev"였는데, 그러면 site_name이 단사가 아니었다: 프로젝트 shop의 dev 배포와
-# 프로젝트 shop-dev의 release 배포가 둘 다 "shop-dev"가 되어 **같은 조각 파일 하나를
-# 공유했다** — 뒤에 배포한 쪽이 앞엣것의 라우트를 덮어쓰고, remove()가 남의 것을 지웠다.
+#   경로       /apps/{조직}/{프로젝트}~dev/
+#   사이트 이름  {프로젝트}~dev   (조각 파일 이름·규칙 이름)
 #
-# 하필 '+'인 이유: Apache는 IncludeOptional handles/*.conf의 글롭 순서(알파벳)가 곧
-# ProxyPass 우선순위이고, dev가 release보다 앞서야 한다(경로가 release 안에 있다).
-# '+'(43)는 '.'(46)보다 작아 "shop+dev.conf" < "shop.conf"가 유지된다 — '_'나 '~'로
-# 바꾸면 그 순서가 뒤집혀 Apache에서 dev가 release로 새어 들어간다.
-DEV_SUFFIX = "+dev"
+# 문자는 프로젝트 이름 규칙(^[a-z0-9][a-z0-9-]{1,40}$)에 **없는** 것이어야 한다. 그래야
+# 두 가지가 동시에 성립한다:
+#
+#   1. site_name이 단사다. "-dev"이던 때는 프로젝트 shop의 dev와 프로젝트 shop-dev의
+#      release가 같은 이름이 되어 조각 파일 하나를 공유했다 — 뒤에 배포한 쪽이 앞엣것의
+#      라우트를 덮어쓰고 remove()가 남의 것을 지웠다.
+#   2. release 경로와 dev 경로가 **서로소**다. 예전에는 dev가 release 안에 있어서
+#      (/apps/_/shop/ ⊃ /apps/_/shop/dev/) 어느 규칙이 먼저 놓이느냐가 라우팅을 정했고,
+#      그 순서는 조각 파일 정렬이라는 눈에 안 보이는 성질이 정했다. 형제로 떼어 놓으면
+#      순서가 아예 무관해진다 — 세 백엔드 모두에서.
+#
+# 그리고 이제 release 앱이 **자기 /dev/ 경로를 되찾는다**. 예전에는 플랫폼이 그 자리를
+# 가져가서 /apps/_/shop/dev/... 가 앱에 닿지 못했다.
+#
+# '~'인 이유: URL 경로에서 이스케이프가 필요 없는 문자(RFC 3986 unreserved)이고 정규식
+# 메타문자가 아니다 — 이 값은 IIS match 패턴에 그대로 들어간다('+'였다면 깨진다).
+DEV_SUFFIX = "~dev"
 
 
 def site_name(project_name: str, profile: BuildProfile) -> str:
