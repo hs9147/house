@@ -26,7 +26,7 @@ from pathlib import Path
 from ...config import get_settings
 from ...models import BuildProfile
 from ..runtime.base import Endpoint
-from .base import PathRoute, RedirectSpec, ReverseProxy, site_name
+from .base import DEV_SEGMENT, PathRoute, RedirectSpec, ReverseProxy, site_name
 
 REDIRECT_TYPES = {301: "Permanent", 302: "Found", 303: "SeeOther", 307: "Temporary"}
 
@@ -216,17 +216,38 @@ def _migrate_legacy_routes_if_needed() -> None:
                 pass
 
 
+def _match_url(path_prefix: str, exclude_dev: bool) -> str:
+    """규칙의 match 패턴. release 루트 규칙에는 dev/ 조각을 빼는 부정 선읽기를 붙인다.
+
+    **dev 경로가 release 경로 안에 있다**(/apps/_/shop/ ⊃ /apps/_/shop/dev/). 그대로 두면
+    어느 규칙이 먼저 놓이느냐가 라우팅을 정하는데, 그 순서를 정하는 것은 조각 파일을
+    합칠 때의 정렬(_regenerate_base_web_config의 sorted(glob))이다 — 눈에 보이지 않는
+    성질이고, 실제로 release("shop")가 dev("shop-dev")보다 앞에 놓여 **dev 요청이 전부
+    release 업스트림으로 갔다**. 두 패턴을 서로소로 만들어 순서에 기대지 않게 한다.
+
+    선읽기는 캡처 그룹이 아니라 {R:1}은 그대로 경로 나머지를 가리킨다.
+    """
+    prefix = path_prefix.strip("/")
+    guard = f"(?!{DEV_SEGMENT}/)" if exclude_dev else ""
+    return f"^{prefix}/{guard}(.*)"
+
+
 def _build_shared_fragment(
     frag_key: str, routes: list[PathRoute], redirects: list[RedirectSpec],
+    profile: BuildProfile = BuildProfile.release,
 ) -> str:
     ordered = sorted(routes, key=lambda r: r.path_prefix in ("/", ""))
+    # dev를 삼킬 수 있는 것은 프로젝트 루트 경로를 잡는 규칙 하나뿐이다(가장 넓은 것 =
+    # 마지막). composite의 /api/ 같은 하위 경로에까지 선읽기를 붙이면 앱이 실제로 가진
+    # /api/dev/... 같은 경로를 막게 된다.
+    root = ordered[-1]
+    guard_root = profile != BuildProfile.development
     blocks = []
     for i, r in enumerate(ordered):
-        prefix = r.path_prefix.strip("/")
         proxy_target = _rewrite_target(r)
         blocks.append(
             f'        <rule name="{frag_key}-path-{i}" stopProcessing="true">\n'
-            f'          <match url="^{prefix}/(.*)" />\n'
+            f'          <match url="{_match_url(r.path_prefix, guard_root and r is root)}" />\n'
             f'          <action type="Rewrite" url="{proxy_target}" />\n'
             f'        </rule>\n'
         )
@@ -377,7 +398,7 @@ class IISProxy(ReverseProxy):
         # 배포 도메인/경로는 서브패스(Sub Path) 기반으로 통일 관리한다.
         frag_key = site_name(project_name, profile)
         _route_fragment_file(project_name, profile).write_text(
-            _build_shared_fragment(frag_key, routes, redirects), encoding="utf-8",
+            _build_shared_fragment(frag_key, routes, redirects, profile), encoding="utf-8",
         )
         _regenerate_base_web_config()
         _ensure_base_site()

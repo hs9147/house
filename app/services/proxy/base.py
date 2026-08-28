@@ -27,6 +27,13 @@ class RedirectSpec:
         )
 
 
+# development 배포가 쓰는 경로 조각. **release 경로 바로 아래에 들어간다** —
+# /apps/{조직}/{프로젝트}/ 안에 /apps/{조직}/{프로젝트}/dev/ 가 있는 모양이라, 두 규칙을
+# 그대로 두면 release 쪽이 dev 요청까지 삼킨다(services/proxy/__init__.py의
+# path_prefix_for가 이 값을 붙이고, iis_proxy._match_url이 그 둘을 갈라 놓는다).
+DEV_SEGMENT = "dev"
+
+
 def site_name(project_name: str, profile: BuildProfile) -> str:
     suffix = "-dev" if profile == BuildProfile.development else ""
     return f"{project_name}{suffix}"
