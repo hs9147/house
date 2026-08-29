@@ -467,3 +467,95 @@ def test_hwpx_merged_cells_fall_back_to_inline_html(tmp_path):
     )
     md = doctext.extract_markdown(_zip(tmp_path / "양식.hwpx", {"Contents/section0.xml": section}))
     assert '<th colspan="2">결재</th>' in md
+
+
+# --- PDF OCR 폴백 ---
+
+def test_scanned_pdf_error_names_the_ocr_setting(tmp_path, monkeypatch):
+    """OCR 도구가 없을 때의 오류가 무엇을 설치하면 되는지 말해야 한다(soffice와 같은 규칙)."""
+    monkeypatch.setattr(doctext, "_tesseract", lambda: None)
+    with pytest.raises(doctext.ExtractError, match="PAAS_TESSERACT_PATH"):
+        doctext.extract(_pdf(tmp_path / "스캔.pdf", None))
+
+
+def test_scanned_pdf_falls_back_to_ocr(tmp_path, monkeypatch):
+    """텍스트 레이어가 없으면 OCR로 넘어간다 — 출처는 마크다운에만 남고 검색 평문은 깨끗하다."""
+    monkeypatch.setattr(doctext, "_ocr_pdf", lambda path: "물품 반출 관리 규정")
+    markdown, plain = doctext.extract(_pdf(tmp_path / "스캔.pdf", None))
+    assert plain == "물품 반출 관리 규정"
+    assert markdown.startswith("<!-- 이미지에서 OCR로 추출한 텍스트입니다 -->")
+    # 마크다운을 평문으로 벗겨도 출처 주석은 검색에 안 들어간다
+    assert "OCR" not in doctext.to_plain(markdown)
+
+
+def test_normal_text_pdf_never_touches_ocr(tmp_path, monkeypatch):
+    def _boom(path):
+        raise AssertionError("텍스트가 멀쩡한 PDF가 OCR을 탔다")
+
+    monkeypatch.setattr(doctext, "_ocr_pdf", _boom)
+    markdown, plain = doctext.extract(_pdf(tmp_path / "a.pdf", "export approval"))
+    assert "export approval" in plain
+    assert "OCR" not in markdown
+
+
+def test_garbled_pua_text_is_not_silently_indexed(tmp_path, monkeypatch):
+    """HWP 계열 PDF는 한글을 사설영역(PUA) 코드로 심는 경우가 있다 — pypdf가 "성공"해도
+    검색 불가능한 쓰레기다. 예전에는 그대로 색인됐다(읽었다고 착각하게 만드는 상태)."""
+    garbage = "\ue0a1\ue0b2\ue0c3 \ue0d4\ue0e5\ue0f6" * 40
+    monkeypatch.setattr(doctext, "_ocr_pdf", lambda path: "복구된 본문")
+    fake_pages = [type("P", (), {"extract_text": lambda self: garbage})()]
+
+    import pypdf
+
+    class _FakeReader:
+        def __init__(self, _path):
+            self.is_encrypted = False
+            self.pages = fake_pages
+
+    monkeypatch.setattr(pypdf, "PdfReader", _FakeReader)
+    markdown, plain = doctext.extract(_pdf(tmp_path / "깨짐.pdf", "x"))
+    assert plain == "복구된 본문"
+
+    # OCR이 없으면 쓰레기를 색인하지 않고 실패로 알린다
+    monkeypatch.setattr(doctext, "_ocr_pdf", lambda path: None)
+    with pytest.raises(doctext.ExtractError, match="깨져"):
+        doctext.extract(_pdf(tmp_path / "깨짐.pdf", "x"))
+
+
+def test_looks_garbled_spares_english_and_korean():
+    """한글 없음은 깨짐의 근거가 아니다 — 영어 문서는 한글 0%가 정상이다."""
+    assert doctext._looks_garbled("\ue000\ue001\ue002" * 100) is True
+    assert doctext._looks_garbled("Quarterly report: revenue grew 12%.") is False
+    assert doctext._looks_garbled("반출 승인 절차를 정한다.") is False
+    assert doctext._looks_garbled("") is False
+
+
+def _ocr_ready() -> bool:
+    import importlib.util
+    import shutil as sh
+    from pathlib import Path
+
+    return bool(
+        sh.which("tesseract")
+        and importlib.util.find_spec("pypdfium2")
+        and importlib.util.find_spec("PIL")
+        and Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf").exists()
+    )
+
+
+@pytest.mark.skipif(not _ocr_ready(), reason="tesseract/pypdfium2/한글 폰트 없음")
+def test_ocr_end_to_end_reads_a_scanned_korean_pdf(tmp_path):
+    """이미지로만 담긴 한글 PDF가 실제 OCR 경로로 읽힌다 — 도구가 깔린 환경에서만 돈다."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    font = ImageFont.truetype("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", 42)
+    img = Image.new("RGB", (1240, 400), "white")
+    d = ImageDraw.Draw(img)
+    d.text((80, 80), "물품 반출 관리 규정", font=font, fill=(20, 20, 20))
+    d.text((80, 180), "제1조(목적) 반출 절차와 승인 기준을 정한다.", font=font, fill=(20, 20, 20))
+    pdf = tmp_path / "스캔.pdf"
+    img.save(pdf)
+
+    markdown, plain = doctext.extract(pdf)
+    assert "반출" in plain and "승인" in plain
+    assert markdown.startswith("<!-- 이미지에서 OCR로 추출한 텍스트입니다 -->")

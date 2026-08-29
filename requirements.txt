@@ -23,4 +23,7 @@ python-multipart>=0.0.9
 # pypdf>=4.0           # 문서 텍스트 추출(services/doctext.py)에서 PDF를 읽을 때.
 #                      # docx·xlsx·pptx는 표준 라이브러리만으로 읽으므로 이것만 있으면 된다.
 #                      # 97-2003 바이너리(.doc/.xls/.ppt)는 LibreOffice가 필요하다(PAAS_SOFFICE_PATH).
+# pypdfium2>=4.0       # 스캔·깨진 PDF의 OCR 폴백(페이지 렌더링). Pillow와 Tesseract(kor 언어
+# Pillow>=10.0         # 데이터 포함, PAAS_TESSERACT_PATH)가 함께 있어야 동작한다 — 셋 중
+#                      # 하나라도 없으면 해당 PDF만 "추출 불가"로 표시되고 나머지는 그대로다.
 

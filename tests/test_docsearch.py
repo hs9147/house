@@ -168,6 +168,7 @@ def test_status_reports_coverage_and_failure_reasons(docs, monkeypatch):
     from app.services import doctext as dt
 
     monkeypatch.setattr(dt, "_soffice", lambda: None)
+    monkeypatch.setattr(dt, "_tesseract", lambda: None)  # OCR 도구 없는 서버 시나리오
     pytest.importorskip("pypdf")
 
     docsearch.reindex("s1", docs)

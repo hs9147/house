@@ -223,6 +223,11 @@ class Settings(BaseSettings):
     # (예: C:\Program Files\LibreOffice\program\soffice.exe). 비우면 PATH의 soffice를
     # 찾고, 그것도 없으면 해당 형식만 "추출 불가"로 표시된다(docx류·pdf는 무관).
     soffice_path: str = ""
+    # 스캔(이미지) PDF와 텍스트가 깨진 PDF(HWP 계열의 사설영역 인코딩)를 OCR로 추출할 때
+    # 쓰는 Tesseract 실행 파일 경로(예: C:\Program Files\Tesseract-OCR\tesseract.exe).
+    # kor 언어 데이터와 pip 패키지 pypdfium2(페이지 렌더링)가 함께 필요하다. 비우면
+    # PATH의 tesseract를 찾고, 그것도 없으면 해당 PDF만 "추출 불가"로 표시된다.
+    tesseract_path: str = ""
 
     # 사내 문서 검색(services/docsearch.py)이 추출 텍스트를 캐시하는 자리. 파생 데이터라
     # 언제든 지우고 다시 만들 수 있어서 플랫폼 DB가 아니라 저장소별 sqlite 파일로 둔다.
