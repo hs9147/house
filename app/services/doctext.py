@@ -23,8 +23,10 @@
 
   zip(PK)        docx·xlsx·pptx·hwpx  표준 라이브러리만으로 된다(zipfile + ElementTree).
                                       이 형식들은 zip 안의 XML이다.
-  %PDF           pdf                  pypdf(선택 의존성). 스캔 이미지 PDF는 텍스트가
-                                      없으므로 OCR이 필요하다고 알린다.
+  %PDF           pdf                  pypdf(선택 의존성). 텍스트가 없는 스캔 PDF와
+                                      깨진 텍스트(HWP 계열의 사설영역 인코딩)는
+                                      Tesseract OCR 폴백(선택, PAAS_TESSERACT_PATH) —
+                                      없으면 무엇을 설치하면 되는지 알린다.
   OLE(D0CF11E0)  97-2003 doc·xls·ppt  순수 파이썬으로 제대로 뽑을 수 없다 →
                                       LibreOffice(soffice) 변환 경유(선택).
   그 외           텍스트                utf-8 → cp949 순서로 디코드한다. 한국어 윈도우에서
@@ -73,8 +75,15 @@ def extract(path: Path) -> tuple[str, str]:
         return markdown, to_plain(markdown)
 
     if head[:4] == b"%PDF":
-        text = _pdf_text(path)
-    elif head[:4] == _OLE_MAGIC:
+        text, from_ocr = _pdf_text(path)
+        text = text[:MAX_TEXT_CHARS]
+        if from_ocr:
+            # 출처는 마크다운 쪽에만 남긴다 — to_plain이 이 줄을 떨어뜨려 검색은
+            # 오염되지 않고, read_doc으로 열어 본 사람은 왜 글자가 어색한지 알 수 있다.
+            return f"<!-- 이미지에서 OCR로 추출한 텍스트입니다 -->\n\n{text}", text
+        return text, text
+
+    if head[:4] == _OLE_MAGIC:
         text = _legacy_office_text(path)
     else:
         text = _plain_text(path)
@@ -109,12 +118,13 @@ def _ooxml_markdown(path: Path) -> str:
                 return _xlsx_markdown(zf, names)
             if "word/document.xml" in names:
                 return _docx_markdown(zf)
-            for pattern in (_SLIDE_RE, _HWPX_RE):
-                entries = sorted((n for n in names if pattern.match(n)), key=_entry_order)
-                if not entries:
-                    continue
+            sections = sorted((n for n in names if _HWPX_RE.match(n)), key=_entry_order)
+            if sections:
+                return _hwpx_markdown(zf, sections)
+            slides = sorted((n for n in names if _SLIDE_RE.match(n)), key=_entry_order)
+            if slides:
                 # 단락 사이는 빈 줄로 — 마크다운에서 줄바꿈 하나는 같은 문단의 이어짐이다.
-                parts = [_xml_text(zf.read(n), "t", "p") for n in entries]
+                parts = [_xml_text(zf.read(n), "t", "p") for n in slides]
                 return "\n".join(p for p in parts if p)
     except zipfile.BadZipFile as e:
         raise ExtractError(f"압축이 깨졌습니다: {e}")
@@ -160,17 +170,40 @@ def _docx_markdown(zf: zipfile.ZipFile) -> str:
 
 
 def _docx_rows(tbl) -> list[list[tuple[str, int]]]:
-    """(셀 텍스트, 가로 병합 칸 수). 세로 병합은 칸 수를 바꾸지 않으므로 빈 셀로 남는다."""
+    """(셀 텍스트, 가로 병합 칸 수).
+
+    세로 병합의 이어지는 셀(vMerge, restart 아님)은 XML에서 빈 셀이다 — 그대로 두면
+    "총무팀"이 첫 행에만 남고 병합 아래 행들은 부서 없는 값이 된다. 위 행에서 같은
+    자리를 덮는 셀의 텍스트를 내려 채워 행마다 온전한 레코드로 만든다."""
     rows = []
     for tr in (c for c in tbl if _local(c) == "tr"):
         cells = []
+        grid = 0  # 이 셀이 시작하는 표 기준 열 자리(앞 셀들의 병합 칸 수 누적)
         for tc in (c for c in tr if _local(c) == "tc"):
             text = "".join(t.text or "" for t in tc.iter() if _local(t) == "t")
             span = next((_attr(g, "val") for g in tc.iter() if _local(g) == "gridSpan"), "")
-            cells.append((text, int(span) if span.isdigit() else 1))
+            width = int(span) if span.isdigit() else 1
+            merge = next((g for g in tc.iter() if _local(g) == "vMerge"), None)
+            if merge is not None and _attr(merge, "val") != "restart" and not text.strip():
+                text = _cell_above(rows, grid)
+            cells.append((text, width))
+            grid += width
         if cells:
             rows.append(cells)
     return rows
+
+
+def _cell_above(rows: list[list[tuple[str, int]]], grid: int) -> str:
+    """바로 위 행에서 grid 열 자리를 덮는 셀의 텍스트 — 위 행도 이미 채워져 있으므로
+    3행 이상 병합도 한 행씩 내려온다."""
+    if not rows:
+        return ""
+    pos = 0
+    for text, span in rows[-1]:
+        if pos <= grid < pos + span:
+            return text
+        pos += span
+    return ""
 
 
 # --- 표 렌더링 ---
@@ -213,6 +246,62 @@ def _table_html(rows: list[list[tuple[str, int]]]) -> str:
     return "\n".join(out)
 
 
+# --- hwpx: 표를 살린다 ---
+
+def _hwpx_markdown(zf: zipfile.ZipFile, entries: list[str]) -> str:
+    """hwpx 구역 — 단락은 줄로, 표는 행·열이 남게 마크다운 표로.
+
+    사내 규정·대장류의 지배적 형식인데, 표를 단락처럼 흘리면 셀이 세로 나열로 무너져
+    "2025-01"이 어느 관리번호의 값인지 복원할 수 없다(평문 추출의 표 문제와 같다).
+
+    hwpx의 표는 단락의 런 안에 컨트롤로 들어 있다(<hp:p><hp:run><hp:tbl>…). 문서
+    순서로 걸으며 표를 만나면 통째로 렌더링하고 그 아래로는 들어가지 않는다 — 셀
+    텍스트가 단락 나열로 한 번 더 나오면 같은 값이 검색에 두 번 걸린다.
+    """
+    blocks: list[str] = []
+    for name in entries:
+        root = _parse(zf.read(name), name)
+        inside_table: set[int] = set()
+        buffer: list[str] = []
+
+        def flush() -> None:
+            if buffer:
+                blocks.append("".join(buffer))
+                buffer.clear()
+
+        for element in root.iter():
+            if id(element) in inside_table:
+                continue
+            local = _local(element)
+            if local == "tbl":
+                inside_table.update(id(d) for d in element.iter())
+                flush()
+                table = _table_markdown(_hwpx_rows(element))
+                if table:
+                    blocks.append(table)
+            elif local == "p":
+                flush()
+            elif local == "t" and element.text:
+                buffer.append(element.text)
+        flush()
+    return "\n\n".join(blocks)
+
+
+def _hwpx_rows(tbl) -> list[list[tuple[str, int]]]:
+    """(셀 텍스트, 가로 병합 칸 수). 병합 칸 수는 <hp:cellSpan colSpan="…">에 있다."""
+    rows = []
+    for tr in (c for c in tbl if _local(c) == "tr"):
+        cells = []
+        for tc in (c for c in tr if _local(c) == "tc"):
+            text = "".join(t.text or "" for t in tc.iter() if _local(t) == "t")
+            span = next(
+                (g.get("colSpan") or "" for g in tc.iter() if _local(g) == "cellSpan"), "")
+            cells.append((text, int(span) if span.isdigit() else 1))
+        if cells:
+            rows.append(cells)
+    return rows
+
+
 # --- xlsx ---
 
 def _xlsx_markdown(zf: zipfile.ZipFile, names: list[str]) -> str:
@@ -242,7 +331,17 @@ def _xlsx_markdown(zf: zipfile.ZipFile, names: list[str]) -> str:
         for row in root.iter():
             if _local(row) != "row":
                 continue
-            cells = [_cell_text(cell, shared) for cell in row if _local(cell) == "c"]
+            # 엑셀은 빈 셀을 XML에 아예 쓰지 않는다 — 순서대로만 받으면 A·C에 값이 있는
+            # 행에서 C의 값이 B 열로 밀려 들어온다(금액이 담당자 열로 읽히는 식으로,
+            # 틀린 값이 조용히 맞는 값처럼 보인다). 셀 참조(r="C2")로 제자리에 놓는다.
+            cells: list[str] = []
+            for cell in row:
+                if _local(cell) != "c":
+                    continue
+                at = _col_index(cell.get("r") or "")
+                if at is not None and at > len(cells):
+                    cells.extend([""] * (at - len(cells)))
+                cells.append(_cell_text(cell, shared))
             if any(cells):
                 rows.append([(value, 1) for value in cells])
         if not rows:
@@ -254,6 +353,17 @@ def _xlsx_markdown(zf: zipfile.ZipFile, names: list[str]) -> str:
             blocks.append(f"## {title}")
         blocks.append(_table_markdown(rows))
     return "\n\n".join(blocks)
+
+
+def _col_index(ref: str) -> int | None:
+    """셀 참조의 열 자리 — "C2"면 2. 참조가 없는 파일(라이브러리 생성)은 None → 순서대로."""
+    match = re.match(r"([A-Z]{1,3})\d+$", ref)
+    if not match:
+        return None
+    index = 0
+    for ch in match.group(1):
+        index = index * 26 + (ord(ch) - 64)
+    return index - 1
 
 
 def _cell_text(cell, shared: list[str]) -> str:
@@ -350,7 +460,8 @@ def _xml_text(data: bytes, text_tag: str, block_tag: str) -> str:
 
 # --- PDF ---
 
-def _pdf_text(path: Path) -> str:
+def _pdf_text(path: Path) -> tuple[str, bool]:
+    """(본문, OCR을 거쳤는가). 텍스트 레이어가 멀쩡하면 그대로, 없거나 깨졌으면 OCR 폴백."""
     try:
         from pypdf import PdfReader  # noqa: PLC0415 — 선택 의존성
     except ImportError:
@@ -371,10 +482,106 @@ def _pdf_text(path: Path) -> str:
         raise ExtractError(f"PDF를 읽을 수 없습니다: {str(e)[:200]}")
 
     text = "\n".join(pages).strip()
-    if not text:
+    if text and not _looks_garbled(text):
+        return text, False
+
+    ocr = _ocr_pdf(path)
+    if ocr is not None:
+        return ocr, True
+    if text:
+        # 예전에는 이 깨진 텍스트가 조용히 색인됐다 — 확장자를 믿지 않는 이유와 같다:
+        # "읽었다"고 착각하게 만드는 것이 못 읽는 것보다 나쁘다.
         raise ExtractError(
-            "PDF에서 텍스트를 찾지 못했습니다 — 스캔 이미지 PDF일 수 있습니다(OCR 필요).")
-    return text
+            "PDF 텍스트가 깨져 있습니다(한글이 사설영역 코드로 저장된 HWP 계열 PDF) — "
+            "Tesseract(kor)를 설치하고 PAAS_TESSERACT_PATH를 지정하면 OCR로 추출합니다.")
+    # "OCR"이 앞쪽에 오게 쓴다 — index_status의 실패 이유 요약이 앞 60자만 남긴다.
+    raise ExtractError(
+        "PDF에 텍스트가 없습니다(스캔 이미지) — OCR로 추출하려면 Tesseract(kor)와 "
+        "pip 패키지 pypdfium2·Pillow를 설치하고 PAAS_TESSERACT_PATH를 지정하세요.")
+
+
+def _looks_garbled(text: str) -> bool:
+    """추출은 됐지만 내용이 깨진 텍스트인가.
+
+    HWP 계열에서 만든 PDF는 한글을 유니코드 사설영역(PUA) 코드로 심는 경우가 있어
+    pypdf가 "성공"해도 검색 불가능한 글자만 나온다. **한글이 없다는 것**은 기준으로
+    쓰지 않는다 — 영어 문서는 한글 0%가 정상이다. 사설영역·대체문자 비율로만 판정한다.
+    """
+    sample = re.sub(r"\s", "", text[:20_000])[:5_000]
+    if not sample:
+        return False
+    bad = sum(1 for ch in sample if "\ue000" <= ch <= "\uf8ff" or ch == "\ufffd")
+    return bad / len(sample) > 0.3
+
+
+# 측정(합성 스캔 2쪽, 한글 규정): 150dpi + psm 6에서 쪽당 ~1초, 문자 일치 99%.
+# 해상도를 올리면 느려지기만 하고(300dpi 쪽당 2.5초) 정확도는 오히려 내려갔다.
+_OCR_DPI = 150
+# 페이지 분할은 "단일 텍스트 블록"(psm 6)으로 못 박는다 — 기본값(자동 레이아웃 분석)은
+# 같은 이미지에서 문자 일치가 21~38%까지 떨어졌다("물품 반출"이 "둘줌 반줄"이 된다).
+# 이 값 하나가 이 폴백의 성패를 가른다.
+_OCR_PSM = "6"
+# 쪽수 상한 — 스캔 문서 하나가 색인 스레드를 분 단위로 잡지 않게 한다(쪽당 ~1초).
+_OCR_MAX_PAGES = 30
+_OCR_PAGE_TIMEOUT = 60
+
+
+def _ocr_pdf(path: Path) -> str | None:
+    """페이지를 이미지로 렌더링해 Tesseract로 읽는다. 도구가 없으면 None(호출자가 안내).
+
+    합성 이미지 기준의 측정이므로 실제 스캔(기울어짐·도장·팩스 화질)은 이보다 낮다 —
+    그래서 이 경로는 **지금 0인 문서를 살리는 폴백**으로만 쓰고, 텍스트가 멀쩡한 PDF는
+    타지 않는다. 표는 평문으로 무너진다(텍스트 PDF와 같은 수준).
+    """
+    exe = _tesseract()
+    if exe is None:
+        return None
+    try:
+        import pypdfium2 as pdfium  # noqa: PLC0415 — 선택 의존성(렌더링)
+        import PIL  # noqa: F401, PLC0415 — 렌더링 결과를 PNG로 저장할 때 필요
+    except ImportError:
+        return None
+
+    texts: list[str] = []
+    try:
+        doc = pdfium.PdfDocument(str(path))
+    except Exception as e:  # noqa: BLE001 — pypdf는 열었는데 pdfium이 못 여는 경우
+        raise ExtractError(f"PDF를 렌더링할 수 없습니다: {str(e)[:200]}")
+    try:
+        page_count = min(len(doc), _OCR_MAX_PAGES)
+        with tempfile.TemporaryDirectory() as workdir:
+            for index in range(page_count):
+                image = doc[index].render(scale=_OCR_DPI / 72, grayscale=True).to_pil()
+                png = Path(workdir) / f"page{index}.png"
+                image.save(png)
+                try:
+                    done = subprocess.run(
+                        [exe, str(png), "stdout", "-l", "kor+eng", "--psm", _OCR_PSM],
+                        capture_output=True, timeout=_OCR_PAGE_TIMEOUT, check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    raise ExtractError(
+                        f"OCR이 한 쪽에서 {_OCR_PAGE_TIMEOUT}초를 넘겼습니다"
+                        f"({index + 1}/{page_count}쪽).")
+                if done.returncode != 0:
+                    detail = (done.stderr or b"").decode("utf-8", "replace").strip()
+                    raise ExtractError(
+                        f"OCR이 실패했습니다{f' — {detail[:200]}' if detail else ''} "
+                        "(kor 언어 데이터가 설치되어 있는지 확인)")
+                texts.append(done.stdout.decode("utf-8", "replace"))
+        if len(doc) > page_count:
+            # 잘렸다는 사실을 본문에 남긴다 — 뒷부분이 검색에 안 걸리는 이유를
+            # 문서를 연 사람이 바로 알 수 있어야 한다.
+            texts.append(f"(OCR은 앞 {page_count}쪽까지만 추출했습니다 — 전체 {len(doc)}쪽)")
+    finally:
+        doc.close()
+    text = "\n".join(texts).strip()
+    return text or None
+
+
+def _tesseract() -> str | None:
+    configured = get_settings().tesseract_path
+    return shutil.which(configured) if configured else shutil.which("tesseract")
 
 
 # --- 97-2003 바이너리 오피스 ---

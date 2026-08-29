@@ -385,3 +385,177 @@ def test_plain_files_are_never_stripped(tmp_path):
     path = tmp_path / "표.csv"
     path.write_text("# 제목\n| 항목 | 금액 |\n|---|---|\n", encoding="utf-8")
     assert doctext.extract_text(path) == "# 제목\n| 항목 | 금액 |\n|---|---|\n"
+
+
+def test_xlsx_skipped_cells_stay_in_their_column(tmp_path):
+    """엑셀은 빈 셀을 XML에 아예 쓰지 않는다 — 셀 참조(r="C2")를 무시하고 순서대로
+    받으면 금액이 담당자 열로 밀려, 틀린 값이 조용히 맞는 값처럼 보인다."""
+    ns = _SHEET_NS
+    sheet = (
+        f'<worksheet {ns}><sheetData>'
+        '<row r="1"><c r="A1" t="inlineStr"><is><t>항목</t></is></c>'
+        '<c r="B1" t="inlineStr"><is><t>담당</t></is></c>'
+        '<c r="C1" t="inlineStr"><is><t>금액</t></is></c></row>'
+        '<row r="2"><c r="A2" t="inlineStr"><is><t>반출승인</t></is></c>'
+        '<c r="C2" t="n"><v>1500</v></c></row>'
+        '</sheetData></worksheet>'
+    )
+    path = _zip(tmp_path / "대장.xlsx", {
+        "xl/workbook.xml": f'<workbook {ns}><sheets><sheet name="대장"/></sheets></workbook>',
+        "xl/worksheets/sheet1.xml": sheet,
+    })
+    assert "| 반출승인 |  | 1500 |" in doctext.extract_markdown(path)
+
+
+def test_docx_vertical_merge_fills_down(tmp_path):
+    """세로 병합의 이어지는 셀은 XML에서 빈 셀이다 — 그대로 두면 병합 아래 행들이
+    부서 없는 값이 된다. 위 행의 값을 내려 채워 행마다 온전한 레코드로 만든다."""
+    body = (
+        '<w:tbl>'
+        '<w:tr><w:tc><w:p><w:r><w:t>부서</w:t></w:r></w:p></w:tc>'
+        '<w:tc><w:p><w:r><w:t>항목</w:t></w:r></w:p></w:tc></w:tr>'
+        '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>'
+        '<w:p><w:r><w:t>총무팀</w:t></w:r></w:p></w:tc>'
+        '<w:tc><w:p><w:r><w:t>비품</w:t></w:r></w:p></w:tc></w:tr>'
+        '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>'
+        '<w:tc><w:p><w:r><w:t>인장</w:t></w:r></w:p></w:tc></w:tr>'
+        '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>'
+        '<w:tc><w:p><w:r><w:t>차량</w:t></w:r></w:p></w:tc></w:tr>'
+        '</w:tbl>'
+    )
+    path = _zip(tmp_path / "a.docx", {
+        "word/document.xml": f"<w:document {OOXML_NS}><w:body>{body}</w:body></w:document>"})
+    md = doctext.extract_markdown(path)
+    assert "| 총무팀 | 비품 |" in md
+    assert "| 총무팀 | 인장 |" in md   # 이어지는 행에도 부서가 내려온다
+    assert "| 총무팀 | 차량 |" in md   # 3행 병합도 한 행씩 내려온다
+
+
+HWPX_NS = 'xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"'
+
+
+def test_hwpx_tables_keep_rows_and_columns(tmp_path):
+    """hwpx 표를 단락처럼 흘리면 셀이 세로 나열로 무너져 "2025-01"이 어느 관리번호의
+    값인지 복원할 수 없다 — 규정·대장류의 지배적 형식이 hwpx라 표가 곧 본문이다."""
+    section = (
+        f'<sec {HWPX_NS}>'
+        '<hp:p><hp:run><hp:t>인장 관리 대장</hp:t></hp:run></hp:p>'
+        '<hp:p><hp:run><hp:tbl>'
+        '<hp:tr><hp:tc><hp:p><hp:run><hp:t>관리번호</hp:t></hp:run></hp:p></hp:tc>'
+        '<hp:tc><hp:p><hp:run><hp:t>사용부서</hp:t></hp:run></hp:p></hp:tc></hp:tr>'
+        '<hp:tr><hp:tc><hp:p><hp:run><hp:t>2025-01</hp:t></hp:run></hp:p></hp:tc>'
+        '<hp:tc><hp:p><hp:run><hp:t>총무팀</hp:t></hp:run></hp:p></hp:tc></hp:tr>'
+        '</hp:tbl></hp:run></hp:p>'
+        '<hp:p><hp:run><hp:t>연 1회 실사한다.</hp:t></hp:run></hp:p>'
+        '</sec>'
+    )
+    md = doctext.extract_markdown(_zip(tmp_path / "대장.hwpx", {"Contents/section0.xml": section}))
+    assert "| 관리번호 | 사용부서 |" in md
+    assert "| 2025-01 | 총무팀 |" in md
+    assert "인장 관리 대장" in md and "연 1회 실사한다." in md
+    # 셀 텍스트가 단락 나열로 한 번 더 나오지 않는다 — 두 번 나오면 검색에 두 번 걸린다
+    assert md.count("총무팀") == 1
+
+
+def test_hwpx_merged_cells_fall_back_to_inline_html(tmp_path):
+    section = (
+        f'<sec {HWPX_NS}><hp:p><hp:run><hp:tbl>'
+        '<hp:tr><hp:tc><hp:cellSpan colSpan="2" rowSpan="1"/>'
+        '<hp:p><hp:run><hp:t>결재</hp:t></hp:run></hp:p></hp:tc>'
+        '<hp:tc><hp:p><hp:run><hp:t>승인자</hp:t></hp:run></hp:p></hp:tc></hp:tr>'
+        '</hp:tbl></hp:run></hp:p></sec>'
+    )
+    md = doctext.extract_markdown(_zip(tmp_path / "양식.hwpx", {"Contents/section0.xml": section}))
+    assert '<th colspan="2">결재</th>' in md
+
+
+# --- PDF OCR 폴백 ---
+
+def test_scanned_pdf_error_names_the_ocr_setting(tmp_path, monkeypatch):
+    """OCR 도구가 없을 때의 오류가 무엇을 설치하면 되는지 말해야 한다(soffice와 같은 규칙)."""
+    monkeypatch.setattr(doctext, "_tesseract", lambda: None)
+    with pytest.raises(doctext.ExtractError, match="PAAS_TESSERACT_PATH"):
+        doctext.extract(_pdf(tmp_path / "스캔.pdf", None))
+
+
+def test_scanned_pdf_falls_back_to_ocr(tmp_path, monkeypatch):
+    """텍스트 레이어가 없으면 OCR로 넘어간다 — 출처는 마크다운에만 남고 검색 평문은 깨끗하다."""
+    monkeypatch.setattr(doctext, "_ocr_pdf", lambda path: "물품 반출 관리 규정")
+    markdown, plain = doctext.extract(_pdf(tmp_path / "스캔.pdf", None))
+    assert plain == "물품 반출 관리 규정"
+    assert markdown.startswith("<!-- 이미지에서 OCR로 추출한 텍스트입니다 -->")
+    # 마크다운을 평문으로 벗겨도 출처 주석은 검색에 안 들어간다
+    assert "OCR" not in doctext.to_plain(markdown)
+
+
+def test_normal_text_pdf_never_touches_ocr(tmp_path, monkeypatch):
+    def _boom(path):
+        raise AssertionError("텍스트가 멀쩡한 PDF가 OCR을 탔다")
+
+    monkeypatch.setattr(doctext, "_ocr_pdf", _boom)
+    markdown, plain = doctext.extract(_pdf(tmp_path / "a.pdf", "export approval"))
+    assert "export approval" in plain
+    assert "OCR" not in markdown
+
+
+def test_garbled_pua_text_is_not_silently_indexed(tmp_path, monkeypatch):
+    """HWP 계열 PDF는 한글을 사설영역(PUA) 코드로 심는 경우가 있다 — pypdf가 "성공"해도
+    검색 불가능한 쓰레기다. 예전에는 그대로 색인됐다(읽었다고 착각하게 만드는 상태)."""
+    garbage = "\ue0a1\ue0b2\ue0c3 \ue0d4\ue0e5\ue0f6" * 40
+    monkeypatch.setattr(doctext, "_ocr_pdf", lambda path: "복구된 본문")
+    fake_pages = [type("P", (), {"extract_text": lambda self: garbage})()]
+
+    import pypdf
+
+    class _FakeReader:
+        def __init__(self, _path):
+            self.is_encrypted = False
+            self.pages = fake_pages
+
+    monkeypatch.setattr(pypdf, "PdfReader", _FakeReader)
+    markdown, plain = doctext.extract(_pdf(tmp_path / "깨짐.pdf", "x"))
+    assert plain == "복구된 본문"
+
+    # OCR이 없으면 쓰레기를 색인하지 않고 실패로 알린다
+    monkeypatch.setattr(doctext, "_ocr_pdf", lambda path: None)
+    with pytest.raises(doctext.ExtractError, match="깨져"):
+        doctext.extract(_pdf(tmp_path / "깨짐.pdf", "x"))
+
+
+def test_looks_garbled_spares_english_and_korean():
+    """한글 없음은 깨짐의 근거가 아니다 — 영어 문서는 한글 0%가 정상이다."""
+    assert doctext._looks_garbled("\ue000\ue001\ue002" * 100) is True
+    assert doctext._looks_garbled("Quarterly report: revenue grew 12%.") is False
+    assert doctext._looks_garbled("반출 승인 절차를 정한다.") is False
+    assert doctext._looks_garbled("") is False
+
+
+def _ocr_ready() -> bool:
+    import importlib.util
+    import shutil as sh
+    from pathlib import Path
+
+    return bool(
+        sh.which("tesseract")
+        and importlib.util.find_spec("pypdfium2")
+        and importlib.util.find_spec("PIL")
+        and Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf").exists()
+    )
+
+
+@pytest.mark.skipif(not _ocr_ready(), reason="tesseract/pypdfium2/한글 폰트 없음")
+def test_ocr_end_to_end_reads_a_scanned_korean_pdf(tmp_path):
+    """이미지로만 담긴 한글 PDF가 실제 OCR 경로로 읽힌다 — 도구가 깔린 환경에서만 돈다."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    font = ImageFont.truetype("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", 42)
+    img = Image.new("RGB", (1240, 400), "white")
+    d = ImageDraw.Draw(img)
+    d.text((80, 80), "물품 반출 관리 규정", font=font, fill=(20, 20, 20))
+    d.text((80, 180), "제1조(목적) 반출 절차와 승인 기준을 정한다.", font=font, fill=(20, 20, 20))
+    pdf = tmp_path / "스캔.pdf"
+    img.save(pdf)
+
+    markdown, plain = doctext.extract(pdf)
+    assert "반출" in plain and "승인" in plain
+    assert markdown.startswith("<!-- 이미지에서 OCR로 추출한 텍스트입니다 -->")

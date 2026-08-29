@@ -28,11 +28,25 @@ LLM 프로바이더가 설정되지 않은 설치본에서는 색인이 반쪽�
 한 번에 할 수 있는 이름 맞추기뿐이다.
 """
 import re
+from html import unescape
 
 # 제목 한 줄. doctext가 docx의 제목 단계를 그대로 옮겨 놓는다.
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.M)
 # 사내 규정의 조문. 제목 안에 있으면 그 절의 번호가 되고, 본문에 있으면 인용이다.
 _ARTICLE_RE = re.compile(r"제\s*(\d{1,3})\s*조")
+# 줄 머리의 `제N조(제목)` — 제목 스타일 없이 쓴 규정의 조문 줄. 사내 규정은 대부분
+# 워드 제목 스타일 없이 본문 단락으로 쓰이고, hwpx·pdf·97-2003 경유 추출은 애초에
+# 제목 단계가 없다 — 이 규칙 하나가 그 전부에서 절 계층을 되살린다. 괄호 제목을
+# 요구하는 이유: "제5조에 따라 처리한다"처럼 줄 머리에 온 **인용**을 절로 오인하지
+# 않기 위해서다(조문 표기는 관행적으로 `제N조(제목)`이다).
+_ARTICLE_LINE_RE = re.compile(r"^제\s*(\d{1,3})\s*조(?:의\s*\d{1,3})?\s*\([^)\n]{1,60}\)")
+# 조문 절의 깊이 — 어떤 마크다운 제목(#×1~6)보다 깊게 둬서, 제목이 있는 문서에서는
+# 그 아래로 들어가고 조문끼리는 형제가 된다.
+_ARTICLE_DEPTH = 7
+# 병합 셀 표는 마크다운이 아니라 인라인 HTML로 나온다(doctext._table_html) — 첫 행이
+# <th>다. 결재란처럼 병합이 있는 양식이 사내 표의 다수라, 이걸 안 읽으면 정작 흔한
+# 표가 스키마에서 빠진다.
+_HTML_TH_RE = re.compile(r"<th[^>]*>(.*?)</th>")
 # `"X"란 …` / `"X"라 함은` — 정의문의 가장 흔한 두 모양.
 _QUOTE = "\"'“”‘’"
 _DEFINED_RE = re.compile(
@@ -105,9 +119,30 @@ def extract(rel_path: str, title: str, markdown: str) -> tuple[list[dict], list[
             current = key
             continue
 
+        # 조문 줄: 제목 스타일 없이 쓴 `제N조(제목) …`도 절이다. continue하지 않는다 —
+        # 같은 줄에 정의·인용이 이어지는 것이 조문의 통상 모양이라("제2조(정의) "X"란 …")
+        # 아래 추출이 이 새 절에 달리게 흘려보낸다.
+        article_line = _ARTICLE_LINE_RE.match(line)
+        if article_line:
+            name = article_line.group(0).strip()
+            key = add(_node("section", name, f"제{article_line.group(1)}조", _ARTICLE_DEPTH))
+            while stack and stack[-1][0] >= _ARTICLE_DEPTH:
+                stack.pop()
+            link(stack[-1][1] if stack else doc_key, "contains", key)
+            stack.append((_ARTICLE_DEPTH, key))
+            current = key
+
         # 표: 구분선을 만나면 바로 윗줄이 머리글이다. 컬럼 이름이 곧 스키마다.
         if _TABLE_SEP_RE.match(line) and i > 0:
             columns = [c for c in _cells(lines[i - 1]) if c]
+            if len(columns) >= 2:
+                key = add(_node("table", " | ".join(columns), f"columns={len(columns)}"))
+                link(current, "contains", key)
+            continue
+
+        # 병합 셀 표(인라인 HTML)의 머리글 행 — 마크다운 표와 같은 자격의 스키마다.
+        if line.startswith("<tr><th"):
+            columns = [c for c in (unescape(v).strip() for v in _HTML_TH_RE.findall(line)) if c]
             if len(columns) >= 2:
                 key = add(_node("table", " | ".join(columns), f"columns={len(columns)}"))
                 link(current, "contains", key)
