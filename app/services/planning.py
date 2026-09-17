@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import audit
-from ..models import LlmProvider, Module, ModuleBinding, PlanStage, Project
+from ..models import LlmProvider, Module, ModuleBinding, PlanConstraint, PlanStage, Project
 from . import a2a as a2a_service
 from . import gitea as gitea_service
 from . import llm as llm_service
@@ -111,6 +111,8 @@ PLANNING_SYSTEM_PROMPT = (
     "4. Build on the confirmed artifacts of previous stages when provided; do not contradict them.\n"
     "5. When a '현재 산출물' is given, revise THAT document instead of starting over — keep the "
     "parts that still hold and change only what the request asks for.\n"
+    "6. The injected '공통 제약사항' apply to every project and every stage — reflect them in this "
+    "stage's document and never propose anything that violates them.\n"
     "OUTPUT FORMAT (exactly):\n"
     "First a short Korean summary (2-4 sentences) of what this document covers and, on a "
     "revision, what you changed and why.\n"
@@ -447,6 +449,13 @@ def auto_pull_request(project: Project, branch: str, title: str, body: str = "")
     return result
 
 
+def common_constraints(db: Session) -> list[str]:
+    """관리자가 등록한 공통 제약사항(모든 프로젝트 적용, 등록 순)."""
+    return [c.text for c in db.execute(
+        select(PlanConstraint).order_by(PlanConstraint.id)
+    ).scalars()]
+
+
 def build_constraints(db: Session, project: Project) -> dict:
     """외부 빌드의 guardrail이 되는 '가용 모듈 제약' 데이터.
 
@@ -455,6 +464,8 @@ def build_constraints(db: Session, project: Project) -> dict:
     """
     return {
         "project": project.name,
+        # 프로젝트와 무관하게 늘 지켜야 하는 환경 제약 — 기획 각 단계에 함께 실린다.
+        "common_constraints": common_constraints(db),
         "rules": [
             "허용된 내부 모듈/자원만 사용한다 — 아래 목록 밖의 자원은 사용 금지.",
             "외부 LLM API·외부 모듈/DB URL을 직접 호출하지 않는다.",
@@ -475,6 +486,10 @@ def render_constraints_doc(constraints: dict) -> str:
         "## 규칙 (외부 빌드 제약)",
     ]
     lines += [f"- {r}" for r in constraints["rules"]]
+    common = constraints.get("common_constraints") or []
+    if common:
+        lines += ["", "## 공통 제약사항 (모든 프로젝트 적용 — 각 단계에서 반드시 고려)"]
+        lines += [f"- {c}" for c in common]
     lines += ["", "## 바인딩된 내부 모듈(A2A 능력)"]
     agents = constraints.get("bound_agents") or []
     if agents:

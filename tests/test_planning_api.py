@@ -1283,6 +1283,63 @@ def test_constraints_document_lists_rules():
     assert "가용 모듈 제약" in body["document"]
 
 
+def test_common_constraints_are_admin_only_to_edit():
+    """공통 제약은 플랫폼 차원의 규범이다 — 등록·삭제는 관리자만, 조회는 누구나."""
+    c = _client()
+    member = c.post("/paas/api/v1/keys", json={"name": "planner", "is_admin": False},
+                    headers=ADMIN).json()["key"]
+    MEMBER = {"x-api-key": member}
+
+    r = c.post("/paas/api/v1/plan/constraints", json={"text": "외부 솔루션은 쓰지 않는다."},
+               headers=MEMBER)
+    assert r.status_code == 403
+
+    created = c.post("/paas/api/v1/plan/constraints",
+                     json={"text": "외부 솔루션은 쓰지 않는다."}, headers=ADMIN)
+    assert created.status_code == 201, created.text
+    cid = created.json()["id"]
+
+    # 빈 내용은 등록되지 않는다
+    assert c.post("/paas/api/v1/plan/constraints", json={"text": "  "},
+                  headers=ADMIN).status_code == 422
+
+    listed = c.get("/paas/api/v1/plan/constraints", headers=MEMBER)
+    assert listed.status_code == 200
+    assert [row["text"] for row in listed.json()] == ["외부 솔루션은 쓰지 않는다."]
+
+    assert c.delete(f"/paas/api/v1/plan/constraints/{cid}", headers=MEMBER).status_code == 403
+    assert c.delete(f"/paas/api/v1/plan/constraints/{cid}", headers=ADMIN).status_code == 204
+    assert c.get("/paas/api/v1/plan/constraints", headers=ADMIN).json() == []
+
+
+def test_common_constraints_reach_every_stage_and_the_builder(
+    monkeypatch, fresh_settings, tmp_path
+):
+    """등록한 공통 제약은 각 단계 프롬프트·제약 문서·외주 빌더(MCP)에 그대로 실린다."""
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    text = "서버가 80포트만 사용 가능해 서브패스 URL을 IIS에서 rewrite한다."
+    c.post("/paas/api/v1/plan/constraints", json={"text": text}, headers=ADMIN)
+
+    # 제약 문서(콘솔·외주 빌더 공용)에 공통 제약 섹션으로 들어간다
+    body = c.get(f"/paas/api/v1/plan/projects/{pid}/constraints", headers=ADMIN).json()
+    assert body["common_constraints"] == [text]
+    assert "## 공통 제약사항" in body["document"] and text in body["document"]
+
+    # 단계 대화 컨텍스트에도 실린다 — 각 단계에서 고려된다
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    calls = _mock_llm(monkeypatch)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
+           json={"content": "기획서 써줘"}, headers=ADMIN)
+    assert text in _draft_context(calls)
+
+    # 외주 빌더가 MCP로 받아 가는 제약 문서에도 같은 문장이 있다
+    mcp_text = _mcp(c, pid, "get_constraints")["result"]["content"][0]["text"]
+    assert text in mcp_text
+
+
 def test_mcp_server_tools_and_progress_report():
     c = _client()
     pid, prov = _project_and_provider(c)

@@ -25,6 +25,7 @@ from ..models import (
     ChatSession,
     LlmProvider,
     PlanArtifact,
+    PlanConstraint,
     PlanStage,
     Project,
 )
@@ -37,6 +38,8 @@ from ..schemas import (
     PlanArtifactOut,
     PlanChatMessageOut,
     PlanConfirmIn,
+    PlanConstraintIn,
+    PlanConstraintOut,
     PlanMergeOut,
     PlanMessageIn,
     PlanMessageReply,
@@ -44,7 +47,7 @@ from ..schemas import (
     PlanSessionOut,
     PlanSessionSummary,
 )
-from ..security import can_view_git_url, require_api_key, viewer_org_ids
+from ..security import can_view_git_url, require_admin, require_api_key, viewer_org_ids
 from ..services import a2a as a2a_service
 from ..services import codemap as codemap_service
 from ..services import compliance as compliance_service
@@ -265,7 +268,7 @@ async def post_plan_message(
 
     # 가용 모듈 제약(guardrail) — 모든 단계에 주입, 솔루션 구성 단계의 핵심 제약
     constraints = planning_service.build_constraints(db, project)
-    context_parts.append("=== 가용 모듈 제약 (사용 가능 자원·게이트웨이 규칙) ===\n"
+    context_parts.append("=== 가용 모듈 제약 (공통 제약사항·사용 가능 자원·게이트웨이 규칙) ===\n"
                          + planning_service.render_constraints_doc(constraints))
 
     # 앞 단계에서 확정된 산출물 본문을 순서대로 주입 — 각 단계는 이전 단계 문서를 근거로 쓴다.
@@ -807,6 +810,59 @@ def get_plan_constraints(
         raise HTTPException(status_code=404, detail="project not found")
     constraints = planning_service.build_constraints(db, project)
     return {**constraints, "document": planning_service.render_constraints_doc(constraints)}
+
+
+# --- 공통 제약사항 — 모든 프로젝트·모든 단계에 실리는 환경 제약(관리자가 등록) ---
+# 프로젝트마다 다시 말해 줄 수 없는 제약(리버스 프록시 구조·외부 솔루션 금지 등)을 한 곳에
+# 두고 build_constraints에 합친다. 그래서 단계 대화·작업 지시 분해·MCP get_constraints·
+# 컴플라이언스 수정 지시가 모두 같은 문장을 본다.
+
+
+def _constraint_out(row: PlanConstraint) -> PlanConstraintOut:
+    return PlanConstraintOut(id=row.id, text=row.text, created_at=row.created_at)
+
+
+@router.get("/plan/constraints", response_model=list[PlanConstraintOut])
+def list_common_constraints(
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """공통 제약사항 목록 — 등록은 관리자만, 조회는 기획을 진행하는 누구나."""
+    return [_constraint_out(r) for r in db.execute(
+        select(PlanConstraint).order_by(PlanConstraint.id)
+    ).scalars()]
+
+
+@router.post("/plan/constraints", response_model=PlanConstraintOut, status_code=201)
+def add_common_constraint(
+    body: PlanConstraintIn,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="제약사항 내용이 비어 있습니다.")
+    row = PlanConstraint(text=text)
+    db.add(row)
+    db.commit()
+    audit.record(db, admin.name, "plan.constraint.add", "-", {"id": row.id, "text": text[:200]})
+    return _constraint_out(row)
+
+
+@router.delete("/plan/constraints/{constraint_id}", status_code=204)
+def delete_common_constraint(
+    constraint_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    row = db.get(PlanConstraint, constraint_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="constraint not found")
+    text = row.text
+    db.delete(row)
+    db.commit()
+    audit.record(db, admin.name, "plan.constraint.delete", "-",
+                 {"id": constraint_id, "text": text[:200]})
 
 
 @router.get("/plan/sessions/{session_id}/build-status")

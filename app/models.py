@@ -288,6 +288,21 @@ class PlanStage(str, enum.Enum):
     tasks = "tasks"  # 작업 지시(외주 빌드 단위) — 산출물은 BuildTask를 렌더한 문서
 
 
+class PlanConstraint(Base):
+    """모든 프로젝트에 공통으로 적용되는 기획 제약사항(관리자가 콘솔에서 등록).
+
+    프로젝트마다 다시 말해 줄 수 없는 환경 제약(리버스 프록시 구조·외부 솔루션 금지 등)을
+    한 곳에 모아 둔다. 기획 각 단계의 제약 문서(services/planning.render_constraints_doc)에
+    실려 단계 대화·작업 지시 분해·외주 빌더(MCP)가 모두 같은 문장을 본다.
+    """
+
+    __tablename__ = "plan_constraints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class PlanArtifact(Base):
     """단계 산출물 포인터. 본문은 프로젝트 Gitea 리포에 커밋되고 여기엔 위치·커밋·확정만 둔다."""
 

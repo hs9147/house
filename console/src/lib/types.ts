@@ -233,6 +233,13 @@ export interface PlanChatMessage {
   created_at: string | null;
 }
 
+// 모든 프로젝트에 적용되는 공통 제약사항 — 기획 각 단계의 제약 문서에 함께 실린다
+export interface PlanConstraintOut {
+  id: number;
+  text: string;
+  created_at: string | null;
+}
+
 // 외주 빌드 작업 지시(work order)
 export type BuildTaskStatus = 'pending' | 'in_progress' | 'done' | 'blocked';
 

@@ -222,6 +222,10 @@ POST /paas/api/v1/plan/sessions/{id}/tasks/sync     # 진행 현황을 기본 �
 PATCH /paas/api/v1/plan/tasks/{id}                  # {status?, note?, commit_sha?}
 POST /paas/api/v1/plan/sessions/{id}/merge          # 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영
 GET  /paas/api/v1/plan/projects/{id}/constraints    # 가용 모듈 제약(외부 빌드 guardrail)
+                                                # 공통 제약사항도 이 문서의 한 섹션으로 함께 실린다
+GET  /paas/api/v1/plan/constraints                  # 공통 제약사항 목록(모든 프로젝트·모든 단계에 적용)
+POST /paas/api/v1/plan/constraints                  # {text} 등록 (admin) — 기획 각 단계 컨텍스트에 실린다
+DELETE /paas/api/v1/plan/constraints/{id}           # 공통 제약사항 삭제 (admin)
 GET  /paas/api/v1/plan/projects/{id}/compliance     # LLM·모듈 사용 검증 + 외주 빌더 전달용 수정 지시
 POST /paas/api/v1/plan/projects/{id}/mcp            # 외부 빌드 도구용 MCP 서버(JSON-RPC 2.0)
 POST /paas/api/v1/projects/{id}/review              # {provider_id, diff? , base_ref?} → 심각도 분류 findings

@@ -291,6 +291,18 @@ class ComplianceOut(BaseModel):
     builder_prompt: str = ""
 
 
+class PlanConstraintIn(BaseModel):
+    """모든 프로젝트에 적용되는 공통 제약사항 한 건(여러 줄 가능)."""
+
+    text: str
+
+
+class PlanConstraintOut(BaseModel):
+    id: int
+    text: str
+    created_at: datetime | None = None
+
+
 class ModuleCreate(BaseModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,40}$")
     type: str = Field(pattern=r"^(external_api|internal_api|database|mcp|llm)$")
