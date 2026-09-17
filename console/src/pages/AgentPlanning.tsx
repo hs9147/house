@@ -88,6 +88,9 @@ export default function AgentPlanning() {
   const [mergeResult, setMergeResult] = useState<PlanMergeOut | null>(null);
   const [draftSource, setDraftSource] = useState<PlanArtifactContent['source']>('');
   const history = useApi(() => api.listPlanSessions());
+  // 모든 프로젝트에 적용되는 공통 제약사항 — 등록은 관리자만, 목록은 누구나 본다.
+  const commonConstraints = useApi(() => api.listCommonConstraints());
+  const [constraintText, setConstraintText] = useState('');
 
   // 프로젝트 페이지와 동일한 CreateModal(빈 프로젝트 옵션 포함)을 재사용한다.
   const [showCreate, setShowCreate] = useState(false);
@@ -181,6 +184,30 @@ export default function AgentPlanning() {
       await api.deletePlanSession(row.id);
       if (session?.id === row.id) setSession(null);
       history.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const addConstraint = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = constraintText.trim();
+    if (!text) return;
+    setError('');
+    try {
+      await api.addCommonConstraint(text);
+      setConstraintText('');
+      commonConstraints.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const removeConstraint = async (id: number) => {
+    setError('');
+    try {
+      await api.deleteCommonConstraint(id);
+      commonConstraints.reload();
     } catch (err) {
       setError((err as Error).message);
     }
@@ -397,6 +424,51 @@ export default function AgentPlanning() {
             </span>
           )}
         </form>
+      </div>
+
+      {/* 공통 제약사항 — 프로젝트와 무관하게 늘 지켜야 하는 환경 제약(관리자가 등록) */}
+      <div className="panel">
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ margin: 0 }}>📌 공통 제약사항 (모든 프로젝트 적용)</h3>
+          <button className="secondary small" onClick={() => commonConstraints.reload()}>새로고침</button>
+        </div>
+        <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
+          여기에 등록한 제약은 기획 ①~⑤ 각 단계의 제약 문서에 함께 실려 매 단계에서 고려되고,
+          작업 지시 생성과 외주 빌더(MCP <span className="mono">get_constraints</span>)·
+          위반 검사 수정 지시에도 그대로 전달됩니다.
+          {!me.data?.is_admin && ' 등록·삭제는 관리자만 할 수 있습니다.'}
+        </p>
+        {me.data?.is_admin && (
+          <form onSubmit={addConstraint} className="row" style={{ alignItems: 'flex-start', marginBottom: 8 }}>
+            <textarea
+              style={{ flex: 1, minHeight: 60, fontFamily: 'inherit' }}
+              placeholder="예: 기업 내부 에이전트이므로 외부 솔루션은 사용하지 않는다(Redis 등 불필요)."
+              value={constraintText}
+              onChange={(e) => setConstraintText(e.target.value)}
+            />
+            <button type="submit" disabled={!constraintText.trim()}>+ 추가</button>
+          </form>
+        )}
+        <Async state={commonConstraints} empty="등록된 공통 제약사항이 없습니다.">
+          {(rows) => (
+            <ul style={{ margin: 0, paddingLeft: 16, fontSize: 13 }}>
+              {rows.map((r) => (
+                <li key={r.id} style={{ marginBottom: 6 }}>
+                  <span style={{ whiteSpace: 'pre-wrap' }}>{r.text}</span>
+                  {me.data?.is_admin && (
+                    <button
+                      className="small danger"
+                      style={{ marginLeft: 8 }}
+                      onClick={() => removeConstraint(r.id)}
+                    >
+                      삭제
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Async>
       </div>
 
       {/* 기획 세션 이력 — 재개·삭제 */}

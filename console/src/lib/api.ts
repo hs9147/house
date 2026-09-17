@@ -23,6 +23,7 @@ import type {
   PlanArtifactOut,
   PlanBuildStatus,
   PlanChatMessage,
+  PlanConstraintOut,
   PlanMergeOut,
   PlanMessageReply,
   PlanSessionOut,
@@ -405,6 +406,12 @@ export const api = {
     request<PlanBuildStatus>('GET', `/plan/sessions/${sessionId}/build-status`),
   planConstraints: (projectId: number) =>
     request<{ document: string }>('GET', `/plan/projects/${projectId}/constraints`),
+  // 모든 프로젝트에 적용되는 공통 제약사항 — 등록·삭제는 관리자만
+  listCommonConstraints: () => request<PlanConstraintOut[]>('GET', '/plan/constraints'),
+  addCommonConstraint: (text: string) =>
+    request<PlanConstraintOut>('POST', '/plan/constraints', { text }),
+  deleteCommonConstraint: (id: number) =>
+    request<void>('DELETE', `/plan/constraints/${id}`),
   // 외주 빌드 작업 지시(work order)
   generatePlanTasks: (sessionId: number) =>
     request<BuildTaskOut[]>('POST', `/plan/sessions/${sessionId}/tasks/generate`),
