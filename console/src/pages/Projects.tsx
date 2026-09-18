@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
-import CopyGitUrlButton from '../components/CopyGitUrlButton';
+import GitBrowseButton from '../components/GitBrowseButton';
 import Modal from '../components/Modal';
 import StatusPill from '../components/StatusPill';
 import VscodeWorkButton from '../components/VscodeWorkButton';
@@ -57,7 +57,9 @@ export default function Projects() {
                 <tr>
                   <th>이름</th>
                   <th>타입</th>
-                  <th>Git</th>
+                  {/* Git 주소를 보여 주는 칸이 아니라 리포로 하는 작업(조회·VS Code·ZIP)을
+                      모아 둔 칸이다 — 열 이름도 그대로 '작업'이다. */}
+                  <th>작업</th>
                   <th>기본 프로필</th>
                   <th>생성일</th>
                   {canDelete && <th />}
@@ -68,10 +70,10 @@ export default function Projects() {
                   <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
                     <td>{p.name}</td>
                     <td><StatusPill value={p.type} /></td>
-                    {/* 주소 자체는 길어서 표를 밀어낸다 — 필요하면 복사 버튼으로 가져간다. */}
+                    {/* 주소 자체는 길어서 표를 밀어낸다 — 리포는 'Git 조회'로 새 창에서 본다. */}
                     <td>
                       <span className="row" style={{ alignItems: 'center', gap: 8 }}>
-                        <CopyGitUrlButton project={p} />
+                        <GitBrowseButton project={p} />
                         <VscodeWorkButton project={p} />
                         <ZipDownloadButton project={p} />
                       </span>

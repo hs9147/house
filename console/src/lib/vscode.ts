@@ -22,7 +22,17 @@ export function gitArchiveZipUrl(gitUrl: string, branch: string): string {
 }
 
 /**
- * 이 프로젝트의 git_url이 실제 주소인지 — 두 버튼의 활성화 조건.
+ * 리포의 Gitea 웹 페이지 주소 — clone 주소에서 끝의 `.git`만 뗀 것.
+ *
+ * Gitea는 `<host>/<owner>/<repo>`가 곧 웹 화면이라 clone 주소와 경로가 같다. `.git`을
+ * 남기면 없는 리포로 404가 된다(gitArchiveZipUrl과 같은 이유).
+ */
+export function gitRepoWebUrl(gitUrl: string): string {
+  return gitUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
+}
+
+/**
+ * 이 프로젝트의 git_url이 실제 주소인지 — 리포 버튼들의 활성화 조건.
  *
  * git_url은 비관리자·비소속 사용자에게는 안내 문구로 마스킹돼 내려온다
  * (api/projects.py의 GIT_URL_MASK). 그 문구를 그대로 넘기면 VS Code가 열리고도 실패하거나

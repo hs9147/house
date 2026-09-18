@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gitArchiveZipUrl, hasUsableGitUrl, vscodeCloneUri } from '../lib/vscode';
+import { gitArchiveZipUrl, gitRepoWebUrl, hasUsableGitUrl, vscodeCloneUri } from '../lib/vscode';
 
 describe('vscodeCloneUri', () => {
   it('VS Code git 확장이 처리하는 clone URI를 만든다', () => {
@@ -55,5 +55,24 @@ describe('gitArchiveZipUrl', () => {
 
   it('브랜치가 비면 main으로 받는다', () => {
     expect(gitArchiveZipUrl('https://h/o/r.git', '')).toBe('https://h/o/r/archive/main.zip');
+  });
+});
+
+describe('gitRepoWebUrl', () => {
+  it('clone 주소에서 .git을 떼어 리포 웹 화면 주소를 만든다', () => {
+    expect(gitRepoWebUrl('http://gpax.lge.com/git/demo/app.git'))
+      .toBe('http://gpax.lge.com/git/demo/app');
+  });
+
+  // repo.git은 Gitea 웹에서 없는 리포라 404다 — clone 주소를 그대로 열면 안 된다.
+  it('끝의 슬래시도 떼고, .git이 없으면 그대로 둔다', () => {
+    expect(gitRepoWebUrl('https://h/o/r/')).toBe('https://h/o/r');
+    expect(gitRepoWebUrl('https://h/o/r')).toBe('https://h/o/r');
+    expect(gitRepoWebUrl('  https://h/o/r.GIT  ')).toBe('https://h/o/r');
+  });
+
+  // 경로 안의 .git은 리포 이름의 일부일 수 있다 — 끝에 있는 것만 뗀다.
+  it('경로 중간의 .git은 건드리지 않는다', () => {
+    expect(gitRepoWebUrl('https://h/o/my.git.repo')).toBe('https://h/o/my.git.repo');
   });
 });
