@@ -290,6 +290,46 @@ export interface PlanBuildStatus {
   events: PlanBuildEvent[];
 }
 
+// 단계별 C4 시각화 — 확정 산출물에 실린 mermaid C4 블록에서 서버가 읽어 온 그래프.
+// 조회 가능한 레벨은 어느 단계가 확정됐는지에 달려 있다(app/services/c4.py).
+export type C4Base = 'person' | 'system' | 'container' | 'component' | 'boundary';
+
+export interface C4Element {
+  kind: string; // 문서에 쓰인 선언 그대로(Person_Ext·ContainerDb 등)
+  base: C4Base;
+  alias: string;
+  label: string;
+  technology: string;
+  description: string;
+  external: boolean; // _Ext 선언 — 우리가 만들지 않는 사용자·시스템·솔루션
+  shape: string;
+  boundary_type: string;
+  parent: string | null; // 이 요소를 감싼 경계의 alias
+  link: string;
+  tags: string;
+  paths: string[]; // 이 component가 구현된 리포 파일 — code 레벨의 대상
+}
+
+export interface C4Relation {
+  source: string;
+  target: string;
+  label: string;
+  technology: string;
+  bidirectional: boolean;
+}
+
+export interface C4Level {
+  stage: string; // 이 그림을 확정한 단계
+  title: string;
+  elements: C4Element[];
+  relations: C4Relation[];
+}
+
+export interface C4Model {
+  project_id: number;
+  levels: Partial<Record<'context' | 'container' | 'component', C4Level>>;
+}
+
 export interface ReviewFinding {
   severity: string;
   file: string;

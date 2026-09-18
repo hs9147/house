@@ -8,6 +8,7 @@ import type {
   BuildProfile,
   BuildTaskOut,
   BuildTaskSync,
+  C4Model,
   CodeMapOut,
   ComplianceOut,
   GiteaSyncResult,
@@ -395,6 +396,8 @@ export const api = {
   // 단계 산출물 본문 — 세션 재개·단계 이동 시 편집기를 채운다
   planArtifactContent: (sessionId: number, stage: string) =>
     request<PlanArtifactContent>('GET', `/plan/sessions/${sessionId}/stages/${stage}/artifact`),
+  // 단계별 C4 시각화 모델 — 확정 산출물의 mermaid C4 블록에서 뽑은 그래프
+  planC4: (sessionId: number) => request<C4Model>('GET', `/plan/sessions/${sessionId}/c4`),
   // overwrite=true는 리포에 이미 있는 문서를 덮어쓸 때만(412 확인 후 재시도)
   confirmPlanStage: (sessionId: number, stage: string, content: string, overwrite = false) =>
     request<PlanArtifactOut>('POST', `/plan/sessions/${sessionId}/stages/${stage}/confirm`,

@@ -1366,3 +1366,98 @@ def test_mcp_server_tools_and_progress_report():
     # 모니터링 집계에 진행 보고가 잡힌다
     status = c.get(f"/paas/api/v1/plan/sessions/{sid}/build-status", headers=ADMIN).json()
     assert any(e["action"] == "plan.build.progress" for e in status["events"])
+
+
+# --- 단계별 C4 시각화 — 확정 산출물에 실린 mermaid 블록이 원천(services/c4) ---
+
+_C4_SPEC_DOC = """# 기획서
+
+## C4 다이어그램
+
+```mermaid
+C4Context
+  Person(planner, "기획자", "단계를 확정한다")
+  System(paas, "GPaaS")
+  System_Ext(gitea, "Gitea", "산출물 리포")
+  Rel(planner, paas, "단계 확정")
+```
+"""
+
+_C4_ARCH_DOC = """# 아키텍처 설계
+
+```mermaid
+C4Container
+  System_Boundary(paas, "GPaaS") {
+    Container(api, "API", "FastAPI", "단계 진행")
+  }
+  Rel(api, paas, "구성")
+```
+
+```mermaid
+C4Component
+  Container_Boundary(api, "API") {
+    Component(entry, "진입점", "Python", "메인", $link="app.py")
+    Component(todo, "미구현 컴포넌트", "Python", "아직 없음", $link="app/nope.py")
+  }
+```
+"""
+
+
+def _confirm_stage_doc(c, monkeypatch, sid: int, repo, stage: str, filename: str, body: str):
+    """단계를 확정하고 확정본을 세션 브랜치에 실제로 커밋한다(커밋 호출만 목킹)."""
+    from app.services import workspace
+
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, br, path, content, message: "deadbeef")
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/{stage}/confirm",
+               json={"content": body}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
+    try:
+        _git(repo, "checkout", "-q", branch)
+    except subprocess.CalledProcessError:
+        _git(repo, "checkout", "-q", "-b", branch)
+    doc = repo / "docs" / "agent-planning" / filename
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(body, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", f"plan({stage})")
+    _git(repo, "checkout", "-q", "main")
+
+
+def test_c4_levels_unlock_as_stages_are_confirmed(monkeypatch, fresh_settings, tmp_path):
+    """조회 가능한 C4 레벨은 확정된 단계가 정한다 — 기획서 → context, 아키텍처 → container·component."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    # 확정 전에는 그릴 것이 없다
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}/c4", headers=ADMIN).json()["levels"] == {}
+
+    _confirm_stage_doc(c, monkeypatch, sid, repo, "spec", "01-기획서.md", _C4_SPEC_DOC)
+    levels = c.get(f"/paas/api/v1/plan/sessions/{sid}/c4", headers=ADMIN).json()["levels"]
+    assert set(levels) == {"context"}
+    assert levels["context"]["stage"] == "spec"
+    people = [e for e in levels["context"]["elements"] if e["base"] == "person"]
+    external = [e for e in levels["context"]["elements"] if e["external"]]
+    assert [p["label"] for p in people] == ["기획자"]
+    assert [e["label"] for e in external] == ["Gitea"]
+
+    _confirm_stage_doc(c, monkeypatch, sid, repo, "architecture", "02-아키텍처설계.md",
+                       _C4_ARCH_DOC)
+    levels = c.get(f"/paas/api/v1/plan/sessions/{sid}/c4", headers=ADMIN).json()["levels"]
+    assert set(levels) == {"context", "container", "component"}
+    assert levels["container"]["stage"] == "architecture"
+    containers = {e["alias"]: e for e in levels["container"]["elements"]}
+    assert containers["api"]["parent"] == "paas"  # 경계 안에 있다
+
+    # code 레벨의 대상 — $link이 가리키는 파일이 리포에 실제로 있는 component만 경로를 받는다
+    components = {e["alias"]: e for e in levels["component"]["elements"]}
+    assert components["entry"]["paths"] == ["app.py"]
+    assert components["todo"]["paths"] == []
+
+
+def test_c4_requires_an_existing_session():
+    assert _client().get("/paas/api/v1/plan/sessions/999/c4", headers=ADMIN).status_code == 404

@@ -291,6 +291,48 @@ class ComplianceOut(BaseModel):
     builder_prompt: str = ""
 
 
+class C4ElementOut(BaseModel):
+    """C4 다이어그램의 요소 하나 — 확정 산출물의 mermaid 블록에서 읽은 것(services/c4)."""
+
+    kind: str  # 문서에 쓰인 선언 그대로(Person_Ext·ContainerDb 등)
+    base: str  # person | system | container | component | boundary
+    alias: str
+    label: str
+    technology: str = ""
+    description: str = ""
+    external: bool = False  # _Ext 선언 — 우리가 만들지 않는 사용자·시스템·솔루션
+    shape: str = "box"  # box | db | queue | person | boundary
+    boundary_type: str = ""  # enterprise | system | container (base=boundary일 때)
+    parent: str | None = None  # 이 요소를 감싼 경계의 alias
+    link: str = ""  # $link — 이 component가 구현되는 리포 경로
+    tags: str = ""
+    paths: list[str] = []  # link/이름으로 찾은 실제 리포 파일 — code 레벨의 대상
+
+
+class C4RelationOut(BaseModel):
+    source: str
+    target: str
+    label: str = ""
+    technology: str = ""
+    bidirectional: bool = False
+
+
+class C4LevelOut(BaseModel):
+    """레벨 하나의 그림과 그것을 확정한 단계."""
+
+    stage: str  # 이 그림이 실려 있던 확정 산출물의 단계
+    title: str = ""
+    elements: list[C4ElementOut] = []
+    relations: list[C4RelationOut] = []
+
+
+class C4ModelOut(BaseModel):
+    """단계별 C4 시각화 모델 — 조회 가능한 레벨은 어느 단계가 확정됐는지에 달려 있다."""
+
+    project_id: int
+    levels: dict[str, C4LevelOut] = {}  # context | container | component
+
+
 class PlanConstraintIn(BaseModel):
     """모든 프로젝트에 적용되는 공통 제약사항 한 건(여러 줄 가능)."""
 

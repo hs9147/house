@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import Async from '../components/Async';
+import C4Diagram from '../components/C4Diagram';
 import VscodeWorkButton from '../components/VscodeWorkButton';
 import ZipDownloadButton from '../components/ZipDownloadButton';
 import { ApiError, api } from '../lib/api';
@@ -548,6 +549,24 @@ export default function AgentPlanning() {
                 );
               })}
             </div>
+          </div>
+
+          {/* 단계별 시각화 — 확정 산출물에 실린 mermaid C4 블록이 그림의 원천이다.
+              어느 레벨이 열리는지는 문서가 정한다(app/services/c4.py): 기획서 확정 →
+              사용자·외부 환경(context), 아키텍처 설계 확정 → container·component,
+              솔루션 구성이 같은 레벨을 다시 그리면 그것으로 구체화된다. */}
+          <div className="panel">
+            <h3 style={{ margin: 0 }}>🗺️ 단계별 시각화 (C4 모델)</h3>
+            <C4Diagram
+              // 세션을 바꾸면 보고 있던 레벨·선택 컴포넌트를 초기화한다 — 이전 세션의
+              // 컴포넌트 코드가 새 세션 화면에 남으면 안 된다.
+              key={session.id}
+              sessionId={session.id}
+              projectId={session.project_id}
+              reloadKey={session.artifacts
+                .filter((a) => a.confirmed).map((a) => a.commit_sha ?? '').join(',')}
+              stageLabels={Object.fromEntries(STAGES.map((s) => [s.key, s.label]))}
+            />
           </div>
 
           {/* 단계 작업 영역 — ①~④는 대화로, ⑤는 작업 지시 목록으로 산출물을 만든다 */}

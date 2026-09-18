@@ -214,6 +214,10 @@ POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/messages   # 단계 생성 �
                                                 # 바인딩된 mcp 모듈의 도구({모듈명}__{도구명})로 실제 규격을 확인
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/confirm    # 확정 → Gitea 커밋 후 git 상태에 따라 PR·머지 자동
                                                 # 리포에 다른 내용의 같은 문서가 있으면 412 — overwrite=true로 재요청
+GET  /paas/api/v1/plan/sessions/{id}/c4             # 단계별 C4 시각화 모델 — 확정 산출물의 mermaid C4 블록을 파싱
+                                                # levels: context(기획서 확정 후) · container·component(아키텍처 확정 후)
+                                                # 솔루션 구성이 같은 레벨을 다시 그리면 그 그림으로 구체화된다
+                                                # component의 paths = $link이 가리키는 리포 파일(code 레벨 대상)
 POST /paas/api/v1/plan/sessions/{id}/tasks/generate # 확정 산출물 → 외주 빌드 작업 지시(work order)
                                                 # ⑤ tasks 단계 산출물(05-작업지시.md)은 이 목록을 렌더한 문서
 GET  /paas/api/v1/plan/sessions/{id}/tasks          # 작업 지시 목록·상태
@@ -329,6 +333,15 @@ DELETE /paas/api/v1/previews/{id}
   JS/TS 정규식)으로 만든 파일→클래스/함수 계층 트리를 확대/축소로 확인할 수 있고,
   **같은 개요가 에이전트 기획의 LLM 컨텍스트에도 주입**되어 전체 구조·항목별 기능 요약을
   참조해 문서를 작성합니다(`services/codemap.py`, `GET /projects/{id}/codemap`).
+- **단계별 C4 시각화**: 에이전트 기획 화면에서 확정 산출물을 C4 모델(System Context →
+  Container → Component → Code)로 확대·축소하며 탐색합니다. **그림의 원천은 문서**입니다 —
+  각 단계 프롬프트가 산출물에 ` ```mermaid C4Context/C4Container/C4Component ` 블록을 싣게 하고
+  콘솔이 그 블록을 파싱합니다(`services/c4.py`, `GET /plan/sessions/{id}/c4`). 그래서 같은 그림이
+  Gitea·VSCode 프리뷰에서도 렌더되고, 문서와 다이어그램이 갈라지지 않습니다. 조회 가능한 레벨은
+  확정 단계가 정합니다: ① 기획서 → 사용자·외부 환경(context), ② 아키텍처 설계 →
+  container·component, ③ 솔루션 구성이 같은 레벨을 다시 그리면 실제 내부 모듈·솔루션으로
+  구체화됩니다. Code 레벨은 문서가 아니라 리포가 원천이며, component의 `$link` 경로로
+  코드맵을 걸러 보여줍니다.
 - **외부 API 검색 → 모듈 자동 추가**: 수집해 둔 API 카탈로그(`api_catalog` 표)를
   키워드·카테고리·소스로 검색해 선택 결과를 external_api 모듈로 바로 추가합니다.
   키워드는 이름·설명·카테고리와 **주소**(홈페이지·스펙 URL)에 걸립니다 — 받아 둔 URL을

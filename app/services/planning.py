@@ -23,6 +23,27 @@ from . import modules as modules_service
 # 산출물이 커밋되는 리포 내 표준 경로(개발도구가 clone/open으로 그대로 열람).
 ARTIFACT_DIR = "docs/agent-planning"
 
+# 단계 산출물에 함께 싣는 C4 다이어그램 블록의 작성 규약.
+# **왜 문서 안인가.** 콘솔의 단계별 시각화는 이 블록을 읽는다(services/c4). 그림을 별도
+# 표나 DB에 두면 문서와 갈라지고 콘솔 밖에서는 볼 수 없는데, 문서 안 mermaid 블록은
+# Gitea·VSCode 프리뷰에서 그대로 렌더돼 clone만으로도 같은 그림이 보인다.
+C4_BLOCK_GUIDE = (
+    "문서 끝에 '## C4 다이어그램' 절을 두고 mermaid 블록으로 C4 모델을 함께 실어라 "
+    "— 콘솔의 단계별 시각화가 이 블록을 그대로 읽는다.\n"
+    "- 블록은 ```mermaid 로 열고 첫 줄에 다이어그램 종류만 쓴다(C4Context·C4Container·C4Component).\n"
+    "- 쓸 수 있는 선언: Person·Person_Ext, System·System_Ext·SystemDb, "
+    "Container·ContainerDb·ContainerQueue·Container_Ext, Component·ComponentDb·Component_Ext, "
+    "Enterprise_Boundary·System_Boundary·Container_Boundary(alias, \"이름\") { ... }, Rel·BiRel.\n"
+    "- 인자 순서: Person(alias, \"이름\", \"설명\") · System(alias, \"이름\", \"설명\") · "
+    "Container(alias, \"이름\", \"기술\", \"설명\") · Component(alias, \"이름\", \"기술\", \"설명\") · "
+    "Rel(출발, 도착, \"관계\", \"기술\").\n"
+    "- alias는 영문·숫자·밑줄만 쓰고 문서 안에서 유일해야 한다. 이름·설명은 한국어로 쓴다.\n"
+    "- 우리가 만들지 않는 사용자·시스템·솔루션은 반드시 _Ext 선언으로 외부임을 밝힌다.\n"
+    "- Component에는 구현될 리포 경로를 $link로 적어라 — 콘솔이 그 경로의 코드 구조를 "
+    "code 레벨로 보여준다. 예: Component(planner, \"기획 서비스\", \"Python\", \"단계 진행\", "
+    "$link=\"app/services/planning.py\")"
+)
+
 # 단계별 메타: 순서·제목·리포 파일명·문서 작성 지시(스테이지 프롬프트)·기본 생성 요청.
 # "request"는 콘솔 입력창에 미리 채워지는 기본값 — 사용자가 아무것도 쓰지 않아도
 # 바로 '생성 요청'을 누를 수 있어야 한다.
@@ -32,7 +53,10 @@ STAGES: dict[PlanStage, dict[str, str]] = {
         "filename": "01-기획서.md",
         "prompt": (
             "이번 단계는 '기획서 확정'이다. 요구사항·목적·범위·사용자 시나리오·성공 기준을 "
-            "구조화해 확정 가능한 기획서 문서를 작성하라."
+            "구조화해 확정 가능한 기획서 문서를 작성하라.\n\n"
+            + C4_BLOCK_GUIDE
+            + "\n- 이 단계에서 그릴 것은 C4Context 하나다: 이 시스템(System), 시스템을 쓰는 "
+            "사용자(Person·Person_Ext), 맞닿은 외부 환경(System_Ext), 그리고 그 사이의 Rel."
         ),
         "request": (
             "이 프로젝트의 리포 구성과 가용 모듈 제약을 참고해 기획서 초안을 작성해줘. "
@@ -44,7 +68,11 @@ STAGES: dict[PlanStage, dict[str, str]] = {
         "filename": "02-아키텍처설계.md",
         "prompt": (
             "이번 단계는 '아키텍처 설계'다. 확정된 기획서를 바탕으로 컴포넌트·데이터 흐름·경계·"
-            "비기능 요건을 담은 아키텍처 설계 문서를 작성하라."
+            "비기능 요건을 담은 아키텍처 설계 문서를 작성하라.\n\n"
+            + C4_BLOCK_GUIDE
+            + "\n- 이 단계에서 그릴 것은 두 개다: 배포·실행 단위를 담은 C4Container와, "
+            "각 컨테이너 안의 내부 구조를 담은 C4Component(Container_Boundary로 어느 컨테이너의 "
+            "컴포넌트인지 묶어라)."
         ),
         "request": (
             "확정된 기획서를 근거로 아키텍처 설계 초안을 작성해줘. "
@@ -57,7 +85,12 @@ STAGES: dict[PlanStage, dict[str, str]] = {
         "prompt": (
             "이번 단계는 '솔루션 구성'이다. 아래 '가용 모듈 제약'에 명시된 내부 모듈/자원만 "
             "사용하고, 외부 직접 호출 대신 중앙 게이트웨이(A2A/프록시) 경유를 전제로 솔루션 구성 "
-            "문서를 작성하라. 제약에 없는 자원은 사용하지 말라."
+            "문서를 작성하라. 제약에 없는 자원은 사용하지 말라.\n\n"
+            + C4_BLOCK_GUIDE
+            + "\n- 이 단계에서는 앞 단계의 C4Context·C4Container·C4Component를 이 문서에 다시 "
+            "싣되, 쓰기로 결정한 실제 내부 모듈·솔루션·기술 이름으로 고쳐 구체화하라 "
+            "(내부 솔루션은 System·Container, 게이트웨이 경유로 닿는 외부는 System_Ext). "
+            "여기 다시 실은 블록이 그 레벨의 최신 그림이 된다."
         ),
         "request": (
             "확정된 기획서·아키텍처 설계와 가용 모듈 제약을 근거로 솔루션 구성 초안을 작성해줘. "

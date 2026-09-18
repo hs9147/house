@@ -33,6 +33,7 @@ from ..schemas import (
     BuildTaskOut,
     BuildTaskSyncOut,
     BuildTaskUpdate,
+    C4ModelOut,
     ComplianceOut,
     PlanArtifactContentOut,
     PlanArtifactOut,
@@ -49,6 +50,7 @@ from ..schemas import (
 )
 from ..security import can_view_git_url, require_admin, require_api_key, viewer_org_ids
 from ..services import a2a as a2a_service
+from ..services import c4 as c4_service
 from ..services import codemap as codemap_service
 from ..services import compliance as compliance_service
 from ..services import llm as llm_service
@@ -574,6 +576,48 @@ def get_plan_artifact_content(
         confirmed=bool(artifact and artifact.confirmed),
         source=source,
     )
+
+
+@router.get("/plan/sessions/{session_id}/c4", response_model=C4ModelOut)
+def get_plan_c4_model(
+    session_id: int,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """단계별 C4 시각화 모델 — 확정 산출물에 실린 mermaid C4 블록에서 읽는다.
+
+    **어느 레벨이 보이는지는 문서가 정한다.** 기획서를 확정하면 사용자·외부 환경이 담긴
+    context가, 아키텍처 설계를 확정하면 container·component가 생기고, 솔루션 구성이 같은
+    레벨을 다시 그리면 그것으로 구체화된다(services/c4.model_from_stages). 그래서 여기에
+    단계별 게이팅 규칙을 따로 두지 않는다 — 규칙을 두 곳에 쓰면 문서와 화면이 갈라진다.
+
+    code 레벨은 문서가 아니라 리포가 원천이라 여기서 그리지 않는다. component마다 구현
+    파일 경로(paths)만 실어 주고, 콘솔이 그 경로로 코드맵(/projects/{id}/codemap)을
+    걸러 보여준다.
+    """
+    session = db.get(ChatSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    project = db.get(Project, session.project_id)
+
+    stage_docs: list[tuple[str, str]] = []
+    for stage in planning_service.STAGE_ORDER:
+        if not _is_confirmed(db, session_id, stage):
+            continue
+        content = _artifact_content(db, project, session, stage)
+        if content:
+            stage_docs.append((stage.value, content))
+    levels = c4_service.model_from_stages(stage_docs)
+
+    workdir = workspace.workdir_for(project)
+    # file_tree의 기본 상한(200)으로는 큰 리포에서 $link이 가리키는 파일을 놓쳐 code
+    # 레벨이 말없이 비어 버린다 — 코드맵이 훑는 범위(codemap.build_code_map)와 맞춘다.
+    tree = workspace.file_tree(workdir, limit=2000) if workdir.exists() else []
+    for level in levels.values():
+        for element in level["elements"]:
+            if element["base"] == "component":
+                element["paths"] = c4_service.component_paths(element, tree)
+    return C4ModelOut(project_id=project.id, levels=levels)
 
 
 @router.get("/plan/sessions/{session_id}/repo")
