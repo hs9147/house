@@ -75,6 +75,12 @@ class Project(Base):
     )
     # LLM 전용 확장 필드 (vLLM 옵션 등)
     llm_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 리포에서 감지한 **배포 단위 목록**(services/structure.py). type 하나로는 백엔드+
+    # 프론트엔드처럼 서로 다른 템플릿·포트로 빌드돼야 하는 구성을 표현할 수 없어서, 감지
+    # 결과를 그대로 둔다. type 컬럼은 이 구조의 대표값으로 남는다(structure.representative_type).
+    #   {"method", "detected_at", "git_sha", "source",
+    #    "components": [{"name", "path", "type"}, ...]}
+    structure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     organization: Mapped["Organization | None"] = relationship(back_populates="projects")

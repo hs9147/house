@@ -86,6 +86,10 @@ class ProjectOut(BaseModel):
     branch: str
     source_subdir: str | None
     default_profile: BuildProfile
+    # 리포에서 감지한 배포 단위 목록(services/structure.py). type 하나로는 백엔드+
+    # 프론트엔드처럼 서로 다른 템플릿·포트로 빌드돼야 하는 구성을 표현할 수 없다.
+    # 화면은 이 목록을 배지로 보여준다. 아직 감지하지 않은 프로젝트는 null.
+    structure: dict | None = None
     created_at: datetime
 
 

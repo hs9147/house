@@ -1,3 +1,4 @@
+import asyncio
 import shutil
 from pathlib import Path
 
@@ -42,8 +43,8 @@ from ..schemas import (
     ProjectUploadForm,
 )
 from ..security import can_view_git_url, encrypt_value, require_admin, require_api_key, viewer_org_ids
-from ..services import deployer, gitea, upload
-from ..services.build import COMPOSITE_COMPONENTS
+from ..services import deployer, gitea, structure, upload
+from ..services.build import COMPOSITE_COMPONENTS, checkout
 from ..services.deployer import DeployInProgress, NoRollbackTarget, ProfileConflict
 from ..services.gitea import GiteaError, GiteaNotConfigured
 from ..services.upload import UploadError, UploadRejected
@@ -209,6 +210,12 @@ async def upload_project(
     db.commit()
     audit.record(db, key.name, "project.upload", project.name, {"git_sha": git_sha})
 
+    # 올린 소스에서 배포 단위를 읽어 둔다 — 사용자가 고른 type 하나로는 백엔드+프론트엔드
+    # 같은 구성을 표현할 수 없고, 배포 시점에 폴더 이름으로 다시 추측할 수도 없다.
+    # 감지된 구조가 사용자가 고른 type과 다르면 대표 타입도 감지값으로 맞춘다
+    # (services/structure.refresh) — 올린 소스가 사실이다.
+    structure.refresh(db, project, workdir, actor=key.name, source="repo", git_sha=git_sha)
+
     if form.deploy_after_upload and is_enabled("deploy"):
         if project.type == ProjectType.composite:
             deployer.deploy_composite_queued(db, project, form.default_profile, git_sha)
@@ -259,6 +266,34 @@ def delete_project(
 
     shutil.rmtree(get_settings().work_dir / name, ignore_errors=True)
     audit.record(db, admin.name, "project.delete", name, {"project_id": project_id})
+
+
+@router.post("/{project_id}/structure/detect", response_model=ProjectOut)
+async def detect_project_structure(
+    project_id: int,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """리포 구조를 지금 다시 읽어 저장한다 — **배포 전에 확인하는 유일한 길**이다.
+
+    배포 시점에도 자동으로 다시 읽지만(services/deployer), 그때는 이미 빌드가 시작된
+    뒤다. 구조가 바뀌었는지 먼저 보고 싶을 때 여기서 확인한다.
+
+    리포를 최신화한 뒤 감지한다 — 체크아웃이 실패하면 있는 워킹카피로 판정하고, 감지된
+    컴포넌트가 하나도 없으면 저장된 구조를 지우지 않는다(services/structure.refresh).
+    """
+    project = _get_project(db, project_id)
+    workdir = get_settings().work_dir / project.name
+    git_sha = ""
+    try:
+        workdir, git_sha = await asyncio.to_thread(checkout, project)
+    except Exception:  # noqa: BLE001 — 원격이 없어도 워킹카피가 있으면 읽는다
+        pass
+    await asyncio.to_thread(
+        structure.refresh, db, project, workdir,
+        actor=key.name, source="repo", git_sha=git_sha,
+    )
+    return _serialize_project(project, key, viewer_org_ids(db, key))
 
 
 @router.post("/{project_id}/deploy", response_model=DeploymentOut | list[DeploymentOut],

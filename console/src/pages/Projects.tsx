@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
 import GitBrowseButton from '../components/GitBrowseButton';
+import TypeBadges from '../components/TypeBadges';
 import Modal from '../components/Modal';
 import StatusPill from '../components/StatusPill';
 import VscodeWorkButton from '../components/VscodeWorkButton';
@@ -69,7 +70,8 @@ export default function Projects() {
                 {filtered.map((p) => (
                   <tr key={p.id} className="clickable" onClick={() => navigate(`/projects/${p.id}`)}>
                     <td>{p.name}</td>
-                    <td><StatusPill value={p.type} /></td>
+                    {/* 타입 하나가 아니라 감지된 배포 단위를 배지로 나열한다 */}
+                    <td><TypeBadges project={p} /></td>
                     {/* 주소 자체는 길어서 표를 밀어낸다 — 리포는 'Git 조회'로 새 창에서 본다. */}
                     <td>
                       <span className="row" style={{ alignItems: 'center', gap: 8 }}>

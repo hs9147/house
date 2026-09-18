@@ -30,7 +30,8 @@ from ..models import (
     Organization, PreviewSession, Project, ProjectType, RedirectRule,
 )
 from . import gitea
-from .build import COMPOSITE_COMPONENTS, detect_project_type
+from . import structure as structure_service
+from .build import COMPOSITE_COMPONENTS
 from .git_auth import auth_args
 from .gitea import GiteaError
 
@@ -87,7 +88,10 @@ def sync_from_gitea(
             workdir = None
             try:
                 workdir = _shallow_clone(repo["clone_url"], branch)
-                ptype = detect_project_type(workdir)
+                # 리포 구조를 그대로 읽는다 — 폴더 이름이 아니라 시그니처 파일이 기준이고,
+                # 컴포넌트가 여럿이면 그 목록을 배포 명세로 저장한다(services/structure).
+                detected = structure_service.snapshot(workdir, source="repo")
+                ptype = structure_service.representative_type(detected)
             except RuntimeError as e:
                 skipped.append({"name": repo_name, "kind": "project", "reason": f"clone 실패: {e}"})
                 continue
@@ -104,7 +108,7 @@ def sync_from_gitea(
 
             project = Project(
                 name=repo_name, type=ptype, organization_id=org.id,
-                git_url=repo["clone_url"], branch=branch,
+                git_url=repo["clone_url"], branch=branch, structure=detected,
             )
             db.add(project)
             db.commit()

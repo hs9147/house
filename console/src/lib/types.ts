@@ -4,6 +4,22 @@ export type ProjectType = 'react' | 'python' | 'node' | 'llm' | 'html' | 'stream
 export type BuildProfile = 'development' | 'release';
 export type DeploymentStatus = 'building' | 'running' | 'failed' | 'stopped';
 
+// 리포에서 감지한 배포 단위 하나 — 빌드 한 번에 대응한다(app/services/structure.py).
+// type이 null이면 판정 불가(추측성 기본값을 넣지 않는다).
+export interface ProjectComponent {
+  name: string;
+  path: string; // 리포 루트 기준 상대 경로("."은 루트 자체)
+  type: ProjectType | null;
+}
+
+export interface ProjectStructure {
+  method: string; // deterministic
+  source?: string; // repo | plan — 리포를 훑은 것인지 기획이 선언한 것인지
+  detected_at?: string;
+  git_sha?: string;
+  components: ProjectComponent[];
+}
+
 export interface ProjectOut {
   id: number;
   name: string;
@@ -14,6 +30,9 @@ export interface ProjectOut {
   git_url: string;
   branch: string;
   default_profile: BuildProfile;
+  // 타입 하나로는 표현할 수 없는 복합 구성을 담는다. 아직 감지하지 않았으면 null —
+  // 다음 배포나 '구조 다시 감지'에서 채워진다.
+  structure: ProjectStructure | null;
   created_at: string;
 }
 

@@ -13,9 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import BuildProfile, Deployment, DeploymentStatus, EnvVar, Project, RedirectRule
+from ..models import (
+    BuildProfile, Deployment, DeploymentStatus, EnvVar, Project, ProjectType, RedirectRule,
+)
 from ..security import decrypt_value
 from . import ports, proxy
+from . import structure
 from .build import (
     COMPOSITE_COMPONENTS,
     PROFILES,
@@ -178,6 +181,24 @@ def deploy_sync(
                 db.commit()
             raise
         workdir, sha = checkout(project, git_sha)
+        # 배포 직전에 구조를 다시 읽는다. 저장된 구조로 빌드하면 리포가 바뀐 뒤에는 없는
+        # 폴더를 찾거나 새 컴포넌트를 빼먹는다 — 빌드할 수 있는 것은 리포에 있는 것뿐이라
+        # 감지 결과가 이긴다. 바뀐 내용은 감사기록에 남는다(services/structure.refresh).
+        detected, _changed = structure.refresh(
+            db, project, workdir, actor="deploy", source="repo", git_sha=sha)
+        if project.type == ProjectType.composite:
+            # 단일 배포 경로로 들어왔는데 구조가 복합이 됐다 — 여기서 계속하면 컴포넌트
+            # 하나만 배포되고 나머지는 조용히 빠진다. 무엇이 감지됐는지 말하고 멈춘다.
+            msg = (
+                f"{project.name}: 리포 구조가 복합으로 감지됐습니다 "
+                f"({structure.summary(detected)}) — 복합 배포로 다시 실행하세요."
+            )
+            if record is not None:
+                record.status = DeploymentStatus.failed
+                record.error = msg
+                record.finished_at = datetime.now(timezone.utc)
+                db.commit()
+            raise BuildError(msg)
         if record is None:
             record = Deployment(
                 project_id=project.id,
@@ -448,10 +469,18 @@ def deploy_composite_sync(
                 db.commit()
             raise BuildError(msg)
         workdir, sha = checkout(project, git_sha)
+        # 단일 배포와 같은 이유로 구조를 다시 읽어 저장한다 — 화면·감사기록이 실제로
+        # 배포한 구성을 말해야 한다.
+        detected, _changed = structure.refresh(
+            db, project, workdir, actor="deploy", source="repo", git_sha=sha)
         components = detect_composite_components(workdir)
         if not components:
+            # 감지된 구조를 함께 말한다. 예전 문구는 backend/·frontend/만 언급해서,
+            # api/·web/처럼 이름이 다른 리포나 컴포넌트가 셋인 리포에서는 무엇이 문제인지
+            # 알 수 없었다(빌드 파이프라인이 아직 그 두 이름만 다룬다).
             raise BuildError(
-                f"{project.name}: composite 프로젝트인데 backend/, frontend/ 서브폴더가 없습니다"
+                f"{project.name}: 복합 배포는 아직 backend/·frontend/ 두 폴더만 지원합니다 "
+                f"(감지된 구조: {structure.summary(detected) or '없음'})"
             )
 
         group_id = uuid.uuid4().hex
