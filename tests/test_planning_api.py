@@ -1613,3 +1613,88 @@ def test_confirm_opens_pull_request_when_gitea_lives_under_a_subpath(
     # 서브패스를 떼고 owner/repo를 읽어야 한다
     assert opened == [("demo", "subpath-app")]
     get_settings.cache_clear()
+
+
+def test_merge_state_survives_reopening_the_session(monkeypatch, fresh_settings, tmp_path):
+    """회귀: 머지 여부를 콘솔 state로만 들고 있어 세션을 다시 열면 머지 버튼이 또 보였다.
+
+    마무리는 세션에 남아야 한다(ChatSession.merged_at) — 화면이 '브랜치 머지'와 '진행 현황
+    업데이트' 중 무엇을 보일지 이 값으로 갈린다.
+    """
+    from app.services import gitea, workspace
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    # 시작 시점에는 마무리되지 않았다
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["merged_at"] is None
+
+    _confirm_stage_doc(c, monkeypatch, sid, repo, "spec", "01-기획서.md", _C4_SPEC_DOC)
+    monkeypatch.setattr(gitea, "repo_slug", lambda git_url: ("o", "plan-app"))
+    monkeypatch.setattr(gitea, "ensure_pull_request", lambda o, r, head, base, title, body="": {
+        "number": 9, "html_url": "https://git.example.com/pulls/9", "mergeable": True,
+    })
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": True)
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, br, path, content, message: "cafe123")
+
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["action"] == "merged"
+
+    # 세션을 다시 읽어도(재개와 같은 경로) 마무리 상태가 남아 있다
+    merged_at = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["merged_at"]
+    assert merged_at is not None
+
+
+def test_merge_that_did_not_land_is_not_recorded_as_finished(monkeypatch, fresh_settings, tmp_path):
+    """PR이 열린 채 남은 것은 마무리가 아니다 — 마무리로 적으면 되돌릴 길이 없다."""
+    from app.services import gitea, workspace
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _confirm_stage_doc(c, monkeypatch, sid, repo, "spec", "01-기획서.md", _C4_SPEC_DOC)
+    monkeypatch.setattr(gitea, "repo_slug", lambda git_url: ("o", "plan-app"))
+    monkeypatch.setattr(gitea, "ensure_pull_request", lambda o, r, head, base, title, body="": {
+        "number": 9, "html_url": "https://git.example.com/pulls/9", "mergeable": False,
+    })
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, br, path, content, message: "cafe123")
+
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/merge",
+                  headers=ADMIN).json()["action"] == "pr_opened"
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["merged_at"] is None
+
+
+def test_regenerating_tasks_undoes_the_merge_state(monkeypatch, fresh_settings, tmp_path):
+    """작업 지시를 다시 만들면 마무리가 무효다 — 화면도 '브랜치 머지'로 돌아가야 한다."""
+    from app.db import SessionLocal
+    from app.models import ChatSession
+    from app.services import planning as planning_service
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _confirm_stage_doc(c, monkeypatch, sid, repo, "spec", "01-기획서.md", _C4_SPEC_DOC)
+
+    # 마무리된 상태를 만들어 둔다
+    with SessionLocal() as db:
+        db.get(ChatSession, sid).merged_at = __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc)
+        db.commit()
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}",
+                 headers=ADMIN).json()["merged_at"] is not None
+
+    monkeypatch.setattr(planning_service, "decompose_tasks",
+                        lambda provider, db, documents, constraints, limit=12: [
+                            {"title": "새 작업", "detail": "d", "verify": "v"}])
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate",
+                  headers=ADMIN).status_code == 200
+    assert c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["merged_at"] is None

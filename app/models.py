@@ -265,6 +265,13 @@ class ChatSession(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
     provider_id: Mapped[int] = mapped_column(ForeignKey("llm_providers.id"))
     branch: Mapped[str] = mapped_column(String(128))  # 편집 대상 작업 브랜치
+    # 세션 마무리(작업 브랜치를 기본 브랜치로 반영) 시각. 화면이 '브랜치 머지'와 '진행
+    # 현황 업데이트' 중 무엇을 보여줄지 여기서 갈린다 — 클라이언트 state로만 두면 세션을
+    # 다시 열었을 때 이미 머지한 세션에 머지 버튼이 또 보인다. 작업 지시를 재생성하면
+    # 다시 None이 된다(마무리가 무효가 되므로 — api/planning.generate_build_tasks).
+    merged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -133,11 +133,17 @@ export default function AgentPlanning() {
   const stageUnlocked = (stage: string) =>
     STAGES.slice(0, stageIndex(stage)).every((s) => isConfirmed(s.key));
 
+  // 세션이 마무리(브랜치 머지)됐는지 — **서버가 기억한다**(ChatSession.merged_at).
+  // 방금 머지한 결과(mergeResult)만 보면 세션을 다시 열었을 때 이미 머지한 세션에 머지
+  // 버튼이 또 보인다. 작업 지시를 재생성하면 서버가 merged_at을 지우므로 다시 머지 단계로
+  // 돌아간다.
+  const merged = session?.merged_at != null;
+
   // ⑤ 단계에서 지금 강조할 버튼 — 작업 지시 생성 → 단계 확정 → 브랜치 머지 → 진행 현황 순.
   const taskStep: 'generate' | 'confirm' | 'merge' | 'progress' =
     tasks.length === 0 ? 'generate'
       : !isConfirmed(TASK_STAGE) ? 'confirm'
-        : mergeResult ? 'progress' : 'merge';
+        : merged ? 'progress' : 'merge';
 
   const start = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -149,6 +155,7 @@ export default function AgentPlanning() {
       setMessages([]);
       setDraft('');
       setGitResult(null);
+      setMergeResult(null); // 이전 세션의 머지 결과 문구가 남지 않게
       setInput(defaultRequestOf(s, 'spec'));
       await loadArtifact(s.id, 'spec'); // 리포에 이미 기획 문서가 있으면 그대로 불러온다
       history.reload();
@@ -183,6 +190,7 @@ export default function AgentPlanning() {
       setActiveStage(next.key);
       setMessages(msgs.map((m) => ({ role: m.role, content: m.content })));
       setGitResult(null);
+      setMergeResult(null); // 이전 세션의 머지 결과 문구가 남지 않게
       setCompliance(null);
       setInput(defaultRequestOf(s, next.key));
       await loadArtifact(row.id, next.key);
@@ -401,6 +409,10 @@ export default function AgentPlanning() {
       setTasks(await api.generatePlanTasks(session.id, signal));
       // 산출물 문서는 이 목록을 렌더한 것이다 — 편집기도 새 목록으로 맞춘다.
       await loadArtifact(session.id, TASK_STAGE);
+      // 재생성으로 세션 마무리가 무효가 됐다(서버가 merged_at을 지운다) — 버튼 상태를
+      // 다시 읽어 '진행 현황 업데이트'가 '브랜치 머지'로 돌아가게 한다.
+      setMergeResult(null);
+      await refreshSession();
     } catch (err) {
       if (isCancel(err)) await afterCancel();
       else setError((err as Error).message);
@@ -731,7 +743,11 @@ export default function AgentPlanning() {
                   <ZipDownloadButton
                     project={availableProjects.find((p) => p.id === session?.project_id)}
                   />
-                  {isConfirmed(TASK_STAGE) && (
+                  {/* 머지 전에는 '브랜치 머지', 머지 후에는 '진행 현황 업데이트' —
+                      둘을 함께 두지 않는다. 마무리한 세션에 머지 버튼이 남아 있으면 다시
+                      눌러야 하는 것처럼 보인다. 작업 지시를 재생성하면 서버가 마무리를
+                      무효로 만들어(merged_at=None) 다시 머지 버튼으로 돌아온다. */}
+                  {isConfirmed(TASK_STAGE) && !merged && (
                     <button
                       className={taskStep === 'merge' ? 'primary small' : 'secondary small'}
                       onClick={mergeSession}
@@ -740,7 +756,7 @@ export default function AgentPlanning() {
                       🔀 브랜치 머지 (세션 마무리)
                     </button>
                   )}
-                  {mergeResult && (
+                  {merged && (
                     <button
                       className={taskStep === 'progress' ? 'primary small' : 'secondary small'}
                       onClick={loadBuildStatus}

@@ -232,6 +232,9 @@ class PlanSessionOut(BaseModel):
     provider: str
     project_id: int
     project_name: str
+    # 세션을 마무리(브랜치 머지)한 시각. 화면이 '브랜치 머지'와 '진행 현황 업데이트' 중
+    # 무엇을 보여줄지 이 값으로 갈린다 — 세션을 다시 열어도 상태가 유지되어야 한다.
+    merged_at: datetime | None = None
     artifacts: list[PlanArtifactOut] = []
 
 

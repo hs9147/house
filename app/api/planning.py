@@ -28,6 +28,7 @@ from ..models import (
     PlanConstraint,
     PlanStage,
     Project,
+    utcnow,
 )
 from ..schemas import (
     BuildTaskOut,
@@ -100,6 +101,7 @@ def _session_out(db: Session, session: ChatSession) -> PlanSessionOut:
         provider=provider.name if provider else "",
         project_id=session.project_id,
         project_name=project.name if project else "",
+        merged_at=session.merged_at,
         artifacts=_artifacts_out(db, session.id),
     )
 
@@ -489,6 +491,12 @@ async def merge_plan_session(
         f"plan: 기획 산출물 반영 (session #{session_id})",
         "에이전트 기획 세션 마무리 — 확정 산출물과 작업 지시를 기본 브랜치로 반영합니다.",
     )
+    # 반영에 성공했을 때만 마무리로 기록한다 — PR이 열린 채 남았거나(pr_opened) 건너뛴
+    # 것은(skipped) 아직 마무리가 아니다. 이 값으로 화면이 '브랜치 머지'와 '진행 현황
+    # 업데이트' 중 무엇을 보일지 갈리므로, 실패를 마무리로 적으면 되돌릴 길이 사라진다.
+    if result["action"] in ("merged", "committed"):
+        session.merged_at = utcnow()
+        db.commit()
     audit.record(db, key.name, "plan.session.merge", project.name,
                  {"session_id": session_id, "branch": session.branch, "action": result["action"]})
     return PlanMergeOut(
@@ -735,6 +743,9 @@ async def generate_build_tasks(
             project_id=project.id, session_id=session_id,
             title=item["title"], detail=item["detail"], verify=item["verify"],
         ))
+    # 작업 지시를 다시 만들면 이 세션의 마무리는 무효다 — 새 작업들이 아직 아무것도
+    # 반영되지 않았으므로 화면도 '브랜치 머지'로 되돌아가야 한다.
+    session.merged_at = None
     db.commit()
     audit.record(db, key.name, "plan.tasks.generate", project.name, {"count": len(items)})
     return [_task_out(t) for t in _session_tasks(db, session_id)]
