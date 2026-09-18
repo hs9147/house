@@ -40,7 +40,7 @@ const GIT_ACTION_LABEL: Record<string, string> = {
   skipped: 'PR 미수행',
 };
 
-// 작업 지시 상태 — 외부 빌더가 MCP로 갱신하고 콘솔에서도 바꿀 수 있다.
+// 작업 지시 상태 — 외부 빌더가 MCP로 갱신하고, 콘솔은 표시만 한다(읽기 전용).
 const TASK_STATUS: { key: BuildTaskOut['status']; label: string; color: string }[] = [
   { key: 'pending', label: '대기', color: '#94a3b8' },
   { key: 'in_progress', label: '진행', color: '#38bdf8' },
@@ -409,15 +409,6 @@ export default function AgentPlanning() {
     }
   };
 
-  const setTaskStatus = async (row: BuildTaskOut, status: string) => {
-    try {
-      const updated = await api.updatePlanTask(row.id, { status });
-      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  };
-
   const mergeSession = async () => {
     if (!session) return;
     const signal = begin(
@@ -774,6 +765,8 @@ export default function AgentPlanning() {
                   질의가 이 기획 세션에 남습니다. 진행 현황은 빌더의 보고가 아니라
                   <b> 기본 브랜치에 반영된 커밋</b>을 기준으로 갱신됩니다 — 빌더가 작업 브랜치를 push하면
                   기본 브랜치로 가는 PR이 자동 생성되고, 그 PR이 머지되면 완료로 바뀝니다.
+                  {' '}<b>상태는 여기서 직접 바꾸지 않습니다</b> — 손으로 고쳐도 다음 갱신이
+                  같은 기준으로 다시 판정해 되돌립니다.
                 </p>
                 {taskSync && (
                   <p style={{ fontSize: 12, marginTop: 6 }}>
@@ -808,16 +801,9 @@ export default function AgentPlanning() {
                             )}
                           </td>
                           <td className="mutedtext" style={{ fontSize: 12 }}>{t.verify}</td>
-                          <td>
-                            <select
-                              value={t.status}
-                              onChange={(e) => setTaskStatus(t, e.target.value)}
-                              style={{ fontSize: 12, color: TASK_STATUS.find((s) => s.key === t.status)?.color }}
-                            >
-                              {TASK_STATUS.map((s) => (
-                                <option key={s.key} value={s.key}>{s.label}</option>
-                              ))}
-                            </select>
+                          {/* 손으로 고쳐 두면 다음 '진행 현황 업데이트'가 되돌린다 — 표시만 한다 */}
+                          <td style={{ fontSize: 12, color: TASK_STATUS.find((s) => s.key === t.status)?.color }}>
+                            {TASK_STATUS.find((s) => s.key === t.status)?.label ?? t.status}
                           </td>
                           <td className="mono" style={{ fontSize: 12 }}>{t.commit_sha?.substring(0, 7) ?? '—'}</td>
                         </tr>
