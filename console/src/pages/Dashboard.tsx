@@ -39,10 +39,16 @@ export default function Dashboard() {
         <Async state={state}>
           {(s) => (
             <>
+              {/* 실제 구성을 그대로 말한다. 예전에는 OS만 보고 만든 문구라 런타임이
+                  windows_service(Docker 미사용)여도 Docker 라이선스 안내가 뜨고, GPU가
+                  없는 서버에서 "GPU 지원"이라 하면서 바로 아래 "GPU 없음"과 어긋났다. */}
               {s.host_os && (
                 <p className="mutedtext" style={{ marginTop: 0 }}>
-                  운영환경: <span className="status info">{s.host_os}</span>{' '}
-                  {s.docker_hint} · GPU {s.gpu_supported ? '지원' : '미지원'}
+                  운영환경: <span className="status info">{s.host_os}</span>
+                  {s.runtime_backend && <> · 런타임 <span className="mono">{s.runtime_backend}</span></>}
+                  {s.proxy_backend && <> · 프록시 <span className="mono">{s.proxy_backend}</span></>}
+                  {' '}· GPU 배정 {s.gpu_supported ? '가능' : '불가'}
+                  {s.docker_hint && <> · {s.docker_hint}</>}
                 </p>
               )}
               {s.system && <p className="mutedtext">{s.system}</p>}

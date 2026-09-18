@@ -504,7 +504,13 @@ export interface GpuInfo {
 
 export interface StatusSnapshot {
   host_os?: string;
+  // 지금 유효한 런타임(k8s | windows_service | docker)과 리버스프록시 — OS가 아니라
+  // 실제 구성이다. enterprise 티어는 PAAS_RUNTIME_BACKEND와 무관하게 k8s다.
+  runtime_backend?: string;
+  proxy_backend?: string;
+  // 이 구성에서 GPU를 배정할 수 있는가(런타임 + OS 능력). 실제 장치 유무는 gpus가 말한다.
   gpu_supported?: boolean;
+  // Docker 라이선스 안내 — Docker 런타임이 아니면 빈 값이다.
   docker_hint?: string;
   cpu_percent?: number;
   memory?: { total: number; used: number; percent: number };

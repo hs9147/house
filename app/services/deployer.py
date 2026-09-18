@@ -35,13 +35,34 @@ from .runtime.base import Endpoint, Runtime, RuntimeSpec
 _locks: dict[int, threading.Lock] = defaultdict(threading.Lock)
 
 
-def get_runtime() -> Runtime:
+def runtime_name() -> str:
+    """지금 유효한 런타임 이름: k8s | windows_service | docker.
+
+    PAAS_RUNTIME_BACKEND만 보면 틀린다 — enterprise 티어는 그 값과 무관하게 k8s다.
+    화면·상태 보고가 이 판정을 다시 쓰기 때문에(services/monitor) get_runtime과 같은
+    곳에서 이름만 돌려준다. 두 곳에 같은 분기를 쓰면 언젠가 갈라지고, 그러면 화면이
+    실제로 도는 런타임과 다른 것을 말한다.
+    """
     settings = get_settings()
     if settings.tier == "enterprise":
+        return "k8s"
+    if settings.runtime_backend == "windows_service":
+        return "windows_service"
+    return "docker"
+
+
+# GPU를 배정할 수 있는 런타임. windows_service(nssm 네이티브 프로세스)에는 GPU 배정이라는
+# 개념 자체가 없다 — 그 런타임은 RuntimeSpec.gpu를 읽지도 않는다.
+GPU_CAPABLE_RUNTIMES = ("docker", "k8s")
+
+
+def get_runtime() -> Runtime:
+    name = runtime_name()
+    if name == "k8s":
         from .runtime.k8s_runtime import K8sRuntime  # noqa: PLC0415
 
         return K8sRuntime()
-    if settings.runtime_backend == "windows_service":
+    if name == "windows_service":
         from .runtime.windows_service_runtime import WindowsServiceRuntime  # noqa: PLC0415
 
         return WindowsServiceRuntime()
