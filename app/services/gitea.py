@@ -102,13 +102,28 @@ def repo_slug(git_url: str) -> tuple[str, str] | None:
 
     Gitea REST API(PR·머지)를 쓸 수 있는지 판별하는 관문 — git_auth.auth_args와 동일하게
     호스트가 PAAS_GITEA_URL과 일치할 때만 유효하다.
+
+    **PAAS_GITEA_URL의 서브패스를 떼고 본다.** Gitea를 리버스 프록시 아래 서브패스로
+    올리는 구성(`http://host/git/`)에서 리포 주소는 `http://host/git/{owner}/{repo}.git`이다.
+    예전에는 호스트만 맞춰 보고 경로를 루트부터 잘라서 `git/owner/repo` 세 조각이 나왔고,
+    두 조각이 아니라는 이유로 **사내 리포를 전부 외부로 오판했다.** 그 결과 단계 확정의
+    PR·머지가 모두 "사내 Gitea 리포가 아니어서"로 건너뛰어졌고, 빌더 push의 자동 PR
+    (api/webhooks._pull_request_task)은 감사 기록도 없이 조용히 사라졌다.
     """
     settings = get_settings()
     if not settings.gitea_url:
         return None
-    if urlsplit(git_url).netloc != urlsplit(settings.gitea_url).netloc:
+    base = urlsplit(settings.gitea_url)
+    target = urlsplit(git_url)
+    if not base.netloc or target.netloc != base.netloc:
         return None
-    path = urlsplit(git_url).path.strip("/")
+    path = target.path.strip("/")
+    base_path = base.path.strip("/")
+    if base_path:
+        # 경계까지 포함해 비교한다 — `/git`이 `/gitea/...`에 걸리면 안 된다.
+        if not (path + "/").startswith(base_path + "/"):
+            return None
+        path = path[len(base_path):].strip("/")
     if path.endswith(".git"):
         path = path[:-4]
     parts = path.split("/")

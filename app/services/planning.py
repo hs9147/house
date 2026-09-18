@@ -451,7 +451,15 @@ def auto_pull_request(project: Project, branch: str, title: str, body: str = "")
         return {"action": "committed", "detail": f"기본 브랜치({project.branch})에 직접 커밋"}
     slug = gitea_service.repo_slug(project.git_url)
     if slug is None:
-        return {"action": "skipped", "detail": "사내 Gitea 리포가 아니어서 PR을 만들지 않았습니다."}
+        # 왜 아닌지를 말해 준다 — 예전 문구("사내 Gitea 리포가 아니어서")는 사내 리포로
+        # 작업하는 사람에게 사실과 어긋나 보여서 원인을 짚을 수 없었다. 주소 자체는 싣지
+        # 않는다(git_url은 조직 밖 사용자에게 가려지는 값이다 — security.can_view_git_url).
+        return {
+            "action": "skipped",
+            "detail": ("프로젝트 git_url이 사내 Gitea(PAAS_GITEA_URL) 아래의 "
+                       "{owner}/{repo} 형태로 읽히지 않아 PR을 만들지 않았습니다 — "
+                       "PAAS_GITEA_URL과 프로젝트 git_url의 호스트·경로를 확인하세요."),
+        }
     owner, repo = slug
     try:
         # PR이 없으면 여기서 만든다(있으면 그 PR을 재사용).

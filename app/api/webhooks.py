@@ -107,7 +107,14 @@ def _pull_request_task(project_id: int, branch: str) -> None:
             return
         slug = gitea.repo_slug(project.git_url)
         if slug is None:
-            return  # 사내 Gitea가 아니면 API로 PR을 만들 수 없다
+            # 사내 Gitea가 아니면 API로 PR을 만들 수 없다. 조용히 돌아가면 "PR이 왜 안
+            # 생겼는지"를 확인할 방법이 없다 — 실제로 서브패스 Gitea에서 이 경로로 전부
+            # 빠지고 있었는데 아무 기록이 없어 드러나지 않았다(services/gitea.repo_slug).
+            audit.record(db, "webhook", "plan.build.pull_request.skipped", project.name,
+                         {"branch": branch,
+                          "reason": "git_url이 사내 Gitea(PAAS_GITEA_URL) 아래의 "
+                                    "{owner}/{repo} 형태로 읽히지 않습니다."})
+            return
         owner, repo = slug
         try:
             pr = gitea.ensure_pull_request(

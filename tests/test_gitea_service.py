@@ -119,6 +119,29 @@ def test_repo_slug_parses_internal_repo_only():
     assert gitea.repo_slug("https://git.example.com/api") is None
 
 
+def test_repo_slug_handles_gitea_under_a_subpath(monkeypatch):
+    """회귀: 서브패스 구성(`http://host/git/`)의 사내 리포를 외부로 오판했다.
+
+    호스트만 맞춰 보고 경로를 루트부터 잘라서 `git/owner/repo` 세 조각이 나왔고, 두 조각이
+    아니라는 이유로 None이 됐다. 그 결과 단계 확정의 PR·머지가 전부 "사내 Gitea 리포가
+    아니어서"로 건너뛰어지고, 빌더 push의 자동 PR은 감사 기록도 없이 사라졌다.
+    """
+    monkeypatch.setenv("PAAS_GITEA_URL", "http://gpax.lge.com/git/")
+    get_settings.cache_clear()
+
+    assert gitea.repo_slug("http://gpax.lge.com/git/shop-team/api.git") == ("shop-team", "api")
+    assert gitea.repo_slug("http://gpax.lge.com/git/shop-team/api") == ("shop-team", "api")
+    # 서브패스 밖의 주소는 여전히 사내 리포가 아니다
+    assert gitea.repo_slug("http://gpax.lge.com/shop-team/api.git") is None
+    # 경계까지 맞춰 본다 — `/git`이 `/gitea/...`에 걸리면 안 된다
+    assert gitea.repo_slug("http://gpax.lge.com/gitea/shop-team/api.git") is None
+    # 서브패스만 있고 리포가 없으면 슬러그가 아니다
+    assert gitea.repo_slug("http://gpax.lge.com/git/") is None
+    assert gitea.repo_slug("http://gpax.lge.com/git/only-owner") is None
+    # 호스트가 다르면 서브패스가 같아도 아니다
+    assert gitea.repo_slug("http://other.example.com/git/shop-team/api.git") is None
+
+
 def test_ensure_pull_request_created(monkeypatch):
     calls = []
     monkeypatch.setattr(
