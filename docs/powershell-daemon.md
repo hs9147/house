@@ -262,9 +262,17 @@ paas가 nssm 등으로 **Job Object**에 묶여 있으면, paas 서비스가 sto
 프로세스가 함께 종료된다. 그 프로세스가 같은 Job 안에 있으면 paas가 자기 자신을 재시작하는
 순간 재시작을 수행하던 프로세스까지 죽는 **self-kill**이 발생한다.
 
-이를 막기 위해 프로세스를 생성할 때 `CREATE_BREAKAWAY_FROM_JOB`(+ `DETACHED_PROCESS` 또는
-`CREATE_NO_WINDOW`, `CREATE_NEW_PROCESS_GROUP`)로 **Job에서 breakaway**시킨다. 관련 상수·헬퍼는
-`app/services/powershell_daemon.py`의 `_creation_flags()`에 모여 있다(분리의 단일 지점).
+이를 막기 위해 프로세스를 생성할 때 `CREATE_BREAKAWAY_FROM_JOB`으로 **Job에서
+breakaway**시킨다. 관련 상수·헬퍼는 `app/services/powershell_daemon.py`의 `_creation_flags()`에
+모여 있다(분리의 단일 지점).
+
+**PowerShell에는 `DETACHED_PROCESS`를 쓰지 않는다.** 콘솔이 아예 없으면 Windows PowerShell은
+호스트를 세우지 못해 **스크립트를 한 줄도 실행하지 않고 즉시 죽는다.** `Popen`은 성공하고
+예외도 없으므로 호출자는 성공했다고 믿는다 — 재시작도 SW 업데이트도 조용히 아무 일도
+일어나지 않는다. 그래서 `run_detached_script`는 `CREATE_NO_WINDOW`(창만 숨김)를 쓴다.
+살아남는 데 필요한 것은 콘솔 분리가 아니라 Job breakaway다 — 윈도우는 부모가 죽어도 자식을
+죽이지 않는다. 반면 `_spawn_broker`는 `python.exe`를 띄우므로 콘솔이 없어도 시작한다
+(그쪽은 `DETACHED_PROCESS`를 그대로 쓴다).
 
 ### 업데이트가 실제로 반영됐는지 — 리비전으로 본다
 
@@ -272,7 +280,7 @@ paas가 nssm 등으로 **Job Object**에 묶여 있으면, paas 서비스가 sto
 콘솔 PowerShell 화면 머리말에도 같은 값이 찍히고, 서비스 로그 첫 줄에도 남는다.
 
 ```powershell
-(Invoke-RestMethod http://127.0.0.1:8000/paas/health).revision
+(Invoke-RestMethod http://127.0.0.1:7000/paas/health).revision
 ```
 
 디스크가 아니라 **돌고 있는 쪽**을 말한다 — `git pull`만 하고 재시작하지 않았으면 예전
@@ -282,6 +290,34 @@ paas가 nssm 등으로 **Job Object**에 묶여 있으면, paas 서비스가 sto
 
 없던 엔드포인트가 404라면 먼저 이 값을 보면 된다 — 코드가 옛것인지, 프록시 문제인지가
 거기서 갈린다.
+
+### 터미널에서 자기 자신을 재시작한다
+
+`git pull` 없이 백엔드만 재기동하는 경로다. 콘솔 PowerShell 화면의 **🔁 백엔드 재시작**
+버튼(`POST /system/restart`)과, 터미널에 직접 치는 것이 **같은 스크립트**를 쓴다:
+
+```powershell
+.\infra\restart-paas.ps1
+```
+
+**왜 스크립트가 스스로를 한 번 더 띄우는가.** `-Now` 없이 부르면 스크립트는 실제 재시작을
+분리된 프로세스로 넘기고 **즉시 반환한다.** 그러지 않으면 `/exec`가 이 명령의 출력을 30초
+동기 대기하는 동안 paas가 내려가 응답이 끊기고, 재시작은 성공했는데 콘솔에는 실패로
+보인다. 실측으로 호출자는 2.5초에 돌아오고, 분리된 쪽이 재기동을 끝낸다.
+
+**무엇을 재시작하는가.** `Get-Service`로 등록된 서비스(nssm)가 있으면 `Restart-Service`,
+없으면(로컬 개발) uvicorn을 직접 다시 띄운다. 판정은 실행 시점에 스크립트가 한다.
+리눅스(systemd) 확장은 `app/services/selfrestart.py`의 posix 분기에 자리를 잡아 두었다.
+
+**포트는 추측하지 않는다.** 엔드포인트는 요청을 받은 소켓의 실제 바인딩 포트를 읽어
+넘기고(`request.scope["server"]` — IIS 뒤에서 공개 도메인으로 들어와도 실제 포트가 나온다),
+터미널에서 직접 부를 때는 스크립트가 `app.main:app`을 실행 중인 프로세스의 리스닝 포트를
+찾는다. 예전에는 8000이 박혀 있어서, 7000에서 돌던 백엔드가 재시작 후 8000에 떠
+**콘솔·IIS가 보는 자리에서 사라졌다.** 호스트만 소켓에서 알 수 없어(0.0.0.0 바인딩이면
+연결이 들어온 주소만 보인다) `PAAS_BIND_HOST` 설정으로 받는다(기본 `127.0.0.1`).
+
+진행 상황은 `logs/restart-paas.log`에 남고 콘솔 "서버 로그" 탭에서 읽는다 — 분리된
+프로세스의 stdout은 어디에도 닿지 않으므로, 로그가 없으면 실패했는지조차 알 수 없다.
 
 ### SW 업데이트가 하는 일
 

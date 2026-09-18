@@ -139,6 +139,32 @@ def test_run_detached_script_requests_breakaway_first(monkeypatch):
     assert "stdin" not in calls[0] and "stdout" not in calls[0] and "stderr" not in calls[0]
 
 
+def test_run_detached_script_gives_powershell_a_console(monkeypatch):
+    """회귀: DETACHED_PROCESS로 띄우면 powershell.exe가 아무것도 실행하지 않고 죽는다.
+
+    콘솔이 아예 없으면 Windows PowerShell은 호스트를 세우지 못한다. Popen은 성공하고
+    예외도 없어서 호출자는 성공했다고 믿는다 — /system/restart와 /system/sw-update가
+    **조용히 아무 일도 하지 않았다**(실측: 파일 하나 쓰는 스크립트조차 실행되지 않고,
+    CREATE_NO_WINDOW로 바꾸면 실행된다).
+
+    살아남는 데 필요한 것은 콘솔 분리가 아니라 Job breakaway다 — 윈도우는 부모가 죽어도
+    자식을 죽이지 않으므로 창만 숨기면 된다. python.exe를 띄우는 _spawn_broker는 콘솔이
+    없어도 시작하므로 그대로 detached를 쓴다.
+    """
+    from app.services import powershell_daemon as psd
+
+    monkeypatch.setattr(psd.sys, "platform", "win32")
+    calls = []
+    monkeypatch.setattr(psd.subprocess, "Popen",
+                        lambda args, **kwargs: calls.append(kwargs) or object())
+
+    psd.run_detached_script("Write-Host hi")
+
+    flags = calls[0]["creationflags"]
+    assert not (flags & psd._DETACHED_PROCESS)
+    assert flags & psd._CREATE_NO_WINDOW
+
+
 def test_run_detached_script_falls_back_when_breakaway_rejected(monkeypatch):
     """Job이 breakaway를 불허하면(OSError) 플래그 없이 한 번 더 시도한다 — 완전히
     실패 처리하지 않는다(스크립트 자체는 여전히 실행돼야 한다)."""

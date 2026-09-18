@@ -143,8 +143,10 @@ export default function PowerShellConsole() {
     } catch (err) {
       setLogs((prev) => [
         ...prev,
-        `[Backend Unavailable] 백엔드 서비스(8000) 정지 중: ${(err as Error).message}`,
-        `[Hint] 백엔드 재기동 후 명령어를 재입력하세요. (콘솔 세션 유지 중)\n`,
+        // 포트를 문구에 박아 두지 않는다 — 예전에는 "(8000)"이라고 적혀 있었지만
+        // 플랫폼은 7000에서 서비스하고, 그 오해가 /system/restart의 실제 버그였다.
+        `[Backend Unavailable] 백엔드에 닿지 못했습니다: ${(err as Error).message}`,
+        '[Hint] 백엔드 재기동 후 명령어를 재입력하세요. (PowerShell 세션은 브로커에 남아 유지됩니다)\n',
       ]);
     } finally {
       setRunning(false);
@@ -153,6 +155,32 @@ export default function PowerShellConsole() {
   };
 
   const [restarting, setRestarting] = useState(false);
+
+  // 백엔드만 재기동. 터미널에 직접 칠 수도 있는 같은 헬퍼(infra/restart-paas.ps1)를
+  // 서버가 실행한다 — 리포 경로·실제 바인딩 포트·인터프리터를 아는 쪽이 서버이므로
+  // 콘솔에서 경로를 짜맞추지 않는다. 헬퍼가 실제 재시작을 분리된 프로세스로 넘기고 즉시
+  // 반환하므로, 백엔드가 내려가면서 이 요청이 끊겨 성공인데도 실패로 보이는 일이 없다.
+  const handleRestart = async () => {
+    if (!window.confirm(
+      '백엔드(paas)를 재기동합니다. git pull은 하지 않습니다.\n'
+      + '서비스로 등록돼 있으면 서비스 재시작, 아니면 uvicorn을 같은 포트로 다시 띄웁니다.\n'
+      + '재기동하는 동안 백엔드가 잠시 내려갑니다. 진행하시겠습니까?',
+    )) return;
+    setRestarting(true);
+    try {
+      const res = await api.systemRestart();
+      setLogs((prev) => [
+        ...prev,
+        `\n[재시작] ${res.status}: ${res.message}`,
+        '[재시작] 진행 상황은 서버 로그 탭의 restart-paas.log에 남습니다.',
+        '[재시작] 잠시 후 "연결"로 다시 붙으세요.\n',
+      ]);
+    } catch (err) {
+      setLogs((prev) => [...prev, `\n[재시작] 실패: ${(err as Error).message}\n`]);
+    } finally {
+      setRestarting(false);
+    }
+  };
 
   // git pull + 서비스 재시작. 백엔드는 이걸 paas와 분리된 PowerShell 프로세스로 띄우므로
   // (powershell_daemon.run_detached_script) 이 페이지의 콘솔 세션 연결 여부와 무관하다 —
@@ -262,6 +290,20 @@ export default function PowerShellConsole() {
             title="git pull 후 paas·console 서비스를 재시작합니다 (백엔드가 잠시 내려갑니다)"
           >
             {restarting ? 'SW 업데이트 중...' : '⬆️ SW 업데이트'}
+          </button>
+        )}
+        {/* git pull 없이 백엔드만 재기동한다. 터미널에서 직접 치는 것과 같은 스크립트를
+            쓴다(infra/restart-paas.ps1) — 재시작 작업을 분리된 프로세스로 넘기고 즉시
+            돌아오므로, 이 요청이 백엔드가 내려가면서 끊기지 않는다. */}
+        {me.data?.is_admin && (
+          <button
+            className="secondary small"
+            disabled={restarting || running}
+            onClick={handleRestart}
+            title={'백엔드만 재기동합니다 (git pull 없음). 터미널에서 직접 치려면: '
+              + '.\\infra\\restart-paas.ps1'}
+          >
+            🔁 백엔드 재시작
           </button>
         )}
         <button

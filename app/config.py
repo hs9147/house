@@ -137,6 +137,14 @@ class Settings(BaseSettings):
     # 설치 환경마다 다르므로 여기서 지정한다 — 예: "paas,paas-console".
     sw_update_services: str = "paas,paas-console"
 
+    # --- 자기 재시작(services/selfrestart.py) ---
+    # 서비스로 등록되지 않은 설치본(로컬 개발 등)에서 uvicorn을 다시 띄울 때 쓸 바인드 주소.
+    # **포트는 여기 없다** — 재시작 시점에 요청 소켓에서 실제 바인딩된 포트를 읽는다
+    # (request.scope["server"]). 설정으로 두면 uvicorn 기동 인자와 어긋나 재시작이 다른
+    # 포트로 살아나는 일이 생기고, 그게 바로 예전 8000 하드코딩이 만든 사고였다.
+    # 호스트는 소켓에서 알 수 없다 — 0.0.0.0에 바인딩해도 연결이 들어온 주소만 보인다.
+    bind_host: str = "127.0.0.1"
+
     # --- 1차(small) 전용 ---
     # 실행 런타임: docker(기본, 컨테이너 이미지) | windows_service(Docker 없이 nssm으로
     # 네이티브 프로세스를 Windows Service로 등록 — IIS 뒤에 배치하는 구성 등)

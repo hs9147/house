@@ -3,7 +3,7 @@ from datetime import timedelta
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, WebSocket
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, WebSocket
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -762,60 +762,60 @@ def list_server_log_files(
 
 @router.post("/system/restart")
 def restart_backend_service(
+    request: Request,
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
-    """Self-Kill 대응: 백엔드가 자기 자신을 재시작할 때 8000 포트 점유 프로세스를 해제하고,
-    paas의 Job에서 분리된 독립 PowerShell 프로세스(powershell_daemon.run_detached_script)로
-    안전 재기동한다 — paas가 내려가도 재시작 작업이 죽지 않는다."""
+    """백엔드 자기 재시작 — 서비스로 등록돼 있으면 서비스 재시작, 아니면 uvicorn 재기동.
+
+    **포트를 추측하지 않는다.** 이 요청을 받은 소켓의 실제 바인딩 포트를 읽어 그대로
+    다시 띄운다(services/selfrestart.bound_port). 예전에는 8000으로 하드코딩돼 있어,
+    이 버튼을 누르면 7000에서 돌던 백엔드가 죽고 새 프로세스가 8000에 떠서 콘솔·IIS가
+    보는 자리에서 백엔드가 사라졌다. 덤으로 8000을 쓰던 무관한 프로세스까지 죽였다.
+    유닉스 소켓(--uds)으로 떠 있으면 포트가 없으므로 서비스 재시작만 가능하다.
+
+    self-kill 방지: 재시작 작업은 paas와 분리된 독립 프로세스로 넘긴다
+    (services/selfrestart.launch) — paas가 내려가도 끝까지 진행된다.
+    """
     import os  # noqa: PLC0415
     import sys  # noqa: PLC0415
     import threading  # noqa: PLC0415
-    from pathlib import Path  # noqa: PLC0415
 
-    from ..services import powershell_daemon  # noqa: PLC0415
+    from ..services import selfrestart  # noqa: PLC0415
 
-    root_dir = Path(__file__).resolve().parent.parent.parent
-    py_exe = sys.executable
-    escaped_exe = py_exe.replace("'", "''")
+    settings = get_settings()
+    repo_dir = str(settings.resolved_repo_root)
+    services = [s.strip() for s in settings.sw_update_services.split(",") if s.strip()]
+    port = selfrestart.bound_port(request.scope)
+    if port is None and not services:
+        raise HTTPException(
+            status_code=409,
+            detail=("바인딩된 TCP 포트를 알 수 없고(유닉스 소켓 기동) 재시작할 서비스도 "
+                    "지정되지 않았습니다 — PAAS_SW_UPDATE_SERVICES를 설정하세요."),
+        )
 
-    restart_script = (
-        "Start-Sleep -Seconds 2; "
-        "if (!(Test-Path '.venv')) { "
-        "  Write-Host '[PaaS Provisioning] .venv missing. Creating Python virtual environment...'; "
-        f"  & '{escaped_exe}' -m venv .venv; "
-        "  if (Test-Path '.venv\\Scripts\\python.exe') { "
-        "    & '.venv\\Scripts\\python.exe' -m pip install --upgrade pip --disable-pip-version-check; "
-        "    if (Test-Path 'requirements.txt') { & '.venv\\Scripts\\python.exe' -m pip install --disable-pip-version-check -r requirements.txt } "
-        "  } "
-        "}; "
-        "Write-Host '[PaaS Restart] Releasing port 8000...'; "
-        "$pids = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess; "
-        "foreach ($p in $pids) { if ($p -and $p -gt 0 -and $p -ne $PID) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } }; "
-        "Start-Sleep -Seconds 1; "
-        "if (Test-Path '.venv\\Scripts\\python.exe') { "
-        "  & '.venv\\Scripts\\python.exe' -m uvicorn app.main:app --host 0.0.0.0 --port 8000 "
-        "} else { "
-        f"  & '{escaped_exe}' -m uvicorn app.main:app --host 0.0.0.0 --port 8000 "
-        "}"
+    script = selfrestart.restart_script(
+        services=services, host=settings.bind_host, port=port or 0, repo_root=repo_dir,
     )
-
     try:
-        powershell_daemon.run_detached_script(restart_script, cwd=str(root_dir))
-        actor_name = getattr(admin, "name", "admin")
-        audit.record(db, actor_name, "system.restart", "backend_service", {"py_exe": py_exe})
+        selfrestart.launch(script, cwd=repo_dir)
+        audit.record(db, getattr(admin, "name", "admin"), "system.restart", "backend_service",
+                     {"py_exe": sys.executable, "port": port, "host": settings.bind_host,
+                      "services": services})
 
-        # 2.5초 후 기존 백엔드 프로세스를 종료하여 8000번 포트를 완전히 비워준다
-        def _terminate_self():
-            os._exit(0)
-
-        threading.Timer(2.5, _terminate_self).start()
+        # 옛 프로세스가 포트를 놓아 줘야 새 프로세스가 잡을 수 있다. 응답을 먼저 보내고
+        # 빠진다 — selfrestart.SETTLE_SECONDS가 이보다 길게 잡혀 있다.
+        threading.Timer(2.5, lambda: os._exit(0)).start()
 
         return {
             "status": "restarting",
-            "message": "PaaS 백엔드 서비스가 2초 후 기존 포트 해제 및 디태치 독립 프로세스로 안전하게 재기동됩니다.",
+            "message": (f"백엔드를 재시작합니다 — 서비스({', '.join(services) or '없음'})가 "
+                        f"등록돼 있으면 서비스 재시작, 없으면 {settings.bind_host}:{port}로 "
+                        "uvicorn 재기동합니다."),
             "error": None,
-            "executable": py_exe,
+            "executable": sys.executable,
+            "port": port,
+            "services": services,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to schedule service restart: {e}")

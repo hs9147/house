@@ -481,4 +481,12 @@ export const api = {
   swUpdate: () =>
     request<{ status: string; message: string; error: string | null; services: string[] }>(
       'POST', '/system/sw-update'),
+  // git pull 없이 백엔드만 재기동. 터미널에 직접 치는 것과 같은 헬퍼를 서버가 실행한다
+  // (infra/restart-paas.ps1) — 서버가 리포 경로·포트·인터프리터를 알고 있으므로
+  // 콘솔이 경로를 짜맞출 필요가 없다.
+  systemRestart: () =>
+    request<{
+      status: string; message: string; error: string | null;
+      port: number | null; services: string[];
+    }>('POST', '/system/restart'),
 };

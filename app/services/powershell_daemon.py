@@ -201,12 +201,23 @@ def run_detached_script(script: str, cwd: str | None = None) -> None:
     paas가 자기 자신을 재시작할 때(포트 해제·Restart-Service) 쓰는 경로 — 이 프로세스는
     paas의 Job에서 breakaway해 살아남으므로, paas 프로세스가 내려가도 재시작 작업이 끝까지
     진행된다(self-kill 방지). Job이 breakaway를 불허하면 플래그를 빼고 재시도한다.
+
+    **DETACHED_PROCESS를 쓰지 않는다.** 예전에는 detached=True였는데, 그러면 자식이 콘솔을
+    아예 갖지 못해 **powershell.exe가 스크립트를 한 줄도 실행하지 않고 즉시 죽는다.**
+    Popen은 성공하고 예외도 없어서 호출자는 성공했다고 믿는다 — 재시작도 SW 업데이트도
+    조용히 아무 일도 일어나지 않았다(실측: DETACHED 조합은 파일 하나 쓰는 스크립트조차
+    실행하지 못하고, CREATE_NO_WINDOW 조합은 실행한다).
+
+    살아남는 데 필요한 것은 콘솔 분리가 아니라 **Job breakaway**다(nssm이 paas를 Job에
+    묶어 둔다). 윈도우는 부모가 죽어도 자식을 죽이지 않으므로, 창만 숨기면 충분하다.
+    같은 파일의 _spawn_broker는 python.exe를 띄우므로 detached여도 무해하다 — 콘솔 없이
+    시작하지 못하는 것은 powershell.exe다.
     """
     args = [POWERSHELL_EXE, "-NoProfile", "-NonInteractive", "-Command", script]
     try:
-        subprocess.Popen(args, cwd=cwd, creationflags=_creation_flags(detached=True, breakaway=True), close_fds=True)
+        subprocess.Popen(args, cwd=cwd, creationflags=_creation_flags(detached=False, breakaway=True), close_fds=True)
     except OSError:
-        subprocess.Popen(args, cwd=cwd, creationflags=_creation_flags(detached=True, breakaway=False), close_fds=True)
+        subprocess.Popen(args, cwd=cwd, creationflags=_creation_flags(detached=False, breakaway=False), close_fds=True)
 
 
 def kill_broker(port: int) -> None:
