@@ -1425,6 +1425,14 @@ def _confirm_stage_doc(c, monkeypatch, sid: int, repo, stage: str, filename: str
     _git(repo, "checkout", "-q", "main")
 
 
+def _c4(c, sid: int, stage: str = "", draft: str = "") -> dict:
+    """시각화 조회. stage·draft를 주면 편집 중 초안까지 반영해 그린다."""
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/c4",
+               json={"stage": stage, "draft": draft}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 def test_c4_levels_unlock_as_stages_are_confirmed(monkeypatch, fresh_settings, tmp_path):
     """조회 가능한 C4 레벨은 확정된 단계가 정한다 — 기획서 → context, 아키텍처 → container·component."""
     repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
@@ -1434,10 +1442,10 @@ def test_c4_levels_unlock_as_stages_are_confirmed(monkeypatch, fresh_settings, t
                  headers=ADMIN).json()["id"]
 
     # 확정 전에는 그릴 것이 없다
-    assert c.get(f"/paas/api/v1/plan/sessions/{sid}/c4", headers=ADMIN).json()["levels"] == {}
+    assert _c4(c, sid)["levels"] == {}
 
     _confirm_stage_doc(c, monkeypatch, sid, repo, "spec", "01-기획서.md", _C4_SPEC_DOC)
-    levels = c.get(f"/paas/api/v1/plan/sessions/{sid}/c4", headers=ADMIN).json()["levels"]
+    levels = _c4(c, sid)["levels"]
     assert set(levels) == {"context"}
     assert levels["context"]["stage"] == "spec"
     people = [e for e in levels["context"]["elements"] if e["base"] == "person"]
@@ -1447,7 +1455,7 @@ def test_c4_levels_unlock_as_stages_are_confirmed(monkeypatch, fresh_settings, t
 
     _confirm_stage_doc(c, monkeypatch, sid, repo, "architecture", "02-아키텍처설계.md",
                        _C4_ARCH_DOC)
-    levels = c.get(f"/paas/api/v1/plan/sessions/{sid}/c4", headers=ADMIN).json()["levels"]
+    levels = _c4(c, sid)["levels"]
     assert set(levels) == {"context", "container", "component"}
     assert levels["container"]["stage"] == "architecture"
     containers = {e["alias"]: e for e in levels["container"]["elements"]}
@@ -1460,4 +1468,148 @@ def test_c4_levels_unlock_as_stages_are_confirmed(monkeypatch, fresh_settings, t
 
 
 def test_c4_requires_an_existing_session():
-    assert _client().get("/paas/api/v1/plan/sessions/999/c4", headers=ADMIN).status_code == 404
+    assert _client().post("/paas/api/v1/plan/sessions/999/c4",
+                          json={}, headers=ADMIN).status_code == 404
+
+
+def test_c4_draws_the_draft_before_it_is_confirmed(monkeypatch, fresh_settings, tmp_path):
+    """그림은 확정을 검토하는 도구다 — 확정을 기다리면 검토에 쓸 수 없다.
+
+    초안을 넘기면 아무것도 확정되지 않은 세션에서도 그려지고, 그 레벨은 confirmed=False로
+    표시돼 화면이 "미확정 초안"임을 밝힐 수 있다.
+    """
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    # 확정된 것이 없어도 초안만으로 그려진다
+    levels = _c4(c, sid, stage="spec", draft=_C4_SPEC_DOC)["levels"]
+    assert set(levels) == {"context"}
+    assert levels["context"]["stage"] == "spec"
+    assert levels["context"]["confirmed"] is False
+    assert {e["label"] for e in levels["context"]["elements"]} >= {"기획자", "GPaaS"}
+
+    # 초안을 주지 않으면 확정본만 본다(외부 도구가 확정된 그림만 읽는 경로)
+    assert _c4(c, sid)["levels"] == {}
+
+
+def test_c4_draft_replaces_that_stages_confirmed_document(monkeypatch, fresh_settings, tmp_path):
+    """확정한 단계로 되돌아가 고치는 중이면 검토 대상은 화면의 초안이다.
+
+    다른 단계의 확정 그림은 그대로 남아야 한다 — 초안 하나를 편집한다고 앞뒤 단계가
+    확정한 레벨이 사라지면 안 된다.
+    """
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _confirm_stage_doc(c, monkeypatch, sid, repo, "spec", "01-기획서.md", _C4_SPEC_DOC)
+    _confirm_stage_doc(c, monkeypatch, sid, repo, "architecture", "02-아키텍처설계.md",
+                       _C4_ARCH_DOC)
+
+    revised = """# 기획서 (수정 중)
+
+```mermaid
+C4Context
+  Person(reviewer, "검토자", "초안을 검토한다")
+  System(paas, "GPaaS")
+  Rel(reviewer, paas, "검토")
+```
+"""
+    levels = _c4(c, sid, stage="spec", draft=revised)["levels"]
+    # spec 레벨은 초안이 이긴다
+    assert levels["context"]["confirmed"] is False
+    assert {e["alias"] for e in levels["context"]["elements"]} == {"reviewer", "paas"}
+    # 아키텍처가 확정한 레벨은 그대로 남고 확정으로 표시된다
+    assert levels["container"]["confirmed"] is True
+    assert levels["component"]["confirmed"] is True
+
+
+def test_c4_later_confirmed_stage_still_wins_over_an_earlier_draft(
+    monkeypatch, fresh_settings, tmp_path,
+):
+    """단계 순서는 초안이어도 지켜진다 — 뒤 단계가 그린 레벨이 최신 그림이다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _confirm_stage_doc(c, monkeypatch, sid, repo, "spec", "01-기획서.md", _C4_SPEC_DOC)
+    _confirm_stage_doc(c, monkeypatch, sid, repo, "architecture", "02-아키텍처설계.md",
+                       _C4_ARCH_DOC)
+
+    # spec 초안이 container를 그려도, 뒤 단계(아키텍처)가 확정한 container가 이긴다
+    spec_draft = _C4_SPEC_DOC + """
+```mermaid
+C4Container
+  Container(from_spec, "기획서가 그린 컨테이너", "x", "무시돼야 한다")
+```
+"""
+    levels = _c4(c, sid, stage="spec", draft=spec_draft)["levels"]
+    assert levels["container"]["stage"] == "architecture"
+    assert "from_spec" not in {e["alias"] for e in levels["container"]["elements"]}
+
+
+def test_c4_rejects_an_unknown_draft_stage(monkeypatch, fresh_settings, tmp_path):
+    """모르는 단계를 조용히 무시하면 초안이 화면에서 사라진 이유를 알 수 없다."""
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/c4",
+               json={"stage": "nope", "draft": _C4_SPEC_DOC}, headers=ADMIN)
+    assert r.status_code == 404
+
+
+def test_confirm_opens_pull_request_when_gitea_lives_under_a_subpath(
+    monkeypatch, fresh_settings,
+):
+    """회귀: 서브패스 Gitea(`http://host/git/`)에서 PR이 전부 건너뛰어졌다.
+
+    repo_slug가 호스트만 맞춰 보고 경로를 루트부터 잘라 `git/owner/repo` 세 조각을 얻었고,
+    두 조각이 아니라는 이유로 사내 리포를 외부로 오판했다. 사내 리포로 작업하는 사람에게는
+    "사내 Gitea 리포가 아니어서 PR을 만들지 않았습니다"가 사실과 어긋나 보여 원인을
+    짚을 수 없었다. 여기서는 목킹 없이 **실제 repo_slug**를 태워 그 경로를 지킨다.
+    """
+    from app.config import get_settings
+    from app.services import gitea, workspace
+
+    monkeypatch.setenv("PAAS_GITEA_URL", "http://gpax.lge.com/git/")
+    monkeypatch.setenv("PAAS_GITEA_API_TOKEN", "tok")
+    get_settings.cache_clear()
+
+    c = _client()
+    pid = c.post("/paas/api/v1/projects", json={
+        "name": "subpath-app", "type": "python",
+        "git_url": "http://gpax.lge.com/git/demo/subpath-app.git",
+    }, headers=ADMIN).json()["id"]
+    prov = c.post("/paas/api/v1/llm/providers", json={
+        "name": "sp", "kind": "openai", "base_url": "https://api.example.com",
+        "api_key": "sk-secret", "model": "m",
+    }, headers=ADMIN).json()["id"]
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    opened: list[tuple] = []
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, branch, path, content, message: "deadbeef")
+    monkeypatch.setattr(gitea, "ensure_pull_request",
+                        lambda o, r, head, base, title, body="": (
+                            opened.append((o, r)),
+                            {"number": 4, "html_url": "http://gpax.lge.com/git/demo/subpath-app/pulls/4",
+                             "mergeable": True},
+                        )[1])
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": True)
+
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+               json={"content": "# 기획서 확정본"}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["git_action"] == "merged", body
+    # 서브패스를 떼고 owner/repo를 읽어야 한다
+    assert opened == [("demo", "subpath-app")]
+    get_settings.cache_clear()

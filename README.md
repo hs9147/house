@@ -214,8 +214,11 @@ POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/messages   # 단계 생성 �
                                                 # 바인딩된 mcp 모듈의 도구({모듈명}__{도구명})로 실제 규격을 확인
 POST /paas/api/v1/plan/sessions/{id}/stages/{stage}/confirm    # 확정 → Gitea 커밋 후 git 상태에 따라 PR·머지 자동
                                                 # 리포에 다른 내용의 같은 문서가 있으면 412 — overwrite=true로 재요청
-GET  /paas/api/v1/plan/sessions/{id}/c4             # 단계별 C4 시각화 모델 — 확정 산출물의 mermaid C4 블록을 파싱
-                                                # levels: context(기획서 확정 후) · container·component(아키텍처 확정 후)
+POST /paas/api/v1/plan/sessions/{id}/c4             # 단계별 C4 시각화 모델 — 산출물의 mermaid C4 블록을 파싱
+                                                # {stage, draft} — 편집 중 초안을 주면 확정 전에도 그린다
+                                                # (그림은 확정을 검토하는 도구다). 빈 본문이면 확정본만.
+                                                # levels: context(기획서) · container·component(아키텍처)
+                                                # 레벨마다 confirmed로 확정본/초안을 구분해 돌려준다
                                                 # 솔루션 구성이 같은 레벨을 다시 그리면 그 그림으로 구체화된다
                                                 # component의 paths = $link이 가리키는 리포 파일(code 레벨 대상)
 POST /paas/api/v1/plan/sessions/{id}/tasks/generate # 확정 산출물 → 외주 빌드 작업 지시(work order)
@@ -336,9 +339,12 @@ DELETE /paas/api/v1/previews/{id}
 - **단계별 C4 시각화**: 에이전트 기획 화면에서 확정 산출물을 C4 모델(System Context →
   Container → Component → Code)로 확대·축소하며 탐색합니다. **그림의 원천은 문서**입니다 —
   각 단계 프롬프트가 산출물에 ` ```mermaid C4Context/C4Container/C4Component ` 블록을 싣게 하고
-  콘솔이 그 블록을 파싱합니다(`services/c4.py`, `GET /plan/sessions/{id}/c4`). 그래서 같은 그림이
-  Gitea·VSCode 프리뷰에서도 렌더되고, 문서와 다이어그램이 갈라지지 않습니다. 조회 가능한 레벨은
-  확정 단계가 정합니다: ① 기획서 → 사용자·외부 환경(context), ② 아키텍처 설계 →
+  콘솔이 그 블록을 파싱합니다(`services/c4.py`, `POST /plan/sessions/{id}/c4`). 그래서 같은 그림이
+  Gitea·VSCode 프리뷰에서도 렌더되고, 문서와 다이어그램이 갈라지지 않습니다. **확정을 기다리지
+  않습니다** — 편집 중인 초안을 함께 넘겨 산출물이 나온 즉시 그립니다. 그림은 확정 여부를
+  검토하기 위한 도구이고 확정은 그 검토의 결과이므로, 확정 후에만 보이면 정작 검토에 쓸 수
+  없습니다(레벨마다 확정본인지 초안인지 표시합니다). 어느 레벨이 있는지는 각 단계 문서가
+  정합니다: ① 기획서 → 사용자·외부 환경(context), ② 아키텍처 설계 →
   container·component, ③ 솔루션 구성이 같은 레벨을 다시 그리면 실제 내부 모듈·솔루션으로
   구체화됩니다. Code 레벨은 문서가 아니라 리포가 원천이며, component의 `$link` 경로로
   코드맵을 걸러 보여줍니다.

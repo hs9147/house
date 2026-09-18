@@ -106,6 +106,9 @@ async function request<T>(
   path: string,
   body?: unknown,
   query?: Record<string, string | number | undefined>,
+  // 진행 중인 요청을 사용자가 취소할 수 있게 하는 통로. abort된 fetch는 name이
+  // 'AbortError'인 예외를 던지므로 호출측이 실패와 취소를 구분할 수 있다.
+  signal?: AbortSignal,
 ): Promise<T> {
   let url = apiUrl(path);
   if (query) {
@@ -123,6 +126,7 @@ async function request<T>(
       ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (res.status === 401) {
     // 만료/무효 키 — 전역 단일 처리 지점
@@ -390,23 +394,31 @@ export const api = {
   // 참조 파일은 서버가 요청 문장을 보고 고른다 — 경로를 사람이 적지 않는다.
   // compact=true는 컨텍스트 한도 초과(413) 후 재시도할 때만.
   sendPlanMessage: (sessionId: number, stage: string, content: string, draft: string,
-                    compact = false) =>
+                    compact = false, signal?: AbortSignal) =>
     request<PlanMessageReply>('POST', `/plan/sessions/${sessionId}/stages/${stage}/messages`,
-      { content, draft, compact }),
+      { content, draft, compact }, undefined, signal),
   // 단계 산출물 본문 — 세션 재개·단계 이동 시 편집기를 채운다
   planArtifactContent: (sessionId: number, stage: string) =>
     request<PlanArtifactContent>('GET', `/plan/sessions/${sessionId}/stages/${stage}/artifact`),
-  // 단계별 C4 시각화 모델 — 확정 산출물의 mermaid C4 블록에서 뽑은 그래프
-  planC4: (sessionId: number) => request<C4Model>('GET', `/plan/sessions/${sessionId}/c4`),
+  // 단계별 C4 시각화 모델 — 산출물의 mermaid C4 블록에서 뽑은 그래프.
+  // stage·draft를 주면 **확정 전 초안**까지 반영해 그린다 — 그림은 확정을 검토하는
+  // 도구이므로 확정을 기다리면 정작 검토에 쓸 수 없다. 초안 본문이 커서 GET 쿼리에
+  // 실을 수 없어 POST를 쓴다(읽기지만 본문이 필요한 계산 조회다).
+  planC4: (sessionId: number, stage = '', draft = '', signal?: AbortSignal) =>
+    request<C4Model>('POST', `/plan/sessions/${sessionId}/c4`,
+      { stage, draft }, undefined, signal),
   // overwrite=true는 리포에 이미 있는 문서를 덮어쓸 때만(412 확인 후 재시도)
-  confirmPlanStage: (sessionId: number, stage: string, content: string, overwrite = false) =>
+  confirmPlanStage: (sessionId: number, stage: string, content: string, overwrite = false,
+                     signal?: AbortSignal) =>
     request<PlanArtifactOut>('POST', `/plan/sessions/${sessionId}/stages/${stage}/confirm`,
-      { content, overwrite }),
+      { content, overwrite }, undefined, signal),
   // 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영
-  mergePlanSession: (sessionId: number) =>
-    request<PlanMergeOut>('POST', `/plan/sessions/${sessionId}/merge`),
-  planBuildStatus: (sessionId: number) =>
-    request<PlanBuildStatus>('GET', `/plan/sessions/${sessionId}/build-status`),
+  mergePlanSession: (sessionId: number, signal?: AbortSignal) =>
+    request<PlanMergeOut>('POST', `/plan/sessions/${sessionId}/merge`,
+      undefined, undefined, signal),
+  planBuildStatus: (sessionId: number, signal?: AbortSignal) =>
+    request<PlanBuildStatus>('GET', `/plan/sessions/${sessionId}/build-status`,
+      undefined, undefined, signal),
   planConstraints: (projectId: number) =>
     request<{ document: string }>('GET', `/plan/projects/${projectId}/constraints`),
   // 모든 프로젝트에 적용되는 공통 제약사항 — 등록·삭제는 관리자만
@@ -416,18 +428,21 @@ export const api = {
   deleteCommonConstraint: (id: number) =>
     request<void>('DELETE', `/plan/constraints/${id}`),
   // 외주 빌드 작업 지시(work order)
-  generatePlanTasks: (sessionId: number) =>
-    request<BuildTaskOut[]>('POST', `/plan/sessions/${sessionId}/tasks/generate`),
+  generatePlanTasks: (sessionId: number, signal?: AbortSignal) =>
+    request<BuildTaskOut[]>('POST', `/plan/sessions/${sessionId}/tasks/generate`,
+      undefined, undefined, signal),
   listPlanTasks: (sessionId: number) =>
     request<BuildTaskOut[]>('GET', `/plan/sessions/${sessionId}/tasks`),
   // 진행 현황을 기본 브랜치(main) 기준으로 갱신 — 보고가 아니라 반영된 커밋이 기준이다
-  syncPlanTasks: (sessionId: number) =>
-    request<BuildTaskSync>('POST', `/plan/sessions/${sessionId}/tasks/sync`),
+  syncPlanTasks: (sessionId: number, signal?: AbortSignal) =>
+    request<BuildTaskSync>('POST', `/plan/sessions/${sessionId}/tasks/sync`,
+      undefined, undefined, signal),
   updatePlanTask: (taskId: number, body: { status?: string; note?: string }) =>
     request<BuildTaskOut>('PATCH', `/plan/tasks/${taskId}`, body),
   // 외주 결과의 LLM·모듈 사용 검증
-  planCompliance: (projectId: number) =>
-    request<ComplianceOut>('GET', `/plan/projects/${projectId}/compliance`),
+  planCompliance: (projectId: number, signal?: AbortSignal) =>
+    request<ComplianceOut>('GET', `/plan/projects/${projectId}/compliance`,
+      undefined, undefined, signal),
 
   // 서버구성 (런타임/프록시 백엔드 시각화 + redirect/rewrite 규칙)
   serverConfig: () => request<ServerConfigOut>('GET', '/server-config'),

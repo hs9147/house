@@ -318,16 +318,26 @@ class C4RelationOut(BaseModel):
 
 
 class C4LevelOut(BaseModel):
-    """레벨 하나의 그림과 그것을 확정한 단계."""
+    """레벨 하나의 그림과 그것이 실려 있던 단계."""
 
-    stage: str  # 이 그림이 실려 있던 확정 산출물의 단계
+    stage: str  # 이 그림이 실려 있던 산출물의 단계
     title: str = ""
+    # False = 편집 중 초안에서 읽은 그림(아직 확정 전). 그림은 확정을 검토하는 도구이므로
+    # 초안에서도 보여야 하고, 화면은 둘을 구분해 표시해야 한다.
+    confirmed: bool = True
     elements: list[C4ElementOut] = []
     relations: list[C4RelationOut] = []
 
 
+class C4In(BaseModel):
+    """시각화 요청 — 편집 중인 초안을 함께 주면 확정 전에도 그림을 본다."""
+
+    stage: str = ""  # 초안이 속한 단계(비우면 확정 산출물만 본다)
+    draft: str = ""
+
+
 class C4ModelOut(BaseModel):
-    """단계별 C4 시각화 모델 — 조회 가능한 레벨은 어느 단계가 확정됐는지에 달려 있다."""
+    """단계별 C4 시각화 모델 — 어느 레벨이 있는지는 각 단계 문서가 정한다."""
 
     project_id: int
     levels: dict[str, C4LevelOut] = {}  # context | container | component

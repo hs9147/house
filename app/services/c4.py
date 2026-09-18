@@ -125,13 +125,19 @@ def parse_block(body: str) -> dict:
     return {"title": title, "elements": elements, "relations": relations}
 
 
-def model_from_stages(stage_docs: list[tuple[str, str]]) -> dict[str, dict]:
+def model_from_stages(
+    stage_docs: list[tuple[str, str]], draft_stage: str | None = None,
+) -> dict[str, dict]:
     """단계별 (stage, 산출물 본문) → 레벨별 다이어그램.
 
     같은 레벨을 여러 단계가 그리면 **뒤 단계**가 이긴다. 아키텍처가 그린 컨테이너를
     솔루션 구성이 실제 모듈·기술로 고쳐 다시 싣는 것이 정상 흐름이므로, 최신 그림은
     뒤 단계의 것이다. 어느 단계에서 온 그림인지는 stage로 함께 돌려준다 —
     화면에서 "이 그림은 ③ 솔루션 구성이 확정한 것"임을 밝혀야 한다.
+
+    draft_stage로 넘긴 단계의 본문은 아직 확정되지 않은 편집 중 초안이다. 그림은 확정을
+    **검토하기 위한** 도구이고 확정은 그 검토의 결과이므로, 초안 단계에서 이미 보여야
+    한다 — 레벨마다 confirmed로 어느 쪽인지 밝혀 화면이 "미확정 초안"을 표시할 수 있게 한다.
 
     stage_docs는 단계 순서대로 들어와야 한다(planning.STAGE_ORDER).
     """
@@ -140,7 +146,7 @@ def model_from_stages(stage_docs: list[tuple[str, str]]) -> dict[str, dict]:
         for level, body in extract_blocks(content).items():
             parsed = parse_block(body)
             if parsed["elements"]:
-                levels[level] = {"stage": stage, **parsed}
+                levels[level] = {"stage": stage, "confirmed": stage != draft_stage, **parsed}
     return levels
 
 

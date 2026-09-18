@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow,
   type Edge, type Node, type NodeProps,
@@ -19,30 +19,29 @@ import type { C4Element, C4Level } from '../lib/types';
 type DocLevel = 'context' | 'container' | 'component';
 type Level = DocLevel | 'code';
 
-const LEVELS: { key: Level; label: string; locked: string }[] = [
-  // locked 문구는 "확정을 안 했다"와 "확정했지만 문서에 블록이 없다"를 함께 덮는다 —
-  // 두 경우를 가려내려면 단계별 확정 상태를 또 내려받아야 하는데, 사용자가 할 일은
-  // 어느 쪽이든 같다(그 단계 산출물에 해당 블록을 실어 확정한다).
+// 그릴 수 없는 레벨에는 **어느 단계에서 무엇을 써야 생기는지**를 알려 준다. 초안이든
+// 확정본이든 사용자가 할 일은 같으므로(그 단계 문서에 그 블록을 싣는다) 두 경우를
+// 가려내지 않는다. code 레벨은 상황마다 할 일이 달라 여기 문구를 두지 않고 아래
+// codeHint()가 상태를 보고 만든다.
+const LEVELS: { key: Level; label: string; origin: string }[] = [
   {
     key: 'context',
     label: 'System Context',
-    locked: '① 기획서 확정 산출물의 C4Context 블록에서 사용자·외부 환경을 그립니다 — 아직 그 블록이 없습니다.',
+    origin: '① 기획서 단계 문서에 C4Context 블록(Person·System·System_Ext)을 실으면 그려집니다.',
   },
   {
     key: 'container',
     label: 'Container',
-    locked: '② 아키텍처 설계 확정 산출물의 C4Container 블록에서 그립니다 (③ 솔루션 구성에서 구체화) — 아직 그 블록이 없습니다.',
+    origin: '② 아키텍처 설계 단계 문서에 C4Container 블록을 실으면 그려집니다 '
+      + '(③ 솔루션 구성에서 실제 모듈·기술로 구체화).',
   },
   {
     key: 'component',
     label: 'Component',
-    locked: '② 아키텍처 설계 확정 산출물의 C4Component 블록에서 그립니다 (③ 솔루션 구성에서 구체화) — 아직 그 블록이 없습니다.',
+    origin: '② 아키텍처 설계 단계 문서에 C4Component 블록을 실으면 그려집니다 '
+      + '(③ 솔루션 구성에서 실제 모듈·기술로 구체화).',
   },
-  {
-    key: 'code',
-    label: 'Code',
-    locked: 'Component 레벨에서 컴포넌트를 클릭하면 그 코드 구조가 열립니다.',
-  },
+  { key: 'code', label: 'Code', origin: '' },
 ];
 
 interface Props {
@@ -50,12 +49,35 @@ interface Props {
   projectId: number;
   // 확정 상태가 바뀌면 다시 불러온다(확정 커밋 sha를 이어 붙인 값).
   reloadKey: string;
+  // 지금 편집 중인 단계와 그 초안 — 확정을 기다리지 않고 그린다. 그림은 확정 여부를
+  // 검토하기 위한 도구이고 확정은 그 검토의 결과이므로, 초안이 나온 즉시 보여야 한다.
+  stage: string;
+  draft: string;
   // stage → 기획 화면과 같은 단계 표기('① 기획서'). 그림이 어느 단계에서 왔는지 밝힌다.
   stageLabels: Record<string, string>;
 }
 
-export default function C4Diagram({ sessionId, projectId, reloadKey, stageLabels }: Props) {
-  const model = useApi(() => api.planC4(sessionId), [sessionId, reloadKey]);
+// 초안은 타이핑마다 바뀐다 — 글자마다 요청을 보내지 않도록 잠잠해진 뒤에만 반영한다.
+const DRAFT_DEBOUNCE_MS = 800;
+
+/** value가 ms 동안 바뀌지 않았을 때만 따라가는 값. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return settled;
+}
+
+export default function C4Diagram({
+  sessionId, projectId, reloadKey, stage, draft, stageLabels,
+}: Props) {
+  const settledDraft = useDebounced(draft, DRAFT_DEBOUNCE_MS);
+  const model = useApi(
+    () => api.planC4(sessionId, stage, settledDraft),
+    [sessionId, reloadKey, stage, settledDraft],
+  );
   const [level, setLevel] = useState<Level>('context');
   // 특정 컨테이너 안으로 들어간 상태 — 그 경계에 속한 요소만 그린다.
   const [focus, setFocus] = useState<string | null>(null);
@@ -79,6 +101,34 @@ export default function C4Diagram({ sessionId, projectId, reloadKey, stageLabels
     if (next !== 'code') setCodeTarget(null);
   };
 
+  // code 레벨을 그릴 수 있는 component들 — $link이 가리키는 파일이 리포에 실제로 있는 것.
+  const components = levels.component?.elements.filter((e) => e.base === 'component') ?? [];
+  const withCode = components.filter((e) => e.paths.length > 0);
+
+  // code 레벨은 "왜 못 그리는지"가 상황마다 다르고, 그때마다 할 일도 다르다 —
+  // 컴포넌트가 아예 없는 것 · 있는데 $link을 안 적은 것 · 코드가 아직 커밋되지 않은 것 ·
+  // 그릴 수 있는데 아직 고르지 않은 것은 전부 다른 안내가 필요하다.
+  const codeHint = (): string => {
+    if (components.length === 0) {
+      return '② 아키텍처 설계 단계 문서에 C4Component 블록을 실으면 컴포넌트가 생기고, '
+        + '각 Component에 $link로 구현 경로를 적으면 그 코드 구조를 볼 수 있습니다.';
+    }
+    if (withCode.length === 0) {
+      const noLink = components.filter((e) => !e.link).length;
+      return noLink > 0
+        ? `컴포넌트 ${components.length}개 중 ${noLink}개에 $link 경로가 없습니다 — `
+          + '② 아키텍처 설계나 ③ 솔루션 구성 단계에서 '
+          + 'Component(..., $link="app/services/foo.py")처럼 구현 경로를 적으세요.'
+        : `$link 경로(${components.map((e) => e.link).filter(Boolean).join(', ')})가 `
+          + '가리키는 파일이 리포에 아직 없습니다 — 외주 빌드가 커밋하면 여기서 열립니다.';
+    }
+    return `Component 레벨에서 컴포넌트를 클릭하세요 — 코드가 있는 컴포넌트 ${withCode.length}개`
+      + ` (${withCode.map((e) => e.label).join(', ')}).`;
+  };
+
+  const hintFor = (level: Level): string =>
+    (level === 'code' ? codeHint() : LEVELS.find((l) => l.key === level)?.origin ?? '');
+
   // 클릭해서 한 단계 안으로 들어갈 수 있는 노드 — 판정과 실제 이동(onDrill)을 한 자리에
   // 둔다. 들어갈 곳이 없으면(다음 레벨 그림이 없거나 코드가 없으면) 클릭도 막는다.
   const drillable = useCallback((element: C4Element): boolean => {
@@ -92,14 +142,16 @@ export default function C4Diagram({ sessionId, projectId, reloadKey, stageLabels
     <>
       <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         {LEVELS.map((l) => {
-          const available = l.key === 'code' ? codeTarget !== null : !!levels[l.key as DocLevel];
+          // code 레벨은 "고른 컴포넌트가 있는지"가 아니라 "그릴 수 있는 코드가 있는지"로
+          // 잠근다 — 고르는 것은 잠금이 풀린 다음의 일이다.
+          const available = l.key === 'code' ? withCode.length > 0 : !!levels[l.key as DocLevel];
           return (
             <button
               key={l.key}
               className={level === l.key ? 'primary small' : 'secondary small'}
               style={{ opacity: available ? 1 : 0.45 }}
               onClick={() => selectLevel(l.key)}
-              title={available ? '' : l.locked}
+              title={available ? '' : hintFor(l.key)}
             >
               {available ? '' : '🔒 '}{l.label}
             </button>
@@ -115,7 +167,10 @@ export default function C4Diagram({ sessionId, projectId, reloadKey, stageLabels
       <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
         {current ? (
           <>
-            {stageLabels[current.stage] ?? current.stage} 확정 산출물의 C4 블록
+            {stageLabels[current.stage] ?? current.stage}{' '}
+            {current.confirmed ? '확정 산출물' : (
+              <span style={{ color: 'var(--yellow)' }}>초안(미확정)</span>
+            )}의 C4 블록
             {current.title && <> · {current.title}</>}
             {focus && <> · <span className="mono">{focus}</span> 안쪽만</>}
             {' '}· 노드를 클릭하면 한 단계 안으로 들어갑니다
@@ -123,7 +178,7 @@ export default function C4Diagram({ sessionId, projectId, reloadKey, stageLabels
         ) : codeTarget ? (
           <>리포 코드 구조 — <b>{codeTarget.label}</b> 컴포넌트로 구현된 파일</>
         ) : (
-          LEVELS.find((l) => l.key === level)?.locked
+          hintFor(level)
         )}
       </p>
 
@@ -287,13 +342,8 @@ const NODE_TYPES = { c4node: C4NodeView, c4group: C4GroupView };
 
 function CodeLevel({ projectId, component }: { projectId: number; component: C4Element | null }) {
   const codemap = useApi(() => api.projectCodemap(projectId), [projectId]);
-  if (component === null) {
-    return (
-      <p className="mutedtext" style={{ fontSize: 12 }}>
-        Component 레벨에서 컴포넌트를 클릭하면 그 코드 구조가 열립니다.
-      </p>
-    );
-  }
+  // 안내 문구는 호출측(hintFor)이 상태를 보고 이미 띄웠다 — 여기서 또 쓰면 어긋난다.
+  if (component === null) return null;
   return (
     <Async state={codemap}>
       {(data) => {

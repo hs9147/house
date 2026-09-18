@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Async from '../components/Async';
 import C4Diagram from '../components/C4Diagram';
+import Modal from '../components/Modal';
 import VscodeWorkButton from '../components/VscodeWorkButton';
 import ZipDownloadButton from '../components/ZipDownloadButton';
 import { ApiError, api } from '../lib/api';
@@ -20,6 +21,15 @@ interface Msg {
   contextFiles?: string[];
   boundModules?: string[];
   compacted?: boolean;
+}
+
+// 진행 중인 서버 작업. 팝업이 화면을 덮어 처리 중에는 다른 조작을 받지 않는다 —
+// 생성 중에 단계를 옮기거나 생성을 다시 요청하면 요청이 엉키고, 먼저 온 응답이 나중
+// 것을 덮어써 결과가 조용히 버려진다.
+interface RunningTask {
+  label: string;
+  detail: string;
+  controller: AbortController;
 }
 
 // 확정 시 git 상태에 따라 자동 수행된 결과의 표시 문구
@@ -79,8 +89,11 @@ export default function AgentPlanning() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [draft, setDraft] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [task, setTask] = useState<RunningTask | null>(null);
+  const busy = task !== null;
   const [error, setError] = useState('');
+  // 취소처럼 실패가 아닌 알림 — 빨간 경고와 섞으면 사고인지 아닌지 구분되지 않는다.
+  const [notice, setNotice] = useState('');
   const [buildEvents, setBuildEvents] = useState<PlanBuildEvent[]>([]);
   const [gitResult, setGitResult] = useState<PlanArtifactOut | null>(null);
   const [tasks, setTasks] = useState<BuildTaskOut[]>([]);
@@ -89,8 +102,13 @@ export default function AgentPlanning() {
   const [mergeResult, setMergeResult] = useState<PlanMergeOut | null>(null);
   const [draftSource, setDraftSource] = useState<PlanArtifactContent['source']>('');
   const history = useApi(() => api.listPlanSessions());
-  // 모든 프로젝트에 적용되는 공통 제약사항 — 등록은 관리자만, 목록은 누구나 본다.
-  const commonConstraints = useApi(() => api.listCommonConstraints());
+  // 공통 제약사항은 관리자만 본다 — 일반 사용자가 손댈 수 없는 환경 제약이고, 어차피
+  // 서버가 각 단계 컨텍스트에 실어 주므로(services/planning.build_constraints) 화면에
+  // 두 번 보여 줄 이유가 없다. 관리자가 아니면 조회 자체를 하지 않는다.
+  const commonConstraints = useApi(
+    () => (me.data?.is_admin ? api.listCommonConstraints() : Promise.resolve([])),
+    [me.data?.is_admin],
+  );
   const [constraintText, setConstraintText] = useState('');
 
   // 프로젝트 페이지와 동일한 CreateModal(빈 프로젝트 옵션 포함)을 재사용한다.
@@ -219,6 +237,30 @@ export default function AgentPlanning() {
     setSession(await api.getPlanSession(session.id));
   };
 
+  // 진행 중 작업을 등록하고 취소용 신호를 돌려준다 — 팝업은 이 상태를 보고 뜬다.
+  const begin = (label: string, detail: string): AbortSignal => {
+    const controller = new AbortController();
+    setTask({ label, detail, controller });
+    setError('');
+    setNotice('');
+    return controller.signal;
+  };
+
+  const isCancel = (err: unknown) => (err as Error).name === 'AbortError';
+
+  // 취소는 **이 화면의 기다림만** 끊는다. 서버에서 시작된 일(LLM 호출·Gitea 커밋)은
+  // 계속될 수 있으므로, 화면이 사실과 어긋나지 않게 세션 상태를 다시 읽는다.
+  const afterCancel = async () => {
+    setNotice('취소했습니다 — 서버에서 이미 시작된 작업은 계속될 수 있습니다. '
+      + '화면을 서버 상태로 다시 맞췄습니다.');
+    try {
+      await refreshSession();
+      if (session) await loadArtifact(session.id, activeStage);
+    } catch {
+      /* 재동기화 실패는 취소 자체를 되돌리지 않는다 */
+    }
+  };
+
   const selectStage = (stage: PlanArtifactOut['stage']) => {
     if (!stageUnlocked(stage) || !session) return;
     setActiveStage(stage);
@@ -238,13 +280,17 @@ export default function AgentPlanning() {
     const content = input.trim();
     setMessages((prev) => [...prev, { role: 'user', content }]);
     setInput('');
-    setBusy(true);
-    setError('');
+    const stageLabel = STAGES.find((s) => s.key === activeStage)?.label ?? activeStage;
+    const signal = begin(
+      `${stageLabel} 생성 중`,
+      'LLM이 앞 단계 확정 문서와 가용 모듈 제약을 읽고 산출물을 작성하고 있습니다. '
+      + '문서 길이에 따라 수십 초가 걸릴 수 있습니다.',
+    );
     try {
       // 편집 중인 산출물을 함께 보낸다 — 새로 쓰지 않고 이것을 고치게 한다.
       let res;
       try {
-        res = await api.sendPlanMessage(session.id, activeStage, content, draft);
+        res = await api.sendPlanMessage(session.id, activeStage, content, draft, false, signal);
       } catch (err) {
         // 413 = 컨텍스트가 모델 한도를 넘었다 — 압축해서 다시 시도할지 묻는다.
         if ((err as ApiError).status !== 413) throw err;
@@ -255,10 +301,10 @@ export default function AgentPlanning() {
         )) {
           setMessages((prev) => prev.slice(0, -1)); // 보낸 요청을 되돌린다
           setInput(content);
-          setBusy(false);
+          setTask(null);
           return;
         }
-        res = await api.sendPlanMessage(session.id, activeStage, content, draft, true);
+        res = await api.sendPlanMessage(session.id, activeStage, content, draft, true, signal);
       }
       setMessages((prev) => [...prev, {
         role: 'assistant', content: res.summary,
@@ -268,28 +314,37 @@ export default function AgentPlanning() {
       setDraft(res.document); // 문서 본문은 산출물 란으로
       setDraftSource('session');
     } catch (err) {
-      setError((err as Error).message);
+      if (isCancel(err)) {
+        setMessages((prev) => prev.slice(0, -1)); // 보낸 요청을 되돌린다
+        setInput(content);
+        await afterCancel();
+      } else {
+        setError((err as Error).message);
+      }
     } finally {
-      setBusy(false);
+      setTask(null);
     }
   };
 
   const confirm = async () => {
     if (!session || !draft.trim()) return;
-    setBusy(true);
-    setError('');
+    const stageLabel = STAGES.find((s) => s.key === activeStage)?.label ?? activeStage;
+    const signal = begin(
+      `${stageLabel} 확정 중`,
+      '산출물을 Gitea 리포에 커밋하고, 작업 브랜치면 PR 생성·자동 머지까지 시도합니다.',
+    );
     try {
       let confirmed;
       try {
-        confirmed = await api.confirmPlanStage(session.id, activeStage, draft);
+        confirmed = await api.confirmPlanStage(session.id, activeStage, draft, false, signal);
       } catch (err) {
         // 412 = 리포에 이미 다른 내용의 같은 문서가 있다 — 덮어쓸지 확인하고 재시도한다.
         if ((err as ApiError).status !== 412) throw err;
         if (!window.confirm(`${(err as Error).message}\n\n덮어쓰고 확정할까요?`)) {
-          setBusy(false);
+          setTask(null);
           return;
         }
-        confirmed = await api.confirmPlanStage(session.id, activeStage, draft, true);
+        confirmed = await api.confirmPlanStage(session.id, activeStage, draft, true, signal);
       }
       setGitResult(confirmed); // 커밋 후 자동 수행된 PR/머지 결과
       await refreshSession();
@@ -305,9 +360,10 @@ export default function AgentPlanning() {
         setDraftSource('session');
       }
     } catch (err) {
-      setError((err as Error).message);
+      if (isCancel(err)) await afterCancel();
+      else setError((err as Error).message);
     } finally {
-      setBusy(false);
+      setTask(null);
     }
   };
 
@@ -315,37 +371,47 @@ export default function AgentPlanning() {
   // 반영된 커밋이 완료의 근거다.
   const loadBuildStatus = async () => {
     if (!session) return;
+    const signal = begin(
+      '진행 현황 확인 중',
+      '기본 브랜치를 최신화하고, 보고된 커밋이 거기에 반영됐는지 판정합니다.',
+    );
     try {
       const [s, sync] = await Promise.all([
-        api.planBuildStatus(session.id),
-        api.syncPlanTasks(session.id),
+        api.planBuildStatus(session.id, signal),
+        api.syncPlanTasks(session.id, signal),
       ]);
       setBuildEvents(s.events);
       setTasks(sync.tasks);
       setTaskSync(sync);
     } catch (err) {
-      setError((err as Error).message);
+      if (isCancel(err)) await afterCancel();
+      else setError((err as Error).message);
+    } finally {
+      setTask(null);
     }
   };
 
   const generateTasks = async () => {
     if (!session) return;
-    setBusy(true);
-    setError('');
+    const signal = begin(
+      '작업 지시 생성 중',
+      'LLM이 확정 산출물을 외주 빌드 단위로 나누고 있습니다.',
+    );
     try {
-      setTasks(await api.generatePlanTasks(session.id));
+      setTasks(await api.generatePlanTasks(session.id, signal));
       // 산출물 문서는 이 목록을 렌더한 것이다 — 편집기도 새 목록으로 맞춘다.
       await loadArtifact(session.id, TASK_STAGE);
     } catch (err) {
-      setError((err as Error).message);
+      if (isCancel(err)) await afterCancel();
+      else setError((err as Error).message);
     } finally {
-      setBusy(false);
+      setTask(null);
     }
   };
 
-  const setTaskStatus = async (task: BuildTaskOut, status: string) => {
+  const setTaskStatus = async (row: BuildTaskOut, status: string) => {
     try {
-      const updated = await api.updatePlanTask(task.id, { status });
+      const updated = await api.updatePlanTask(row.id, { status });
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
     } catch (err) {
       setError((err as Error).message);
@@ -354,29 +420,35 @@ export default function AgentPlanning() {
 
   const mergeSession = async () => {
     if (!session) return;
-    setBusy(true);
-    setError('');
+    const signal = begin(
+      '브랜치 머지 중',
+      '작업 브랜치를 기본 브랜치로 반영합니다(PR 생성·머지).',
+    );
     try {
-      setMergeResult(await api.mergePlanSession(session.id));
+      setMergeResult(await api.mergePlanSession(session.id, signal));
       await refreshSession();
       history.reload();
     } catch (err) {
-      setError((err as Error).message);
+      if (isCancel(err)) await afterCancel();
+      else setError((err as Error).message);
     } finally {
-      setBusy(false);
+      setTask(null);
     }
   };
 
   const runCompliance = async () => {
     if (!session) return;
-    setBusy(true);
-    setError('');
+    const signal = begin(
+      'LLM·모듈 사용 검증 중',
+      '커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 모듈을 쓰는지 훑습니다.',
+    );
     try {
-      setCompliance(await api.planCompliance(session.project_id));
+      setCompliance(await api.planCompliance(session.project_id, signal));
     } catch (err) {
-      setError((err as Error).message);
+      if (isCancel(err)) await afterCancel();
+      else setError((err as Error).message);
     } finally {
-      setBusy(false);
+      setTask(null);
     }
   };
 
@@ -427,19 +499,21 @@ export default function AgentPlanning() {
         </form>
       </div>
 
-      {/* 공통 제약사항 — 프로젝트와 무관하게 늘 지켜야 하는 환경 제약(관리자가 등록) */}
-      <div className="panel">
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <h3 style={{ margin: 0 }}>📌 공통 제약사항 (모든 프로젝트 적용)</h3>
-          <button className="secondary small" onClick={() => commonConstraints.reload()}>새로고침</button>
-        </div>
-        <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
-          여기에 등록한 제약은 기획 ①~⑤ 각 단계의 제약 문서에 함께 실려 매 단계에서 고려되고,
-          작업 지시 생성과 외주 빌더(MCP <span className="mono">get_constraints</span>)·
-          위반 검사 수정 지시에도 그대로 전달됩니다.
-          {!me.data?.is_admin && ' 등록·삭제는 관리자만 할 수 있습니다.'}
-        </p>
-        {me.data?.is_admin && (
+      {/* 공통 제약사항 — 프로젝트와 무관하게 늘 지켜야 하는 환경 제약.
+          **관리자 전용 화면이다.** 일반 사용자가 바꿀 수 없는 값이고, 서버가 각 단계
+          컨텍스트에 알아서 실어 주므로(services/planning.build_constraints) 화면에 또
+          보여 줄 이유가 없다. */}
+      {me.data?.is_admin && (
+        <div className="panel">
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <h3 style={{ margin: 0 }}>📌 공통 제약사항 (모든 프로젝트 적용)</h3>
+            <button className="secondary small" onClick={() => commonConstraints.reload()}>새로고침</button>
+          </div>
+          <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
+            여기에 등록한 제약은 기획 ①~⑤ 각 단계의 제약 문서에 함께 실려 매 단계에서 고려되고,
+            작업 지시 생성과 외주 빌더(MCP <span className="mono">get_constraints</span>)·
+            위반 검사 수정 지시에도 그대로 전달됩니다.
+          </p>
           <form onSubmit={addConstraint} className="row" style={{ alignItems: 'flex-start', marginBottom: 8 }}>
             <textarea
               style={{ flex: 1, minHeight: 60, fontFamily: 'inherit' }}
@@ -449,14 +523,12 @@ export default function AgentPlanning() {
             />
             <button type="submit" disabled={!constraintText.trim()}>+ 추가</button>
           </form>
-        )}
-        <Async state={commonConstraints} empty="등록된 공통 제약사항이 없습니다.">
-          {(rows) => (
-            <ul style={{ margin: 0, paddingLeft: 16, fontSize: 13 }}>
-              {rows.map((r) => (
-                <li key={r.id} style={{ marginBottom: 6 }}>
-                  <span style={{ whiteSpace: 'pre-wrap' }}>{r.text}</span>
-                  {me.data?.is_admin && (
+          <Async state={commonConstraints} empty="등록된 공통 제약사항이 없습니다.">
+            {(rows) => (
+              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 13 }}>
+                {rows.map((r) => (
+                  <li key={r.id} style={{ marginBottom: 6 }}>
+                    <span style={{ whiteSpace: 'pre-wrap' }}>{r.text}</span>
                     <button
                       className="small danger"
                       style={{ marginLeft: 8 }}
@@ -464,13 +536,13 @@ export default function AgentPlanning() {
                     >
                       삭제
                     </button>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-        </Async>
-      </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Async>
+        </div>
+      )}
 
       {/* 기획 세션 이력 — 재개·삭제 */}
       <div className="panel">
@@ -551,10 +623,12 @@ export default function AgentPlanning() {
             </div>
           </div>
 
-          {/* 단계별 시각화 — 확정 산출물에 실린 mermaid C4 블록이 그림의 원천이다.
-              어느 레벨이 열리는지는 문서가 정한다(app/services/c4.py): 기획서 확정 →
-              사용자·외부 환경(context), 아키텍처 설계 확정 → container·component,
-              솔루션 구성이 같은 레벨을 다시 그리면 그것으로 구체화된다. */}
+          {/* 단계별 시각화 — 산출물에 실린 mermaid C4 블록이 그림의 원천이다.
+              어느 레벨이 열리는지는 문서가 정한다(app/services/c4.py): 기획서의
+              C4Context → 사용자·외부 환경, 아키텍처 설계의 C4Container·C4Component,
+              솔루션 구성이 같은 레벨을 다시 그리면 그것으로 구체화된다.
+              **확정을 기다리지 않는다** — 편집 중인 초안을 함께 넘겨 바로 그린다.
+              그림은 확정 여부를 검토하기 위한 도구이고, 확정은 그 검토의 결과다. */}
           <div className="panel">
             <h3 style={{ margin: 0 }}>🗺️ 단계별 시각화 (C4 모델)</h3>
             <C4Diagram
@@ -565,6 +639,8 @@ export default function AgentPlanning() {
               projectId={session.project_id}
               reloadKey={session.artifacts
                 .filter((a) => a.confirmed).map((a) => a.commit_sha ?? '').join(',')}
+              stage={activeStage}
+              draft={draft}
               stageLabels={Object.fromEntries(STAGES.map((s) => [s.key, s.label]))}
             />
           </div>
@@ -795,16 +871,50 @@ export default function AgentPlanning() {
             </div>
           </div>
 
-          {/* 외주 결과 검증 — LLM·모듈 사용 */}
+          {/* 외부 빌드 모니터링 — 진행 현황과 결과 검증을 한 화면에 둔다.
+              둘은 같은 질문의 두 면이다: 외주 빌더가 무엇을 했고(이벤트·커밋), 그것이
+              제약을 지켰는지(LLM·모듈 사용). 패널을 갈라 두면 커밋이 올라온 것을 보고도
+              검증은 다른 자리에서 따로 눌러야 해서 그냥 넘어가기 쉽다. */}
           <div className="panel">
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={{ margin: 0 }}>🔍 LLM·모듈 사용 검증</h3>
-              <button className="secondary small" onClick={runCompliance} disabled={busy}>검사 실행</button>
+              <h3 style={{ margin: 0 }}>🛠️ 외부 빌드 모니터링</h3>
+              <div className="row" style={{ gap: 6 }}>
+                <button className="secondary small" onClick={runCompliance} disabled={busy}>
+                  🔍 LLM·모듈 사용 검증
+                </button>
+                <button className="secondary small" onClick={loadBuildStatus} disabled={busy}>
+                  새로고침
+                </button>
+              </div>
             </div>
             <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
-              커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 모듈을 쓰는지 검사합니다.
-              위반이 있으면 아래 프롬프트를 외주 빌더에게 그대로 전달하세요.
+              빌드는 외부 개발도구에서 수행됩니다. 커밋(Gitea 웹훅)과 모듈 사용·진행 보고(MCP)가
+              아래에 집계되고, 커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 모듈을 쓰는지도
+              여기서 검증합니다.
             </p>
+
+            <div style={{ fontSize: 12, fontWeight: 600, margin: '12px 0 4px' }}>수집된 이벤트</div>
+            {buildEvents.length === 0 ? (
+              <p className="mutedtext" style={{ fontSize: 12 }}>수집된 이벤트가 없습니다.</p>
+            ) : (
+              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12 }}>
+                {buildEvents.map((e, i) => (
+                  <li key={i}>
+                    <span className="mono">{e.action}</span> · {e.actor}
+                    {e.created_at && <span className="mutedtext"> · {e.created_at}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div style={{ fontSize: 12, fontWeight: 600, margin: '16px 0 4px' }}>
+              LLM·모듈 사용 검증
+              {!compliance && (
+                <span className="mutedtext" style={{ fontWeight: 400 }}>
+                  {' '}— 아직 검사하지 않았습니다 (위 버튼으로 실행)
+                </span>
+              )}
+            </div>
             {compliance && (compliance.findings.length === 0 ? (
               <p style={{ fontSize: 13, color: '#10b981' }}>✅ 위반 없음 — 제약을 지켰습니다.</p>
             ) : (
@@ -836,29 +946,6 @@ export default function AgentPlanning() {
               </>
             ))}
           </div>
-
-          {/* 외부 빌드 모니터링 */}
-          <div className="panel">
-            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={{ margin: 0 }}>🛠️ 외부 빌드 모니터링</h3>
-              <button className="secondary small" onClick={loadBuildStatus}>새로고침</button>
-            </div>
-            <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
-              빌드는 외부 개발도구에서 수행됩니다. 커밋(Gitea 웹훅)과 모듈 사용·진행 보고(MCP)가 아래에 집계됩니다.
-            </p>
-            {buildEvents.length === 0 ? (
-              <p className="mutedtext" style={{ fontSize: 12 }}>수집된 이벤트가 없습니다.</p>
-            ) : (
-              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12 }}>
-                {buildEvents.map((e, i) => (
-                  <li key={i}>
-                    <span className="mono">{e.action}</span> · {e.actor}
-                    {e.created_at && <span className="mutedtext"> · {e.created_at}</span>}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
         </>
       )}
 
@@ -867,11 +954,63 @@ export default function AgentPlanning() {
           ⚠️ {error}
         </div>
       )}
+      {notice && (
+        <div style={{ padding: 12, borderRadius: 6, background: 'rgba(56, 189, 248, 0.12)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)', marginTop: 16 }}>
+          ℹ️ {notice}
+        </div>
+      )}
+
+      {/* 처리 중에는 이 팝업이 화면을 덮는다 — 진행 상황을 보여 주는 동시에 다른 조작을
+          막는 것이 목적이다. 생성 중에 단계를 옮기거나 다시 생성을 요청하면 요청이
+          엉키고, 먼저 온 응답이 나중 것을 덮어써 결과가 조용히 버려진다. */}
+      {task && (
+        <ProgressModal task={task} onCancel={() => task.controller.abort()} />
+      )}
 
       {/* 프로젝트 페이지와 동일한 생성 UI(빈 프로젝트 옵션 포함) */}
       {showCreate && (
         <CreateModal onClose={() => setShowCreate(false)} onCreated={handleProjectCreated} />
       )}
     </>
+  );
+}
+
+// 진행 중 팝업. 닫기 버튼이 없다(closable=false) — 창만 닫고 다른 조작을 하게 두면
+// 막는 의미가 없다. 나가는 길은 '취소' 하나다.
+//
+// 퍼센트를 보여 주지 않는다. LLM 호출은 서버가 진행률을 알려 주지 않으므로 진행률을
+// 그리면 그건 지어낸 숫자다 — 대신 무엇을 하는 중인지와 경과 시간을 보여 준다.
+function ProgressModal({ task, onCancel }: { task: RunningTask; onCancel: () => void }) {
+  const [seconds, setSeconds] = useState(0);
+  const [cancelling, setCancelling] = useState(false);
+
+  useEffect(() => {
+    const timer = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <Modal title={task.label} onClose={onCancel} closable={false}>
+      <p style={{ marginTop: 0, fontSize: 13 }}>{task.detail}</p>
+      <div className="progress-indeterminate"><div /></div>
+      <p className="mutedtext" style={{ fontSize: 12 }}>
+        {seconds}초 경과 · 처리가 끝날 때까지 다른 조작을 받지 않습니다.
+      </p>
+      <div className="row" style={{ justifyContent: 'flex-end', marginTop: 12 }}>
+        <button
+          className="secondary"
+          disabled={cancelling}
+          onClick={() => { setCancelling(true); onCancel(); }}
+        >
+          {cancelling ? '취소 중...' : '취소'}
+        </button>
+      </div>
+      {cancelling && (
+        <p className="mutedtext" style={{ fontSize: 11, marginBottom: 0 }}>
+          취소는 이 화면의 기다림을 끊습니다. 서버에서 이미 시작된 작업(LLM 호출·Gitea
+          커밋)은 끝까지 진행될 수 있어, 취소 후 화면을 서버 상태로 다시 맞춥니다.
+        </p>
+      )}
+    </Modal>
   );
 }

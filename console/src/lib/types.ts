@@ -319,7 +319,10 @@ export interface C4Relation {
 }
 
 export interface C4Level {
-  stage: string; // 이 그림을 확정한 단계
+  stage: string; // 이 그림이 실려 있던 단계
+  // false = 편집 중 초안에서 읽은 그림(아직 확정 전). 그림은 확정을 검토하는 도구이므로
+  // 초안에서도 보이고, 화면은 둘을 구분해 표시한다.
+  confirmed: boolean;
   title: string;
   elements: C4Element[];
   relations: C4Relation[];

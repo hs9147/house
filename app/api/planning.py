@@ -33,6 +33,7 @@ from ..schemas import (
     BuildTaskOut,
     BuildTaskSyncOut,
     BuildTaskUpdate,
+    C4In,
     C4ModelOut,
     ComplianceOut,
     PlanArtifactContentOut,
@@ -578,18 +579,25 @@ def get_plan_artifact_content(
     )
 
 
-@router.get("/plan/sessions/{session_id}/c4", response_model=C4ModelOut)
+@router.post("/plan/sessions/{session_id}/c4", response_model=C4ModelOut)
 def get_plan_c4_model(
     session_id: int,
+    body: C4In | None = None,
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_api_key),
 ):
-    """단계별 C4 시각화 모델 — 확정 산출물에 실린 mermaid C4 블록에서 읽는다.
+    """단계별 C4 시각화 모델 — 산출물에 실린 mermaid C4 블록에서 읽는다.
 
-    **어느 레벨이 보이는지는 문서가 정한다.** 기획서를 확정하면 사용자·외부 환경이 담긴
-    context가, 아키텍처 설계를 확정하면 container·component가 생기고, 솔루션 구성이 같은
-    레벨을 다시 그리면 그것으로 구체화된다(services/c4.model_from_stages). 그래서 여기에
-    단계별 게이팅 규칙을 따로 두지 않는다 — 규칙을 두 곳에 쓰면 문서와 화면이 갈라진다.
+    **확정을 기다리지 않는다.** 그림은 확정 여부를 **검토하기 위한** 도구이고 확정은 그
+    검토의 결과다. 그래서 body.draft로 편집 중인 초안을 주면 그 단계 자리에 초안을 끼워
+    넣어 바로 그린다(레벨마다 confirmed로 초안인지 알린다). 초안을 주지 않으면 확정
+    산출물만 본다 — 외부 도구가 확정된 그림만 읽을 때의 경로다.
+
+    **어느 레벨이 보이는지는 문서가 정한다.** 기획서에 C4Context가 있으면 사용자·외부
+    환경이, 아키텍처 설계에 C4Container·C4Component가 있으면 그것들이 생기고, 솔루션
+    구성이 같은 레벨을 다시 그리면 그것으로 구체화된다(services/c4.model_from_stages).
+    그래서 여기에 단계별 게이팅 규칙을 따로 두지 않는다 — 규칙을 두 곳에 쓰면 문서와
+    화면이 갈라진다.
 
     code 레벨은 문서가 아니라 리포가 원천이라 여기서 그리지 않는다. component마다 구현
     파일 경로(paths)만 실어 주고, 콘솔이 그 경로로 코드맵(/projects/{id}/codemap)을
@@ -600,23 +608,38 @@ def get_plan_c4_model(
         raise HTTPException(status_code=404, detail="session not found")
     project = db.get(Project, session.project_id)
 
+    draft = (body.draft if body else "") or ""
+    draft_stage = (body.stage if body else "") or ""
+    if draft_stage and draft.strip():
+        _parse_stage(draft_stage)  # 모르는 단계면 404 — 조용히 무시하면 초안이 사라진다
+    else:
+        draft_stage = ""
+
+    # 단계 순서를 지켜 훑는다. 초안이 있는 단계는 확정본 대신 초안을 싣는다 — 확정된
+    # 단계로 되돌아가 고치는 중일 수도 있고, 그때 검토 대상은 화면의 초안이다.
     stage_docs: list[tuple[str, str]] = []
     for stage in planning_service.STAGE_ORDER:
+        if stage.value == draft_stage:
+            stage_docs.append((stage.value, draft))
+            continue
         if not _is_confirmed(db, session_id, stage):
             continue
         content = _artifact_content(db, project, session, stage)
         if content:
             stage_docs.append((stage.value, content))
-    levels = c4_service.model_from_stages(stage_docs)
+    levels = c4_service.model_from_stages(stage_docs, draft_stage=draft_stage or None)
 
-    workdir = workspace.workdir_for(project)
-    # file_tree의 기본 상한(200)으로는 큰 리포에서 $link이 가리키는 파일을 놓쳐 code
-    # 레벨이 말없이 비어 버린다 — 코드맵이 훑는 범위(codemap.build_code_map)와 맞춘다.
-    tree = workspace.file_tree(workdir, limit=2000) if workdir.exists() else []
-    for level in levels.values():
-        for element in level["elements"]:
-            if element["base"] == "component":
-                element["paths"] = c4_service.component_paths(element, tree)
+    # component가 없으면 리포를 훑지 않는다 — 초안을 편집하는 동안 이 요청이 반복되므로
+    # 매번 git ls-files를 부를 이유가 없다.
+    components = [e for level in levels.values() for e in level["elements"]
+                  if e["base"] == "component"]
+    if components:
+        workdir = workspace.workdir_for(project)
+        # file_tree의 기본 상한(200)으로는 큰 리포에서 $link이 가리키는 파일을 놓쳐 code
+        # 레벨이 말없이 비어 버린다 — 코드맵이 훑는 범위(codemap.build_code_map)와 맞춘다.
+        tree = workspace.file_tree(workdir, limit=2000) if workdir.exists() else []
+        for element in components:
+            element["paths"] = c4_service.component_paths(element, tree)
     return C4ModelOut(project_id=project.id, levels=levels)
 
 

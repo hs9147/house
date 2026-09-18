@@ -347,3 +347,24 @@ pre.logbox {
 .react-flow__edge.c4-edge .react-flow__edge-path { stroke: rgba(255, 255, 255, 0.3); stroke-width: 1.5; }
 .react-flow__edge.c4-edge .react-flow__edge-text { fill: var(--muted); font-size: 10px; }
 .react-flow__edge.c4-edge .react-flow__edge-textbg { fill: var(--bg); }
+
+/* 진행 중 표시 — 서버가 진행률을 알려 주지 않는 작업(LLM 호출 등)에 쓴다.
+   퍼센트를 그리면 지어낸 숫자가 되므로 "돌고 있다"만 보여 준다. */
+.progress-indeterminate {
+  height: 4px;
+  margin: 12px 0 8px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.progress-indeterminate > div {
+  width: 35%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
