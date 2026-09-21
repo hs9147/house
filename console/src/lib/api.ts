@@ -30,6 +30,7 @@ import type {
   PlanSessionOut,
   PlanSessionSummary,
   PreviewOut,
+  RepoCommit,
   ProjectCreate,
   ProjectFileContentOut,
   ProjectFilesOut,
@@ -437,8 +438,13 @@ export const api = {
   syncPlanTasks: (sessionId: number, signal?: AbortSignal) =>
     request<BuildTaskSync>('POST', `/plan/sessions/${sessionId}/tasks/sync`,
       undefined, undefined, signal),
-  updatePlanTask: (taskId: number, body: { status?: string; note?: string }) =>
-    request<BuildTaskOut>('PATCH', `/plan/tasks/${taskId}`, body),
+  // 기본 브랜치의 최근 커밋 — 작업에 근거로 연결할 대상을 고르기 위한 목록
+  planRepoCommits: (sessionId: number) =>
+    request<RepoCommit[]>('GET', `/plan/sessions/${sessionId}/commits`),
+  // 콘솔에서는 **근거(commit_sha)만** 넣는다. 상태는 리포가 판정한다(tasks/sync) —
+  // 상태를 직접 쓰면 다음 갱신이 조용히 되돌린다.
+  linkPlanTaskCommit: (taskId: number, commit_sha: string) =>
+    request<BuildTaskOut>('PATCH', `/plan/tasks/${taskId}`, { commit_sha }),
   // 외주 결과의 LLM·모듈 사용 검증
   planCompliance: (projectId: number, signal?: AbortSignal) =>
     request<ComplianceOut>('GET', `/plan/projects/${projectId}/compliance`,

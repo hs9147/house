@@ -1790,3 +1790,85 @@ def test_work_order_document_carries_the_commit_convention(monkeypatch, fresh_se
         "jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()["result"]["tools"]
     list_tasks = next(t for t in tools if t["name"] == "list_tasks")
     assert "task #" in list_tasks["description"]
+
+
+def test_linking_a_commit_lets_the_repo_judge_it(monkeypatch, fresh_settings, tmp_path):
+    """규약 이전에 머지된 작업을 살리는 길 — 사람은 **근거**만 넣고 판정은 리포가 한다.
+
+    커밋 메시지에 `task #N`이 없으면 플랫폼은 그 커밋이 어느 작업의 것인지 알 수 없다.
+    짐작하지 않는 대신 사람이 커밋을 고르게 하고, 완료 여부는 그대로 "그 커밋이 기본
+    브랜치에 있는가"로 판정한다 — 상태를 직접 쓰는 것과 다르다.
+    """
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+
+    # 규약 없이 main에 커밋했다 — 판정 근거가 없다
+    (repo / "pay.py").write_text("PRICE = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "feat: 결제 구현 (규약 없음)")
+    assert c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync",
+                  headers=ADMIN).json()["unmatched"] == len(tasks)
+
+    # 고를 수 있는 커밋 목록이 내려온다 — 40자 sha를 손으로 옮기지 않게
+    commits = c.get(f"/paas/api/v1/plan/sessions/{sid}/commits", headers=ADMIN).json()
+    assert commits and all({"sha", "subject", "task_refs"} <= set(x) for x in commits)
+    target = next(x for x in commits if "결제 구현" in x["subject"])
+    assert target["task_refs"] == []  # 규약 참조가 없다
+
+    # 근거를 연결하면 리포가 완료로 판정한다
+    assert c.patch(f"/paas/api/v1/plan/tasks/{tasks[0]['id']}",
+                   json={"commit_sha": target["sha"]}, headers=ADMIN).status_code == 200
+    synced = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
+    done = next(t for t in synced["tasks"] if t["id"] == tasks[0]["id"])
+    assert done["status"] == "done"
+    assert synced["merged"] == 1
+    assert synced["unmatched"] == len(tasks) - 1
+
+
+def test_linked_commit_not_on_main_stays_pending(monkeypatch, fresh_settings, tmp_path):
+    """근거를 넣어도 기본 브랜치에 없으면 완료가 아니다 — 판정은 여전히 리포가 한다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+
+    _git(repo, "checkout", "-q", "-b", "wip")
+    (repo / "pay.py").write_text("PRICE = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "wip")
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    _git(repo, "checkout", "-q", "main")
+
+    c.patch(f"/paas/api/v1/plan/tasks/{tasks[0]['id']}",
+            json={"commit_sha": sha}, headers=ADMIN)
+    synced = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
+    assert (synced["merged"], synced["pending"]) == (0, 1)
+    assert next(t for t in synced["tasks"] if t["id"] == tasks[0]["id"])["status"] == "in_progress"
+
+
+def test_dev_principles_prompt_carries_the_commit_convention():
+    """진행 현황 연계는 개발 규칙이다 — 개발원칙 단계가 그것을 문서에 남기게 지시해야 한다.
+
+    ⑤ 작업 지시 문서와 MCP 설명에만 있으면, 개발원칙을 읽고 구현하는 사람은 규약을 모른다.
+    """
+    from app.models import PlanStage
+    from app.services import planning as planning_service
+
+    prompt = planning_service.stage_prompt(PlanStage.principles)
+    assert "task #" in prompt
+    assert "커밋 규약" in prompt
+    # 왜 필요한지도 함께 — 규약만 적으면 안 지켰을 때 무슨 일이 생기는지 모른다
+    assert "짐작하지 않는다" in prompt

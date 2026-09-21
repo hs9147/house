@@ -49,6 +49,7 @@ from ..schemas import (
     PlanSessionCreate,
     PlanSessionOut,
     PlanSessionSummary,
+    RepoCommitOut,
 )
 from ..security import can_view_git_url, require_admin, require_api_key, viewer_org_ids
 from ..services import a2a as a2a_service
@@ -763,6 +764,49 @@ def list_build_tasks(
     return [_task_out(t) for t in _session_tasks(db, session_id)]
 
 
+@router.get("/plan/sessions/{session_id}/commits", response_model=list[RepoCommitOut])
+async def list_repo_commits(
+    session_id: int,
+    limit: int = 30,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """기본 브랜치의 최근 커밋 — 작업에 **근거로 연결할 대상**을 고르기 위한 목록.
+
+    커밋 메시지에 `task #N` 규약이 없으면(규약 이전에 머지된 작업) 플랫폼은 그 커밋이 어느
+    작업의 것인지 알 수 없다. 짐작하지 않는 대신 사람이 고를 수 있게 한다 — 고른 뒤에도
+    완료 여부는 그대로 리포가 판정한다(그 커밋이 기본 브랜치에 있는지). 사람이 넣는 것은
+    상태가 아니라 근거다.
+
+    sha를 직접 입력하게 두지 않는 이유: 40자를 손으로 옮기다 틀리면 '기본 브랜치에 없는
+    커밋'이 되어 조용히 머지 대기로 남는다.
+    """
+    session = db.get(ChatSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    project = db.get(Project, session.project_id)
+    try:
+        await asyncio.to_thread(checkout, project)  # 최신 커밋까지 보이게
+    except Exception:  # noqa: BLE001 — 원격이 없어도 워킹카피로 보여준다
+        pass
+    workdir = workspace.workdir_for(project)
+    if not workdir.exists():
+        return []
+    base_ref = workspace.default_branch_ref(workdir, project.branch)
+    if base_ref is None:
+        return []
+    entries = await asyncio.to_thread(
+        workspace.log_messages, workdir, base_ref, max(1, min(limit, 200)))
+    return [
+        RepoCommitOut(
+            sha=sha,
+            subject=(message.strip().splitlines() or [""])[0][:200],
+            task_refs=sorted(taskmatch.refs_in_message(message)),
+        )
+        for sha, message in entries
+    ]
+
+
 @router.post("/plan/sessions/{session_id}/tasks/sync", response_model=BuildTaskSyncOut)
 async def sync_build_tasks(
     session_id: int,
@@ -827,8 +871,11 @@ async def sync_build_tasks(
                 task.commit_sha = sha  # 무엇을 근거로 완료인지 남긴다
                 changed.append(task.id)
         else:
+            # 커밋은 있는데 기본 브랜치에 없다 = 구현은 됐고 반영을 기다린다. 완료였다면
+            # 되돌리고, 대기였다면 올린다 — '대기'는 "아직 시작 안 함"으로 읽히는데
+            # 커밋이 연결돼 있으면 사실과 다르다.
             pending += 1
-            if task.status == BuildTaskStatus.done:
+            if task.status != BuildTaskStatus.in_progress:
                 task.status = BuildTaskStatus.in_progress
                 changed.append(task.id)
     db.commit()
