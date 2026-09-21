@@ -819,11 +819,21 @@ export default function AgentPlanning() {
                 ) : (
                   <table>
                     <thead>
-                      <tr><th>작업</th><th>완료 판정</th><th>상태</th><th>커밋</th></tr>
+                      {/* 번호를 보여줘야 커밋 규약(`task #N`)을 쓸 수 있다 — 번호가
+                          없으면 무엇을 적어야 할지 알 방법이 화면에 없다. */}
+                      <tr><th>번호</th><th>작업</th><th>완료 판정</th><th>상태</th><th>커밋</th></tr>
                     </thead>
                     <tbody>
                       {tasks.map((t) => (
                         <tr key={t.id}>
+                          {/* 커밋 메시지에 그대로 붙여 쓰는 값이다 — 복사하기 쉽게 mono로 */}
+                          <td
+                            className="mono"
+                            style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+                            title="커밋 메시지에 이 문구를 넣으면 기본 브랜치 반영 시 자동으로 완료가 됩니다"
+                          >
+                            task #{t.id}
+                          </td>
                           <td>
                             <div style={{ fontWeight: 600 }}>{t.title}</div>
                             {t.detail && <div className="mutedtext" style={{ fontSize: 12 }}>{t.detail}</div>}
