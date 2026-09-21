@@ -93,6 +93,24 @@ def aws_profiles(_: ApiKey = Depends(require_admin)):
     }
 
 
+@router.get("/llm/aws/models")
+def aws_models(profile: str, base_url: str = "", _: ApiKey = Depends(require_admin)):
+    """로그인된 자격증명으로 지금 부를 수 있는 모델 목록 — 등록 화면의 모델 선택용.
+
+    모델 ID를 손으로 적게 두면 틀린다. 실측: ap-northeast-2에서 `anthropic.claude-…`를
+    그대로 넣으면 "on-demand throughput isn't supported — use an inference profile"로
+    거부된다. 실제로 통하는 ID를 계정에서 받아 고르게 한다(컨트롤 플레인 조회라 과금 없음).
+
+    토큰이 만료됐으면 목록을 받을 수 없다 — 그 사유(재로그인 명령 포함)를 그대로 올린다.
+    """
+    region = bedrock.region_from_url(base_url, profile)
+    try:
+        models = bedrock.list_models(profile=profile, region=region)
+    except bedrock.BedrockError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"region": region, "models": models}
+
+
 @router.get("/llm/providers", response_model=list[LlmProviderOut])
 def list_providers(db: Session = Depends(get_db), _: ApiKey = Depends(require_api_key)):
     rows = db.execute(select(LlmProvider).order_by(LlmProvider.id)).scalars()

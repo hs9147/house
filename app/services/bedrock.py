@@ -304,15 +304,69 @@ def converse(
     return _from_converse(_post_signed(url, payload, frozen, region, timeout))
 
 
+def list_models(*, profile: str, region: str, timeout: int = 20) -> list[dict]:
+    """이 자격증명으로 지금 부를 수 있는 모델 후보 — 등록 화면에서 고르기 위한 목록.
+
+    **추론 프로필을 먼저 싣는다.** 실측(ap-northeast-2): foundation-models에 있는 ID를
+    그대로 넣으면 "Invocation of model ID ... with on-demand throughput isn't supported.
+    Retry with the ID or ARN of an inference profile"로 거부된다. 그러니 실제로 통하는
+    ID(global.anthropic.…·apac.anthropic.…)가 목록 앞에 있어야 한다.
+
+    뒤에는 온디맨드로 부를 수 있는 텍스트 모델을 붙인다 — 리전에 따라 그쪽이 되는 곳도 있다.
+    임베딩·이미지 모델은 대화에 쓸 수 없으므로 뺀다.
+    """
+    frozen = _frozen(profile)
+    out: list[dict] = []
+    profiles = _get_signed(
+        f"https://bedrock.{region}.amazonaws.com/inference-profiles?maxResults=100",
+        frozen, region, timeout)
+    for entry in profiles.get("inferenceProfileSummaries") or []:
+        if (entry.get("status") or "ACTIVE") != "ACTIVE":
+            continue
+        out.append({
+            "id": entry.get("inferenceProfileId") or "",
+            "name": entry.get("inferenceProfileName") or "",
+            "kind": "inference_profile",
+        })
+    models = _get_signed(
+        f"https://bedrock.{region}.amazonaws.com/foundation-models", frozen, region, timeout)
+    for m in models.get("modelSummaries") or []:
+        if "ON_DEMAND" not in (m.get("inferenceTypesSupported") or []):
+            continue
+        if "TEXT" not in (m.get("outputModalities") or []):
+            continue
+        if ((m.get("modelLifecycle") or {}).get("status") or "ACTIVE") != "ACTIVE":
+            continue
+        out.append({
+            "id": m.get("modelId") or "",
+            "name": m.get("modelName") or "",
+            "kind": "on_demand",
+        })
+    return [e for e in out if e["id"]]
+
+
+def _get_signed(url: str, frozen, region: str, timeout: int) -> dict:
+    """서명한 GET (컨트롤 플레인 조회 — 추론이 아니라 과금 없음)."""
+    return _signed(method="GET", url=url, payload=b"", frozen=frozen,
+                   region=region, timeout=timeout)
+
+
 def _post_signed(url: str, payload: bytes, frozen, region: str, timeout: int) -> dict:
-    """서명 + 실제 HTTP 경계 (테스트에서 monkeypatch하는 지점)."""
+    """서명한 POST (테스트에서 monkeypatch하는 지점)."""
+    return _signed(method="POST", url=url, payload=payload, frozen=frozen,
+                   region=region, timeout=timeout)
+
+
+def _signed(*, method: str, url: str, payload: bytes, frozen, region: str, timeout: int) -> dict:
+    """서명 + 실제 HTTP 경계."""
     from botocore.auth import SigV4Auth  # noqa: PLC0415
     from botocore.awsrequest import AWSRequest  # noqa: PLC0415
 
-    request = AWSRequest(method="POST", url=url, data=payload,
+    request = AWSRequest(method=method, url=url, data=payload or None,
                          headers={"content-type": "application/json"})
     SigV4Auth(frozen, "bedrock", region).add_auth(request)
-    res = httpx.post(url, headers=dict(request.headers), content=payload, timeout=timeout)
+    res = httpx.request(method, url, headers=dict(request.headers),
+                        content=payload or None, timeout=timeout)
     if res.status_code >= 400:
         # 본문에 이유가 들어 있다(만료·권한 없음·모델 접근 미승인·리전에 없는 모델).
         # raise_for_status는 그 본문을 버려서 "400 Bad Request"만 남긴다 — 실측에서

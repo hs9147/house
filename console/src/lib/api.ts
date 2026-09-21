@@ -375,6 +375,14 @@ export const api = {
   }) => request<LlmProviderOut>('POST', '/llm/providers', body),
   // Bedrock이 쓸 AWS 자격증명 프로필과 지금 유효한지. 사내 SSO 토큰은 보통 8시간이면
   // 만료되므로 '재로그인 필요'와 그 명령까지 서버가 말해 준다.
+  // 로그인된 자격증명으로 지금 부를 수 있는 모델 — 손으로 적으면 틀리는 값이다
+  // (온디맨드가 안 되는 리전에서는 inference profile ID를 넣어야 한다).
+  listAwsModels: (profile: string, base_url: string) =>
+    request<{
+      region: string;
+      models: { id: string; name: string; kind: 'inference_profile' | 'on_demand' }[];
+    }>('GET', `/llm/aws/models?profile=${encodeURIComponent(profile)}`
+      + `&base_url=${encodeURIComponent(base_url)}`),
   listAwsProfiles: () => request<{
     botocore_available: boolean;
     config_path: string; // 어디를 읽었는지 — 서비스 계정이면 홈이 달라 목록이 빈다

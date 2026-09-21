@@ -18,6 +18,16 @@ export default function Providers() {
   });
   const selectedProfile = (awsProfiles.data?.profiles ?? [])
     .find((p) => p.name === form.aws_profile);
+  // 모델 ID는 손으로 적으면 틀린다(리전에 따라 inference profile ID를 넣어야 한다) —
+  // 로그인된 자격증명으로 계정에서 받아 고르게 한다. 프로필을 고른 뒤에만 읽는다.
+  // base_url은 deps에 넣지 않는다 — 한 글자마다 다시 부르게 된다(리전은 프로필에도 있다).
+  const awsModels = useApi(
+    () => (form.kind === 'aws' && form.aws_profile
+      ? api.listAwsModels(form.aws_profile, form.base_url)
+      : Promise.resolve(null)),
+    [form.kind, form.aws_profile],
+  );
+  const modelOptions = awsModels.data?.models ?? [];
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -157,12 +167,39 @@ export default function Providers() {
             <div className="row">
               <label className="field" style={{ flex: 1 }}>
                 모델
-                <input
-                  className="mono"
-                  value={form.model}
-                  onChange={(e) => set('model', e.target.value)}
-                  required
-                />
+                {modelOptions.length > 0 ? (
+                  <select
+                    className="mono"
+                    value={form.model}
+                    onChange={(e) => set('model', e.target.value)}
+                    required
+                  >
+                    <option value="">— 선택 —</option>
+                    {/* 추론 프로필이 먼저다. 실측(ap-northeast-2): 파운데이션 모델 ID를
+                        그대로 넣으면 "on-demand throughput isn't supported — use an
+                        inference profile"로 거부된다. 실제로 통하는 ID가 앞에 있어야 한다. */}
+                    <optgroup label={`추론 프로필 (권장 · ${awsModels.data?.region ?? ''})`}>
+                      {modelOptions.filter((m) => m.kind === 'inference_profile').map((m) => (
+                        <option key={m.id} value={m.id}>{m.id}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="온디맨드 모델">
+                      {modelOptions.filter((m) => m.kind === 'on_demand').map((m) => (
+                        <option key={m.id} value={m.id}>{m.id}</option>
+                      ))}
+                    </optgroup>
+                  </select>
+                ) : (
+                  <input
+                    className="mono"
+                    value={form.model}
+                    onChange={(e) => set('model', e.target.value)}
+                    required
+                    placeholder={form.kind === 'aws'
+                      ? '프로필을 고르면 계정에서 모델 목록을 받아옵니다'
+                      : undefined}
+                  />
+                )}
               </label>
               {/* Bedrock은 붙여넣을 정적 키가 없다 — 서버 ~/.aws의 자격증명으로 서명한다.
                   그래서 aws에서는 키 입력 대신 프로필을 고른다. */}
@@ -223,6 +260,11 @@ export default function Providers() {
                     )}</>
                 ) : selectedProfile.ok === null ? (
                   <>❓ {selectedProfile.reason}</>
+                ) : awsModels.error ? (
+                  /* 자격증명은 되는데 목록을 못 받았다 — 권한(bedrock:ListFoundationModels)이나
+                     리전 문제다. 모델 칸은 직접 입력으로 남는다. */
+                  <>⚠️ 모델 목록을 받지 못했습니다: {awsModels.error}{' '}
+                    — 모델 ID를 직접 입력하세요.</>
                 ) : (
                   /* 자격증명(STS) 만료가 아니라 **SSO 토큰** 만료다 — 재로그인이
                      필요해지는 시각은 이쪽이고 보통 8시간이다. */

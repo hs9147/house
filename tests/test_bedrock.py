@@ -244,3 +244,87 @@ def test_profile_on_non_aws_kind_is_rejected():
     }, headers=ADMIN)
     assert r.status_code == 422
     assert "aws_profile" in r.text
+
+
+# 실제 응답에서 가려낸 모양(ap-northeast-2). 추론 프로필은 상태가 ACTIVE인 것만,
+# 파운데이션 모델은 온디맨드로 부를 수 있는 텍스트 모델만 후보다.
+_PROFILES_BODY = {"inferenceProfileSummaries": [
+    {"inferenceProfileId": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+     "inferenceProfileName": "Claude Haiku 4.5", "status": "ACTIVE"},
+    {"inferenceProfileId": "apac.anthropic.claude-sonnet-4-20250514-v1:0",
+     "inferenceProfileName": "Claude Sonnet 4", "status": "ACTIVE"},
+    {"inferenceProfileId": "zzz.retired", "status": "INACTIVE"},
+]}
+_MODELS_BODY = {"modelSummaries": [
+    {"modelId": "anthropic.claude-haiku-4-5-20251001-v1:0", "modelName": "Haiku 4.5",
+     "inferenceTypesSupported": ["INFERENCE_PROFILE"], "outputModalities": ["TEXT"]},
+    {"modelId": "amazon.titan-text-express-v1", "modelName": "Titan Text",
+     "inferenceTypesSupported": ["ON_DEMAND"], "outputModalities": ["TEXT"]},
+    {"modelId": "amazon.titan-embed-text-v2:0", "modelName": "Titan Embed",
+     "inferenceTypesSupported": ["ON_DEMAND"], "outputModalities": ["EMBEDDING"]},
+    {"modelId": "old.model", "modelName": "Old", "inferenceTypesSupported": ["ON_DEMAND"],
+     "outputModalities": ["TEXT"], "modelLifecycle": {"status": "LEGACY"}},
+]}
+
+
+def _stub_control_plane(monkeypatch):
+    monkeypatch.setattr(bedrock, "botocore_available", lambda: True)
+    monkeypatch.setattr(bedrock, "_frozen", lambda profile: object())
+
+    def fake_get(url, frozen, region, timeout):
+        return _PROFILES_BODY if "inference-profiles" in url else _MODELS_BODY
+
+    monkeypatch.setattr(bedrock, "_get_signed", fake_get)
+
+
+def test_model_list_puts_inference_profiles_first(monkeypatch):
+    """실측: 파운데이션 모델 ID를 그대로 넣으면 "use an inference profile"로 거부된다.
+
+    그러니 실제로 통하는 ID가 목록 앞에 있어야 한다 — 뒤에 있으면 사람이 앞의 것을 고른다.
+    """
+    _stub_control_plane(monkeypatch)
+    models = bedrock.list_models(profile="p", region="ap-northeast-2")
+    assert [m["kind"] for m in models[:2]] == ["inference_profile", "inference_profile"]
+    assert models[0]["id"] == "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def test_model_list_drops_what_cannot_be_used_for_chat(monkeypatch):
+    """임베딩·비활성·온디맨드 불가는 고를 수 있게 두면 안 된다 — 고르면 실패한다."""
+    _stub_control_plane(monkeypatch)
+    ids = [m["id"] for m in bedrock.list_models(profile="p", region="ap-northeast-2")]
+    assert "amazon.titan-text-express-v1" in ids           # 온디맨드 텍스트 — 후보다
+    assert "zzz.retired" not in ids                        # INACTIVE 추론 프로필
+    assert "amazon.titan-embed-text-v2:0" not in ids       # 임베딩 전용
+    assert "old.model" not in ids                          # LEGACY
+    # 온디맨드가 안 되는 모델은 추론 프로필 쪽 ID로 불러야 한다 — 원본 ID는 후보가 아니다
+    assert "anthropic.claude-haiku-4-5-20251001-v1:0" not in ids
+
+
+def test_models_endpoint_surfaces_expiry_with_the_login_command(monkeypatch, aws_config):
+    """토큰이 만료되면 목록을 받을 수 없다 — 왜인지와 무엇을 할지가 그대로 올라와야 한다."""
+    monkeypatch.setattr(bedrock, "list_models", lambda **kw: (_ for _ in ()).throw(
+        bedrock.BedrockError("AWS SSO 토큰이 만료됐습니다. `aws sso login --profile p`")))
+    c = TestClient(create_app())
+    r = c.get("/paas/api/v1/llm/aws/models?profile=p", headers=ADMIN)
+    assert r.status_code == 502
+    assert "aws sso login --profile p" in r.json()["detail"]
+
+
+def test_models_endpoint_is_admin_only(aws_config, monkeypatch):
+    monkeypatch.setattr(bedrock, "list_models", lambda **kw: [])
+    c = TestClient(create_app())
+    assert c.get("/paas/api/v1/llm/aws/models?profile=p", headers=ADMIN).status_code == 200
+    assert c.get("/paas/api/v1/llm/aws/models?profile=p").status_code in (401, 403)
+
+
+def test_models_endpoint_reports_the_region_it_listed(aws_config, monkeypatch):
+    """리전이 다르면 목록도 다르다 — 어느 리전에서 받은 목록인지 화면이 말해야 한다."""
+    monkeypatch.setattr(bedrock, "list_models", lambda **kw: [])
+    c = TestClient(create_app())
+    body = c.get("/paas/api/v1/llm/aws/models?profile=bedrock-dev"
+                 "&base_url=https://bedrock-runtime.eu-west-1.amazonaws.com",
+                 headers=ADMIN).json()
+    assert body["region"] == "eu-west-1"
+    # Endpoint에 리전이 없으면 프로필 설정을 따른다
+    body = c.get("/paas/api/v1/llm/aws/models?profile=bedrock-dev", headers=ADMIN).json()
+    assert body["region"] == "us-east-1"
