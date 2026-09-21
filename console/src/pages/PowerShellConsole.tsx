@@ -61,30 +61,12 @@ export default function PowerShellConsole() {
 
   // 서버 로그 (.txt) 탭용 API State — 실행 경로 하위 logs/
   const serverLogsState = useApi(() => api.listServerLogs(), []);
-  // 서버가 셸을 지원하는지 — PTY(터미널)와 powershell.exe(한 줄 실행·SW 업데이트·
-  // 재시작)는 다른 신호다. 못 하는 일의 버튼은 감춘다: 눌러도 아무 일도 안 하는
-  // 버튼은 '고장'과 '미지원'을 구분해 주지 않는다.
-  const shell = useApi(() => api.terminalPreflight(), []);
-  // 아직 못 읽었으면 감추지 않는다 — 로딩 중에 버튼이 사라졌다 나타나면 깜빡인다.
-  const ptyReady = shell.data ? shell.data.ok : true;
-  const psReady = shell.data ? shell.data.powershell : true;
   const [selectedFile, setSelectedFile] = useState<string>('');
   const [logContent, setLogContent] = useState<string>('');
   const [tailLines, setTailLines] = useState<number>(1000);
   const [loadingLog, setLoadingLog] = useState<boolean>(false);
 
 
-
-  // 지원하지 않는 탭이 열려 있으면 옮긴다 — 버튼만 감추면 기본값('terminal')이
-  // 그대로 열려 있어 빈 터미널을 보게 된다.
-  useEffect(() => {
-    if (!ptyReady && activeTab === 'terminal') {
-      setActiveTab(psReady ? 'console' : 'server_logs');
-    }
-    if (!psReady && activeTab === 'console') {
-      setActiveTab(ptyReady ? 'terminal' : 'server_logs');
-    }
-  }, [ptyReady, psReady, activeTab]);
 
   useEffect(() => {
     if (serverLogsState.data && serverLogsState.data.files.length > 0 && !selectedFile) {
@@ -282,30 +264,25 @@ export default function PowerShellConsole() {
 
       {/* Tab Nav Selector: PowerShell 콘솔 -> 서버 로그 순서 */}
       <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', paddingBottom: 8 }}>
-        {ptyReady && (
-          <button
-            className={activeTab === 'terminal' ? 'primary small' : 'secondary small'}
-            onClick={() => setActiveTab('terminal')}
-          >
-            ▶ 터미널
-          </button>
-        )}
-        {/* 한 줄 실행도 powershell.exe로 돈다 — 없으면 감춘다(브로커가 셸을 못 띄운다) */}
-        {psReady && (
-          <button
-            className={activeTab === 'console' ? 'primary small' : 'secondary small'}
-            onClick={() => setActiveTab('console')}
-          >
-            ⚡ 명령 실행 (한 줄)
-          </button>
-        )}
+        <button
+          className={activeTab === 'terminal' ? 'primary small' : 'secondary small'}
+          onClick={() => setActiveTab('terminal')}
+        >
+          ▶ 터미널
+        </button>
+        <button
+          className={activeTab === 'console' ? 'primary small' : 'secondary small'}
+          onClick={() => setActiveTab('console')}
+        >
+          ⚡ 명령 실행 (한 줄)
+        </button>
         {/*
           탭이 아니라 동작이다. 탭 줄에 두는 것은 자리 때문이고, 그래서 탭과 같은
           `primary/secondary` 전환을 쓰지 않는다 — 눌린 탭처럼 보이면 안 된다.
 
           엔드포인트가 `require_admin`이라 관리자에게만 보인다. 아니면 눌러야 403을 안다.
         */}
-        {me.data?.is_admin && psReady && (
+        {me.data?.is_admin && (
           <button
             className="secondary small"
             disabled={restarting}
@@ -318,7 +295,7 @@ export default function PowerShellConsole() {
         {/* git pull 없이 백엔드만 재기동한다. 터미널에서 직접 치는 것과 같은 스크립트를
             쓴다(infra/restart-paas.ps1) — 재시작 작업을 분리된 프로세스로 넘기고 즉시
             돌아오므로, 이 요청이 백엔드가 내려가면서 끊기지 않는다. */}
-        {me.data?.is_admin && psReady && (
+        {me.data?.is_admin && (
           <button
             className="secondary small"
             disabled={restarting || running}
@@ -340,19 +317,8 @@ export default function PowerShellConsole() {
         </button>
       </div>
 
-      {/* 감추기만 하면 "원래 없는 기능"으로 오해한다 — 서버가 준 사유를 그대로 띄운다.
-          hint는 한국어 문장이고, 기계가 읽는 사유 코드(reason)는 진단 스크립트용이다. */}
-      {shell.data && !(shell.data.ok && shell.data.powershell) && (
-        <p className="mutedtext" style={{ fontSize: 12, marginTop: 8 }}>
-          ⚠️ 이 서버에서 쓸 수 없는 기능을 감췄습니다
-          {!shell.data.ok && ' · 터미널'}
-          {!shell.data.powershell && ' · 명령 실행/SW 업데이트/백엔드 재시작(powershell.exe 없음)'}
-          {shell.data.hint && <> — {shell.data.hint}</>}
-        </p>
-      )}
-
       {/* TAB 0: PTY 터미널 — 되묻는 명령·Ctrl+C·실시간 출력이 되는 쪽 */}
-      {activeTab === 'terminal' && ptyReady && <PtyTerminal />}
+      {activeTab === 'terminal' && <PtyTerminal />}
 
       {/* TAB 1: 한 줄 실행 — PTY 백엔드(pywinpty)가 없는 서버를 위한 경로로도 남긴다 */}
       {activeTab === 'console' && (

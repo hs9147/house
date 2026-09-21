@@ -568,16 +568,6 @@ def terminal_preflight(_: ApiKey = Depends(require_admin)):
         hint = ("이 서버에서 셸을 열지 못했습니다. Windows Server 2016은 ConPTY가 없으므로"
                 " PAAS_PTY_BACKEND=winpty를 지정해 보세요.")
     result["hint"] = hint
-
-    # PTY와 PowerShell은 **다른 신호**다. ok는 pywinpty로 셸을 열 수 있는지이고, 한 줄
-    # 실행·SW 업데이트·백엔드 재시작은 powershell.exe를 직접 띄운다 — pywinpty가 없어도
-    # PowerShell은 있을 수 있고, 반대로 PowerShell이 없으면(비-Windows 등) 그 기능들이
-    # 전부 조용히 실패한다. 화면이 못 하는 일의 버튼을 감추려면 둘을 따로 알아야 한다.
-    import shutil  # noqa: PLC0415
-
-    from ..services.powershell_daemon import POWERSHELL_EXE  # noqa: PLC0415
-
-    result["powershell"] = shutil.which(POWERSHELL_EXE) is not None
     return result
 
 

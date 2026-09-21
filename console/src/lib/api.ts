@@ -499,10 +499,6 @@ export const api = {
       exit_status: number | null;
       error: string;
       hint: string;
-      // PTY와는 **다른 신호**다. ok는 pywinpty로 셸을 열 수 있는지, 이 값은 플랫폼이
-      // powershell.exe를 띄울 수 있는지 — 한 줄 실행·SW 업데이트·백엔드 재시작이 이쪽에
-      // 의존한다. 없으면 그 버튼들은 눌러도 조용히 아무 일도 하지 않으므로 감춘다.
-      powershell: boolean;
     }>('GET', '/system/terminal/preflight'),
 
   execPowerShell: (command: string) =>

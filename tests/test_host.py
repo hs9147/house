@@ -144,26 +144,3 @@ def test_status_gpu_still_respects_the_os_ceiling(monkeypatch, fresh_settings):
     monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "docker")
     get_settings.cache_clear()
     assert monitor.snapshot()["gpu_supported"] is False
-
-
-def test_preflight_reports_powershell_separately(monkeypatch, fresh_settings):
-    """PTY와 powershell.exe는 다른 신호다 — 화면이 못 하는 일의 버튼을 감추려면 둘을
-    따로 알아야 한다. pywinpty가 없어도 PowerShell은 있을 수 있고, 그 반대도 있다."""
-    import shutil
-
-    from fastapi.testclient import TestClient
-
-    from app.main import create_app
-
-    monkeypatch.setattr(shutil, "which", lambda name: "C:/ps.exe")
-    body = TestClient(create_app()).get(
-        "/paas/api/v1/system/terminal/preflight", headers={"x-api-key": "test-admin-key"},
-    ).json()
-    assert body["powershell"] is True
-    assert "ok" in body and "reason" in body  # PTY 신호는 그대로 남는다
-
-    monkeypatch.setattr(shutil, "which", lambda name: None)
-    body = TestClient(create_app()).get(
-        "/paas/api/v1/system/terminal/preflight", headers={"x-api-key": "test-admin-key"},
-    ).json()
-    assert body["powershell"] is False
