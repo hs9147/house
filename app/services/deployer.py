@@ -59,7 +59,28 @@ def runtime_name() -> str:
 GPU_CAPABLE_RUNTIMES = ("docker", "k8s")
 
 
-def get_runtime() -> Runtime:
+def uses_dev_process(profile: BuildProfile) -> bool:
+    """개발 배포를 맨 프로세스로 띄우는가.
+
+    development 프로필은 이미 dev 서버로 돈다(build.py가 만드는 start.cmd의 분기) — 그걸
+    Windows Service로 감쌀 이유가 없다. 배포마다 nssm install/set/start, 정지 시 remove
+    사이클이 돌고 서비스 등록에 관리자 권한이 필요한데, 정작 dev 서버는 HMR로 파일 변경을
+    스스로 반영한다. URL rewrite는 그대로 필요하고, 그건 프록시와 start.cmd의 base가
+    담당하므로 런타임을 바꿔도 달라지지 않는다.
+
+    실행 스크립트가 start.cmd라 윈도우 전용이다. enterprise(k8s)는 제외한다 — 거기서
+    개발 배포는 클러스터 안에서 도는 것이 전제이고 플랫폼 호스트의 프로세스가 아니다.
+    """
+    import os  # noqa: PLC0415
+
+    return (
+        profile == BuildProfile.development
+        and os.name == "nt"
+        and runtime_name() != "k8s"
+    )
+
+
+def _base_runtime() -> Runtime:
     name = runtime_name()
     if name == "k8s":
         from .runtime.k8s_runtime import K8sRuntime  # noqa: PLC0415
@@ -72,6 +93,41 @@ def get_runtime() -> Runtime:
     from .runtime.docker_runtime import DockerRuntime  # noqa: PLC0415
 
     return DockerRuntime()
+
+
+class ProfileRoutingRuntime(Runtime):
+    """프로필에 따라 런타임을 갈라 주는 얇은 래퍼.
+
+    **왜 get_runtime()에 프로필 인자를 두지 않는가.** 그러면 호출부 열 곳이 프로필을
+    실어 나르게 되고(stop·status·logs·server-config·MCP·프리뷰·삭제 정리), 정작 필요한
+    값은 이미 각 메서드 인자와 RuntimeSpec에 들어 있다. 라우팅을 여기 한 곳에 두면
+    호출부는 그대로 두고 기동·정지·조회가 **자동으로 같은 런타임**을 보게 된다 — 기동은
+    dev 프로세스로 하고 조회는 nssm에 물어 "없는 서비스"를 stopped라고 말하는 어긋남이
+    구조적으로 생기지 않는다.
+    """
+
+    def _for(self, profile: BuildProfile) -> Runtime:
+        if uses_dev_process(profile):
+            from .runtime.dev_process_runtime import DevProcessRuntime  # noqa: PLC0415
+
+            return DevProcessRuntime()
+        return _base_runtime()
+
+    def start(self, spec: RuntimeSpec) -> Endpoint:
+        return self._for(spec.profile).start(spec)
+
+    def stop(self, project_name: str, profile: BuildProfile) -> None:
+        self._for(profile).stop(project_name, profile)
+
+    def status(self, project_name: str, profile: BuildProfile) -> str:
+        return self._for(profile).status(project_name, profile)
+
+    def logs(self, project_name: str, profile: BuildProfile, tail: int = 200) -> str:
+        return self._for(profile).logs(project_name, profile, tail)
+
+
+def get_runtime() -> Runtime:
+    return ProfileRoutingRuntime()
 
 
 def _org_name(project: Project) -> str | None:
