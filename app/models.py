@@ -354,6 +354,10 @@ class BuildTask(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("chat_sessions.id"), index=True)
+    # 프로젝트별 작업 번호(1부터). 커밋 규약(`task #3`)과 화면에 쓰는 번호다 — 전역 id를
+    # 쓰면 다른 프로젝트의 작업까지 번호를 밀어 올려서 새 프로젝트 첫 작업이 #57로
+    # 시작한다. 사람이 커밋 메시지에 적는 값이라 프로젝트 안에서 읽혀야 한다.
+    number: Mapped[int] = mapped_column(Integer, default=0)
     title: Mapped[str] = mapped_column(String(255))
     detail: Mapped[str] = mapped_column(Text, default="")
     # 완료 판정 기준(기획서의 성공 기준을 작업 단위로 내린 것)

@@ -108,7 +108,7 @@ STAGES: dict[PlanStage, dict[str, str]] = {
             "브랜치 커밋 메시지의 이 참조로 커밋과 작업 지시를 잇고, 그 커밋이 기본 브랜치에 "
             "반영되면 해당 작업을 완료로 바꾼다(app/services/taskmatch.py). 참조가 없으면 어느 "
             "작업의 커밋인지 알 수 없어 진행 현황이 갱신되지 않는다 — 플랫폼은 짐작하지 않는다. "
-            "작업 번호는 콘솔의 작업 지시 표와 MCP `list_tasks`의 `id`다.\n"
+            "작업 번호는 콘솔의 작업 지시 표와 MCP `list_tasks`의 `number`다(프로젝트별로 1부터 — 전역 `id`가 아니다).\n"
             "- 배포 형상이 갈리는 프로젝트라면 '배포 및 사용 가이드'에 **리포 폴더 구조와 "
             "배포 단위**를 명시하라: 어느 폴더가 각각 어떤 타입으로 빌드되는지"
             "(python·react·node·html·streamlit·llm), 그 폴더에 어떤 시그니처 파일이 있어야 "
@@ -445,14 +445,14 @@ def render_tasks_doc(tasks: list[dict]) -> str:
         "",
         f"> **커밋 규약** — {taskmatch.CONVENTION_HINT}",
         "> 참조가 없으면 플랫폼이 그 커밋을 어느 작업의 것인지 알 수 없어 진행 현황이",
-        "> 갱신되지 않는다(추측하지 않는다). 작업 번호는 MCP `list_tasks`의 `id`다.",
+        "> 갱신되지 않는다(추측하지 않는다). 작업 번호는 MCP `list_tasks`의 `number`다(프로젝트별로 1부터 — 전역 `id`가 아니다).",
         "",
     ]
     for idx, task in enumerate(tasks, start=1):
         # 번호는 문서 안의 순번이 아니라 작업 id다 — 커밋 규약이 가리키는 것과 같아야 한다.
         heading = f"## {idx}. {task['title']}"
         if task.get("id"):
-            heading = f"## {idx}. {task['title']} (task #{task['id']})"
+            heading = f"## {idx}. {task['title']} (task #{task['number']})"
         lines.append(heading)
         if task.get("detail"):
             lines += ["", task["detail"]]

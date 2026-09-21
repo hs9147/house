@@ -271,20 +271,14 @@ export type BuildTaskStatus = 'pending' | 'in_progress' | 'done' | 'blocked';
 
 export interface BuildTaskOut {
   id: number;
+  // 프로젝트별 작업 번호 — 커밋 규약(`task #3`)에 쓰는 값. id는 API 식별자다.
+  number: number;
   title: string;
   detail: string;
   verify: string; // 완료 판정 기준
   status: BuildTaskStatus;
   note: string;
   commit_sha: string | null;
-}
-
-// 기본 브랜치의 커밋 한 줄 — 작업에 근거로 연결할 대상. 사람이 넣는 것은 상태가 아니라
-// 근거이고, 완료 여부는 그 커밋이 기본 브랜치에 있는지로 서버가 판정한다.
-export interface RepoCommit {
-  sha: string;
-  subject: string;
-  task_refs: number[]; // 이 커밋이 `task #N` 규약으로 가리키는 작업 번호
 }
 
 // 진행 현황을 기본 브랜치 기준으로 맞춘 결과 — 보고가 아니라 반영된 커밋이 기준이다

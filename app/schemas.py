@@ -272,6 +272,8 @@ class PlanChatMessageOut(BaseModel):
 
 class BuildTaskOut(BaseModel):
     id: int
+    # 프로젝트별 작업 번호 — 커밋 규약(`task #3`)에 쓰는 값. id는 API 식별자다.
+    number: int = 0
     title: str
     detail: str = ""
     verify: str = ""  # 완료 판정 기준
@@ -284,20 +286,6 @@ class BuildTaskUpdate(BaseModel):
     status: str | None = None  # pending | in_progress | done | blocked
     note: str | None = None
     commit_sha: str | None = None
-
-
-class RepoCommitOut(BaseModel):
-    """기본 브랜치의 커밋 한 줄 — 작업에 근거로 연결할 대상을 고르기 위한 목록.
-
-    커밋 메시지에 `task #N` 규약이 없는(규약 이전에 머지된) 작업은 플랫폼이 어느 커밋의
-    것인지 알 수 없다. 사람이 **근거**를 지정하면 완료 여부는 그대로 리포가 판정한다
-    (그 커밋이 기본 브랜치에 있는지) — 사람이 상태를 직접 쓰는 것이 아니다.
-    """
-
-    sha: str
-    subject: str  # 커밋 메시지 첫 줄
-    # 이 커밋이 규약으로 가리키는 작업 번호들 — 이미 연결된 것을 또 고르지 않게 한다.
-    task_refs: list[int] = []
 
 
 class BuildTaskSyncOut(BaseModel):

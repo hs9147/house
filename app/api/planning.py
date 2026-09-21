@@ -11,7 +11,7 @@ import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import audit
@@ -49,7 +49,6 @@ from ..schemas import (
     PlanSessionCreate,
     PlanSessionOut,
     PlanSessionSummary,
-    RepoCommitOut,
 )
 from ..security import can_view_git_url, require_admin, require_api_key, viewer_org_ids
 from ..services import a2a as a2a_service
@@ -534,6 +533,21 @@ def _artifact_content(db: Session, project: Project, session: ChatSession,
     return workspace.read_context_files(workdir, [path]).get(path)
 
 
+def _next_task_number(db: Session, project_id: int) -> int:
+    """프로젝트의 다음 작업 번호. 남아 있는 작업의 최대 번호 다음 — 비어 있으면 1이다."""
+    top = db.execute(
+        select(func.max(BuildTask.number)).where(BuildTask.project_id == project_id)
+    ).scalar()
+    return int(top or 0) + 1
+
+
+def _task_by_number(db: Session, project_id: int, number: int) -> BuildTask | None:
+    return db.execute(
+        select(BuildTask)
+        .where(BuildTask.project_id == project_id, BuildTask.number == number)
+    ).scalars().first()
+
+
 def _tasks_document(db: Session, session_id: int) -> str:
     """현재 작업 지시를 5단계 산출물 문서로 렌더한다(아직 커밋 전 미리보기)."""
     return planning_service.render_tasks_doc(
@@ -681,7 +695,7 @@ def get_plan_repo(
 
 def _task_out(t: BuildTask) -> BuildTaskOut:
     return BuildTaskOut(
-        id=t.id, title=t.title, detail=t.detail, verify=t.verify,
+        id=t.id, number=t.number, title=t.title, detail=t.detail, verify=t.verify,
         status=t.status.value, note=t.note, commit_sha=t.commit_sha,
     )
 
@@ -740,9 +754,11 @@ async def generate_build_tasks(
 
     for t in existing:
         db.delete(t)
-    for item in items:
+    db.flush()  # 삭제를 반영해야 남은 작업의 최대 번호가 맞다(재생성이면 다시 1부터)
+    start = _next_task_number(db, project.id)
+    for offset, item in enumerate(items):
         db.add(BuildTask(
-            project_id=project.id, session_id=session_id,
+            project_id=project.id, session_id=session_id, number=start + offset,
             title=item["title"], detail=item["detail"], verify=item["verify"],
         ))
     # 작업 지시를 다시 만들면 이 세션의 마무리는 무효다 — 새 작업들이 아직 아무것도
@@ -762,49 +778,6 @@ def list_build_tasks(
     if db.get(ChatSession, session_id) is None:
         raise HTTPException(status_code=404, detail="session not found")
     return [_task_out(t) for t in _session_tasks(db, session_id)]
-
-
-@router.get("/plan/sessions/{session_id}/commits", response_model=list[RepoCommitOut])
-async def list_repo_commits(
-    session_id: int,
-    limit: int = 30,
-    db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
-):
-    """기본 브랜치의 최근 커밋 — 작업에 **근거로 연결할 대상**을 고르기 위한 목록.
-
-    커밋 메시지에 `task #N` 규약이 없으면(규약 이전에 머지된 작업) 플랫폼은 그 커밋이 어느
-    작업의 것인지 알 수 없다. 짐작하지 않는 대신 사람이 고를 수 있게 한다 — 고른 뒤에도
-    완료 여부는 그대로 리포가 판정한다(그 커밋이 기본 브랜치에 있는지). 사람이 넣는 것은
-    상태가 아니라 근거다.
-
-    sha를 직접 입력하게 두지 않는 이유: 40자를 손으로 옮기다 틀리면 '기본 브랜치에 없는
-    커밋'이 되어 조용히 머지 대기로 남는다.
-    """
-    session = db.get(ChatSession, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    project = db.get(Project, session.project_id)
-    try:
-        await asyncio.to_thread(checkout, project)  # 최신 커밋까지 보이게
-    except Exception:  # noqa: BLE001 — 원격이 없어도 워킹카피로 보여준다
-        pass
-    workdir = workspace.workdir_for(project)
-    if not workdir.exists():
-        return []
-    base_ref = workspace.default_branch_ref(workdir, project.branch)
-    if base_ref is None:
-        return []
-    entries = await asyncio.to_thread(
-        workspace.log_messages, workdir, base_ref, max(1, min(limit, 200)))
-    return [
-        RepoCommitOut(
-            sha=sha,
-            subject=(message.strip().splitlines() or [""])[0][:200],
-            task_refs=sorted(taskmatch.refs_in_message(message)),
-        )
-        for sha, message in entries
-    ]
 
 
 @router.post("/plan/sessions/{session_id}/tasks/sync", response_model=BuildTaskSyncOut)
@@ -860,7 +833,7 @@ async def sync_build_tasks(
             continue  # 질의로 막힌 작업은 사람이 풀어야 한다
         # 커밋 메시지 참조를 먼저 본다 — 기본 브랜치에 실제로 있는 커밋이라 보고보다 강한
         # 근거다. 참조가 없으면 빌더가 보고한 sha로 떨어진다.
-        sha = by_task.get(task.id) or task.commit_sha
+        sha = by_task.get(task.number) or task.commit_sha
         if not sha:
             unmatched += 1
             continue
@@ -1082,7 +1055,8 @@ _MCP_TOOLS = [
         "name": "list_tasks",
         "description": (
             "이 프로젝트의 빌드 작업 지시(work order) 목록과 상태를 반환한다. "
-            "커밋 메시지에 `task #<id>`를 넣으면 그 커밋이 기본 브랜치에 반영될 때 해당 작업이 "
+            "커밋 메시지에 `task #<number>`를 넣으면(프로젝트별 번호, 전역 id가 아니다) 그 "
+            "커밋이 기본 브랜치에 반영될 때 해당 작업이 "
             "자동으로 완료로 바뀐다 — 참조가 없으면 플랫폼은 그 커밋이 어느 작업의 것인지 "
             "알 수 없어 진행 현황을 갱신하지 못한다(추측하지 않는다)."
         ),
@@ -1262,6 +1236,12 @@ def _mcp_build_report(db: Session, actor: str, project: Project, tool: str, args
     if task_id is not None:
         task = db.get(BuildTask, int(task_id))
         if task is None or task.project_id != project.id:
+            # 작업 지시 문서와 커밋 규약은 프로젝트별 번호(`task #3`)를 쓴다 — 빌더가 그
+            # 번호를 그대로 task_id로 넘기는 것이 자연스럽다. 전역 id로 못 찾으면(다른
+            # 프로젝트 것이거나 없으면) 번호로 찾는다. 안 그러면 "task not found"만 보고
+            # 왜인지 알 수 없다.
+            task = _task_by_number(db, project.id, int(task_id))
+        if task is None:
             raise mcp_server.McpToolError(f"task not found: {task_id}")
 
     if tool == "update_task":

@@ -1757,7 +1757,7 @@ def test_progress_updates_from_a_direct_commit_to_main(monkeypatch, fresh_settin
     # 사람이 main에 직접 커밋한다 — MCP 보고 없음, 규약 참조만 있다
     (repo / "pay.py").write_text("PRICE = 1\n", encoding="utf-8")
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", f"feat: 결제 구현 (task #{tasks[0]['id']})")
+    _git(repo, "commit", "-q", "-m", f"feat: 결제 구현 (task #{tasks[0]['number']})")
 
     r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
     assert (r["merged"], r["pending"]) == (1, 0), r
@@ -1784,7 +1784,7 @@ def test_referenced_commit_not_yet_on_main_is_pending(monkeypatch, fresh_setting
     _git(repo, "checkout", "-q", "-b", "build/pay")
     (repo / "pay.py").write_text("PRICE = 1\n", encoding="utf-8")
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", f"feat: 결제 (task #{tasks[0]['id']})")
+    _git(repo, "commit", "-q", "-m", f"feat: 결제 (task #{tasks[0]['number']})")
     _git(repo, "checkout", "-q", "main")
 
     r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
@@ -1821,12 +1821,13 @@ def test_work_order_document_carries_the_commit_convention(monkeypatch, fresh_se
     assert "task #" in list_tasks["description"]
 
 
-def test_linking_a_commit_lets_the_repo_judge_it(monkeypatch, fresh_settings, tmp_path):
-    """규약 이전에 머지된 작업을 살리는 길 — 사람은 **근거**만 넣고 판정은 리포가 한다.
+def test_reported_commit_without_convention_is_judged_by_the_repo(
+        monkeypatch, fresh_settings, tmp_path):
+    """커밋 메시지 규약이 없어도 보고된 sha가 있으면 리포가 판정한다.
 
-    커밋 메시지에 `task #N`이 없으면 플랫폼은 그 커밋이 어느 작업의 것인지 알 수 없다.
-    짐작하지 않는 대신 사람이 커밋을 고르게 하고, 완료 여부는 그대로 "그 커밋이 기본
-    브랜치에 있는가"로 판정한다 — 상태를 직접 쓰는 것과 다르다.
+    콘솔에서 사람이 커밋을 고르는 길은 없앴다(근거도 자동으로 채운다 — 손으로 고르면 다음
+    갱신이 조용히 덮어쓴다). 그래도 이 경로는 남는다: 외주 빌더가 MCP로 보고한 sha다.
+    판정은 그대로 "그 커밋이 기본 브랜치에 있는가"다.
     """
     repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
     c = _client()
@@ -1845,15 +1846,11 @@ def test_linking_a_commit_lets_the_repo_judge_it(monkeypatch, fresh_settings, tm
     assert c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync",
                   headers=ADMIN).json()["unmatched"] == len(tasks)
 
-    # 고를 수 있는 커밋 목록이 내려온다 — 40자 sha를 손으로 옮기지 않게
-    commits = c.get(f"/paas/api/v1/plan/sessions/{sid}/commits", headers=ADMIN).json()
-    assert commits and all({"sha", "subject", "task_refs"} <= set(x) for x in commits)
-    target = next(x for x in commits if "결제 구현" in x["subject"])
-    assert target["task_refs"] == []  # 규약 참조가 없다
-
-    # 근거를 연결하면 리포가 완료로 판정한다
+    # 빌더가 sha를 보고하면(MCP submit_build_result와 같은 경로) 리포가 완료로 판정한다
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                         capture_output=True, text=True, check=True).stdout.strip()
     assert c.patch(f"/paas/api/v1/plan/tasks/{tasks[0]['id']}",
-                   json={"commit_sha": target["sha"]}, headers=ADMIN).status_code == 200
+                   json={"commit_sha": sha}, headers=ADMIN).status_code == 200
     synced = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
     done = next(t for t in synced["tasks"] if t["id"] == tasks[0]["id"])
     assert done["status"] == "done"
@@ -1901,3 +1898,111 @@ def test_dev_principles_prompt_carries_the_commit_convention():
     assert "커밋 규약" in prompt
     # 왜 필요한지도 함께 — 규약만 적으면 안 지켰을 때 무슨 일이 생기는지 모른다
     assert "짐작하지 않는다" in prompt
+
+
+def test_task_numbers_are_per_project_and_start_at_one(monkeypatch, fresh_settings, tmp_path):
+    """작업 번호는 사람이 커밋 메시지에 적는 값이다 — 프로젝트 안에서 읽혀야 한다.
+
+    전역 id를 쓰면 다른 프로젝트에서 작업을 만들 때마다 번호가 밀려서, 새 프로젝트의 첫
+    작업이 `task #57`로 시작한다. 프로젝트 안에서 아무 의미가 없는 값이 된다.
+    """
+    c = _client()
+    prov = c.post("/paas/api/v1/llm/providers", json={
+        "name": "p", "kind": "openai", "base_url": "https://api.example.com", "model": "m",
+    }, headers=ADMIN).json()["id"]
+
+    numbers = []
+    for name in ("num-a", "num-b"):
+        repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path, name)
+        pid = c.post("/paas/api/v1/projects", json={
+            "name": name, "type": "python", "git_url": f"https://git.example.com/o/{name}",
+        }, headers=ADMIN).json()["id"]
+        sid = c.post("/paas/api/v1/plan/sessions",
+                     json={"project_id": pid, "provider_id": prov}, headers=ADMIN).json()["id"]
+        _mock_llm(monkeypatch)
+        _confirm_spec(c, monkeypatch, sid, repo)
+        _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+        tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+        assert [t["number"] for t in tasks] == list(range(1, len(tasks) + 1)), tasks
+        numbers.append([t["number"] for t in tasks])
+
+    # 두 프로젝트가 같은 번호를 쓴다(서로 별개다). 전역 id라면 두 번째가 밀려 있었다.
+    assert numbers[0] == numbers[1]
+
+
+def test_regenerating_tasks_restarts_numbering(monkeypatch, fresh_settings, tmp_path):
+    """재생성하면 앞 작업들이 지워지므로 번호도 다시 1부터다 — 문서와 표가 같아야 한다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    first = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    again = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+
+    assert [t["number"] for t in again] == [t["number"] for t in first]
+    assert [t["number"] for t in first] == list(range(1, len(first) + 1))
+
+
+def test_work_order_document_uses_the_project_number(monkeypatch, fresh_settings, tmp_path):
+    """문서에 적힌 번호로 커밋해야 잡힌다 — 문서·표·판정이 같은 번호를 써야 한다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+
+    doc = c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/artifact",
+                headers=ADMIN).json()["content"]
+    for t in tasks:
+        assert f"task #{t['number']}" in doc
+
+
+def test_mcp_accepts_the_project_task_number_as_task_id(monkeypatch, fresh_settings, tmp_path):
+    """빌더는 문서에서 `task #1`을 읽는다 — 그 번호를 task_id로 넘기는 것이 자연스럽다.
+
+    전역 id로만 찾으면 "task not found"만 보고 왜인지 알 수 없다. 프로젝트 안에서 번호로도
+    찾는다(전역 id가 먼저다 — 기존 빌더는 list_tasks의 id를 그대로 쓴다).
+    """
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+    target = next(t for t in tasks if t["number"] == 2)
+
+    # list_tasks가 번호를 함께 내보낸다 — 빌더가 커밋 메시지에 적을 값이다
+    listing = _mcp(c, pid, "list_tasks")["result"]["content"][0]["text"]
+    assert '"number": 2' in listing
+
+    _mcp(c, pid, "update_task", {"task_id": 2, "status": "blocked", "note": "질의"})
+    after = c.get(f"/paas/api/v1/plan/sessions/{sid}/tasks", headers=ADMIN).json()
+    assert next(t for t in after if t["id"] == target["id"])["status"] == "blocked"
+
+
+def test_mcp_rejects_a_number_from_another_project(monkeypatch, fresh_settings, tmp_path):
+    """번호는 프로젝트별이므로, 없는 번호는 없는 것으로 남아야 한다(엉뚱한 작업을 고치지 않는다)."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN)
+
+    body = _mcp(c, pid, "update_task", {"task_id": 999, "status": "done"})
+    assert "not found" in json.dumps(body, ensure_ascii=False)

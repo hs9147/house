@@ -110,12 +110,6 @@ export default function AgentPlanning() {
     [me.data?.is_admin],
   );
   const [constraintText, setConstraintText] = useState('');
-  // 근거로 연결할 수 있는 기본 브랜치 커밋 목록 — ⑤ 단계에서만 쓰므로 세션이 열릴 때 읽는다.
-  const repoCommits = useApi(
-    () => (session ? api.planRepoCommits(session.id) : Promise.resolve([])),
-    [session?.id],
-  );
-
   // 프로젝트 페이지와 동일한 CreateModal(빈 프로젝트 옵션 포함)을 재사용한다.
   const [showCreate, setShowCreate] = useState(false);
 
@@ -418,27 +412,6 @@ export default function AgentPlanning() {
       // 다시 읽어 '진행 현황 업데이트'가 '브랜치 머지'로 돌아가게 한다.
       setMergeResult(null);
       await refreshSession();
-    } catch (err) {
-      if (isCancel(err)) await afterCancel();
-      else setError((err as Error).message);
-    } finally {
-      setTask(null);
-    }
-  };
-
-  // 작업에 근거 커밋을 연결한다. 상태는 넣지 않는다 — 연결 직후 sync를 돌려 리포가
-  // 판정하게 한다(그 커밋이 기본 브랜치에 있으면 완료, 없으면 머지 대기).
-  const linkCommit = async (row: BuildTaskOut, sha: string) => {
-    const signal = begin(
-      '근거 커밋 연결 중',
-      '작업에 커밋을 연결하고 기본 브랜치 반영 여부로 상태를 다시 판정합니다.',
-    );
-    try {
-      await api.linkPlanTaskCommit(row.id, sha);
-      if (!session) return;
-      const sync = await api.syncPlanTasks(session.id, signal);
-      setTasks(sync.tasks);
-      setTaskSync(sync);
     } catch (err) {
       if (isCancel(err)) await afterCancel();
       else setError((err as Error).message);
@@ -858,7 +831,7 @@ export default function AgentPlanning() {
                             style={{ fontSize: 12, whiteSpace: 'nowrap' }}
                             title="커밋 메시지에 이 문구를 넣으면 기본 브랜치 반영 시 자동으로 완료가 됩니다"
                           >
-                            task #{t.id}
+                            task #{t.number}
                           </td>
                           <td>
                             <div style={{ fontWeight: 600 }}>{t.title}</div>
@@ -872,33 +845,18 @@ export default function AgentPlanning() {
                           <td style={{ fontSize: 12, color: TASK_STATUS.find((s) => s.key === t.status)?.color }}>
                             {TASK_STATUS.find((s) => s.key === t.status)?.label ?? t.status}
                           </td>
-                          {/* 커밋 메시지에 `task #N`이 없는 작업(규약 이전에 머지된 것)은
-                              플랫폼이 어느 커밋의 것인지 알 수 없다. 짐작하지 않는 대신
-                              **근거를 사람이 고르게** 한다 — 완료 여부는 그대로 리포가
-                              판정한다(그 커밋이 기본 브랜치에 있는지). 상태를 직접 쓰는
-                              것과는 다르다. */}
-                          <td>
-                            <select
-                              value={t.commit_sha ?? ''}
-                              disabled={busy}
-                              onChange={(e) => linkCommit(t, e.target.value)}
-                              style={{ fontSize: 11, maxWidth: 260 }}
-                              title="이 작업의 근거가 되는 커밋 — 고르면 기본 브랜치 반영 여부로 상태가 판정됩니다"
-                            >
-                              <option value="">{t.commit_sha ? '연결 해제' : '— 근거 없음 —'}</option>
-                              {/* 이미 연결된 sha가 최근 목록 밖이면 선택값이 사라진다 — 따로 싣는다 */}
-                              {t.commit_sha
-                                && !(repoCommits.data ?? []).some((c) => c.sha === t.commit_sha) && (
-                                <option value={t.commit_sha}>
-                                  {t.commit_sha.substring(0, 7)} (현재)
-                                </option>
-                              )}
-                              {(repoCommits.data ?? []).map((c) => (
-                                <option key={c.sha} value={c.sha}>
-                                  {c.sha.substring(0, 7)} {c.subject.substring(0, 40)}
-                                </option>
-                              ))}
-                            </select>
+                          {/* 근거 커밋도 사람이 넣지 않는다 — '진행 현황 업데이트'가
+                              리포를 보고 채운다(커밋 메시지의 `task #N` 또는 빌더 보고).
+                              손으로 고르게 두면 다음 갱신이 조용히 덮어써서, 넣은 사람은
+                              반영됐다고 믿는다. 표시만 한다. */}
+                          <td
+                            className="mono"
+                            style={{ fontSize: 11, whiteSpace: 'nowrap' }}
+                            title={t.commit_sha ?? '커밋 메시지에 task #번호를 넣으면 자동으로 연결됩니다'}
+                          >
+                            {t.commit_sha
+                              ? t.commit_sha.substring(0, 7)
+                              : <span className="mutedtext">—</span>}
                           </td>
                         </tr>
                       ))}
