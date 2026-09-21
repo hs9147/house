@@ -505,6 +505,13 @@ def auto_pull_request(project: Project, branch: str, title: str, body: str = "")
         return result
     try:
         merged, refusal = gitea_service.merge_pull_request(owner, repo, number, title=title)
+    except gitea_service.GiteaNothingToMerge:
+        # 반영할 것이 없어서 머지가 안 된 것은 실패가 아니다. 같은 작업 브랜치로 여러 번
+        # 확정하면 앞선 PR이 이미 머지해 간 뒤라 차이가 0인 PR이 생긴다 — 그걸 "자동 머지
+        # 거부"로 보고하면 없는 문제를 찾게 만든다.
+        result["action"] = "committed"
+        result["detail"] = f"기본 브랜치({project.branch})에 이미 반영되어 있습니다."
+        return result
     except gitea_service.GiteaError as e:
         result["detail"] = str(e)
         return result

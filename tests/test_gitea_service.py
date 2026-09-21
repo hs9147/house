@@ -188,6 +188,9 @@ def test_merge_pull_request_success_and_not_mergeable(monkeypatch):
     assert calls[0] == "https://git.example.com/api/v1/repos/shop-team/api/pulls/3/merge"
 
     # 거부 사유를 그대로 돌려준다 — 예전에는 본문을 버려 "거부됨"만 남았다.
+    # 거부되면 원인을 짚기 위해 PR을 한 번 조회한다(차이 있고 머지 안 된 정상 거부 상황).
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: _Res(
+        200, body={"merged": False, "mergeable": True, "changed_files": 3}))
     monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(
         405, body={"message": "Please approve the pull request first"}))
     merged, reason = gitea.merge_pull_request("shop-team", "api", 3)
@@ -376,3 +379,38 @@ def test_set_org_membership_remove_tolerates_already_absent(monkeypatch):
     ))
     monkeypatch.setattr(gitea.httpx, "delete", lambda url, **kw: _Res(404))
     assert gitea.set_org_membership("shop-team", "alice@cho-fam.com", False) is True
+
+
+def test_merge_refusal_on_empty_pull_request_is_not_a_failure(monkeypatch):
+    """실측: "Please try again later"로 거부된 PR은 변경 파일이 0이었다.
+
+    같은 작업 브랜치로 여러 번 확정하면 앞선 PR이 이미 머지해 간 뒤라 차이가 없는 PR이
+    생긴다. Gitea는 그것도 머지 불가로 답하는데, "자동 머지 거부"로 보고하면 없는 충돌을
+    찾게 만든다 — 이미 반영됨으로 읽혀야 한다.
+    """
+    monkeypatch.setattr(gitea.httpx, "post",
+                        lambda url, **kw: _Res(405, body={"message": "Please try again later"}))
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: _Res(
+        200, body={"number": 4, "merged": False, "mergeable": True, "changed_files": 0}))
+    with pytest.raises(gitea.GiteaNothingToMerge, match="변경 파일 0"):
+        gitea.merge_pull_request("gp-sil", "dream-rsi", 4)
+
+
+def test_merge_refusal_on_already_merged_pull_request_reports_success(monkeypatch):
+    """사람이 먼저 머지했거나 앞선 시도가 통한 경우다 — 실패가 아니다."""
+    monkeypatch.setattr(gitea.httpx, "post",
+                        lambda url, **kw: _Res(405, body={"message": "Please try again later"}))
+    monkeypatch.setattr(gitea.httpx, "get",
+                        lambda url, **kw: _Res(200, body={"merged": True, "changed_files": 2}))
+    assert gitea.merge_pull_request("gp-sil", "dream-rsi", 3) == (True, "")
+
+
+def test_real_refusal_still_reports_the_reason(monkeypatch):
+    """차이도 있고 머지도 안 된 PR은 Gitea가 준 사유를 그대로 올린다."""
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(
+        405, body={"message": "branch protection: required approvals not met"}))
+    monkeypatch.setattr(gitea.httpx, "get", lambda url, **kw: _Res(
+        200, body={"merged": False, "mergeable": True, "changed_files": 3}))
+    merged, reason = gitea.merge_pull_request("gp-sil", "dream-rsi", 5)
+    assert merged is False
+    assert reason == "branch protection: required approvals not met"

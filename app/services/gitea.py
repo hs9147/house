@@ -187,9 +187,30 @@ def merge_pull_request(
     )
     if res.status_code in (200, 204):
         return True, ""
-    if res.status_code in (405, 409):  # 머지 불가 — 이유는 본문에 있다
-        return False, _error_message(res)
-    raise GiteaError(f"Gitea PR 머지 실패 (HTTP {res.status_code}): {res.text[:300]}")
+    if res.status_code not in (405, 409):
+        raise GiteaError(f"Gitea PR 머지 실패 (HTTP {res.status_code}): {res.text[:300]}")
+    refusal = _error_message(res)
+    # Gitea는 머지가 안 되는 여러 상태를 한 문장으로 뭉갠다("Please try again later").
+    # 실제 원인은 PR 자신에게 있으니 한 번 조회해서 우리가 짚는다 — 실측에서 이 문장이
+    # 뜬 PR은 변경 파일이 0이었다(같은 브랜치의 앞선 PR들이 이미 머지돼 차이가 없었다).
+    pr = _get_pull(api, headers, owner, repo, index)
+    if pr.get("merged") or pr.get("has_merged"):
+        return True, ""  # 이미 반영돼 있다 — 실패가 아니다
+    if pr.get("changed_files") == 0:
+        raise GiteaNothingToMerge(
+            f"PR #{index}에 기본 브랜치와의 차이가 없습니다(변경 파일 0)."
+        )
+    return False, refusal
+
+
+def _get_pull(api: str, headers: dict[str, str], owner: str, repo: str, index: int) -> dict:
+    """PR 단건 조회. 진단용이라 실패하면 빈 dict — 원래 실패를 덮지 않는다."""
+    res = httpx.get(
+        f"{api}/api/v1/repos/{owner}/{repo}/pulls/{index}", headers=headers, timeout=15)
+    if res.status_code != 200:
+        return {}
+    body = res.json()
+    return body if isinstance(body, dict) else {}
 
 
 def _error_message(res) -> str:
