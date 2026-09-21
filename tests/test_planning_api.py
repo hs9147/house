@@ -551,7 +551,7 @@ def test_session_merge_finishes_the_branch(monkeypatch, fresh_settings, tmp_path
     monkeypatch.setattr(gitea, "ensure_pull_request", lambda o, r, head, base, title, body="": {
         "number": 11, "html_url": "https://git.example.com/o/plan-app/pulls/11", "mergeable": True,
     })
-    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": True)
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": (True, ""))
 
     body = c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).json()
     assert body["action"] == "merged"
@@ -667,7 +667,7 @@ def test_merge_creates_the_pull_request_when_none_exists(monkeypatch, fresh_sett
                         lambda o, r, head, base, title, body="":
                         (created.append((head, base)), {"number": 5, "html_url": "u",
                                                         "mergeable": True})[1])
-    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": True)
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": (True, ""))
     body = c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).json()
     assert body["action"] == "merged"
     branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
@@ -812,7 +812,7 @@ def test_confirm_opens_pull_request_and_merges_when_mergeable(monkeypatch):
         "number": 7, "html_url": "https://git.example.com/o/plan-app/pulls/7", "mergeable": True,
     })
     monkeypatch.setattr(gitea, "merge_pull_request",
-                        lambda o, r, index, title="": (merged.append((o, r, index)), True)[1])
+                        lambda o, r, index, title="": (merged.append((o, r, index)), (True, ""))[1])
 
     r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
                json={"content": "# 기획서 확정본"}, headers=ADMIN)
@@ -843,7 +843,36 @@ def test_confirm_leaves_pull_request_open_when_not_mergeable(monkeypatch):
     body = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
                   json={"content": "# 확정본"}, headers=ADMIN).json()
     assert body["git_action"] == "pr_opened"
-    assert "충돌" in body["git_detail"]
+    # 원인을 단정하지 않는다 — 이 단계에서 Gitea는 mergeable=false만 말한다
+    assert "머지 불가" in body["git_detail"]
+
+
+def test_merge_refusal_reason_reaches_the_screen(monkeypatch):
+    """"자동 머지가 거부되었습니다"만 보면 무엇을 해야 할지 알 수 없다 — 사유를 싣는다.
+
+    머지 불가는 충돌만이 아니다(브랜치 보호·필수 승인·WIP 제목). Gitea가 본문에 적어 준
+    이유를 버리지 않고 화면까지 올린다.
+    """
+    from app.services import gitea, workspace
+
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+
+    monkeypatch.setattr(workspace, "write_and_commit",
+                        lambda project, branch, path, content, message: "deadbeef")
+    monkeypatch.setattr(gitea, "repo_slug", lambda git_url: ("o", "plan-app"))
+    monkeypatch.setattr(gitea, "ensure_pull_request", lambda o, r, head, base, title, body="": {
+        "number": 9, "html_url": "https://git.example.com/o/plan-app/pulls/9", "mergeable": True,
+    })
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": (
+        False, "branch protection: required approvals not met"))
+
+    body = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
+                  json={"content": "# 확정본"}, headers=ADMIN).json()
+    assert body["git_action"] == "pr_opened"
+    assert "branch protection: required approvals not met" in body["git_detail"]
 
 
 def test_confirm_on_default_branch_skips_pull_request(monkeypatch):
@@ -1603,7 +1632,7 @@ def test_confirm_opens_pull_request_when_gitea_lives_under_a_subpath(
                             {"number": 4, "html_url": "http://gpax.lge.com/git/demo/subpath-app/pulls/4",
                              "mergeable": True},
                         )[1])
-    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": True)
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": (True, ""))
 
     r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/confirm",
                json={"content": "# 기획서 확정본"}, headers=ADMIN)
@@ -1636,7 +1665,7 @@ def test_merge_state_survives_reopening_the_session(monkeypatch, fresh_settings,
     monkeypatch.setattr(gitea, "ensure_pull_request", lambda o, r, head, base, title, body="": {
         "number": 9, "html_url": "https://git.example.com/pulls/9", "mergeable": True,
     })
-    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": True)
+    monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": (True, ""))
     monkeypatch.setattr(workspace, "write_and_commit",
                         lambda project, br, path, content, message: "cafe123")
 

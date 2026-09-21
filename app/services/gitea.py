@@ -171,18 +171,36 @@ def _find_open_pull(
     return None
 
 
-def merge_pull_request(owner: str, repo: str, index: int, title: str = "") -> bool:
-    """PR을 머지한다. 충돌 등으로 머지 불가면 False(호출부가 PR을 열어둔 채 보고)."""
+def merge_pull_request(
+    owner: str, repo: str, index: int, title: str = "",
+) -> tuple[bool, str]:
+    """PR을 머지한다. (머지됨?, 거부 사유) — 사유는 Gitea가 준 문장 그대로다.
+
+    머지 불가는 충돌만이 아니다(브랜치 보호, 필수 승인 수, WIP 제목, 상태 검사 미통과).
+    Gitea는 405/409 본문에 그 이유를 적어 주는데 예전에는 그것을 버려서 화면에 "자동
+    머지가 거부되었습니다" 한 줄만 남았다 — 무엇을 해야 하는지 알 수 없는 보고였다.
+    """
     api, headers = _base_and_headers()
     res = httpx.post(
         f"{api}/api/v1/repos/{owner}/{repo}/pulls/{index}/merge", headers=headers,
         json={"Do": "merge", "MergeTitleField": title}, timeout=30,
     )
     if res.status_code in (200, 204):
-        return True
-    if res.status_code in (405, 409):  # 머지 불가(충돌·미승인 등)
-        return False
+        return True, ""
+    if res.status_code in (405, 409):  # 머지 불가 — 이유는 본문에 있다
+        return False, _error_message(res)
     raise GiteaError(f"Gitea PR 머지 실패 (HTTP {res.status_code}): {res.text[:300]}")
+
+
+def _error_message(res) -> str:
+    """Gitea 오류 본문에서 사람이 읽을 문장만 꺼낸다 ({"message": ...} 또는 평문)."""
+    try:
+        body = res.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and str(body.get("message") or "").strip():
+        return str(body["message"]).strip()[:300]
+    return (res.text or "").strip()[:300]
 
 
 def ensure_webhook(org_name: str, repo_name: str) -> None:

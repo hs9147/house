@@ -499,17 +499,24 @@ def auto_pull_request(project: Project, branch: str, title: str, body: str = "")
         result["detail"] = "PR 번호를 확인할 수 없어 자동 머지를 건너뜁니다."
         return result
     if pr.get("mergeable") is False:
-        result["detail"] = "충돌로 자동 머지할 수 없어 PR을 열어 두었습니다."
+        # Gitea가 mergeable=false라고만 말하는 단계다 — 충돌인지 브랜치 보호인지는
+        # 여기서 알 수 없으므로 원인을 단정하지 않는다(예전 문구는 "충돌로"였다).
+        result["detail"] = "Gitea가 이 PR을 머지 불가로 표시했습니다 — PR에서 원인을 확인하세요."
         return result
     try:
-        merged = gitea_service.merge_pull_request(owner, repo, number, title=title)
+        merged, refusal = gitea_service.merge_pull_request(owner, repo, number, title=title)
     except gitea_service.GiteaError as e:
         result["detail"] = str(e)
         return result
     if merged:
         result["action"] = "merged"
     else:
-        result["detail"] = "자동 머지가 거부되어 PR을 열어 두었습니다."
+        # 거부 사유를 그대로 싣는다. 브랜치 보호·필수 승인·WIP 제목처럼 사람이 조치할
+        # 수 있는 것들인데, 사유 없이 "거부됨"만 보면 무엇을 할지 알 수 없다.
+        result["detail"] = (
+            f"Gitea가 자동 머지를 거부했습니다: {refusal}" if refusal
+            else "Gitea가 자동 머지를 거부했습니다(사유 없음) — PR에서 직접 머지하세요."
+        )
     return result
 
 

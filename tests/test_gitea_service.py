@@ -184,11 +184,19 @@ def test_merge_pull_request_success_and_not_mergeable(monkeypatch):
     monkeypatch.setattr(
         gitea.httpx, "post", lambda url, **kw: (calls.append(url), _Res(200))[1]
     )
-    assert gitea.merge_pull_request("shop-team", "api", 3) is True
+    assert gitea.merge_pull_request("shop-team", "api", 3) == (True, "")
     assert calls[0] == "https://git.example.com/api/v1/repos/shop-team/api/pulls/3/merge"
 
-    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(405, text="conflict"))
-    assert gitea.merge_pull_request("shop-team", "api", 3) is False
+    # 거부 사유를 그대로 돌려준다 — 예전에는 본문을 버려 "거부됨"만 남았다.
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(
+        405, body={"message": "Please approve the pull request first"}))
+    merged, reason = gitea.merge_pull_request("shop-team", "api", 3)
+    assert merged is False
+    assert reason == "Please approve the pull request first"
+
+    # JSON이 아니면 평문을 그대로 쓴다
+    monkeypatch.setattr(gitea.httpx, "post", lambda url, **kw: _Res(409, text="Merge conflict"))
+    assert gitea.merge_pull_request("shop-team", "api", 3) == (False, "Merge conflict")
 
 
 def test_ensure_webhook_skips_without_public_url(monkeypatch, fresh_settings):
