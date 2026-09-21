@@ -1698,3 +1698,95 @@ def test_regenerating_tasks_undoes_the_merge_state(monkeypatch, fresh_settings, 
     assert c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate",
                   headers=ADMIN).status_code == 200
     assert c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["merged_at"] is None
+
+
+def test_progress_updates_from_a_direct_commit_to_main(monkeypatch, fresh_settings, tmp_path):
+    """회귀(negowith): 사람이 직접 커밋해 push하면 진행 현황이 전혀 갱신되지 않았다.
+
+    판정이 BuildTask.commit_sha만 봤고, 그 값은 외주 빌더가 MCP로 보고할 때만 채워진다.
+    그래서 sha가 없는 작업은 통째로 건너뛰어졌고 화면에는 "반영 0건 · 대기 0건"이 찍혔다 —
+    판정할 것이 없었던 것과 반영이 없는 것이 구분되지 않았다.
+
+    이제 기본 브랜치 커밋 메시지의 `task #N` 참조를 읽는다(services/taskmatch).
+    """
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+    assert len(tasks) >= 2
+
+    # 아직 아무 근거도 없다 — 조용히 0건이 아니라 "근거 없음"으로 드러나야 한다
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
+    assert (r["merged"], r["pending"]) == (0, 0)
+    assert r["unmatched"] == len(tasks)
+
+    # 사람이 main에 직접 커밋한다 — MCP 보고 없음, 규약 참조만 있다
+    (repo / "pay.py").write_text("PRICE = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", f"feat: 결제 구현 (task #{tasks[0]['id']})")
+
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
+    assert (r["merged"], r["pending"]) == (1, 0), r
+    assert r["unmatched"] == len(tasks) - 1
+    done = next(t for t in r["tasks"] if t["id"] == tasks[0]["id"])
+    assert done["status"] == "done"
+    # 무엇을 근거로 완료인지 남는다 — 사람이 나중에 확인할 수 있어야 한다
+    assert done["commit_sha"]
+
+
+def test_referenced_commit_not_yet_on_main_is_pending(monkeypatch, fresh_settings, tmp_path):
+    """참조가 있어도 기본 브랜치에 반영되기 전에는 완료가 아니다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+
+    # 작업 브랜치에만 있는 커밋 — main 로그에는 안 보이므로 근거로 잡히지 않는다
+    _git(repo, "checkout", "-q", "-b", "build/pay")
+    (repo / "pay.py").write_text("PRICE = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", f"feat: 결제 (task #{tasks[0]['id']})")
+    _git(repo, "checkout", "-q", "main")
+
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
+    assert (r["merged"], r["pending"]) == (0, 0)
+    assert r["unmatched"] == len(tasks)  # main에서는 아직 근거가 없다
+
+    # 머지되면 완료가 된다
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge build/pay", "build/pay")
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
+    assert (r["merged"], r["pending"]) == (1, 0)
+
+
+def test_work_order_document_carries_the_commit_convention(monkeypatch, fresh_settings, tmp_path):
+    """규약을 아무도 모르면 지켜지지 않는다 — 산출물 문서와 MCP 안내에 함께 실린다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+
+    doc = c.get(f"/paas/api/v1/plan/sessions/{sid}/stages/tasks/artifact",
+                headers=ADMIN).json()["content"]
+    assert "task #" in doc  # 규약 문구
+    assert f"(task #{tasks[0]['id']})" in doc  # 각 작업의 실제 번호
+
+    # 외부 빌더는 도구 설명으로 규약을 안다(list_tasks 결과는 작업 JSON뿐이다)
+    tools = c.post(f"/paas/api/v1/plan/projects/{pid}/mcp", headers=ADMIN, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()["result"]["tools"]
+    list_tasks = next(t for t in tools if t["name"] == "list_tasks")
+    assert "task #" in list_tasks["description"]

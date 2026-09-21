@@ -218,6 +218,34 @@ def is_merged(workdir: Path, base_ref: str, sha: str) -> bool:
     return out.returncode == 0
 
 
+# 진행 현황 판정에서 훑는 커밋 수 상한. 작업 지시 하나가 몇 달 전 커밋과 엮이는 일은
+# 없고, 리포가 크면 전체 로그를 읽는 비용이 크다.
+LOG_SCAN_LIMIT = 500
+
+
+def log_messages(workdir: Path, ref: str, limit: int = LOG_SCAN_LIMIT) -> list[tuple[str, str]]:
+    """ref에서 도달 가능한 커밋의 (sha, 메시지 전문) 목록 — 최신 순.
+
+    제목만 읽지 않는 이유: 규약 참조(`task #3`)를 본문이나 trailer에 적는 것도 자연스럽다.
+    메시지에 개행이 있으므로 레코드 구분자로 NUL을 쓴다(개행으로 나누면 본문이 잘린다).
+    """
+    out = subprocess.run(
+        ["git", "log", f"--max-count={limit}", "--format=%H%x1f%B%x00", ref],
+        cwd=workdir, capture_output=True, **_TEXT,
+    )
+    if out.returncode != 0:
+        return []
+    entries: list[tuple[str, str]] = []
+    for record in out.stdout.split("\x00"):
+        record = record.strip("\n")
+        if not record:
+            continue
+        sha, _, message = record.partition("\x1f")
+        if sha:
+            entries.append((sha.strip(), message))
+    return entries
+
+
 def diff_between(workdir: Path, base_ref: str, head_ref: str = "HEAD") -> str:
     out = subprocess.run(
         ["git", "diff", f"{base_ref}..{head_ref}"], cwd=workdir, capture_output=True, **_TEXT

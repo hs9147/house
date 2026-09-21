@@ -283,8 +283,12 @@ class BuildTaskSyncOut(BaseModel):
     """작업 지시 진행 현황을 기본 브랜치 기준으로 맞춘 결과."""
 
     base_ref: str  # 판정 기준 ref(예: origin/main) — 비어 있으면 판정하지 못함
-    merged: int  # 보고된 커밋이 기본 브랜치에 반영된 작업 수
-    pending: int  # 커밋은 보고됐지만 아직 기본 브랜치에 없는 작업 수
+    merged: int  # 커밋이 기본 브랜치에 반영된 작업 수
+    pending: int  # 커밋은 있지만 아직 기본 브랜치에 없는 작업 수
+    # 판정 근거(커밋 메시지의 `task #N` 참조 또는 빌더가 보고한 sha)를 찾지 못한 작업 수.
+    # 이 값이 없으면 "반영 0건 · 대기 0건"이 찍혀서, 판정할 것이 없었던 것과 반영이 없는
+    # 것이 구분되지 않는다 — 화면이 동작하는 것처럼 보이면서 아무 일도 하지 않는다.
+    unmatched: int = 0
     tasks: list[BuildTaskOut]
 
 

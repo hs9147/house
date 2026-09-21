@@ -427,6 +427,8 @@ def render_tasks_doc(tasks: list[dict]) -> str:
     표(진행 상태)와 리포 문서의 원천을 하나로 둔다 — 외주 빌더가 MCP로 보는 목록과
     clone해서 보는 문서가 어긋나면 어느 쪽을 믿어야 할지 알 수 없다.
     """
+    from . import taskmatch  # noqa: PLC0415 — 커밋 규약 문구를 한 곳에서만 정한다
+
     lines = ["# 작업 지시 (외주 빌드)", ""]
     if not tasks:
         lines.append("(아직 작업 지시가 없습니다.)")
@@ -435,9 +437,17 @@ def render_tasks_doc(tasks: list[dict]) -> str:
         "확정된 기획 산출물에서 나눈 외주 빌드 단위다. 상태는 플랫폼(MCP `list_tasks`)이",
         "원천이며, 이 문서는 확정 시점의 스냅샷이다.",
         "",
+        f"> **커밋 규약** — {taskmatch.CONVENTION_HINT}",
+        "> 참조가 없으면 플랫폼이 그 커밋을 어느 작업의 것인지 알 수 없어 진행 현황이",
+        "> 갱신되지 않는다(추측하지 않는다). 작업 번호는 MCP `list_tasks`의 `id`다.",
+        "",
     ]
     for idx, task in enumerate(tasks, start=1):
-        lines.append(f"## {idx}. {task['title']}")
+        # 번호는 문서 안의 순번이 아니라 작업 id다 — 커밋 규약이 가리키는 것과 같아야 한다.
+        heading = f"## {idx}. {task['title']}"
+        if task.get("id"):
+            heading = f"## {idx}. {task['title']} (task #{task['id']})"
+        lines.append(heading)
         if task.get("detail"):
             lines += ["", task["detail"]]
         if task.get("verify"):

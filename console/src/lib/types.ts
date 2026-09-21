@@ -280,7 +280,10 @@ export interface BuildTaskOut {
 export interface BuildTaskSync {
   base_ref: string; // 판정 기준 ref(예: origin/main) — 비어 있으면 판정하지 못함
   merged: number; // 기본 브랜치에 반영된 작업 수
-  pending: number; // 커밋은 보고됐지만 아직 반영되지 않은 작업 수
+  pending: number; // 커밋은 있지만 아직 반영되지 않은 작업 수
+  // 판정 근거(커밋 메시지의 `task #N` 참조 또는 빌더가 보고한 sha)를 찾지 못한 작업 수.
+  // 화면이 이걸 보여줘야 "반영 0건 · 대기 0건"이 판정할 게 없었던 것인지 구분된다.
+  unmatched: number;
   tasks: BuildTaskOut[];
 }
 

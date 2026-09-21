@@ -791,6 +791,21 @@ export default function AgentPlanning() {
                         <span className="mono">{taskSync.base_ref}</span> 기준 ·
                         <span style={{ color: '#10b981' }}> 반영 {taskSync.merged}건</span> ·
                         <span style={{ color: '#f59e0b' }}> 머지 대기 {taskSync.pending}건</span>
+                        {/* 근거를 못 찾은 작업을 드러낸다 — 이게 없으면 "반영 0건 · 대기
+                            0건"이 찍혀서, 판정할 것이 없었던 것과 반영이 없는 것이
+                            구분되지 않는다(동작하는 것처럼 보이면서 아무 일도 안 한다). */}
+                        {taskSync.unmatched > 0 && (
+                          <>
+                            {' · '}
+                            <span style={{ color: '#94a3b8' }}>
+                              근거 없음 {taskSync.unmatched}건
+                            </span>
+                            <span className="mutedtext">
+                              {' '}— 커밋 메시지에 <span className="mono">task #번호</span>를
+                              넣으면 그 커밋이 기본 브랜치에 반영될 때 자동으로 완료가 됩니다
+                            </span>
+                          </>
+                        )}
                       </>
                     ) : (
                       <span className="mutedtext">

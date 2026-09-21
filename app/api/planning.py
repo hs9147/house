@@ -59,6 +59,7 @@ from ..services import llm as llm_service
 from ..services import mcp_server
 from ..services import modules as modules_service
 from ..services import planning as planning_service
+from ..services import taskmatch
 from ..services import workspace
 from ..services.build import checkout
 
@@ -768,11 +769,22 @@ async def sync_build_tasks(
     db: Session = Depends(get_db),
     key: ApiKey = Depends(require_api_key),
 ):
-    """작업 지시 진행 현황을 기본 브랜치 기준으로 갱신한다.
+    """작업 지시 진행 현황을 **리포를 보고** 갱신한다.
 
     빌더의 자기 보고(update_task·submit_build_result)는 신호일 뿐이다 — 실제로 반영된
-    것은 기본 브랜치에 올라간 커밋뿐이라, 보고된 커밋이 거기서 도달 가능할 때만 완료로
-    둔다. 아직 PR이 머지되지 않았으면 완료를 진행 중으로 되돌린다.
+    것은 기본 브랜치에 올라간 커밋뿐이라, 커밋이 거기서 도달 가능할 때만 완료로 둔다.
+    아직 PR이 머지되지 않았으면 완료를 진행 중으로 되돌린다.
+
+    **판정 근거는 두 갈래다.** ① 빌더가 MCP로 보고한 commit_sha, ② 기본 브랜치 커밋
+    메시지의 작업 참조(`task #3` — services/taskmatch). ②가 필요한 이유: 예전에는 ①만
+    봤고 sha가 없는 작업은 건너뛰었다. 그래서 사람이 직접 커밋해 push하면 어떤 작업에도
+    sha가 없어 **판정이 통째로 건너뛰어지고 아무것도 바뀌지 않았다.** MCP로 보고된 건은
+    보고 시점에 이미 상태가 반영되므로, 여기서는 그 커밋이 실제로 기본 브랜치에 갔는지만
+    다시 확인한다.
+
+    근거를 못 찾은 작업은 상태를 건드리지 않고 그 수(unmatched)를 돌려준다 — 조용히
+    건너뛰면 "반영 0건 · 대기 0건"이 찍혀서 판정할 게 없었던 것과 반영이 없는 것이
+    구분되지 않는다.
 
     빌더가 남긴 note(구현 요약·질의)는 건드리지 않는다 — 상태를 고치자고 근거 기록을
     지우면 왜 그 상태인지 알 수 없게 된다. 질의로 막힌(blocked) 작업도 그대로 둔다.
@@ -790,18 +802,29 @@ async def sync_build_tasks(
     workdir = workspace.workdir_for(project)
     base_ref = workspace.default_branch_ref(workdir, project.branch) if workdir.exists() else None
     if base_ref is None:
-        return BuildTaskSyncOut(base_ref="", merged=0, pending=0,
+        return BuildTaskSyncOut(base_ref="", merged=0, pending=0, unmatched=len(tasks),
                                 tasks=[_task_out(t) for t in tasks])
 
-    merged = pending = 0
+    # 기본 브랜치 로그에서 작업 참조를 모은다 — 사람이 직접 커밋한 것도 여기서 잡힌다.
+    log = await asyncio.to_thread(workspace.log_messages, workdir, base_ref)
+    by_task = taskmatch.commit_by_task(log)
+
+    merged = pending = unmatched = 0
     changed: list[int] = []
     for task in tasks:
-        if not task.commit_sha or task.status == BuildTaskStatus.blocked:
+        if task.status == BuildTaskStatus.blocked:
+            continue  # 질의로 막힌 작업은 사람이 풀어야 한다
+        # 커밋 메시지 참조를 먼저 본다 — 기본 브랜치에 실제로 있는 커밋이라 보고보다 강한
+        # 근거다. 참조가 없으면 빌더가 보고한 sha로 떨어진다.
+        sha = by_task.get(task.id) or task.commit_sha
+        if not sha:
+            unmatched += 1
             continue
-        if await asyncio.to_thread(workspace.is_merged, workdir, base_ref, task.commit_sha):
+        if await asyncio.to_thread(workspace.is_merged, workdir, base_ref, sha):
             merged += 1
-            if task.status != BuildTaskStatus.done:
+            if task.status != BuildTaskStatus.done or task.commit_sha != sha:
                 task.status = BuildTaskStatus.done
+                task.commit_sha = sha  # 무엇을 근거로 완료인지 남긴다
                 changed.append(task.id)
         else:
             pending += 1
@@ -811,8 +834,10 @@ async def sync_build_tasks(
     db.commit()
     audit.record(db, key.name, "plan.tasks.sync", project.name,
                  {"base_ref": base_ref, "merged": merged, "pending": pending,
+                  "unmatched": unmatched, "from_commit_message": len(by_task),
                   "changed": changed})
     return BuildTaskSyncOut(base_ref=base_ref, merged=merged, pending=pending,
+                            unmatched=unmatched,
                             tasks=[_task_out(t) for t in tasks])
 
 
@@ -1008,7 +1033,12 @@ _MCP_TOOLS = [
     },
     {
         "name": "list_tasks",
-        "description": "이 프로젝트의 빌드 작업 지시(work order) 목록과 상태를 반환한다.",
+        "description": (
+            "이 프로젝트의 빌드 작업 지시(work order) 목록과 상태를 반환한다. "
+            "커밋 메시지에 `task #<id>`를 넣으면 그 커밋이 기본 브랜치에 반영될 때 해당 작업이 "
+            "자동으로 완료로 바뀐다 — 참조가 없으면 플랫폼은 그 커밋이 어느 작업의 것인지 "
+            "알 수 없어 진행 현황을 갱신하지 못한다(추측하지 않는다)."
+        ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
