@@ -377,9 +377,12 @@ export const api = {
   // 만료되므로 '재로그인 필요'와 그 명령까지 서버가 말해 준다.
   listAwsProfiles: () => request<{
     botocore_available: boolean;
+    config_path: string; // 어디를 읽었는지 — 서비스 계정이면 홈이 달라 목록이 빈다
     profiles: {
-      name: string; region: string; sso_session: string;
-      ok: boolean | null; reason: string; expires_at: string | null; login_command: string;
+      name: string; region: string; sso_session: string; sso_start_url: string;
+      ok: boolean | null; reason: string;
+      expires_at: string | null; // SSO 액세스 토큰 만료(재로그인이 필요해지는 시각)
+      login_command: string;
     }[];
   }>('GET', '/llm/aws/profiles'),
   review: (projectId: number, provider_id: number, diff?: string, base_ref?: string) =>

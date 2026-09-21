@@ -201,19 +201,34 @@ export default function Providers() {
                   <>⚠️ 서버에 botocore가 없어 자격증명을 쓸 수 없습니다 —{' '}
                     <span className="mono">pip install botocore</span> 후 백엔드를 재시작하세요.</>
                 ) : (awsProfiles.data?.profiles ?? []).length === 0 ? (
-                  <>⚠️ 서버 <span className="mono">~/.aws/config</span>에 프로필이 없습니다 —{' '}
-                    <span className="mono">aws configure sso</span>로 먼저 설정하세요.</>
+                  /* 경로를 밝힌다 — 서비스로 돌면 홈이 서비스 계정 것이라(nssm 기본값은
+                     LocalSystem) `aws sso login`을 해도 목록이 빈다. 경로를 안 보여 주면
+                     왜 비었는지 알 방법이 없다. */
+                  <>⚠️ 프로필이 없습니다. 읽은 경로:{' '}
+                    <span className="mono">{awsProfiles.data?.config_path}</span>
+                    {' '}— 이 경로가 로그인한 계정의 것이 아니면(서비스 계정) 그 계정으로{' '}
+                    <span className="mono">aws sso login</span>을 하거나{' '}
+                    <span className="mono">AWS_CONFIG_FILE</span>을 지정하세요.</>
                 ) : !selectedProfile ? (
                   <>프로필을 고르면 자격증명이 지금 유효한지 확인해 보여 줍니다.</>
                 ) : selectedProfile.ok === false ? (
-                  <>❌ {selectedProfile.reason} 서버에서{' '}
-                    <span className="mono">{selectedProfile.login_command}</span></>
+                  /* 서버가 준 사유에 이미 재로그인 명령이 들어 있는 경우가 많다(만료·미로그인) —
+                     그때 또 붙이면 같은 명령이 두 번 나온다. 없을 때만 덧붙인다. */
+                  <>❌ {selectedProfile.reason}
+                    {selectedProfile.expires_at
+                      && ` (SSO 토큰 만료: ${new Date(selectedProfile.expires_at).toLocaleString()})`}
+                    {!selectedProfile.reason.includes(selectedProfile.login_command) && (
+                      <>{' '}서버에서{' '}
+                        <span className="mono">{selectedProfile.login_command}</span></>
+                    )}</>
                 ) : selectedProfile.ok === null ? (
                   <>❓ {selectedProfile.reason}</>
                 ) : (
+                  /* 자격증명(STS) 만료가 아니라 **SSO 토큰** 만료다 — 재로그인이
+                     필요해지는 시각은 이쪽이고 보통 8시간이다. */
                   <>✅ 자격증명 유효
                     {selectedProfile.expires_at
-                      && ` · 만료 ${new Date(selectedProfile.expires_at).toLocaleString()}`}
+                      && ` · SSO 토큰 만료 ${new Date(selectedProfile.expires_at).toLocaleString()}`}
                     {' '}· 만료되면 서버에서{' '}
                     <span className="mono">{selectedProfile.login_command}</span>
                   </>

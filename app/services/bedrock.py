@@ -13,6 +13,7 @@ botocore는 **선택 의존성**이다. Bedrock을 쓰지 않는 설치본에 bo
 tool-call 루프를 Bedrock용으로 다시 쓰지 않기 위한 경계다.
 """
 import configparser
+import hashlib
 import json
 import os
 import re
@@ -30,7 +31,7 @@ class BedrockError(RuntimeError):
     """자격증명·서명 단계의 실패. 메시지는 화면에 그대로 뜨는 것을 전제로 쓴다."""
 
 
-def _config_path() -> Path:
+def config_path() -> Path:
     # AWS CLI와 같은 규칙 — 서비스 계정으로 돌 때 프로필 위치를 지정할 수 있어야 한다.
     env = os.environ.get("AWS_CONFIG_FILE")
     return Path(env) if env else Path.home() / ".aws" / "config"
@@ -59,7 +60,7 @@ def list_profiles() -> list[dict]:
     found: dict[str, dict] = {}
     parser = configparser.ConfigParser()
     try:
-        parser.read([_config_path(), _credentials_path()], encoding="utf-8")
+        parser.read([config_path(), _credentials_path()], encoding="utf-8")
     except (OSError, configparser.Error):
         return []
     for section in parser.sections():
@@ -69,11 +70,12 @@ def list_profiles() -> list[dict]:
         if not name:
             continue
         values = parser[section]
-        entry = found.setdefault(name, {"name": name, "region": "", "sso_session": ""})
+        entry = found.setdefault(
+            name, {"name": name, "region": "", "sso_session": "", "sso_start_url": ""})
         entry["region"] = entry["region"] or values.get("region", "")
+        # sso_session(신규)과 sso_start_url(구형) — 둘 중 하나가 SSO 토큰 캐시를 찾는 열쇠다.
         entry["sso_session"] = entry["sso_session"] or values.get("sso_session", "")
-        if values.get("sso_start_url"):
-            entry["sso_session"] = entry["sso_session"] or "(legacy sso)"
+        entry["sso_start_url"] = entry["sso_start_url"] or values.get("sso_start_url", "")
     return sorted(found.values(), key=lambda p: p["name"])
 
 
@@ -87,7 +89,9 @@ def profile_status(profile: str) -> dict:
     ok=None은 '판정 불가'다(botocore 없음) — 되는 것처럼도, 안 되는 것처럼도 말하지 않는다.
     """
     result = {
-        "profile": profile, "ok": None, "reason": "", "expires_at": None,
+        "profile": profile, "ok": None, "reason": "",
+        # ok와 무관하게 싣는다 — 만료됐을 때가 오히려 "언제 끊겼는지"를 알아야 할 때다.
+        "expires_at": sso_token_expiry(profile) or None,
         "login_command": login_command(profile),
     }
     if not botocore_available():
@@ -103,12 +107,39 @@ def profile_status(profile: str) -> dict:
         result["reason"] = str(e)
         return result
     result["ok"] = True
-    # 만료 시각은 갱신형 자격증명(SSO·AssumeRole)만 가진다. 표시용이라 없으면 비운다 —
-    # 여기 값이 없어도 동작은 같고, 실제 만료는 위 확정 단계에서 드러난다.
-    expiry = getattr(creds, "_expiry_time", None)
-    if expiry is not None:
-        result["expires_at"] = expiry.isoformat()
+    if not result["expires_at"]:
+        # SSO가 아니면(정적 키·AssumeRole) 자격증명 자체의 만료로 떨어진다. 표시용이라
+        # 없으면 비운다 — 동작은 같고, 진짜 만료는 위 확정 단계에서 드러난다.
+        expiry = getattr(creds, "_expiry_time", None)
+        if expiry is not None:
+            result["expires_at"] = expiry.isoformat()
     return result
+
+
+def sso_token_expiry(profile: str) -> str:
+    """SSO 액세스 토큰의 만료 시각(ISO 문자열). SSO 프로필이 아니거나 못 읽으면 빈 문자열.
+
+    **자격증명 만료와 다른 값이다.** 실측에서 토큰은 08:15Z에, 그 토큰으로 받은 STS
+    자격증명은 19:25Z에 만료였다 — 재로그인이 필요해지는 시각은 앞쪽이다. 긴 쪽을 보여
+    주면 이미 재로그인이 필요해진 뒤에도 여유가 있는 것처럼 읽힌다.
+
+    캐시 파일 이름은 sso_session 이름(구형은 start_url)의 sha1이다. botocore의
+    SSOTokenLoader를 쓰려면 파일 캐시를 직접 주입해야 하는데(기본값이 빈 dict라
+    "Token does not exist"가 된다) 그 경로는 사설 상수다 — 규칙이 한 줄이라 직접 읽는다.
+    그래서 botocore가 없어도 만료 시각은 보인다.
+    """
+    entry = next((p for p in list_profiles() if p["name"] == profile), None)
+    if entry is None:
+        return ""
+    key = entry.get("sso_session") or entry.get("sso_start_url") or ""
+    if not key:
+        return ""
+    cache = Path.home() / ".aws" / "sso" / "cache" / f"{hashlib.sha1(key.encode()).hexdigest()}.json"
+    try:
+        token = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""  # 로그인 전이거나 규칙이 바뀌었다 — 없는 것으로 둔다
+    return str(token.get("expiresAt") or "") if isinstance(token, dict) else ""
 
 
 def _credentials(profile: str):

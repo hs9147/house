@@ -39,6 +39,53 @@ def aws_config(tmp_path, monkeypatch):
     return path
 
 
+def test_token_expiry_is_the_sso_token_not_the_credentials(aws_config, monkeypatch, tmp_path):
+    """재로그인이 필요해지는 시각은 **SSO 토큰** 만료다 — 자격증명(STS) 만료는 더 길다.
+
+    실측에서 토큰은 08:15Z, 그 토큰으로 받은 자격증명은 19:25Z 만료였다. 긴 쪽을 보여 주면
+    이미 재로그인이 필요해진 뒤에도 여유가 있는 것처럼 읽힌다.
+    """
+    import hashlib
+    import json
+
+    # 캐시 파일 이름은 sso_session 이름의 sha1이다(botocore와 같은 규칙).
+    cache = tmp_path / ".aws" / "sso" / "cache"
+    cache.mkdir(parents=True)
+    key = hashlib.sha1(b"corp-sso").hexdigest()
+    (cache / f"{key}.json").write_text(
+        json.dumps({"accessToken": "x", "expiresAt": "2026-09-21T08:15:09Z"}), encoding="utf-8")
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    assert bedrock.sso_token_expiry("bedrock-dev") == "2026-09-21T08:15:09Z"
+    # SSO가 아닌 프로필은 토큰이 없다 — 없는 것으로 둔다(자격증명 만료로 떨어진다)
+    assert bedrock.sso_token_expiry("default") == ""
+
+
+def test_expired_profile_still_reports_when_it_lapsed(aws_config, monkeypatch, tmp_path):
+    """만료됐을 때가 오히려 "언제 끊겼는지"를 알아야 할 때다 — ok=false에도 시각을 싣는다."""
+    import hashlib
+    import json
+
+    cache = tmp_path / ".aws" / "sso" / "cache"
+    cache.mkdir(parents=True)
+    (cache / f"{hashlib.sha1(b'corp-sso').hexdigest()}.json").write_text(
+        json.dumps({"expiresAt": "2026-09-21T08:15:09Z"}), encoding="utf-8")
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(bedrock, "_credentials",
+                        lambda p: (_ for _ in ()).throw(bedrock.BedrockError("만료됐습니다")))
+
+    status = bedrock.profile_status("bedrock-dev")
+    assert status["ok"] is False
+    assert status["expires_at"] == "2026-09-21T08:15:09Z"
+
+
+def test_profiles_endpoint_reports_where_it_read(aws_config):
+    """서비스로 돌면 홈이 서비스 계정 것이라 목록이 빈다 — 어디를 읽었는지 밝혀야 안다."""
+    c = TestClient(create_app())
+    body = c.get("/paas/api/v1/llm/aws/profiles", headers=ADMIN).json()
+    assert body["config_path"] == str(aws_config)
+
+
 def test_lists_profiles_without_botocore(aws_config, monkeypatch):
     """프로필은 화면에서 골라야 하므로 botocore가 없어도 읽혀야 한다."""
     monkeypatch.setattr(bedrock, "botocore_available", lambda: False)
