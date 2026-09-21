@@ -490,9 +490,15 @@ def build_image(
     *,
     component: str | None = None,
     component_type: ProjectType | None = None,
+    context_subdir: str | None = None,
 ) -> BuildResult:
-    """component가 주어지면(composite 전용) workdir/{component}를 별도 빌드 컨텍스트로
-    쓰고, 태그·로그 파일명에 컴포넌트명을 붙여 일반 프로젝트와 충돌하지 않게 한다.
+    """component가 주어지면(복합 배포) 태그·로그 파일명에 컴포넌트명을 붙여 일반 프로젝트와
+    충돌하지 않게 한다. 빌드 컨텍스트는 context_subdir(없으면 component와 같은 이름의 폴더).
+
+    **이름과 경로를 나눠 받는 이유.** 감지된 컴포넌트 경로는 `apps/web`처럼 슬래시를 담을
+    수 있는데(services/structure), 그 값을 그대로 태그에 쓰면 `proj-apps/web:sha`가 되어
+    docker 태그로 유효하지 않고 로그 파일명에도 못 쓴다. 이름은 슬래시가 없는 값
+    (`apps-web`)이고, 경로는 빌드 컨텍스트로만 쓴다.
 
     component가 없고 project.source_subdir가 지정된 경우(모노레포 서브폴더 프로젝트)는
     workdir/{source_subdir}를 빌드 컨텍스트로 쓴다 — 태그·포트 매핑은 일반 프로젝트와 동일."""
@@ -500,7 +506,8 @@ def build_image(
     spec = PROFILES[profile]
     build_type = component_type or project.type
     if component:
-        context_dir = workdir / component
+        subdir = context_subdir if context_subdir is not None else component
+        context_dir = workdir if subdir in ("", ".") else workdir / subdir
     elif project.source_subdir:
         context_dir = workdir / project.source_subdir
     else:

@@ -25,7 +25,6 @@ from .build import (
     BuildError,
     build_image,
     checkout,
-    detect_composite_components,
     docker_build_log_path,
     env_setup_log_path,
     install_dependencies,
@@ -529,14 +528,25 @@ def deploy_composite_sync(
         # 배포한 구성을 말해야 한다.
         detected, _changed = structure.refresh(
             db, project, workdir, actor="deploy", source="repo", git_sha=sha)
-        components = detect_composite_components(workdir)
-        if not components:
-            # 감지된 구조를 함께 말한다. 예전 문구는 backend/·frontend/만 언급해서,
-            # api/·web/처럼 이름이 다른 리포나 컴포넌트가 셋인 리포에서는 무엇이 문제인지
-            # 알 수 없었다(빌드 파이프라인이 아직 그 두 이름만 다룬다).
+        # 감지된 구조가 배포 명세다 — 폴더 이름이 backend/frontend가 아니어도, 컴포넌트가
+        # 셋 이상이어도 그대로 배포한다(services/structure). 예전에는 그 두 이름만 다뤘다.
+        components = {
+            str(c["name"]): (c["path"], ProjectType(c["type"]))
+            for c in (detected.get("components") or [])
+            if c.get("type")
+        }
+        if len(components) < 2:
             raise BuildError(
-                f"{project.name}: 복합 배포는 아직 backend/·frontend/ 두 폴더만 지원합니다 "
+                f"{project.name}: 복합 배포에는 타입이 판정된 컴포넌트가 둘 이상 필요합니다 "
                 f"(감지된 구조: {structure.summary(detected) or '없음'})"
+            )
+        if structure.missing_root_component(detected):
+            # 루트를 받는 컴포넌트가 없으면 프로젝트 주소 자체가 404가 된다. 조용히
+            # 배포하면 "성공했는데 주소가 열리지 않는" 상태가 된다.
+            raise BuildError(
+                f"{project.name}: 프로젝트 주소(루트)를 받을 컴포넌트를 정할 수 없습니다 "
+                f"(감지된 구조: {structure.summary(detected)}). 화면 컴포넌트를 "
+                "frontend로 두거나 react·html 타입이 하나만 되도록 정리하세요."
             )
 
         group_id = uuid.uuid4().hex
@@ -559,7 +569,7 @@ def deploy_composite_sync(
         endpoints: dict[str, Endpoint] = {}
         failed_component: str | None = None
         failure: Exception | None = None
-        for name, comp_type in components.items():
+        for name, (comp_path, comp_type) in components.items():
             rec = records[name]
             # 이 컴포넌트의 빌드를 시작하기 전에 로그 경로를 커밋한다 — build_image 호출이
             # 오래 걸리거나 멈춰도 그 시점까지의 진행 상황을 조회할 수 있어야 한다.
@@ -567,7 +577,8 @@ def deploy_composite_sync(
             db.commit()
             try:
                 result = build_image(
-                    project, workdir, sha, profile, component=name, component_type=comp_type,
+                    project, workdir, sha, profile, component=name,
+                    component_type=comp_type, context_subdir=comp_path,
                 )
                 rec.image_tag = result.image_tag
                 rec.internal_port = result.internal_port
@@ -604,9 +615,16 @@ def deploy_composite_sync(
                 base_prefix = proxy.path_prefix_for(
                     _org_name(project), project.name, profile,
                 )
+                # 컴포넌트별 공개 경로는 한 곳에서 정한다(structure.routes_for) — backend는
+                # api/, frontend는 루트를 그대로 지키고(이미 배포된 주소다) 그 밖은 이름을
+                # 경로로 쓴다. 긴 경로가 먼저 오도록 이미 정렬돼 있다: 루트("")가 앞에 오면
+                # 그 뒤 규칙이 전부 가려진다.
                 routes = [
-                    proxy.PathRoute(path_prefix=base_prefix + "api/", endpoint=endpoints["backend"]),
-                    proxy.PathRoute(path_prefix=base_prefix, endpoint=endpoints["frontend"]),
+                    proxy.PathRoute(
+                        path_prefix=base_prefix + relative, endpoint=endpoints[name],
+                    )
+                    for name, relative in structure.routes_for(detected)
+                    if name in endpoints
                 ]
                 proxy.configure_paths(
                     project.name, profile, domain, routes, redirects_for(db, project),

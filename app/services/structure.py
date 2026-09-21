@@ -252,6 +252,76 @@ def representative_type(structure: dict | None) -> ProjectType | None:
         return None
 
 
+# 복합 배포에서 공개 경로가 이미 정해져 있는 이름. 예전 파이프라인이 backend·frontend
+# 두 이름만 다루면서 이 경로로 라우팅했고, **이미 배포된 프로젝트의 URL이라 바꿀 수 없다.**
+# 그 밖의 컴포넌트는 이름을 그대로 경로로 쓴다(route_for).
+LEGACY_ROUTES: dict[str, str] = {"backend": "api/", "frontend": ""}
+
+
+# 루트(프로젝트 주소 자체)를 받아야 하는 타입. 브라우저가 처음 닿는 곳이 화면이기
+# 때문이다 — python·node API가 루트를 가지면 사람이 주소를 열었을 때 JSON이 나온다.
+# streamlit·llm은 제외한다: 자기 UI를 갖지만 보통 단독 프로젝트이고, 화면과 API를 함께
+# 둔 복합 구성에서 루트를 양보해야 할 쪽인지가 리포마다 달라 규칙으로 정할 수 없다.
+ROOT_TYPES = frozenset({ProjectType.react.value, ProjectType.html.value})
+
+
+def route_for(component: dict, *, root_name: str | None = None) -> str:
+    """이 컴포넌트가 받을 경로 — 프로젝트 공개 접두사에 이어 붙일 상대 경로.
+
+    ""(빈 문자열)은 루트다. backend·frontend는 예전 규칙을 그대로 지키고(api/·루트) —
+    **이미 배포된 주소라 바꿀 수 없다.** root_name으로 지정된 컴포넌트가 루트를 받고,
+    그 밖은 `{이름}/`이다. 이름은 감지가 경로에서 만든 값이라(`apps/web` → `apps-web`)
+    경로로 쓰기에 안전하다.
+    """
+    name = str(component.get("name") or "")
+    if name in LEGACY_ROUTES:
+        return LEGACY_ROUTES[name]
+    if root_name is not None and name == root_name:
+        return ""
+    return f"{name}/" if name else ""
+
+
+def _root_candidate(components: list[dict]) -> str | None:
+    """루트를 받을 컴포넌트 이름 — 화면 타입이 **정확히 하나**일 때만 정한다.
+
+    둘 이상이면 어느 화면이 대표인지 리포가 말해 주지 않는다. 그때 임의로 고르면 주소를
+    열었을 때 엉뚱한 화면이 나오고, 그건 조용히 틀리는 쪽이다 — 호출부가 실패시킨다.
+    backend·frontend 이름이 섞여 있으면 그 규칙이 이미 루트를 정하므로 여기서 손대지 않는다.
+    """
+    if any(str(c.get("name")) in LEGACY_ROUTES for c in components):
+        return None
+    fronts = [str(c.get("name")) for c in components if c.get("type") in ROOT_TYPES]
+    return fronts[0] if len(fronts) == 1 else None
+
+
+def routes_for(structure: dict | None) -> list[tuple[str, str]]:
+    """(컴포넌트 이름, 상대 경로) 목록 — 긴 경로가 먼저 오도록 정렬한다.
+
+    프록시는 앞선 규칙을 먼저 맞춰 보므로 루트("")가 먼저 오면 그 뒤 규칙이 전부 가려진다.
+    이 정렬이 라우팅의 정합성 자체라 여기서 한 번에 정한다.
+    """
+    components = [
+        c for c in ((structure or {}).get("components") or [])
+        if c.get("base") != "boundary"
+    ]
+    root_name = _root_candidate(components)
+    routes = [
+        (str(c.get("name") or ""), route_for(c, root_name=root_name))
+        for c in components
+    ]
+    return sorted(routes, key=lambda pair: len(pair[1]), reverse=True)
+
+
+def missing_root_component(structure: dict | None) -> bool:
+    """루트를 받는 컴포넌트가 없는가 — 그러면 프로젝트 주소 자체가 404가 된다.
+
+    조용히 배포하면 "배포는 성공했는데 주소가 열리지 않는" 상태가 된다. 호출부가 이걸
+    보고 명확히 실패해야 한다.
+    """
+    routes = routes_for(structure)
+    return bool(routes) and all(path for _name, path in routes)
+
+
 def summary(structure: dict | None) -> str:
     """감사 로그·오류 문구에 실을 한 줄 요약: `backend=python, frontend=react`."""
     components = (structure or {}).get("components") or []

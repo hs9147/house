@@ -97,7 +97,8 @@ def _mock_checkout(monkeypatch, tmp_path: Path):
 
 
 def _mock_build_success(monkeypatch):
-    def fake_build(project, workdir, sha, profile, *, component=None, component_type=None):
+    def fake_build(project, workdir, sha, profile, *, component=None, component_type=None,
+                   context_subdir=None):
         return BuildResult(
             image_tag=f"{project.name}-{component}:{sha[:12]}",
             internal_port=8000 if component == "backend" else 80,
@@ -150,7 +151,8 @@ def test_composite_deploy_commits_build_log_path_before_each_component_build(mon
 
         observed: dict[str, str | None] = {}
 
-        def fake_build(project, workdir, sha, profile, *, component=None, component_type=None):
+        def fake_build(project, workdir, sha, profile, *, component=None,
+                       component_type=None, context_subdir=None):
             # build_image가 아직 반환하기 전에 "다른 세션"으로 같은 레코드를 읽어,
             # 그 시점에 이미 build_log_path가 커밋돼 있는지 확인한다.
             reader = SessionLocal()
@@ -206,7 +208,8 @@ def test_composite_deploy_frontend_fails_backend_restored_from_previous(monkeypa
 
         _mock_checkout(monkeypatch, tmp_path)
 
-        def fake_build(project, workdir, sha, profile, *, component=None, component_type=None):
+        def fake_build(project, workdir, sha, profile, *, component=None,
+                       component_type=None, context_subdir=None):
             if component == "frontend":
                 from app.services.build import BuildError
                 raise BuildError("npm build failed")
@@ -263,7 +266,8 @@ def test_composite_deploy_first_ever_partial_failure_no_rollback_target(monkeypa
         project = _make_project(db, "shop3", tmp_path)
         _mock_checkout(monkeypatch, tmp_path)
 
-        def fake_build(project, workdir, sha, profile, *, component=None, component_type=None):
+        def fake_build(project, workdir, sha, profile, *, component=None,
+                       component_type=None, context_subdir=None):
             if component == "frontend":
                 from app.services.build import BuildError
                 raise BuildError("no frontend deps")

@@ -226,3 +226,43 @@ def test_refresh_keeps_the_chosen_type_when_detection_is_unclear(tmp_path):
     _kept, changed = structure.refresh(_FakeDb(), project, tmp_path, actor="t")
     assert changed is False
     assert project.type is ProjectType.node
+
+
+# --- 복합 배포 라우팅 (structure.routes_for) ---
+
+
+def _components(*names: str) -> dict:
+    return {"components": [{"name": n, "path": n, "type": "python"} for n in names]}
+
+
+def test_existing_composite_urls_do_not_move():
+    """이미 배포된 프로젝트의 주소다 — backend는 api/, frontend는 루트를 그대로 지킨다."""
+    routes = dict(structure.routes_for(_components("backend", "frontend")))
+    assert routes == {"backend": "api/", "frontend": ""}
+
+
+def test_other_components_get_their_name_as_the_path():
+    routes = dict(structure.routes_for(_components("api", "web", "worker")))
+    assert routes == {"api": "api/", "web": "web/", "worker": "worker/"}
+
+
+def test_single_component_at_root_takes_the_root():
+    """단일 프로젝트는 감지에서 이름이 app이다 — 루트를 받아야 주소가 열린다."""
+    one = {"components": [{"name": "app", "path": ".", "type": "python"}]}
+    # app은 예약 이름이 아니므로 app/을 받는다 → 루트가 비어 호출부가 막아야 한다
+    assert structure.missing_root_component(one) is True
+
+
+def test_root_first_would_shadow_everything_so_longest_comes_first():
+    """프록시는 앞선 규칙을 먼저 맞춘다 — 루트가 먼저 오면 뒤 규칙이 전부 가려진다."""
+    routes = structure.routes_for(_components("backend", "frontend"))
+    assert routes[0][1] == "api/"      # 긴 경로가 먼저
+    assert routes[-1][1] == ""         # 루트가 마지막
+
+
+def test_missing_root_is_detected():
+    assert structure.missing_root_component(_components("api", "web")) is True
+    assert structure.missing_root_component(_components("backend", "frontend")) is False
+    # 컴포넌트가 없으면 판정할 것도 없다(배포 자체가 성립하지 않는다)
+    assert structure.missing_root_component({"components": []}) is False
+    assert structure.missing_root_component(None) is False
