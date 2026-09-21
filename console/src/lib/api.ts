@@ -372,8 +372,17 @@ export const api = {
   deleteProvider: (id: number) => request<void>('DELETE', `/llm/providers/${id}`),
   createProvider: (body: {
     name: string; kind: string; base_url: string; api_key?: string; model: string;
-    organization_id?: number | null;
+    aws_profile?: string; organization_id?: number | null;
   }) => request<LlmProviderOut>('POST', '/llm/providers', body),
+  // Bedrock이 쓸 AWS 자격증명 프로필과 지금 유효한지. 사내 SSO 토큰은 보통 8시간이면
+  // 만료되므로 '재로그인 필요'와 그 명령까지 서버가 말해 준다.
+  listAwsProfiles: () => request<{
+    botocore_available: boolean;
+    profiles: {
+      name: string; region: string; sso_session: string;
+      ok: boolean | null; reason: string; expires_at: string | null; login_command: string;
+    }[];
+  }>('GET', '/llm/aws/profiles'),
   review: (projectId: number, provider_id: number, diff?: string, base_ref?: string) =>
     request<ReviewResult>('POST', `/projects/${projectId}/review`, {
       provider_id, diff: diff || null, base_ref: base_ref || null,

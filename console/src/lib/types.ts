@@ -179,6 +179,9 @@ export interface LlmProviderOut {
   base_url: string;
   model: string;
   has_api_key: boolean;
+  // kind='aws'(Bedrock)가 서명에 쓰는 서버 ~/.aws 프로필 이름. 비밀이 아니라 어떤
+  // 자격증명을 쓸지 고른 결과다 — 만료 시 어느 프로필로 재로그인할지 알아야 한다.
+  aws_profile?: string | null;
   // 미지정(null) = 전역(모든 프로젝트에서 사용 가능), 지정 시 해당 조직 소속 프로젝트에서만 사용 가능
   organization_id?: number | null;
   org_name?: string | null;

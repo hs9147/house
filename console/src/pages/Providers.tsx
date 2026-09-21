@@ -9,9 +9,15 @@ export default function Providers() {
   const state = useApi(() => api.listProviders());
   const orgs = useApi(() => api.listOrgs());
   const admin = isAdmin();
+  // 서버 ~/.aws의 프로필. admin 전용 엔드포인트라 일반 사용자에게는 아예 부르지 않는다
+  // (403을 받아 화면에 오류만 남는다).
+  const awsProfiles = useApi(() => (admin ? api.listAwsProfiles() : Promise.resolve(null)), []);
   const [form, setForm] = useState({
-    name: '', kind: 'openai', base_url: '', api_key: '', model: '', organization_id: '',
+    name: '', kind: 'openai', base_url: '', api_key: '', model: '',
+    aws_profile: '', organization_id: '',
   });
+  const selectedProfile = (awsProfiles.data?.profiles ?? [])
+    .find((p) => p.name === form.aws_profile);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -25,9 +31,14 @@ export default function Providers() {
       await api.createProvider({
         ...form,
         api_key: form.api_key || undefined,
+        // 종류를 aws에서 바꿔 놓고 제출하면 서버가 거부한다 — 안 쓰는 값은 보내지 않는다.
+        aws_profile: form.kind === 'aws' ? form.aws_profile || undefined : undefined,
         organization_id: form.organization_id ? Number(form.organization_id) : null,
       });
-      setForm({ name: '', kind: 'openai', base_url: '', api_key: '', model: '', organization_id: '' });
+      setForm({
+        name: '', kind: 'openai', base_url: '', api_key: '', model: '',
+        aws_profile: '', organization_id: '',
+      });
       state.reload();
     } catch (err) {
       setError((err as Error).message);
@@ -53,7 +64,7 @@ export default function Providers() {
                   <th>구분</th>
                   <th>Endpoint</th>
                   <th>모델</th>
-                  <th>API 키</th>
+                  <th>인증</th>
                   <th>사용 범위</th>
                   {admin && <th>작업</th>}
                 </tr>
@@ -68,7 +79,11 @@ export default function Providers() {
                     </td>
                     <td className="mono">{p.base_url}</td>
                     <td className="mono">{p.model}</td>
-                    <td>{p.has_api_key ? '설정됨' : '-'}</td>
+                    <td>
+                      {p.aws_profile
+                        ? <span className="mono" title="AWS 자격증명 프로필로 SigV4 서명">🔑 {p.aws_profile}</span>
+                        : p.has_api_key ? 'API 키 설정됨' : '-'}
+                    </td>
                     <td>{p.org_name ? `🏢 ${p.org_name}` : '전역'}</td>
                     {admin && (
                       <td>
@@ -149,15 +164,62 @@ export default function Providers() {
                   required
                 />
               </label>
-              <label className="field" style={{ flex: 1 }}>
-                API 키 (선택 — 암호화 저장)
-                <input
-                  type="password"
-                  value={form.api_key}
-                  onChange={(e) => set('api_key', e.target.value)}
-                />
-              </label>
+              {/* Bedrock은 붙여넣을 정적 키가 없다 — 서버 ~/.aws의 자격증명으로 서명한다.
+                  그래서 aws에서는 키 입력 대신 프로필을 고른다. */}
+              {form.kind === 'aws' ? (
+                <label className="field" style={{ flex: 1 }}>
+                  AWS 자격증명 프로필
+                  <select
+                    className="mono"
+                    value={form.aws_profile}
+                    onChange={(e) => set('aws_profile', e.target.value)}
+                  >
+                    <option value="">(프로필 없이 — Endpoint가 OpenAI 호환 게이트웨이인 경우)</option>
+                    {(awsProfiles.data?.profiles ?? []).map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name}{p.region ? ` (${p.region})` : ''}{p.sso_session ? ' · SSO' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <label className="field" style={{ flex: 1 }}>
+                  API 키 (선택 — 암호화 저장)
+                  <input
+                    type="password"
+                    value={form.api_key}
+                    onChange={(e) => set('api_key', e.target.value)}
+                  />
+                </label>
+              )}
             </div>
+            {/* 자격증명이 지금 유효한지. SSO 토큰은 보통 8시간이면 만료되고, 만료되면
+                호출이 실패한다 — 그때 무엇을 해야 하는지를 등록 시점에도 보여 둔다. */}
+            {form.kind === 'aws' && (
+              <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+                {awsProfiles.data && !awsProfiles.data.botocore_available ? (
+                  <>⚠️ 서버에 botocore가 없어 자격증명을 쓸 수 없습니다 —{' '}
+                    <span className="mono">pip install botocore</span> 후 백엔드를 재시작하세요.</>
+                ) : (awsProfiles.data?.profiles ?? []).length === 0 ? (
+                  <>⚠️ 서버 <span className="mono">~/.aws/config</span>에 프로필이 없습니다 —{' '}
+                    <span className="mono">aws configure sso</span>로 먼저 설정하세요.</>
+                ) : !selectedProfile ? (
+                  <>프로필을 고르면 자격증명이 지금 유효한지 확인해 보여 줍니다.</>
+                ) : selectedProfile.ok === false ? (
+                  <>❌ {selectedProfile.reason} 서버에서{' '}
+                    <span className="mono">{selectedProfile.login_command}</span></>
+                ) : selectedProfile.ok === null ? (
+                  <>❓ {selectedProfile.reason}</>
+                ) : (
+                  <>✅ 자격증명 유효
+                    {selectedProfile.expires_at
+                      && ` · 만료 ${new Date(selectedProfile.expires_at).toLocaleString()}`}
+                    {' '}· 만료되면 서버에서{' '}
+                    <span className="mono">{selectedProfile.login_command}</span>
+                  </>
+                )}
+              </p>
+            )}
             <label className="field">
               사용 범위 (선택 — 비우면 전역, 모든 프로젝트에서 사용 가능)
               <select value={form.organization_id} onChange={(e) => set('organization_id', e.target.value)}>

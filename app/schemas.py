@@ -129,6 +129,8 @@ class LlmProviderCreate(BaseModel):
     kind: str = Field(pattern=r"^(openai|anthropic|aws|azure|gcp|internal)$")
     base_url: str  # internal은 project://<프로젝트명> 형식만 허용 (아래 검증)
     api_key: str | None = None
+    # kind="aws"(Bedrock)는 정적 키 대신 서버 ~/.aws의 자격증명 프로필로 서명한다.
+    aws_profile: str | None = None
     model: str
     # 미지정(None) = 전역(모든 프로젝트에서 사용 가능), 지정 시 해당 조직 소속
     # 프로젝트에서만 사용 가능 — Module.organization_id와 동일한 규칙.
@@ -144,6 +146,10 @@ class LlmProviderCreate(BaseModel):
                 "internal 프로바이더는 base_url이 'project://<프로젝트명>' 형식이어야 합니다 "
                 "(외부 URL을 쓰려면 kind를 external로 등록하세요)"
             )
+        # aws 외의 종류는 자격증명 프로필을 쓰지 않는다 — 받아 두면 저장은 되고
+        # 호출에는 안 쓰여서, 설정한 사람은 적용됐다고 믿는다.
+        if self.aws_profile and self.kind != "aws":
+            raise ValueError("aws_profile은 kind='aws'(Bedrock)에서만 사용합니다")
         return self
 
 
@@ -154,6 +160,7 @@ class LlmProviderOut(BaseModel):
     base_url: str
     model: str
     has_api_key: bool
+    aws_profile: str | None = None
     organization_id: int | None = None
     org_name: str | None = None
 

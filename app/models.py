@@ -254,6 +254,10 @@ class LlmProvider(Base):
     # internal은 "project://<llm 프로젝트명>" 표기를 허용 — 배포 도메인으로 자동 해석
     base_url: Mapped[str] = mapped_column(String(512))
     api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # kind="aws"(Bedrock)는 정적 키가 아니라 AWS 자격증명으로 서명한다 — 서버의
+    # ~/.aws 프로필 이름. 비밀이 아니라 어떤 자격증명을 쓸지 고른 결과라서 평문이고
+    # 화면에도 그대로 보인다(만료 시 어느 프로필로 재로그인해야 하는지 알아야 한다).
+    aws_profile: Mapped[str | None] = mapped_column(String(128), nullable=True)
     model: Mapped[str] = mapped_column(String(128))
     # Module과 동일한 조직 범위 규칙 — 미지정(NULL) = 전역(모든 프로젝트에서 사용 가능),
     # 지정 시 해당 조직 소속 프로젝트에서만 사용 가능(services/llm.py require_provider_access 참고).

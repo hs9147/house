@@ -25,6 +25,7 @@ from ..schemas import (
 )
 from ..security import encrypt_value, require_admin, require_api_key
 from ..services import codemap as codemap_service
+from ..services import bedrock
 from ..services import llm as llm_service
 from ..services import workspace
 from ..services.build import BuildError, checkout
@@ -39,6 +40,7 @@ def _provider_out(p: LlmProvider) -> LlmProviderOut:
     return LlmProviderOut(
         id=p.id, name=p.name, kind=kind_val, base_url=p.base_url,
         model=p.model, has_api_key=bool(p.api_key_encrypted),
+        aws_profile=p.aws_profile,
         organization_id=p.organization_id,
         org_name=p.organization.name if p.organization_id and p.organization else None,
     )
@@ -59,6 +61,7 @@ def create_provider(
         kind=LlmProviderKind(body.kind),
         base_url=body.base_url,
         api_key_encrypted=encrypt_value(body.api_key) if body.api_key else None,
+        aws_profile=body.aws_profile or None,
         model=body.model,
         organization_id=body.organization_id,
     )
@@ -66,6 +69,23 @@ def create_provider(
     db.commit()
     audit.record(db, admin.name, "llm.provider.create", body.name, {"kind": body.kind})
     return _provider_out(row)
+
+
+@router.get("/llm/aws/profiles")
+def aws_profiles(_: ApiKey = Depends(require_admin)):
+    """서버 ~/.aws에 있는 자격증명 프로필과 지금 쓸 수 있는지 여부.
+
+    Bedrock은 정적 키가 없어 어떤 프로필을 쓸지 골라야 하고, 사내 SSO 토큰은 보통
+    8시간이면 만료된다 — 등록할 때와 실패했을 때 '어느 프로필로 재로그인해야 하는지'를
+    화면이 말할 수 있어야 하므로 상태를 같이 싣는다.
+
+    프로필 이름은 비밀이 아니지만 서버의 계정 구성을 드러내므로 admin에게만 준다.
+    """
+    profiles = bedrock.list_profiles()
+    return {
+        "botocore_available": bedrock.botocore_available(),
+        "profiles": [{**entry, **bedrock.profile_status(entry["name"])} for entry in profiles],
+    }
 
 
 @router.get("/llm/providers", response_model=list[LlmProviderOut])

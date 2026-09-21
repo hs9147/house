@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..models import ApiKey, BuildProfile, LlmProvider, LlmProviderKind, Project
 from ..security import decrypt_value
+from . import bedrock
 
 # 플랫폼이 정한 기획·구현 원칙. 문서 하나가 원천이고, 에이전트 기획의 시스템 프롬프트에
 # 주입되는 동시에 외부 빌더가 받아 가는 구현 규범이기도 하다.
@@ -95,9 +96,57 @@ def chat_completion(
     """tools/tool_executor를 주면(예: 프로젝트에 바인딩된 MCP 서버) OpenAI 호환
     tool-call 프로토콜로 모델↔도구를 오간다 — 모델이 더 이상 tool_calls를 요청하지
     않을 때까지(최대 MAX_TOOL_ROUNDS회) 반복하고 최종 텍스트만 반환한다."""
+    if uses_aws_credentials(provider):
+        # Bedrock 네이티브 Converse — 키가 아니라 AWS 자격증명으로 서명한다. 응답을
+        # OpenAI 모양으로 되돌려 주므로 아래 tool-call 루프는 그대로 쓴다.
+        data = bedrock.converse(
+            profile=provider.aws_profile,
+            region=bedrock.region_from_url(provider.base_url, provider.aws_profile),
+            model_id=provider.model,
+            messages=messages,
+            tools=tools,
+        )
+    else:
+        data = _openai_style_call(provider, messages, tools, db)
+    message = data["choices"][0]["message"]
+
+    tool_calls = message.get("tool_calls")
+    if tool_calls and tool_executor and _round < MAX_TOOL_ROUNDS:
+        next_messages = [*messages, message]
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            try:
+                arguments = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            result = tool_executor(fn.get("name", ""), arguments)
+            next_messages.append({
+                "role": "tool", "tool_call_id": tc.get("id", ""), "content": result,
+            })
+        return chat_completion(provider, next_messages, db, tools, tool_executor, _round + 1)
+    # content가 null인 응답(길이 초과·거절·도구 호출만 있는 경우)이 있다. 호출부가
+    # 문자열을 전제로 후처리하므로 여기서 빈 문자열로 떨어뜨린다 — None이 새 나가면
+    # 엉뚱한 자리에서 AttributeError로 터진다.
+    return message.get("content") or ""
+
+
+def uses_aws_credentials(provider: LlmProvider) -> bool:
+    """Bedrock을 자격증명으로 부를지. 프로필이 비어 있으면 기존 동작(api_key Bearer를
+    OpenAI 호환 엔드포인트로)을 그대로 유지한다 — 앞단에 게이트웨이를 둔 설정이 있다."""
+    kind_str = str(provider.kind.value if hasattr(provider.kind, "value") else provider.kind)
+    return kind_str == "aws" and bool(getattr(provider, "aws_profile", None))
+
+
+def _openai_style_call(
+    provider: LlmProvider,
+    messages: list[dict],
+    tools: list[dict] | None,
+    db: Session | None,
+) -> dict:
+    """OpenAI 호환 chat completions 경로 — 종류별 인증 헤더와 URL 형태만 다르다."""
     url = resolve_base_url(provider.base_url, db)
     headers = {"content-type": "application/json"}
-    
+
     decrypted_key = decrypt_value(provider.api_key_encrypted) if provider.api_key_encrypted else ""
 
     # 프로바이더(openai, anthropic, aws, azure, gcp, internal)별 인증 헤더 및 URL 구성
@@ -149,27 +198,7 @@ def chat_completion(
     payload = {"model": provider.model, "messages": messages}
     if tools:
         payload["tools"] = tools
-    data = _post_chat(url, headers, payload)
-    message = data["choices"][0]["message"]
-
-    tool_calls = message.get("tool_calls")
-    if tool_calls and tool_executor and _round < MAX_TOOL_ROUNDS:
-        next_messages = [*messages, message]
-        for tc in tool_calls:
-            fn = tc.get("function", {})
-            try:
-                arguments = json.loads(fn.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                arguments = {}
-            result = tool_executor(fn.get("name", ""), arguments)
-            next_messages.append({
-                "role": "tool", "tool_call_id": tc.get("id", ""), "content": result,
-            })
-        return chat_completion(provider, next_messages, db, tools, tool_executor, _round + 1)
-    # content가 null인 응답(길이 초과·거절·도구 호출만 있는 경우)이 있다. 호출부가
-    # 문자열을 전제로 후처리하므로 여기서 빈 문자열로 떨어뜨린다 — None이 새 나가면
-    # 엉뚱한 자리에서 AttributeError로 터진다.
-    return message.get("content") or ""
+    return _post_chat(url, headers, payload)
 
 
 def _post_chat(url: str, headers: dict, payload: dict) -> dict:
