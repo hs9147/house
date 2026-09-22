@@ -19,22 +19,43 @@ from ..models import Module, ModuleType
 from . import storage
 
 
-def internal_base_url() -> str:
-    """사내 MCP 서버 주소의 기준. 플랫폼이 **자기 자신에게** 닿는 주소여야 한다.
+def _candidate_bases() -> list[str]:
+    """이 플랫폼의 MCP 주소로 인정하는 기준들 — 앞의 것이 내줄 주소다.
 
-    공개 도메인이 이 플랫폼으로 라우팅되지 않는 구성이 있어서(서브패스 배포) 브라우저가
-    쓰는 주소를 그대로 쓸 수 없다. 백채널 주소가 바로 그런 용도로 이미 있으므로 그것을
-    쓰고, 없으면 공개 주소로 떨어진다. 둘 다 없으면 빈 문자열 — 목록은 주소 없이 나가고
-    등록은 막힌다(동작하지 않을 주소를 만들어 주지 않는다).
+    **공개 주소가 백채널보다 먼저다.** 목록의 url은 개발자가 자기 MCP 클라이언트 설정에
+    붙여 넣는 값이다 — 그 기계에서 `http://localhost:7000`은 아무 데도 닿지 않는다.
+    예전에는 백채널이 먼저라 사내 서버 주소가 전부 localhost로 나갔다.
+
+    `PAAS_MCP_INTERNAL_BASE_URL`은 여전히 가장 먼저다 — 운영자가 명시한 값이라
+    (프록시가 다른 이름으로 열려 있는 구성 등) 유추보다 앞선다.
+
+    뒤쪽 후보들도 목록에 나오지는 않지만 **인정은 한다**: 예전에 등록된 모듈에는 그 주소가
+    저장돼 있어서, 인정하지 않으면 키 발급이 갑자기 거부된다.
     """
     settings = get_settings()
-    if settings.mcp_internal_base_url:
-        return settings.mcp_internal_base_url.rstrip("/")
-    if settings.oidc_provider_backchannel_url:
-        return settings.oidc_provider_backchannel_url.rstrip("/")
-    if settings.platform_public_url:
-        return f"{settings.platform_public_url.rstrip('/')}/paas"
-    return ""
+    bases = [
+        settings.mcp_internal_base_url,
+        f"{settings.platform_public_url.rstrip('/')}/paas" if settings.platform_public_url else "",
+        settings.oidc_provider_backchannel_url,
+    ]
+    out: list[str] = []
+    for base in bases:
+        trimmed = (base or "").rstrip("/")
+        if trimmed and trimmed not in out:
+            out.append(trimmed)
+    return out
+
+
+def accepted_bases() -> str:
+    """오류 문구에 싣는 한 줄 — 어느 주소를 인정하는지 보여 줘야 설정을 고칠 수 있다."""
+    return ", ".join(_candidate_bases())
+
+
+def internal_base_url() -> str:
+    """내줄 MCP 주소의 기준. 없으면 빈 문자열 — 목록은 주소 없이 나가고 등록은 막힌다
+    (동작하지 않을 주소를 만들어 주지 않는다)."""
+    bases = _candidate_bases()
+    return bases[0] if bases else ""
 
 
 def is_internal_server_url(url: str) -> bool:
@@ -42,10 +63,9 @@ def is_internal_server_url(url: str) -> bool:
 
     사내 서버는 다른 엔드포인트와 같은 API 키를 요구하는데(api/mcp_servers.py), 목록에서
     가져와 등록할 때는 붙여 넣을 키가 따로 없다 — 그래서 이 판정으로 갈라 전용 키를
-    발급해 준다. 주소는 목록이 내준 것(_entry)이므로 기준 주소로 시작하는지만 본다.
+    발급해 준다. 기준이 여럿인 이유는 _candidate_bases 참고(예전 주소로 등록된 모듈).
     """
-    base = internal_base_url()
-    return bool(base) and url.startswith(f"{base}/api/v1/mcp/")
+    return any(url.startswith(f"{base}/api/v1/mcp/") for base in _candidate_bases())
 
 
 def _entry(server_id: str, name: str, description: str, category: str, path: str) -> dict:

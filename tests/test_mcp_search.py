@@ -79,17 +79,21 @@ def test_keyword_search_narrows(monkeypatch, tmp_path, fresh_settings):
     assert c.get(f"{API}/mcp/search", params={"q": "없는말"}, headers=ADMIN).json() == []
 
 
-def test_without_a_base_url_entries_carry_no_address(monkeypatch, tmp_path, fresh_settings):
+def test_without_any_base_entries_carry_no_address(monkeypatch, tmp_path, fresh_settings):
     """동작하지 않을 주소를 만들어 주지 않는다 — 등록은 막히고 경로만 보여 준다."""
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "")
     c = _client(monkeypatch, tmp_path, base="")
     ops = c.get(f"{API}/mcp/search", headers=ADMIN).json()[0]
     assert ops["url"] == ""
     assert ops["path"] == "/paas/api/v1/mcp/ops"
 
 
-def test_backchannel_url_is_the_fallback_base(monkeypatch, tmp_path, fresh_settings):
-    """백채널 주소가 바로 '플랫폼이 자기 자신에게 닿는 주소'다."""
+def test_backchannel_url_is_the_last_resort(monkeypatch, tmp_path, fresh_settings):
+    """백채널은 **마지막** 후보다. 공개 주소가 있으면 그쪽이 이긴다 — 목록의 주소는 사람이
+    자기 MCP 클라이언트에 붙여 넣는 값이고, 그 기계에서 백채널(localhost)은 닿지 않는다."""
     monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "http://10.0.0.5:7000/paas")
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "")
     c = _client(monkeypatch, tmp_path, base="")
     ops = c.get(f"{API}/mcp/search", headers=ADMIN).json()[0]
     assert ops["url"] == "http://10.0.0.5:7000/paas/api/v1/mcp/ops"
@@ -250,3 +254,52 @@ def test_issue_key_requires_admin(monkeypatch, tmp_path, fresh_settings):
                  json={"name": "worker", "is_admin": False}).json()["key"]
     res = c.post(f"{API}/modules/{created['id']}/mcp-key", headers={"x-api-key": raw})
     assert res.status_code == 403
+
+
+def test_listed_url_is_the_external_address_not_localhost(monkeypatch, tmp_path, fresh_settings):
+    """목록의 url은 개발자가 자기 MCP 클라이언트 설정에 붙여 넣는 값이다.
+
+    그 기계에서 `http://localhost:7000`은 아무 데도 닿지 않는다. 예전에는 백채널 주소가
+    공개 주소보다 먼저라 사내 서버 주소가 전부 localhost로 나갔다.
+    """
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
+    monkeypatch.delenv("PAAS_MCP_INTERNAL_BASE_URL", raising=False)
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "http://gpax.lge.com")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "http://localhost:7000/paas")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+
+    items = c.get(f"{API}/mcp/search", headers=ADMIN).json()
+    docs = next(i for i in items if i["id"] == "paas-docs")
+    assert docs["url"] == "http://gpax.lge.com/paas/api/v1/mcp/docs"
+    assert all("localhost" not in i["url"] for i in items)
+
+
+def test_explicit_base_still_wins_over_the_public_address(monkeypatch, tmp_path, fresh_settings):
+    """운영자가 명시한 값은 유추보다 앞선다(프록시가 다른 이름으로 열려 있는 구성)."""
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
+    monkeypatch.setenv("PAAS_MCP_INTERNAL_BASE_URL", "http://mcp.internal/paas")
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "http://gpax.lge.com")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+
+    docs = next(i for i in c.get(f"{API}/mcp/search", headers=ADMIN).json()
+                if i["id"] == "paas-docs")
+    assert docs["url"] == "http://mcp.internal/paas/api/v1/mcp/docs"
+
+
+def test_previously_registered_addresses_are_still_recognised(monkeypatch, fresh_settings):
+    """예전에 등록된 모듈에는 백채널 주소가 저장돼 있다 — 인정하지 않으면 키 발급이
+    갑자기 거부된다(사내 서버인데 사외로 취급된다)."""
+    from app.services import mcp_search
+
+    monkeypatch.delenv("PAAS_MCP_INTERNAL_BASE_URL", raising=False)
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "http://gpax.lge.com")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "http://localhost:7000/paas")
+    get_settings.cache_clear()
+
+    assert mcp_search.internal_base_url() == "http://gpax.lge.com/paas"  # 내주는 것은 공개 주소
+    assert mcp_search.is_internal_server_url("http://gpax.lge.com/paas/api/v1/mcp/docs")
+    assert mcp_search.is_internal_server_url("http://localhost:7000/paas/api/v1/mcp/docs")
+    # 사외 서버는 그대로 거부한다 — 발급한 키가 그 주소로 전송되기 때문이다
+    assert not mcp_search.is_internal_server_url("https://mcp.example.com/api/v1/mcp/docs")

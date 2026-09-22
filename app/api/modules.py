@@ -371,12 +371,12 @@ def issue_mcp_module_key(
     config = svc.decrypt_config(row.config)
     url = config.get("url", "")
     if not mcp_search.is_internal_server_url(url):
-        base = mcp_search.internal_base_url() or "(비어 있음 — PAAS_MCP_INTERNAL_BASE_URL 미설정)"
+        accepted = mcp_search.accepted_bases() or "(비어 있음 — 공개 주소·PAAS_MCP_INTERNAL_BASE_URL 미설정)"
         raise HTTPException(status_code=400, detail=(
             f"사내 MCP 주소가 아니라 키를 발급하지 않습니다: {url} — 발급한 키는 이 주소로"
             " 전송되므로 사외 서버에는 붙일 수 없습니다. 사외 서버라면 모듈 수정에서"
             " config.api_key에 그 서버가 준 키를 넣으세요. 사내 서버인데 여기서 걸린다면"
-            f" 기준 주소 설정을 보세요(현재 기준: {base})."))
+            f" 기준 주소 설정을 보세요(인정하는 기준: {accepted})."))
 
     issued = _issue_module_key(db, admin, row.name)
     config["api_key"] = issued
