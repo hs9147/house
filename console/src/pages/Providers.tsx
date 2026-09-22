@@ -220,6 +220,14 @@ export default function Providers() {
               {form.kind === 'aws' ? (
                 <label className="field" style={{ flex: 1 }}>
                   AWS 자격증명 프로필
+                  {/* 읽은 경로는 목록이 있을 때도 보여 준다 — 서비스 계정 홈을 보고 있으면
+                      목록이 나오더라도 로그인한 계정의 것이 아닐 수 있다. */}
+                  {awsProfiles.data?.config_path && (
+                    <span className="mutedtext" style={{ fontWeight: 400, fontSize: 12 }}>
+                      {' '}— <span className="mono">{awsProfiles.data.config_path}</span>
+                      {!awsProfiles.data.config_exists && ' (파일 없음)'}
+                    </span>
+                  )}
                   <select
                     className="mono"
                     value={form.aws_profile}
@@ -263,9 +271,8 @@ export default function Providers() {
                      왜 비었는지 알 방법이 없다. */
                   <>⚠️ 프로필이 없습니다 —{' '}
                     {awsProfiles.data?.config_exists
-                      ? '파일은 있는데 프로필 섹션이 없습니다'
-                      : '이 경로에 파일이 없습니다'}:{' '}
-                    <span className="mono">{awsProfiles.data?.config_path}</span>
+                      ? '위 경로에 파일은 있는데 프로필 섹션이 없습니다.'
+                      : '위 경로에 파일이 없습니다'}
                     {!awsProfiles.data?.config_exists && (
                       <>{' '}— 백엔드가 서비스로 돌면 홈이 로그인한 계정이 아니라 서비스 계정의
                         것입니다. 그 계정으로 <span className="mono">aws sso login</span>을

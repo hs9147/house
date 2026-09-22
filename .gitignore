@@ -5,7 +5,10 @@ paas.db
 test-paas.db
 data/
 .venv/
-console/node_modules/
+# 경로와 무관하게 — 루트에 임시로 설치해도(검증용 도구 등) 커밋에 섞이지 않게 한다.
+node_modules/
+# 루트의 것만. console/package-lock.json은 추적 대상이다(의존성 고정).
+/package-lock.json
 console/dist/
 .pytest_cache/
 logs/

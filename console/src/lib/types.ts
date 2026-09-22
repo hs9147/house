@@ -552,6 +552,10 @@ export interface StatusSnapshot {
 
 export interface HealthInfo {
   ok: boolean;
+  // 모델에는 있는데 DB에는 없는 컬럼(`테이블.컬럼`). 비어 있지 않으면 그 테이블을 읽는
+  // 화면이 전부 500이 된다 — 마이그레이션이 덜 돌았다는 뜻이다.
+  schema_missing?: string[];
+  schema_recovery?: string;
   // 이 백엔드 프로세스가 **적재한** 커밋(기동 시점에 읽는다). SW 업데이트가 실제로
   // 반영됐는지를 이것 하나로 확인한다 — 디스크가 아니라 돌고 있는 쪽을 말한다.
   // .git이 없는 설치본에서는 빈 문자열.

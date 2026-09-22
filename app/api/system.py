@@ -65,6 +65,10 @@ def health():
     from ..services import buildinfo  # noqa: PLC0415
     from ..services.host import get_host_caps  # noqa: PLC0415
 
+    from ..db import Base, engine  # noqa: PLC0415
+    from ..services.schemacheck import RECOVERY, missing_columns  # noqa: PLC0415
+    from .. import models  # noqa: F401, PLC0415 — 모델을 메타데이터에 등록해 둔다
+
     settings = get_settings()
     # 이 프로세스가 적재한 커밋. 기동할 때 한 번 읽어 둔 값이라(services/buildinfo.py),
     # pull만 하고 재시작하지 않았으면 디스크가 아니라 **돌고 있는 쪽**을 답한다 —
@@ -72,6 +76,10 @@ def health():
     revision, branch = buildinfo.head(settings.resolved_repo_root)
     return {
         "ok": True,
+        # 빠진 컬럼이 있으면 그 테이블을 읽는 화면이 전부 500이 된다. 기동 로그에만 적었더니
+        # 로그를 보지 않는 사람은 "Internal Server Error"만 봤다 — 콘솔이 배너로 띄우게 싣는다.
+        "schema_missing": missing_columns(engine, Base.metadata),
+        "schema_recovery": RECOVERY,
         "revision": revision,
         "branch": branch,
         "platform_name": settings.platform_name,

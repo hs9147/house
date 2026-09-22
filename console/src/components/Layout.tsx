@@ -85,6 +85,27 @@ export default function Layout() {
         </div>
       </aside>
       <main>
+        {/* DB 스키마가 코드보다 뒤처지면 그 테이블을 읽는 화면이 전부 500이 된다. 기동
+            로그에만 적었더니 로그를 보지 않는 사람은 "Internal Server Error"만 봤다 —
+            같은 일을 세 번 겪었으니(projects.structure · chat_sessions.merged_at ·
+            build_tasks.number) 어느 화면에 있든 보이게 띄운다. 막지는 않는다:
+            나머지 화면은 동작하고, 복구도 이 콘솔(터미널)로 해야 한다. */}
+        {(health.data?.schema_missing?.length ?? 0) > 0 && (
+          <div className="panel" style={{ borderColor: '#f59e0b', marginBottom: 12 }}>
+            <strong style={{ color: '#f59e0b' }}>
+              ⚠️ DB 스키마가 코드보다 뒤처졌습니다 — 아래 컬럼이 없어 해당 화면이 500으로
+              실패합니다
+            </strong>
+            <ul style={{ margin: '6px 0', fontSize: 12 }}>
+              {health.data?.schema_missing?.map((c) => (
+                <li key={c} className="mono">{c}</li>
+              ))}
+            </ul>
+            <div className="mutedtext" style={{ fontSize: 12 }}>
+              복구: <span className="mono">{health.data?.schema_recovery}</span>
+            </div>
+          </div>
+        )}
         <Outlet />
       </main>
     </div>

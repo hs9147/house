@@ -47,41 +47,21 @@ def _make_console_output_safe() -> None:
 
 
 def _warn_if_schema_is_behind() -> None:
-    """모델에는 있는데 DB에는 없는 컬럼을 기동할 때 이름으로 말해 준다.
-
-    **왜 필요한가.** `create_all`은 없는 **테이블**만 만들고 기존 테이블에 **컬럼을 추가하지
-    않는다.** 그래서 새 컬럼이 생긴 버전으로 올리고 마이그레이션을 돌리지 않으면, 그 테이블을
-    건드리는 엔드포인트가 전부 500이 된다 — 기획 세션 이력과 서버 구성이 동시에 죽는데
-    화면에는 "Internal Server Error"만 남아 원인이 스키마라는 단서가 없다(실제로 겪었다).
-
-    게다가 create_all이 테이블을 미리 만들어 두면 그 테이블을 만드는 마이그레이션이
-    "already exists"로 실패해서 `alembic upgrade head`조차 앞으로 가지 못한다. 그 상태의
-    복구는 빠진 컬럼을 직접 추가하고 `alembic stamp head`로 맞추는 것인데, **무엇이 빠졌는지
-    알아야** 할 수 있다. 그 목록을 여기서 알려 준다.
+    """빠진 컬럼을 기동할 때 이름으로 말해 준다(판정은 services/schemacheck).
 
     기동을 막지는 않는다 — 대부분의 화면은 여전히 동작하고, 여기서 죽이면 복구 작업조차
-    콘솔로 할 수 없다(터미널·SW 업데이트가 이 프로세스 안에 있다).
+    콘솔로 할 수 없다(터미널·SW 업데이트가 이 프로세스 안에 있다). 같은 목록이 /health에도
+    실려서 콘솔이 배너로 띄운다 — 로그만 보고는 원인이 스키마라는 것을 알 수 없었다.
     """
-    import sqlalchemy as sa  # noqa: PLC0415
+    from .services.schemacheck import RECOVERY, missing_columns  # noqa: PLC0415
 
-    try:
-        inspector = sa.inspect(engine)
-        existing = set(inspector.get_table_names())
-        missing: list[str] = []
-        for table in Base.metadata.sorted_tables:
-            if table.name not in existing:
-                continue  # create_all이 만들었거나 곧 만든다
-            have = {c["name"] for c in inspector.get_columns(table.name)}
-            missing += [f"{table.name}.{c.name}" for c in table.columns if c.name not in have]
-    except Exception:  # noqa: BLE001 — 진단이 기동을 막으면 본말전도다
-        return
+    missing = missing_columns(engine, Base.metadata)
     if missing:
         print("[paas] !! DB 스키마가 코드보다 뒤처졌습니다 — 아래 컬럼이 없어 해당 화면이 "
               "500으로 실패합니다:")
         for name in missing:
             print(f"[paas]    - {name}")
-        print("[paas]    복구: alembic upgrade head "
-              "(테이블이 이미 있어 실패하면 위 컬럼을 ALTER TABLE로 추가하고 alembic stamp head)")
+        print(f"[paas]    복구: {RECOVERY}")
 
 
 def create_app() -> FastAPI:
