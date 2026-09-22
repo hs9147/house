@@ -50,7 +50,14 @@ from ..schemas import (
     PlanSessionOut,
     PlanSessionSummary,
 )
-from ..security import can_view_git_url, require_admin, require_api_key, viewer_org_ids
+from ..security import (
+    can_view_git_url,
+    require_admin,
+    require_api_key,
+    require_mcp_key,
+    require_project_mcp_access,
+    viewer_org_ids,
+)
 from ..services import a2a as a2a_service
 from ..services import c4 as c4_service
 from ..services import codemap as codemap_service
@@ -1119,12 +1126,18 @@ async def plan_mcp_server(
     project_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_mcp_key),
 ):
-    """외부 빌드 도구가 접속하는 MCP 서버 엔드포인트(JSON-RPC 2.0)."""
+    """외부 빌드 도구가 접속하는 MCP 서버 엔드포인트(JSON-RPC 2.0).
+
+    외주 에이전트는 API 키가 없다 — 콘솔에서 SSO로 발급받은 개인 MCP 토큰을 Bearer로
+    싣는다(require_mcp_key). 그리고 **어느 프로젝트인지를 본다**: 예전에는 유효한 키면
+    남의 조직 프로젝트의 작업 지시·산출물도 그대로 읽혔다.
+    """
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
+    require_project_mcp_access(db, key, project)
     return mcp_server.dispatch(
         await mcp_server.read_payload(request),
         server_name=f"paas-plan-{project.name}",

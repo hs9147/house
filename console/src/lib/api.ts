@@ -366,6 +366,18 @@ export const api = {
   unbindModule: (projectId: number, bindingId: number) =>
     request<void>('DELETE', `/projects/${projectId}/modules/bindings/${bindingId}`),
 
+  // 개인 MCP 토큰 — 외주 개발 에이전트는 API 키가 없다. 로그인한 사람이 자기 몫을
+  // 발급하고, 접근 권한은 그 사람의 조직으로 판정된다. 원문은 발급 응답에 한 번만 온다.
+  createMcpToken: (label: string, project?: string) =>
+    request<{ token: string; url: string; ttl_days: number }>(
+      'POST', '/mcp/tokens', { label, project }),
+  listMcpTokens: () =>
+    request<{
+      id: number; label: string; created_at: string; expires_at: string;
+      last_used_at: string | null; is_expired: boolean;
+    }[]>('GET', '/mcp/tokens'),
+  revokeMcpToken: (id: number) => request<void>('DELETE', `/mcp/tokens/${id}`),
+
   // LLM
   listProviders: () => request<LlmProviderOut[]>('GET', '/llm/providers'),
   deleteProvider: (id: number) => request<void>('DELETE', `/llm/providers/${id}`),

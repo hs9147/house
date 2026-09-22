@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import secrets
-from datetime import timezone
+from datetime import timedelta, timezone
 
 from cryptography.fernet import Fernet, MultiFernet
 from fastapi import Depends, Header, HTTPException
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .db import get_db
-from .models import ApiKey, Project, UserAccount, UserSession, utcnow
+from .models import ApiKey, McpToken, Project, UserAccount, UserSession, utcnow
 
 _fernet: Fernet | None = None
 
@@ -292,6 +292,93 @@ def resolve_token(db: Session, token: str) -> ApiKey | None:
     # 공개 식별자라 비밀값이 아니다. 인증은 관리자 키(1), 발급된 키의 해시(2),
     # 로그인 세션 토큰(3)으로만 성립한다.
     return None
+
+
+MCP_TOKEN_TTL = timedelta(days=90)
+
+
+def issue_mcp_token(db: Session, email: str, label: str, is_admin: bool) -> str:
+    """개인 MCP 토큰을 발급하고 **원문을 한 번만** 돌려준다(해시만 저장한다)."""
+    token = secrets.token_urlsafe(32)
+    db.add(McpToken(
+        token_hash=hash_key(token), email=email, label=label[:128], is_admin=is_admin,
+        expires_at=utcnow() + MCP_TOKEN_TTL,
+    ))
+    db.commit()
+    return token
+
+
+def resolve_mcp_token(db: Session, token: str) -> ApiKey | None:
+    """개인 MCP 토큰 → 주체. 만료된 토큰은 통과시키지 않지만 **행은 남긴다** — 화면이
+    "만료됨"으로 보여 줘야 사람이 다시 발급할 줄 안다(지워 버리면 사라진 이유가 없다)."""
+    row = db.execute(
+        select(McpToken).where(McpToken.token_hash == hash_key(token))
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    expires = row.expires_at
+    if expires.tzinfo is None:  # SQLite는 tz를 보존하지 않음
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires <= utcnow():
+        return None
+    row.last_used_at = utcnow()  # 안 쓰는 토큰을 지울 근거
+    db.commit()
+    return ApiKey(name=row.email, key_hash="", is_admin=row.is_admin)
+
+
+def require_mcp_key(
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+    db: Session = Depends(get_db),
+) -> ApiKey:
+    """MCP 서버 전용 인증 — 개인 MCP 토큰을 **여기서만** 받는다.
+
+    MCP 규약은 자격증명을 `Authorization: Bearer`로 싣는다. 외주 에이전트는 API 키가 없고
+    콘솔에서 발급받은 개인 토큰을 그 자리에 넣는다. require_api_key가 이 토큰을 받지 않는
+    것이 핵심이다 — 개발자 기계의 설정 파일에 놓이는 값이라, 새어도 MCP 밖으로는 아무것도
+    못 하게 둔다(배포·터미널·계정 관리 등).
+    """
+    token = x_api_key
+    if not token and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    if token and token.count(".") != 2:
+        # JWT가 아니면 개인 MCP 토큰일 수 있다 — 아니면 아래 공통 판정으로 떨어진다.
+        subject = resolve_mcp_token(db, token)
+        if subject is not None:
+            return subject
+    return require_api_key(x_api_key=x_api_key, authorization=authorization, db=db)
+
+
+def require_project_mcp_access(db: Session, key: ApiKey, project: Project) -> None:
+    """이 주체가 이 프로젝트의 MCP를 쓸 수 있는가.
+
+    예전에는 **검사가 없었다** — 유효한 키·토큰이면 어느 프로젝트의 작업 지시도 읽혔다.
+    규칙은 git_url 노출(can_view_git_url)·모듈 범위와 같은 원칙을 쓴다: 관리자,
+    전역 프로젝트(조직 미지정), 또는 그 프로젝트 조직 소속 사용자만.
+
+    여기에 하나를 더 얹는다: **사내 Gitea에 등록된 프로젝트만** MCP를 연다. 판정은 PR·머지와
+    같은 함수를 쓴다(services/gitea.repo_slug).
+
+    단, 그 조건은 **PAAS_GIT_INTERNAL_ONLY가 켜져 있을 때만** 본다. 그 설정이 바로 "모든
+    프로젝트는 사내 리포여야 한다"는 정책이고, 등록 시점에 이미 강제된다(git_policy.py) —
+    켜져 있으면 여기서 다시 볼 것이 없고, 운영자가 꺼 두었다면 외부 리포 프로젝트를 일부러
+    허용한 것이다. 정책을 두 곳에서 따로 정하면 한쪽만 바꿔 놓고 이유를 알 수 없게 된다.
+    """
+    from .services.gitea import repo_slug  # noqa: PLC0415 — 순환 import 회피
+
+    settings = get_settings()
+    if settings.git_internal_only and settings.gitea_url and repo_slug(project.git_url) is None:
+        raise HTTPException(status_code=403, detail=(
+            f"'{project.name}'은 사내 Gitea에 등록된 프로젝트가 아니어서 MCP를 열지 않습니다."
+        ))
+    if key.is_admin or project.organization_id is None:
+        return
+    if project.organization_id in viewer_org_ids(db, key):
+        return
+    raise HTTPException(status_code=403, detail=(
+        f"'{project.name}'은 다른 조직의 프로젝트입니다 — 소속 조직의 프로젝트만 MCP로 "
+        "접근할 수 있습니다."
+    ))
 
 
 def require_admin(key: ApiKey = Depends(require_api_key)) -> ApiKey:

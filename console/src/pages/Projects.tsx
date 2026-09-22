@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
 import GitBrowseButton from '../components/GitBrowseButton';
+import McpAccessButton from '../components/McpAccessButton';
 import TypeBadges from '../components/TypeBadges';
 import Modal from '../components/Modal';
 import StatusPill from '../components/StatusPill';
@@ -78,6 +79,7 @@ export default function Projects() {
                         <GitBrowseButton project={p} />
                         <VscodeWorkButton project={p} />
                         <ZipDownloadButton project={p} />
+                        <McpAccessButton project={p} />
                       </span>
                     </td>
                     <td><StatusPill value={p.default_profile} /></td>

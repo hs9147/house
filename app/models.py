@@ -217,6 +217,36 @@ class UserSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class McpToken(Base):
+    """외주 개발 에이전트가 MCP 서버에 붙을 때 쓰는 **개인** 토큰.
+
+    외주 에이전트에게는 API 키가 없고, 관리자가 키를 나눠 주는 것도 답이 아니다 — 누구에게
+    나갔는지·언제 회수하는지가 남지 않는다. SSO로 로그인한 사람이 자기 몫을 직접 발급하고,
+    그 사람의 조직 권한으로 프로젝트 접근을 판정한다(security.require_project_mcp_access).
+
+    **API 키가 아니다.** require_api_key는 이 토큰을 받지 않는다 — 개발자 기계의 설정
+    파일에 놓이는 값이라, 새어도 MCP 밖으로는 아무것도 못 하게 둔다.
+
+    UserSession과 같은 이유로 원문 대신 해시만 저장한다. is_admin을 행에 박아 두는 것도
+    같은 이유다(발급 시점의 권한으로 고정 — 나중에 권한이 오르면 새로 발급받는다).
+    """
+
+    __tablename__ = "mcp_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sha256 hex
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    # 어느 기계·어느 도구에 넣은 토큰인지 사람이 알아보게 — 폐기할 때 고를 수 있어야 한다.
+    label: Mapped[str] = mapped_column(String(128), default="")
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # 쓰이고 있는 토큰인지 — 안 쓰는 토큰을 지울 근거가 된다.
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class OidcAuthCode(Base):
     """paas 자체 OIDC Provider(services/oidc_provider.py)의 인증 코드 — 1회용, 60초만
     산다. UserSession과 같은 이유로 코드 원문 대신 해시만 저장한다."""

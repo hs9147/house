@@ -55,7 +55,7 @@ from ..models import (
     ApiKey, AuditEvent, BuildProfile, Deployment, DeploymentStatus, Module, ModuleType,
     Project, ProjectType,
 )
-from ..security import require_api_key
+from ..security import require_api_key, require_mcp_key, require_project_mcp_access
 from ..services import apisearch
 from ..services import codemap as codemap_service
 from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, workspace
@@ -449,22 +449,40 @@ _CODE_TOOLS = [
 async def code_mcp_server(
     request: Request,
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_mcp_key),
 ):
-    """코드 조회 MCP 서버(JSON-RPC 2.0) — 모든 프로젝트, 읽기 전용."""
+    """코드 조회 MCP 서버(JSON-RPC 2.0) — 읽기 전용, **접근 권한이 있는 프로젝트만**.
+
+    외주 에이전트는 API 키가 없어 콘솔에서 SSO로 발급받은 개인 MCP 토큰으로 붙는다
+    (require_mcp_key). 예전에는 유효한 키면 남의 조직 프로젝트 코드까지 읽혔다.
+    """
     return mcp_server.dispatch(
         await mcp_server.read_payload(request),
         server_name="paas-code",
         tools=_CODE_TOOLS,
-        call=lambda name, args: _code_dispatch(db, name, args),
+        call=lambda name, args: _code_dispatch(db, key, name, args),
     )
 
 
-def _code_dispatch(db: Session, name: str, args: dict) -> str:
+def _code_dispatch(db: Session, key: ApiKey, name: str, args: dict) -> str:
     if name == "list_projects":
-        names = db.execute(select(Project.name).order_by(Project.name)).scalars().all()
-        return "\n".join(names) if names else "(등록된 프로젝트가 없습니다)"
-    return _code_call(_project_by_name(db, args, discover="list_projects"), name, args)
+        # 목록도 걸러야 한다 — 이름만 알려 주면 그 이름으로 바로 읽으려 든다.
+        rows = db.execute(select(Project).order_by(Project.name)).scalars().all()
+        names = [p.name for p in rows if _mcp_visible(db, key, p)]
+        return "\n".join(names) if names else "(접근 가능한 프로젝트가 없습니다)"
+    project = _project_by_name(db, args, discover="list_projects")
+    require_project_mcp_access(db, key, project)
+    return _code_call(project, name, args)
+
+
+def _mcp_visible(db: Session, key: ApiKey, project: Project) -> bool:
+    """목록에 올릴지 — 판정은 접근 검사와 같은 함수를 쓴다. 둘이 갈리면 목록에는 보이는데
+    읽으면 403인 프로젝트가 생긴다."""
+    try:
+        require_project_mcp_access(db, key, project)
+    except HTTPException:
+        return False
+    return True
 
 
 def _code_workdir(project: Project) -> Path:

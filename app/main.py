@@ -6,7 +6,8 @@ from fastapi import FastAPI
 from starlette.staticfiles import StaticFiles
 
 from .api import (
-    a2a_gateway, llm, mcp_servers, modules, oidc_provider, orgs, planning, previews, projects,
+    a2a_gateway, llm, mcp_servers,
+    mcp_tokens, modules, oidc_provider, orgs, planning, previews, projects,
     proxy_gateway, server, storage, system, webhooks,
 )
 from .config import get_settings
@@ -117,6 +118,8 @@ def create_app() -> FastAPI:
     app.include_router(storage.router, prefix=API_PREFIX)
     # 사내 MCP 서버 — 엔드포인트별로 필요한 기능만 게이트한다(ops=deploy, code=workspace).
     app.include_router(mcp_servers.router, prefix=API_PREFIX)
+    # 개인 MCP 토큰 발급·폐기 — MCP 서버 자체와 달리 콘솔(로그인 세션)이 쓰는 경로다.
+    app.include_router(mcp_tokens.router, prefix=API_PREFIX)
     if settings.oidc_provider_enabled:  # /paas/.well-known/openid-configuration, /paas/oauth2/*
         app.include_router(oidc_provider.router, prefix=PAAS_PREFIX)
         # 발급자 주소는 클라이언트(Gitea 등)가 조회한 URL과 정확히 같아야 하고, 그

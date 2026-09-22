@@ -124,6 +124,31 @@ class EnvVarSet(BaseModel):
     is_secret: bool = True
 
 
+class McpTokenCreate(BaseModel):
+    # 어느 기계·어느 도구에 넣은 토큰인지 — 폐기할 때 고를 수 있어야 한다.
+    label: str = ""
+    # 주면 그 프로젝트의 MCP 주소까지 함께 돌려준다(붙여 넣을 설정을 화면이 만들어 준다).
+    project: str | None = None
+
+
+class McpTokenIssued(BaseModel):
+    """발급 응답 — 원문은 여기 **한 번만** 실린다(해시만 저장하므로 다시 볼 수 없다)."""
+
+    token: str
+    url: str = ""
+    ttl_days: int
+
+
+class McpTokenOut(BaseModel):
+    id: int
+    label: str
+    created_at: datetime
+    expires_at: datetime
+    last_used_at: datetime | None = None
+    # 만료된 행도 남긴다 — "사라졌다"가 아니라 "만료됐다"로 보여야 다시 발급할 줄 안다.
+    is_expired: bool = False
+
+
 class LlmProviderCreate(BaseModel):
     name: str
     kind: str = Field(pattern=r"^(openai|anthropic|aws|azure|gcp|internal)$")
