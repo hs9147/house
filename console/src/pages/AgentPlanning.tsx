@@ -10,7 +10,7 @@ import { fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
 import type {
   BuildTaskOut, BuildTaskSync, ComplianceOut, PlanArtifactContent, PlanArtifactOut,
-  PlanBuildEvent, PlanMergeOut, PlanSessionOut, PlanSessionSummary, ProjectOut,
+  PlanMergeOut, PlanSessionOut, PlanSessionSummary, ProjectOut,
 } from '../lib/types';
 import { CreateModal } from './Projects';
 
@@ -95,7 +95,6 @@ export default function AgentPlanning() {
   const [error, setError] = useState('');
   // 취소처럼 실패가 아닌 알림 — 빨간 경고와 섞으면 사고인지 아닌지 구분되지 않는다.
   const [notice, setNotice] = useState('');
-  const [buildEvents, setBuildEvents] = useState<PlanBuildEvent[]>([]);
   const [gitResult, setGitResult] = useState<PlanArtifactOut | null>(null);
   const [tasks, setTasks] = useState<BuildTaskOut[]>([]);
   const [taskSync, setTaskSync] = useState<BuildTaskSync | null>(null);
@@ -385,11 +384,9 @@ export default function AgentPlanning() {
       '기본 브랜치를 최신화하고, 보고된 커밋이 거기에 반영됐는지 판정합니다.',
     );
     try {
-      const [s, sync] = await Promise.all([
-        api.planBuildStatus(session.id, signal),
-        api.syncPlanTasks(session.id, signal),
-      ]);
-      setBuildEvents(s.events);
+      // 진행 현황의 판정은 이 호출 하나가 한다(리포를 보고 판정한다). 감사 이벤트 목록을
+      // 함께 받던 호출은 그 목록을 화면에서 없애면서 같이 뺐다.
+      const sync = await api.syncPlanTasks(session.id, signal);
       setTasks(sync.tasks);
       setTaskSync(sync);
     } catch (err) {
@@ -742,13 +739,8 @@ export default function AgentPlanning() {
                     지금 할 일 하나만 강조한다: 생성 → 단계 확정 → 브랜치 머지 → 진행 현황.
                     지난 단계 버튼은 남겨 두되(재생성·재머지가 필요할 수 있다) 강조는 뺀다. */}
                 <div className="row" style={{ gap: 8, marginTop: 12 }}>
-                  <button
-                    className={taskStep === 'generate' ? 'primary small' : 'secondary small'}
-                    onClick={generateTasks}
-                    disabled={busy}
-                  >
-                    {tasks.length === 0 ? '확정 산출물에서 작업 지시 생성' : '작업 지시 재생성'}
-                  </button>
+                  {/* 작업 지시 생성·재생성은 산출물 편집기 아래 '이 단계 확정' 옆으로
+                      옮겼다 — 문서를 만들고 확정하는 일이라 그 문서 옆에 있어야 한다. */}
                   {/* 작업 지시까지 나오면 다음은 실제 구현이다 — 이 세션의 프로젝트
                       리포를 바로 VS Code로 받게 한다. 세션에는 project_id만 있으므로
                       목록에서 프로젝트를 찾아 넘긴다. */}
@@ -912,6 +904,17 @@ export default function AgentPlanning() {
                 >
                   ✅ 이 단계 확정 (Gitea 커밋)
                 </button>
+                {/* 작업 지시는 대화가 아니라 이 버튼이 문서를 만든다 — 만드는 버튼과
+                    확정하는 버튼이 같은 줄에 있어야 순서가 보인다. */}
+                {activeStage === TASK_STAGE && (
+                  <button
+                    className={taskStep === 'generate' ? 'primary' : 'secondary'}
+                    onClick={generateTasks}
+                    disabled={busy}
+                  >
+                    {tasks.length === 0 ? '확정 산출물에서 작업 지시 생성' : '작업 지시 재생성'}
+                  </button>
+                )}
                 {gitResult?.git_action && (
                   <span className="mutedtext" style={{ fontSize: 12 }}>
                     {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
@@ -936,9 +939,6 @@ export default function AgentPlanning() {
                 <button className="secondary small" onClick={runCompliance} disabled={busy}>
                   🔍 LLM·모듈 사용 검증
                 </button>
-                <button className="secondary small" onClick={loadBuildStatus} disabled={busy}>
-                  새로고침
-                </button>
               </div>
             </div>
             <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
@@ -946,20 +946,6 @@ export default function AgentPlanning() {
               아래에 집계되고, 커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 모듈을 쓰는지도
               여기서 검증합니다.
             </p>
-
-            <div style={{ fontSize: 12, fontWeight: 600, margin: '12px 0 4px' }}>수집된 이벤트</div>
-            {buildEvents.length === 0 ? (
-              <p className="mutedtext" style={{ fontSize: 12 }}>수집된 이벤트가 없습니다.</p>
-            ) : (
-              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12 }}>
-                {buildEvents.map((e, i) => (
-                  <li key={i}>
-                    <span className="mono">{e.action}</span> · {e.actor}
-                    {e.created_at && <span className="mutedtext"> · {e.created_at}</span>}
-                  </li>
-                ))}
-              </ul>
-            )}
 
             <div style={{ fontSize: 12, fontWeight: 600, margin: '16px 0 4px' }}>
               LLM·모듈 사용 검증
