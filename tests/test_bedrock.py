@@ -509,3 +509,46 @@ def test_login_endpoint_is_admin_only(aws_config, monkeypatch):
     assert r.status_code == 200, r.text
     assert r.json()["user_code"] == "AAAA-BBBB"
     assert c.post("/paas/api/v1/llm/aws/login?profile=bedrock-dev").status_code in (401, 403)
+
+
+def test_converse_sends_the_output_token_limit(monkeypatch, fresh_settings):
+    """안 주면 모델 기본값이 적용되고, 그 값이 작으면 산출물이 문장 중간에서 잘린다."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("PAAS_LLM_MAX_OUTPUT_TOKENS", "4096")
+    get_settings.cache_clear()
+    monkeypatch.setattr(bedrock, "botocore_available", lambda: True)
+    monkeypatch.setattr(bedrock, "_frozen", lambda profile: object())
+    seen = {}
+
+    def fake_post(url, payload, frozen, region, timeout):
+        seen.update(json.loads(payload))
+        return {"output": {"message": {"content": [{"text": "ok"}]}}, "stopReason": "end_turn"}
+
+    monkeypatch.setattr(bedrock, "_post_signed", fake_post)
+    bedrock.converse(profile="p", region="us-east-1", model_id="m",
+                     messages=[{"role": "user", "content": "x"}])
+    assert seen["inferenceConfig"] == {"maxTokens": 4096}
+
+
+def test_converse_reports_truncation_as_finish_reason(monkeypatch, fresh_settings):
+    """잘림 판정을 호출부 한 곳(llm.chat_completion)에서 하도록 stopReason을 옮긴다."""
+    monkeypatch.setattr(bedrock, "botocore_available", lambda: True)
+    monkeypatch.setattr(bedrock, "_frozen", lambda profile: object())
+    monkeypatch.setattr(bedrock, "_post_signed", lambda *a: {
+        "output": {"message": {"content": [{"text": "중간에서"}]}}, "stopReason": "max_tokens"})
+    out = bedrock.converse(profile="p", region="us-east-1", model_id="m",
+                           messages=[{"role": "user", "content": "x"}])
+    assert out["choices"][0]["finish_reason"] == "max_tokens"
+
+
+def test_truncated_bedrock_reply_surfaces_through_chat_completion(monkeypatch, fresh_settings):
+    """Bedrock 경로도 OpenAI 경로와 같은 예외로 드러나야 한다 — 화면이 하나의 문구를 쓴다."""
+    provider = LlmProvider(name="bd", kind=LlmProviderKind.aws, model="m",
+                           base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+                           aws_profile="bedrock-dev")
+    monkeypatch.setattr(bedrock, "converse", lambda **kw: {
+        "choices": [{"message": {"content": "부분"}, "finish_reason": "max_tokens"}]})
+    with pytest.raises(llm_service.LlmTruncated) as cut:
+        llm_service.chat_completion(provider, [{"role": "user", "content": "x"}])
+    assert cut.value.partial == "부분"

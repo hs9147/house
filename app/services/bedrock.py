@@ -26,6 +26,8 @@ from urllib.parse import quote
 
 import httpx
 
+from ..config import get_settings
+
 DEFAULT_REGION = "us-east-1"
 # bedrock-runtime.us-east-1.amazonaws.com → us-east-1
 _REGION_IN_HOST = re.compile(r"bedrock[a-z-]*\.([a-z]{2}-[a-z]+-\d+)\.", re.IGNORECASE)
@@ -373,7 +375,9 @@ def _from_converse(data: dict) -> dict:
     reply: dict = {"role": "assistant", "content": "\n".join(texts)}
     if calls:
         reply["tool_calls"] = calls
-    return {"choices": [{"message": reply}]}
+    # stopReason을 OpenAI의 finish_reason 자리로 옮긴다 — 잘림 판정을 호출부 한 곳에서
+    # 하기 위해서다(llm.chat_completion). Bedrock은 "max_tokens", OpenAI는 "length"다.
+    return {"choices": [{"message": reply, "finish_reason": data.get("stopReason") or ""}]}
 
 
 def _tool_config(tools: list[dict]) -> dict:
@@ -406,6 +410,11 @@ def converse(
     frozen = _frozen(profile)
     system, converse_messages = _to_converse(messages)
     body: dict = {"messages": converse_messages}
+    # 출력 한도를 명시한다 — 안 주면 모델 기본값이 적용되고, 그 값이 작으면 산출물이
+    # 문장 중간에서 잘린다(OpenAI 경로와 같은 이유·같은 설정).
+    limit = get_settings().llm_max_output_tokens
+    if limit > 0:
+        body["inferenceConfig"] = {"maxTokens": limit}
     if system:
         body["system"] = system
     if tools:

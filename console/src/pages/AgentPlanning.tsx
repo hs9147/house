@@ -21,6 +21,7 @@ interface Msg {
   contextFiles?: string[];
   boundModules?: string[];
   compacted?: boolean;
+  truncated?: boolean;
 }
 
 // 진행 중인 서버 작업. 팝업이 화면을 덮어 처리 중에는 다른 조작을 받지 않는다 —
@@ -317,6 +318,7 @@ export default function AgentPlanning() {
         role: 'assistant', content: res.summary,
         usedModules: res.used_modules, contextFiles: res.context_files,
         boundModules: res.bound_modules, compacted: res.compacted,
+        truncated: res.truncated,
       }]);
       setDraft(res.document); // 문서 본문은 산출물 란으로
       setDraftSource('session');
@@ -677,6 +679,20 @@ export default function AgentPlanning() {
                       <div className="mutedtext" style={{ fontSize: 11, marginBottom: 4 }}>
                         {m.role === 'user' ? `👤 ${userLabel}` : '🧭 기획 에이전트'}
                       </div>
+                      {/* 잘린 문서를 확정하면 문서 끝의 C4 블록이 사라진 채 확정된다 —
+                          실제로 그렇게 두 단계가 확정된 사례가 있다. 눈에 띄게 세운다. */}
+                      {m.truncated && (
+                        <div
+                          style={{
+                            marginBottom: 8, padding: '6px 8px', borderRadius: 6, fontSize: 12,
+                            background: 'rgba(245, 158, 11, 0.15)', color: '#f59e0b',
+                          }}
+                        >
+                          ⚠️ 응답이 길이 제한에서 잘렸습니다 — 아래 산출물은 <b>문장 중간에서
+                          끝난 부분 결과</b>입니다. 확정하지 말고 범위를 좁혀 다시 생성하세요
+                          (문서 끝의 C4 다이어그램 블록이 빠집니다).
+                        </div>
+                      )}
                       {m.usedModules && m.usedModules.length > 0 && (
                         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
                           <span className="mutedtext" style={{ fontSize: 11 }}>참조된 모듈:</span>

@@ -85,6 +85,22 @@ def resolve_base_url(base_url: str, db: Session | None = None) -> str:
 MAX_TOOL_ROUNDS = 6
 
 
+class LlmTruncated(RuntimeError):
+    """응답이 길이 제한에서 끊겼다 — 받은 부분을 함께 들고 간다.
+
+    버리지 않는 이유: 사람이 쓴 요청과 모델이 만든 본문은 되살릴 수 없고, 잘렸다는 사실만
+    알면 다시 생성하거나 범위를 좁혀 이어갈 수 있다. 조용히 완전한 것처럼 저장하는 것이
+    가장 나쁘다 — 문서 끝의 C4 블록이 사라진 채 확정된다.
+    """
+
+    def __init__(self, partial: str):
+        super().__init__(
+            "LLM 응답이 길이 제한에서 잘렸습니다 — 문서가 문장 중간에서 끝납니다. "
+            "PAAS_LLM_MAX_OUTPUT_TOKENS를 늘리거나 요청 범위를 좁혀 다시 생성하세요."
+        )
+        self.partial = partial
+
+
 def chat_completion(
     provider: LlmProvider,
     messages: list[dict],
@@ -108,7 +124,13 @@ def chat_completion(
         )
     else:
         data = _openai_style_call(provider, messages, tools, db)
-    message = data["choices"][0]["message"]
+    choice = data["choices"][0]
+    message = choice["message"]
+    # **잘린 응답을 완전한 것처럼 돌려주지 않는다.** 예전에는 finish_reason을 아예 읽지
+    # 않아서, 길이 제한에서 끊긴 산출물이 그대로 저장됐다(supplier-pool: 기획서가
+    # "### 2.1 해결하려는 문제 / 구매·소싱 담당"에서 끝났다). C4 블록은 문서 끝에 두라고
+    # 지시하므로 잘릴 때 가장 먼저 사라진다 — 화면에는 "시각화 미작성"으로만 보였다.
+    truncated = str(choice.get("finish_reason") or "").lower() in ("length", "max_tokens")
 
     tool_calls = message.get("tool_calls")
     if tool_calls and tool_executor and _round < MAX_TOOL_ROUNDS:
@@ -127,7 +149,10 @@ def chat_completion(
     # content가 null인 응답(길이 초과·거절·도구 호출만 있는 경우)이 있다. 호출부가
     # 문자열을 전제로 후처리하므로 여기서 빈 문자열로 떨어뜨린다 — None이 새 나가면
     # 엉뚱한 자리에서 AttributeError로 터진다.
-    return message.get("content") or ""
+    text = message.get("content") or ""
+    if truncated:
+        raise LlmTruncated(text)
+    return text
 
 
 def uses_aws_credentials(provider: LlmProvider) -> bool:
@@ -196,6 +221,11 @@ def _openai_style_call(
                 url = f"{url.rstrip('/')}/v1/chat/completions"
 
     payload = {"model": provider.model, "messages": messages}
+    # 보내지 않으면 프로바이더 기본값이 적용되고, 그 값이 작으면 산출물이 잘린다.
+    # 0은 "보내지 않는다" — 이 파라미터를 거부하는 엔드포인트용 탈출구.
+    limit = get_settings().llm_max_output_tokens
+    if limit > 0:
+        payload["max_tokens"] = limit
     if tools:
         payload["tools"] = tools
     return _post_chat(url, headers, payload)

@@ -221,6 +221,9 @@ export interface PlanMessageReply {
   context_files?: string[]; // 본문까지 참조한 리포 파일
   bound_modules?: string[]; // 솔루션 구성 단계에서 이번에 바인딩된 모듈
   compacted?: boolean; // 압축된 컨텍스트로 생성됐는지
+  // 길이 제한에서 잘렸는지. 부분 결과는 그대로 온다 — 화면이 경고해 잘린 문서를
+  // 확정하지 않게 한다(조용히 저장되면 문서 끝의 C4 블록이 사라진 채 확정된다).
+  truncated?: boolean;
 }
 
 export interface PlanArtifactContent {

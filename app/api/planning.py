@@ -355,10 +355,15 @@ async def post_plan_message(
             db, project, constraints.get("available_resources") or [], key.name, bound_modules,
         )
 
+    # 길이 제한에서 잘렸는지 — 부분 결과는 버리지 않고 경고와 함께 편집기로 보낸다.
+    # 조용히 완전한 것처럼 저장하면 문서 끝의 C4 블록이 사라진 채 확정된다(실측 사례).
+    truncated = False
     try:
         reply = await asyncio.to_thread(
             llm_service.chat_completion, provider, messages, db, tools or None, tool_executor,
         )
+    except llm_service.LlmTruncated as cut:
+        reply, truncated = cut.partial, True
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"llm call failed: {e}")
 
@@ -396,7 +401,7 @@ async def post_plan_message(
     db.commit()
     return PlanMessageReply(summary=summary, document=document, used_modules=used_modules,
                             context_files=context_files, bound_modules=bound_modules,
-                            compacted=body.compact)
+                            compacted=body.compact, truncated=truncated)
 
 
 @router.post("/plan/sessions/{session_id}/stages/{stage}/confirm", response_model=PlanArtifactOut)

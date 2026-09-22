@@ -1,5 +1,7 @@
 """services/llm.py의 chat_completion — tools/tool_executor를 받으면 OpenAI 호환
 tool-call 프로토콜로 모델↔도구 왕복 후 최종 텍스트만 반환한다."""
+import pytest
+
 from app.services import llm as llm_service
 from app.models import LlmProvider, LlmProviderKind
 
@@ -87,3 +89,60 @@ def test_chat_completion_without_tool_executor_ignores_tool_calls(monkeypatch):
     )
     reply = llm_service.chat_completion(_provider(), [{"role": "user", "content": "hi"}], tools=TOOLS)
     assert reply == ""  # content=null → 빈 문자열(호출부가 문자열을 전제로 후처리한다)
+
+
+def test_sends_the_output_token_limit(monkeypatch, fresh_settings):
+    """보내지 않으면 프로바이더 기본값이 적용된다 — 실측에서 그 값이 작아 산출물이 잘렸다."""
+    from app.config import get_settings
+    from app.models import LlmProvider, LlmProviderKind
+    from app.services import llm as llm_service
+
+    monkeypatch.setenv("PAAS_LLM_MAX_OUTPUT_TOKENS", "4096")
+    get_settings.cache_clear()
+    sent = {}
+    monkeypatch.setattr(llm_service, "_post_chat", lambda url, headers, payload: (
+        sent.update(payload), {"choices": [{"message": {"content": "ok"}}]})[1])
+
+    provider = LlmProvider(name="p", kind=LlmProviderKind.openai, model="m",
+                           base_url="https://api.example.com")
+    llm_service.chat_completion(provider, [{"role": "user", "content": "x"}])
+    assert sent["max_tokens"] == 4096
+
+    # 0은 "보내지 않는다" — 이 파라미터를 거부하는 엔드포인트용 탈출구다
+    monkeypatch.setenv("PAAS_LLM_MAX_OUTPUT_TOKENS", "0")
+    get_settings.cache_clear()
+    sent.clear()
+    llm_service.chat_completion(provider, [{"role": "user", "content": "x"}])
+    assert "max_tokens" not in sent
+
+
+def test_truncated_reply_is_raised_with_the_partial_text(monkeypatch, fresh_settings):
+    """잘린 응답을 완전한 것처럼 돌려주면 그대로 확정된다.
+
+    실측(supplier-pool): 기획서가 "### 2.1 해결하려는 문제 / 구매·소싱 담당"에서 끝났고
+    문서 끝의 C4 블록이 사라졌다 — 화면에는 "시각화 미작성"으로만 보였다. 부분 결과는
+    버리지 않는다(사람이 쓴 요청과 모델이 만든 본문을 되살릴 수 없다).
+    """
+    from app.models import LlmProvider, LlmProviderKind
+    from app.services import llm as llm_service
+
+    monkeypatch.setattr(llm_service, "_post_chat", lambda *a: {
+        "choices": [{"message": {"content": "# 문서\n중간에서"}, "finish_reason": "length"}]})
+    provider = LlmProvider(name="p", kind=LlmProviderKind.openai, model="m",
+                           base_url="https://api.example.com")
+    with pytest.raises(llm_service.LlmTruncated) as cut:
+        llm_service.chat_completion(provider, [{"role": "user", "content": "x"}])
+    assert cut.value.partial == "# 문서\n중간에서"
+    assert "길이 제한" in str(cut.value)
+
+
+def test_normal_finish_reason_is_not_treated_as_truncation(monkeypatch, fresh_settings):
+    from app.models import LlmProvider, LlmProviderKind
+    from app.services import llm as llm_service
+
+    provider = LlmProvider(name="p", kind=LlmProviderKind.openai, model="m",
+                           base_url="https://api.example.com")
+    for reason in ("stop", "end_turn", None, ""):
+        monkeypatch.setattr(llm_service, "_post_chat", lambda *a, r=reason: {
+            "choices": [{"message": {"content": "완결"}, "finish_reason": r}]})
+        assert llm_service.chat_completion(provider, [{"role": "user", "content": "x"}]) == "완결"

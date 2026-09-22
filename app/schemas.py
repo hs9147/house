@@ -226,6 +226,9 @@ class PlanMessageReply(BaseModel):
     context_files: list[str] = []  # 이번 요청에서 본문까지 참조한 리포 파일
     bound_modules: list[str] = []  # 솔루션 구성 단계에서 이번에 바인딩된 모듈
     compacted: bool = False  # 압축된 컨텍스트로 생성됐는지
+    # 길이 제한에서 잘렸는지. 부분 결과는 그대로 싣는다 — 버리면 사람이 쓴 요청과 모델이
+    # 만든 본문을 되살릴 수 없다. 화면이 경고를 띄워 잘린 문서를 확정하지 않게 한다.
+    truncated: bool = False
 
 
 class PlanArtifactContentOut(BaseModel):
