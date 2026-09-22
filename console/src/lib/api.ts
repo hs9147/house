@@ -395,6 +395,14 @@ export const api = {
       models: { id: string; name: string; kind: 'inference_profile' | 'on_demand' }[];
     }>('GET', `/llm/aws/models?profile=${encodeURIComponent(profile)}`
       + `&base_url=${encodeURIComponent(base_url)}`),
+  // 서버에서 SSO 로그인을 시작한다 — 완전 무인은 불가능하다(사람이 브라우저에서 승인해야
+  // 토큰이 나온다). 없애는 것은 서버에 원격 접속해 명령을 치는 일이다. 토큰은 서비스 계정의
+  // 홈에 떨어지므로 "내 계정으로 로그인했는데 서비스는 못 본다"도 같이 풀린다.
+  startAwsSsoLogin: (profile: string) =>
+    request<{
+      profile: string; verification_url: string; user_code: string;
+      log_path: string; log_tail: string;
+    }>('POST', `/llm/aws/login?profile=${encodeURIComponent(profile)}`),
   listAwsProfiles: () => request<{
     botocore_available: boolean;
     config_path: string; // 어디를 읽었는지 — 서비스 계정이면 홈이 달라 목록이 빈다

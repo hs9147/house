@@ -400,3 +400,61 @@ def test_profiles_endpoint_carries_the_interpreter(aws_config):
     body = c.get("/paas/api/v1/llm/aws/profiles", headers=ADMIN).json()
     assert body["python"].endswith(("python.exe", "python", "python3"))
     assert "botocore_available" in body
+
+
+def test_sso_login_without_the_cli_says_so(monkeypatch, tmp_path):
+    """CLI가 없으면 시작조차 못 한다 — botocore로는 device authorization을 사람에게
+    보여 줄 방법이 없다. '실패'로 뭉개지 않고 무엇이 없는지 말한다."""
+    monkeypatch.setattr(bedrock, "aws_cli_path", lambda: "")
+    with pytest.raises(bedrock.BedrockError, match="aws CLI"):
+        bedrock.start_sso_login("p", tmp_path / "logs")
+
+
+def test_sso_login_returns_the_verification_url_and_code(monkeypatch, tmp_path):
+    """승인 주소와 코드를 로그에서 뽑아 화면으로 올린다 — 서버에 접속해 읽게 두지 않는다."""
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(bedrock, "aws_cli_path", lambda: "aws.exe")
+    monkeypatch.setattr(bedrock, "LOGIN_WAIT_SECONDS", 2)
+
+    class _Popen:
+        def __init__(self, argv, **kw):
+            # CLI가 찍는 모양(버전마다 문구가 달라 형태로 찾는다)
+            kw["stdout"].write(
+                "Attempting to automatically open the SSO authorization page...\n"
+                "https://device.sso.ap-northeast-2.amazonaws.com/\n"
+                "Then enter the code:\n\nWXYZ-ABCD\n")
+            kw["stdout"].flush()
+
+    monkeypatch.setattr(bedrock.subprocess, "Popen", _Popen)
+    out = bedrock.start_sso_login("bedrock-dev", log_dir)
+    assert out["verification_url"] == "https://device.sso.ap-northeast-2.amazonaws.com/"
+    assert out["user_code"] == "WXYZ-ABCD"
+    assert out["profile"] == "bedrock-dev"
+
+
+def test_sso_login_shows_the_log_when_it_cannot_parse(monkeypatch, tmp_path):
+    """CLI 문구가 바뀌거나 오류면 주소를 못 뽑는다 — 판정 불가를 감추면 볼 것이 없다."""
+    monkeypatch.setattr(bedrock, "aws_cli_path", lambda: "aws.exe")
+    monkeypatch.setattr(bedrock, "LOGIN_WAIT_SECONDS", 1)
+
+    class _Popen:
+        def __init__(self, argv, **kw):
+            kw["stdout"].write("Error loading SSO configuration: profile not found\n")
+            kw["stdout"].flush()
+
+    monkeypatch.setattr(bedrock.subprocess, "Popen", _Popen)
+    out = bedrock.start_sso_login("nope", tmp_path / "logs")
+    assert out["verification_url"] == ""
+    assert "profile not found" in out["log_tail"]
+
+
+def test_login_endpoint_is_admin_only(aws_config, monkeypatch):
+    monkeypatch.setattr(bedrock, "start_sso_login", lambda profile, log_dir: {
+        "profile": profile, "verification_url": "https://x/", "user_code": "AAAA-BBBB",
+        "log_path": "", "log_tail": "",
+    })
+    c = TestClient(create_app())
+    r = c.post("/paas/api/v1/llm/aws/login?profile=bedrock-dev", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["user_code"] == "AAAA-BBBB"
+    assert c.post("/paas/api/v1/llm/aws/login?profile=bedrock-dev").status_code in (401, 403)

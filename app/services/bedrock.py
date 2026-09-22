@@ -17,7 +17,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -206,6 +209,69 @@ def _freeze(creds, profile: str):
         )
     except exc.BotoCoreError as e:
         raise BedrockError(f"AWS 자격증명 갱신에 실패했습니다 (프로필 '{profile}'): {e}")
+
+
+# `aws sso login --no-browser` 출력에서 뽑는 것들. 버전마다 문구가 달라지므로 형태로 찾는다.
+_LOGIN_URL_RE = re.compile(r"https://\S+")
+_LOGIN_CODE_RE = re.compile(r"\b([A-Z]{4}-[A-Z]{4})\b")
+LOGIN_WAIT_SECONDS = 20
+
+
+def aws_cli_path() -> str:
+    """서버의 aws CLI 경로. 없으면 빈 문자열 — SSO 로그인은 CLI가 해야 한다(botocore에는
+    device authorization 흐름을 사람에게 보여 줄 방법이 없다)."""
+    return shutil.which("aws") or ""
+
+
+def start_sso_login(profile: str, log_dir: Path) -> dict:
+    """서버에서 `aws sso login --no-browser`를 띄우고 승인용 주소·코드를 돌려준다.
+
+    **완전 무인은 불가능하다.** SSO는 사람이 브라우저에서 승인해야 토큰이 나온다. 대신
+    서버에 원격 접속해 명령을 치는 일은 없앤다: 플랫폼이 로그인을 시작하고, 사람은 화면에
+    뜬 주소를 열어 코드를 승인한다. 토큰은 **서비스 계정의 홈**에 떨어지므로(그 프로세스가
+    받는다) "내 계정으로 로그인했는데 서비스는 못 본다"는 문제도 같이 풀린다.
+
+    프로세스는 승인을 기다리며 계속 돈다 — 우리는 주소를 읽어 내면 바로 돌아오고, 성공
+    여부는 호출부가 profile_status를 다시 물어 확인한다(폴링). 주소를 못 읽어도 로그 꼬리를
+    함께 돌려준다: 판정 불가를 감추면 사람이 볼 것이 아무것도 없다.
+    """
+    exe = aws_cli_path()
+    if not exe:
+        raise BedrockError(
+            "서버에 aws CLI가 없어 SSO 로그인을 시작할 수 없습니다 "
+            "(AWS CLI v2를 설치하거나 서버에서 직접 `aws sso login`을 실행하세요)."
+        )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "aws-sso-login.log"
+    with log_path.open("w", encoding="utf-8") as log:
+        log.write(f"[paas] aws sso login --profile {profile} --no-browser\n")
+        log.flush()
+        # 콘솔 창을 띄우지 않는다. DETACHED_PROCESS는 쓰지 않는다 — 실측에서 그 플래그를
+        # 주면 자식이 조용히 죽었다(services/powershell_daemon.py에 같은 기록이 있다).
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(
+            [exe, "sso", "login", "--profile", profile, "--no-browser"],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            creationflags=flags,
+        )
+    # 주소가 찍힐 때까지 짧게 기다린다 — 바로 읽으면 빈 파일이다.
+    url = code = ""
+    deadline = time.monotonic() + LOGIN_WAIT_SECONDS
+    while time.monotonic() < deadline and not url:
+        time.sleep(0.5)
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        found = _LOGIN_URL_RE.search(text)
+        url = found.group(0).rstrip(".,)") if found else ""
+        matched = _LOGIN_CODE_RE.search(text)
+        code = matched.group(1) if matched else code
+    return {
+        "profile": profile,
+        "verification_url": url,
+        "user_code": code,
+        "log_path": str(log_path),
+        # 주소를 못 뽑았을 때 사람이 볼 것 — 문구가 바뀌었는지, 오류인지 여기서 드러난다.
+        "log_tail": log_path.read_text(encoding="utf-8", errors="replace")[-1500:],
+    }
 
 
 def region_from_url(base_url: str, profile: str = "") -> str:

@@ -28,6 +28,38 @@ export default function Providers() {
     [form.kind, form.aws_profile],
   );
   const modelOptions = awsModels.data?.models ?? [];
+  // 만료됐을 때 서버에서 SSO 로그인을 시작한다. 승인은 사람이 브라우저에서 해야 하므로
+  // (SSO는 그렇게 설계돼 있다) 주소·코드를 띄우고, 승인이 끝났는지는 프로필 상태를 다시
+  // 물어 확인한다 — 이 응답만으로는 알 수 없다(프로세스가 기다리는 중이다).
+  const [login, setLogin] = useState<{ url: string; code: string; tail: string } | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+
+  const startLogin = async () => {
+    if (!form.aws_profile) return;
+    setLoggingIn(true);
+    setLogin(null);
+    try {
+      const r = await api.startAwsSsoLogin(form.aws_profile);
+      setLogin({ url: r.verification_url, code: r.user_code, tail: r.log_tail });
+      if (r.verification_url) window.open(r.verification_url, '_blank', 'noopener');
+      // 승인을 기다린다 — 되면 프로필 상태가 ok로 바뀌고 모델 목록도 따라 열린다.
+      // **직접 물어본다.** useApi의 reload()는 Promise가 아니고, 이 루프가 잡고 있는
+      // awsProfiles.data는 렌더 시점 값으로 굳어서 영원히 바뀌지 않는다(종료 조건이 안 걸린다).
+      // 무한히 돌지 않는다: 2분 안에 안 되면 사람이 다시 누르는 편이 낫다.
+      for (let i = 0; i < 24; i += 1) {
+        await new Promise((done) => setTimeout(done, 5000));
+        const fresh = await api.listAwsProfiles();
+        if (fresh.profiles.find((p) => p.name === form.aws_profile)?.ok) {
+          awsProfiles.reload();  // 화면(상태·모델 목록)을 갱신한다
+          break;
+        }
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoggingIn(false);
+    }
+  };
   // 프로필을 고르면 Endpoint는 리전에서 정해진다 — 그때만 입력을 선택으로 푼다.
   const endpointFromProfile = form.kind === 'aws' && Boolean(form.aws_profile);
   const [busy, setBusy] = useState(false);
@@ -181,6 +213,13 @@ export default function Providers() {
             <div className="row">
               <label className="field" style={{ flex: 1 }}>
                 모델
+                {/* 목록을 불러오는 동안 입력칸이 그대로 보이면 "콤보박스가 안 나온다"로
+                    읽힌다 — 무엇을 기다리는지 말한다. */}
+                {form.kind === 'aws' && form.aws_profile && awsModels.loading && (
+                  <span className="mutedtext" style={{ fontWeight: 400, fontSize: 12 }}>
+                    {' '}— 계정에서 모델 목록을 불러오는 중…
+                  </span>
+                )}
                 {modelOptions.length > 0 ? (
                   <select
                     className="mono"
@@ -210,7 +249,9 @@ export default function Providers() {
                     onChange={(e) => set('model', e.target.value)}
                     required
                     placeholder={form.kind === 'aws'
-                      ? '프로필을 고르면 계정에서 모델 목록을 받아옵니다'
+                      ? (form.aws_profile
+                        ? '모델 목록을 받지 못했습니다 — ID를 직접 입력하세요'
+                        : '프로필을 고르면 계정에서 모델 목록을 받아옵니다')
                       : undefined}
                   />
                 )}
@@ -297,6 +338,37 @@ export default function Providers() {
                     {!selectedProfile.reason.includes(selectedProfile.login_command) && (
                       <>{' '}서버에서{' '}
                         <span className="mono">{selectedProfile.login_command}</span></>
+                    )}
+                    {/* 서버에 원격 접속해 명령을 치지 않아도 되게 — 플랫폼이 로그인을
+                        시작하고 사람은 브라우저에서 코드만 승인한다. */}
+                    <button
+                      type="button"
+                      className="secondary small"
+                      style={{ marginLeft: 8 }}
+                      disabled={loggingIn}
+                      onClick={startLogin}
+                    >
+                      {loggingIn ? '승인 대기 중...' : '서버에서 SSO 로그인'}
+                    </button>
+                    {login && (
+                      <div style={{ marginTop: 6 }}>
+                        {login.url ? (
+                          <>
+                            브라우저에서 <a href={login.url} target="_blank" rel="noopener">
+                              {login.url}
+                            </a>
+                            {login.code && <> 를 열고 코드 <b className="mono">{login.code}</b>를 승인하세요.</>}
+                            {' '}승인되면 이 화면이 스스로 갱신됩니다.
+                          </>
+                        ) : (
+                          /* 주소를 못 뽑았다 — CLI 문구가 바뀌었거나 오류다. 감추지 않는다. */
+                          <>승인 주소를 읽지 못했습니다. 서버 로그:
+                            <pre className="mono" style={{ fontSize: 11, whiteSpace: 'pre-wrap' }}>
+                              {login.tail}
+                            </pre>
+                          </>
+                        )}
+                      </div>
                     )}</>
                 ) : selectedProfile.ok === null ? (
                   <>❓ {selectedProfile.reason}</>

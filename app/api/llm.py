@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import audit
+from ..config import get_settings
 from ..db import get_db
 from ..models import (
     ApiKey,
@@ -97,6 +98,32 @@ def aws_profiles(_: ApiKey = Depends(require_admin)):
         **bedrock.config_state(),
         "profiles": [{**entry, **bedrock.profile_status(entry["name"])} for entry in profiles],
     }
+
+
+@router.post("/llm/aws/login")
+def aws_sso_login(
+    profile: str,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """서버에서 이 프로필의 SSO 로그인을 시작하고 승인용 주소·코드를 돌려준다.
+
+    **완전 무인은 안 된다.** SSO는 사람이 브라우저에서 승인해야 토큰이 나온다. 없애는 것은
+    "서버에 원격 접속해 명령을 치는 일"이다 — 플랫폼이 로그인을 시작하고, 사람은 화면에 뜬
+    주소를 열어 코드를 승인한다. 토큰은 그 프로세스가 받으므로 **서비스 계정의 홈**에
+    떨어진다: "내 계정으로 로그인했는데 서비스는 못 본다"는 문제도 같이 풀린다.
+
+    승인이 끝났는지는 이 응답으로 알 수 없다(프로세스가 기다리는 중이다) — 호출부가
+    /llm/aws/profiles를 다시 물어 ok가 되는지로 확인한다.
+    """
+    try:
+        result = bedrock.start_sso_login(
+            profile, get_settings().resolved_repo_root / "logs")
+    except bedrock.BedrockError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    audit.record(db, admin.name, "aws.sso.login", profile,
+                 {"url_found": bool(result["verification_url"])})
+    return result
 
 
 @router.get("/llm/aws/models")
