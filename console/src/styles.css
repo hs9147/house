@@ -341,7 +341,12 @@ pre.logbox {
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.03);
 }
-.c4-group-label { padding: 7px 12px; font-size: 10px; font-weight: 600; }
+/* 경계 이름은 박스 폭을 넘길 수 있다(code 레벨은 파일 경로가 이름이다) — 줄이고
+   전체 값은 title로 남긴다. 이름이 길어 옆 박스를 덮는 것이 더 나쁘다. */
+.c4-group-label {
+  padding: 7px 12px; font-size: 10px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* 연결점은 배치 계산에만 쓰고 보이지 않게 둔다 — 손으로 잇는 그림이 아니다 */
 .c4-handle { opacity: 0; }
 .react-flow__edge.c4-edge .react-flow__edge-path { stroke: rgba(255, 255, 255, 0.3); stroke-width: 1.5; }

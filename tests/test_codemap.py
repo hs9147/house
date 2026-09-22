@@ -112,3 +112,25 @@ def test_codemap_endpoint(monkeypatch, tmp_path):
     assert r.status_code == 200, r.text
     files = {f["path"] for f in r.json()["files"]}
     assert "svc.py" in files and "ui.tsx" in files
+
+
+def test_class_bases_are_listed_not_only_in_the_signature():
+    """code 레벨 다이어그램이 상속선을 그릴 근거 — 표시 문자열을 다시 파싱하지 않게 둔다.
+
+    signature("class Widget(Base)")에도 들어 있지만, 그 문구가 바뀌면 화면의 선이 조용히
+    사라진다. 목록으로 따로 싣는다.
+    """
+    _summary, children = codemap._parse_python(
+        "class Base:\n    pass\n\n"
+        "class Widget(Base, Mixin):\n"
+        "    def draw(self):\n        ...\n\n"
+        "def helper():\n    ...\n"
+    )
+    nodes = {n["name"]: n for n in children}
+    assert nodes["Widget"]["bases"] == ["Base", "Mixin"]
+    assert nodes["Base"]["bases"] == []          # 상위 클래스가 없으면 빈 목록
+    assert "bases" not in nodes["helper"]        # 함수에는 없는 개념이다
+
+    # JS/TS의 extends도 같은 모양으로 나와야 한다 — 화면은 언어를 구분하지 않는다.
+    _s, js = codemap._parse_js("export class Panel extends Widget {}\n")
+    assert {n["name"]: n.get("bases") for n in js}["Panel"] == ["Widget"]

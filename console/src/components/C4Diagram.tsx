@@ -6,6 +6,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import Async from './Async';
 import CodeStructure from './CodeStructure';
+import { codeLevel } from '../lib/codelevel';
 import { api } from '../lib/api';
 import { focusElements, layoutElements } from '../lib/c4layout';
 import { useApi } from '../lib/hooks';
@@ -213,7 +214,8 @@ export default function C4Diagram({
 // --- 레벨 하나의 캔버스 ---
 
 interface CanvasProps {
-  level: DocLevel;
+  // React Flow를 다시 마운트할 key에만 쓰인다 — code 레벨도 같은 캔버스를 쓴다.
+  level: Level;
   data: C4Level;
   focus: string | null;
   drillable: (element: C4Element) => boolean;
@@ -326,7 +328,7 @@ function C4GroupView({ data }: NodeProps) {
   return (
     <div className="c4-group">
       <Handle type="target" position={Position.Top} className="c4-handle" />
-      <div className="c4-group-label">
+      <div className="c4-group-label" title={element.label}>
         {element.label}
         <span className="mutedtext"> · {element.kind}</span>
       </div>
@@ -365,7 +367,26 @@ function CodeLevel({ projectId, component }: { projectId: number; component: C4E
                 {' '}대상 경로: <span className="mono">{component.paths.join(', ') || '—'}</span>
               </p>
             ) : (
-              <CodeStructure files={files} />
+              <>
+                {/* 다른 레벨과 **같은 캔버스**를 쓴다 — 레벨마다 다른 엔진을 두면 확대·축소
+                    동작이 레벨별로 미묘하게 달라진다. 이 레벨은 더 내려갈 곳이 없어
+                    파고들기를 끈다. */}
+                <LevelCanvas
+                  level="code"
+                  data={codeLevel(files, component.label)}
+                  focus={null}
+                  drillable={() => false}
+                  onDrill={() => {}}
+                />
+                {/* 그림은 무엇이 있고 무엇을 상속하는지를 말한다. 메서드 시그니처와 설명은
+                    박스에 담을 수 없으니 접어서 함께 둔다 — 정보를 잃지 않는다. */}
+                <details style={{ marginTop: 8 }}>
+                  <summary style={{ fontSize: 12, cursor: 'pointer' }}>
+                    파일별 상세 (시그니처·설명)
+                  </summary>
+                  <CodeStructure files={files} />
+                </details>
+              </>
             )}
           </>
         );

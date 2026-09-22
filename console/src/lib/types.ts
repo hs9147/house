@@ -395,6 +395,10 @@ export interface CodeMapNode {
   signature: string;
   doc: string;
   lineno: number;
+  // class 노드의 상위 클래스 이름들 — code 레벨 다이어그램의 상속선 근거.
+  // signature 문자열에도 들어 있지만, 표시용 문자열을 다시 파싱하면 문구가 바뀔 때
+  // 조용히 선이 사라진다(services/codemap.py 참고).
+  bases?: string[];
   children: CodeMapNode[];
 }
 

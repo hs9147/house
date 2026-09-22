@@ -28,7 +28,11 @@ def build_code_map(workdir: Path, limit: int = MAX_FILES) -> list[dict]:
     반환 형태:
       [{"path", "lang", "summary", "children": [Node, ...]}]
       Node = {"kind": "class"|"function"|"method", "name", "signature", "doc",
-              "lineno", "children": [Node, ...]}
+              "lineno", "bases": [str, ...], "children": [Node, ...]}
+
+    bases는 class 노드의 상위 클래스 이름들이다. signature 문자열에도 들어 있지만 따로
+    싣는다 — code 레벨 다이어그램이 상속선을 그리려면 목록이 필요하고, 표시용 문자열을
+    다시 파싱하는 것은 취약하다(문구가 바뀌면 조용히 선이 사라진다).
     """
     root = workdir.resolve()
     result: list[dict] = []
@@ -101,11 +105,14 @@ def _parse_python(source: str) -> tuple[str, list[dict]]:
                 for m in node.body
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
             ]
-            bases = ", ".join(_base_name(b) for b in node.bases)
+            base_names = [_base_name(b) for b in node.bases]
+            bases = ", ".join(base_names)
             children.append({
                 "kind": "class", "name": node.name,
                 "signature": f"class {node.name}({bases})" if bases else f"class {node.name}",
                 "doc": _first_line(ast.get_docstring(node)), "lineno": node.lineno,
+                # 다이어그램이 상속선을 그릴 근거 — 표시 문자열을 다시 파싱하지 않게 둔다.
+                "bases": [b for b in base_names if b],
                 "children": methods,
             })
     return summary, children
@@ -145,7 +152,8 @@ def _parse_js(source: str) -> tuple[str, list[dict]]:
             name, base = m.group(1), m.group(2)
             sig = f"class {name} extends {base}" if base else f"class {name}"
             children.append({"kind": "class", "name": name, "signature": sig,
-                             "doc": "", "lineno": i, "children": []})
+                             "doc": "", "lineno": i,
+                             "bases": [base] if base else [], "children": []})
             continue
         m = _JS_FUNC.match(line)
         if m:
