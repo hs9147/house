@@ -146,3 +146,55 @@ def test_normal_finish_reason_is_not_treated_as_truncation(monkeypatch, fresh_se
         monkeypatch.setattr(llm_service, "_post_chat", lambda *a, r=reason: {
             "choices": [{"message": {"content": "완결"}, "finish_reason": r}]})
         assert llm_service.chat_completion(provider, [{"role": "user", "content": "x"}]) == "완결"
+
+
+def test_timeout_says_how_long_it_waited_and_what_to_change(monkeypatch, fresh_settings):
+    """'the read operation timed out'만 남으면 무엇을 해야 할지 알 수 없다.
+
+    출력 한도를 올리면 생성이 길어져 이쪽이 먼저 끊긴다 — 둘은 함께 움직이므로 두 설정을
+    같이 말해 준다.
+    """
+    import httpx
+
+    from app.config import get_settings
+
+    monkeypatch.setenv("PAAS_LLM_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("PAAS_LLM_MAX_OUTPUT_TOKENS", "32768")
+    get_settings.cache_clear()
+
+    def boom(*a, **kw):
+        raise httpx.ReadTimeout("the read operation timed out")
+
+    monkeypatch.setattr(llm_service.httpx, "post", boom)
+    with pytest.raises(llm_service.LlmTimeout) as err:
+        llm_service.chat_completion(_provider(), [{"role": "user", "content": "x"}])
+    message = str(err.value)
+    assert "45초" in message
+    assert "32768" in message
+    assert "PAAS_LLM_TIMEOUT_SECONDS" in message
+    assert err.value.seconds == 45
+
+
+def test_timeout_setting_is_actually_used(monkeypatch, fresh_settings):
+    """고정 120초였던 자리다 — 설정이 실제로 httpx에 전달되는지 본다."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("PAAS_LLM_TIMEOUT_SECONDS", "300")
+    get_settings.cache_clear()
+    seen = {}
+
+    class _Res:
+        status_code = 200
+
+        def raise_for_status(self): ...
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen["timeout"] = timeout
+        return _Res()
+
+    monkeypatch.setattr(llm_service.httpx, "post", fake_post)
+    llm_service.chat_completion(_provider(), [{"role": "user", "content": "x"}])
+    assert seen["timeout"] == 300

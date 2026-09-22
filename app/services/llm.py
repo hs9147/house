@@ -85,6 +85,18 @@ def resolve_base_url(base_url: str, db: Session | None = None) -> str:
 MAX_TOOL_ROUNDS = 6
 
 
+class LlmTimeout(RuntimeError):
+    """응답이 제한 시간 안에 오지 않았다. 무엇을 기다렸고 어디를 고치는지 말한다."""
+
+    def __init__(self, seconds: int, max_tokens: int):
+        super().__init__(
+            f"LLM이 {seconds}초 안에 응답하지 않았습니다(최대 출력 {max_tokens} 토큰). "
+            "출력 한도가 크면 생성도 길어집니다 — PAAS_LLM_TIMEOUT_SECONDS를 늘리거나 "
+            "PAAS_LLM_MAX_OUTPUT_TOKENS를 줄이거나, 요청 범위를 좁혀 다시 시도하세요."
+        )
+        self.seconds = seconds
+
+
 class LlmTruncated(RuntimeError):
     """응답이 길이 제한에서 끊겼다 — 받은 부분을 함께 들고 간다.
 
@@ -237,7 +249,14 @@ def _openai_style_call(
 
 def _post_chat(url: str, headers: dict, payload: dict) -> dict:
     """테스트에서 monkeypatch하는 실제 HTTP 경계."""
-    res = httpx.post(url, headers=headers, json=payload, timeout=120)
+    seconds = get_settings().llm_timeout_seconds
+    try:
+        res = httpx.post(url, headers=headers, json=payload, timeout=seconds)
+    except httpx.TimeoutException:
+        # "the read operation timed out"만 남으면 무엇을 해야 할지 알 수 없다 — 얼마를
+        # 기다렸는지와 어디를 고치는지 말한다. 출력 한도를 올리면 생성이 길어져 이쪽이
+        # 먼저 끊긴다(둘은 함께 움직인다).
+        raise LlmTimeout(seconds, get_settings().llm_max_output_tokens)
     res.raise_for_status()
     return res.json()
 

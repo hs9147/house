@@ -273,6 +273,12 @@ class Settings(BaseSettings):
     # 낮추면 된다(조용히 잘리는 것보다 거부가 낫다).
     llm_max_output_tokens: int = 32768
 
+    # LLM 한 번 호출의 HTTP 읽기 제한(초). **출력 한도와 함께 움직인다** — 한도를 32768로
+    # 올리자 생성이 길어져 예전의 고정 120초가 새 병목이 됐다("llm call failed: the read
+    # operation timed out"). 토큰을 많이 허용하면 그만큼 기다려야 한다.
+    # 사람이 기다리는 요청이므로 무한정 두지는 않는다 — 콘솔의 진행 팝업에서 취소할 수 있다.
+    llm_timeout_seconds: int = 600
+
     # --- 외부 API 디렉터리 검색 (services/apisearch.py) ---
     # 키워드로 공개 API를 검색해 external_api 모듈로 추가할 때 조회하는 머신리더블
     # OpenAPI 디렉터리. 기본은 apis.guru 공개 목록. 폐쇄망이라면 사내 미러 URL로 교체.

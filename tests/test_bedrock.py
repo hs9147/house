@@ -552,3 +552,28 @@ def test_truncated_bedrock_reply_surfaces_through_chat_completion(monkeypatch, f
     with pytest.raises(llm_service.LlmTruncated) as cut:
         llm_service.chat_completion(provider, [{"role": "user", "content": "x"}])
     assert cut.value.partial == "부분"
+
+
+def test_converse_timeout_says_what_to_change(monkeypatch, fresh_settings):
+    """Bedrock 경로도 같은 말을 해야 한다 — 사람은 어느 경로였는지 모른다."""
+    import httpx
+
+    from app.config import get_settings
+
+    monkeypatch.setenv("PAAS_LLM_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("PAAS_LLM_MAX_OUTPUT_TOKENS", "32768")
+    get_settings.cache_clear()
+    monkeypatch.setattr(bedrock, "botocore_available", lambda: True)
+    monkeypatch.setattr(bedrock, "_frozen", lambda profile: object())
+
+    def boom(*a, **kw):
+        raise httpx.ReadTimeout("the read operation timed out")
+
+    monkeypatch.setattr(bedrock.httpx, "request", boom)
+    monkeypatch.setattr("botocore.auth.SigV4Auth.add_auth", lambda self, request: None)
+    with pytest.raises(bedrock.BedrockError) as err:
+        bedrock.converse(profile="p", region="us-east-1", model_id="m",
+                         messages=[{"role": "user", "content": "x"}])
+    message = str(err.value)
+    assert "90초" in message and "32768" in message
+    assert "PAAS_LLM_TIMEOUT_SECONDS" in message

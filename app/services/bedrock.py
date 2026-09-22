@@ -399,7 +399,7 @@ def converse(
     model_id: str,
     messages: list[dict],
     tools: list[dict] | None = None,
-    timeout: int = 120,
+    timeout: int = 0,  # 0이면 설정값(llm_timeout_seconds)
 ) -> dict:
     """Bedrock Converse 한 번 호출. 반환값은 OpenAI 모양이다."""
     if not botocore_available():
@@ -408,6 +408,7 @@ def converse(
             "(서버에서 `pip install botocore` 후 백엔드 재시작)."
         )
     frozen = _frozen(profile)
+    timeout = timeout or get_settings().llm_timeout_seconds
     system, converse_messages = _to_converse(messages)
     body: dict = {"messages": converse_messages}
     # 출력 한도를 명시한다 — 안 주면 모델 기본값이 적용되고, 그 값이 작으면 산출물이
@@ -486,8 +487,18 @@ def _signed(*, method: str, url: str, payload: bytes, frozen, region: str, timeo
     request = AWSRequest(method=method, url=url, data=payload or None,
                          headers={"content-type": "application/json"})
     SigV4Auth(frozen, "bedrock", region).add_auth(request)
-    res = httpx.request(method, url, headers=dict(request.headers),
-                        content=payload or None, timeout=timeout)
+    try:
+        res = httpx.request(method, url, headers=dict(request.headers),
+                            content=payload or None, timeout=timeout)
+    except httpx.TimeoutException:
+        # llm.LlmTimeout과 같은 내용을 여기서 다시 쓴다 — llm.py를 import하면 순환이 된다
+        # (llm이 bedrock을 쓴다). 문구는 사람이 보는 것이므로 같은 말이어야 한다.
+        raise BedrockError(
+            f"Bedrock이 {timeout}초 안에 응답하지 않았습니다 "
+            f"(최대 출력 {get_settings().llm_max_output_tokens} 토큰). "
+            "출력 한도가 크면 생성도 길어집니다 — PAAS_LLM_TIMEOUT_SECONDS를 늘리거나 "
+            "PAAS_LLM_MAX_OUTPUT_TOKENS를 줄이거나, 요청 범위를 좁혀 다시 시도하세요."
+        )
     if res.status_code >= 400:
         # 본문에 이유가 들어 있다(만료·권한 없음·모델 접근 미승인·리전에 없는 모델).
         # raise_for_status는 그 본문을 버려서 "400 Bad Request"만 남긴다 — 실측에서
