@@ -2006,3 +2006,75 @@ def test_mcp_rejects_a_number_from_another_project(monkeypatch, fresh_settings, 
 
     body = _mcp(c, pid, "update_task", {"task_id": 999, "status": "done"})
     assert "not found" in json.dumps(body, ensure_ascii=False)
+
+
+def test_constraints_carry_full_urls_not_relative_paths(monkeypatch, fresh_settings, tmp_path):
+    """솔루션·개발원칙 문서에 적힐 주소는 전체 URL이어야 한다.
+
+    이 문서를 받는 쪽은 외주 빌더의 기계다 — 거기에는 `/paas/...`의 기준 호스트가 없다.
+    LLM은 호스트를 알 수 없으니 컨텍스트에 전체 주소가 실려 있어야 그대로 옮길 수 있다.
+    """
+    from app.db import SessionLocal
+    from app.models import Project
+    from app.services import planning as planning_service
+
+    from app.config import get_settings
+
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "http://gpax.lge.com")
+    monkeypatch.delenv("PAAS_MCP_INTERNAL_BASE_URL", raising=False)
+    get_settings.cache_clear()
+
+    c = _client()
+    pid, _prov = _project_and_provider(c)
+    db = SessionLocal()
+    try:
+        project = db.get(Project, pid)
+        constraints = planning_service.build_constraints(db, project)
+        assert constraints["api_base_url"] == "http://gpax.lge.com/paas/api/v1"
+        assert constraints["plan_mcp_url"] == (
+            f"http://gpax.lge.com/paas/api/v1/plan/projects/{pid}/mcp")
+
+        doc = planning_service.render_constraints_doc(constraints)
+        assert "## MCP 접속 주소" in doc
+        assert f"http://gpax.lge.com/paas/api/v1/plan/projects/{pid}/mcp" in doc
+        # 게이트웨이 규칙도 전체 주소다 — 예전에는 `/paas/api/v1/proxy/llm`이었다
+        assert "http://gpax.lge.com/paas/api/v1/proxy/llm" in doc
+        # 키는 절대 싣지 않는다(문서와 LLM 컨텍스트로 나가는 값이다)
+        assert "api_key" not in doc
+    finally:
+        db.close()
+
+
+def test_stage_prompts_demand_full_urls():
+    """컨텍스트에 전체 주소가 있어도, 그대로 옮기라고 지시하지 않으면 모델이 줄여 적는다."""
+    from app.models import PlanStage
+    from app.services import planning as planning_service
+
+    for stage in (PlanStage.solution, PlanStage.principles):
+        prompt = planning_service.stage_prompt(stage)
+        assert "전체 URL" in prompt, stage.value
+    # 개발원칙은 어디로 보고하는지까지 문서에 남겨야 한다
+    assert "MCP 접속 주소" in planning_service.stage_prompt(PlanStage.principles)
+
+
+def test_constraints_without_a_public_address_stay_relative(monkeypatch, fresh_settings):
+    """기준 주소가 없으면 만들어 내지 않는다 — 틀린 호스트를 적는 것이 더 나쁘다."""
+    from app.db import SessionLocal
+    from app.models import Project
+    from app.services import planning as planning_service
+
+    from app.config import get_settings
+
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "")
+    monkeypatch.setenv("PAAS_MCP_INTERNAL_BASE_URL", "")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "")
+    get_settings.cache_clear()
+
+    c = _client()
+    pid, _prov = _project_and_provider(c)
+    db = SessionLocal()
+    try:
+        constraints = planning_service.build_constraints(db, db.get(Project, pid))
+        assert constraints["api_base_url"] == "/paas/api/v1"
+    finally:
+        db.close()

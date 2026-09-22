@@ -17,7 +17,7 @@ from ..models import LlmProvider, Module, ModuleBinding, PlanConstraint, PlanSta
 from . import a2a as a2a_service
 from . import gitea as gitea_service
 from . import llm as llm_service
-from . import mcp_client
+from . import mcp_client, mcp_search
 from . import modules as modules_service
 
 # 산출물이 커밋되는 리포 내 표준 경로(개발도구가 clone/open으로 그대로 열람).
@@ -85,7 +85,11 @@ STAGES: dict[PlanStage, dict[str, str]] = {
         "prompt": (
             "이번 단계는 '솔루션 구성'이다. 아래 '가용 모듈 제약'에 명시된 내부 모듈/자원만 "
             "사용하고, 외부 직접 호출 대신 중앙 게이트웨이(A2A/프록시) 경유를 전제로 솔루션 구성 "
-            "문서를 작성하라. 제약에 없는 자원은 사용하지 말라.\n\n"
+            "문서를 작성하라. 제약에 없는 자원은 사용하지 말라.\n"
+            "- **주소는 전체 URL로 적어라.** MCP 서버·게이트웨이 주소는 '가용 모듈 제약'의 "
+            "'MCP 접속 주소'와 '규칙'에 있는 값을 **그대로** 옮긴다. 상대 경로(`/paas/...`)로 "
+            "적으면 이 문서를 받는 쪽(외주 빌더의 기계)에서 기준 호스트를 알 수 없다. "
+            "주소를 추측해 만들지 말고, 제약에 없으면 적지 말라.\n\n"
             + C4_BLOCK_GUIDE
             + "\n- 이 단계에서는 앞 단계의 C4Context·C4Container·C4Component를 이 문서에 다시 "
             "싣되, 쓰기로 결정한 실제 내부 모듈·솔루션·기술 이름으로 고쳐 구체화하라 "
@@ -109,6 +113,10 @@ STAGES: dict[PlanStage, dict[str, str]] = {
             "반영되면 해당 작업을 완료로 바꾼다(app/services/taskmatch.py). 참조가 없으면 어느 "
             "작업의 커밋인지 알 수 없어 진행 현황이 갱신되지 않는다 — 플랫폼은 짐작하지 않는다. "
             "작업 번호는 콘솔의 작업 지시 표와 MCP `list_tasks`의 `number`다(프로젝트별로 1부터 — 전역 `id`가 아니다).\n"
+            "- '구현계획 및 현황관리'에 **MCP 접속 주소를 전체 URL로** 남겨라: '가용 모듈 제약'의 "
+            "'MCP 접속 주소'에 있는 값을 그대로 옮긴다(작업 지시 조회·진행 보고용 주소와 "
+            "바인딩된 MCP 서버). 상대 경로로 적으면 이 문서를 읽고 구현하는 사람이 어디로 "
+            "붙어야 하는지 알 수 없다. API 키는 적지 말라 — 배포 시 환경변수로 주입된다.\n"
             "- 배포 형상이 갈리는 프로젝트라면 '배포 및 사용 가이드'에 **리포 폴더 구조와 "
             "배포 단위**를 명시하라: 어느 폴더가 각각 어떤 타입으로 빌드되는지"
             "(python·react·node·html·streamlit·llm), 그 폴더에 어떤 시그니처 파일이 있어야 "
@@ -540,16 +548,33 @@ def build_constraints(db: Session, project: Project) -> dict:
     기존 A2A 카드(모듈→능력·엔드포인트·env_prefix)와 가용 자원 목록에 게이트웨이 경유
     규칙을 더한다. 신규 데이터 소스 없이 기존 서비스 출력을 재사용한다.
     """
+    # 주소는 **전체 URL**로 낸다. 이 문서를 받는 쪽은 외주 빌더의 기계이고, 거기에는
+    # `/paas/...`의 기준이 없다 — 상대 경로를 적어 두면 사람이 호스트를 추측해야 한다.
+    # 기준은 MCP 서버 목록과 같은 곳에서 온다(services/mcp_search.internal_base_url).
+    base = mcp_search.internal_base_url()
+    api = f"{base}/api/v1" if base else "/paas/api/v1"
     return {
         "project": project.name,
         # 프로젝트와 무관하게 늘 지켜야 하는 환경 제약 — 기획 각 단계에 함께 실린다.
         "common_constraints": common_constraints(db),
+        "api_base_url": api,
+        # 외주 빌더가 붙는 MCP 서버(작업 지시 조회·진행 보고·제약 확인). 이 주소가 없으면
+        # 개발원칙에 "MCP로 보고한다"고만 적히고 어디로 보고하는지가 문서에 없다.
+        "plan_mcp_url": f"{api}/plan/projects/{project.id}/mcp",
+        # 이 프로젝트에 바인딩된 MCP 서버들의 전체 주소. **키는 싣지 않는다** — 문서와
+        # LLM 컨텍스트로 나가는 값이다(키는 배포 시 환경변수로만 주입된다).
+        "mcp_servers": [
+            {"name": svr["name"], "url": svr["url"]}
+            for svr in modules_service.mcp_servers_for_project(db, project) if svr.get("url")
+        ],
         "rules": [
             "허용된 내부 모듈/자원만 사용한다 — 아래 목록 밖의 자원은 사용 금지.",
             "외부 LLM API·외부 모듈/DB URL을 직접 호출하지 않는다.",
             "모든 자원 접근은 중앙 PaaS 게이트웨이를 경유한다 "
-            "(LLM: /paas/api/v1/proxy/llm, 모듈: /paas/api/v1/proxy/modules/{module_name}, "
-            "A2A: /paas/api/v1/a2a/agents/{agent_name}/task).",
+            f"(LLM: {api}/proxy/llm, 모듈: {api}/proxy/modules/{{module_name}}, "
+            f"A2A: {api}/a2a/agents/{{agent_name}}/task).",
+            "문서에 주소를 적을 때는 위와 같이 **전체 URL**로 적는다 — 상대 경로(`/paas/...`)는 "
+            "받는 쪽에서 기준을 알 수 없다.",
         ],
         "bound_agents": a2a_service.list_project_a2a_cards(db, project),
         "available_resources": modules_service.available_resources(db, project),
@@ -574,6 +599,11 @@ def render_constraints_doc(constraints: dict) -> str:
         lines += ["", "```json", json.dumps(agents, indent=2, ensure_ascii=False), "```"]
     else:
         lines.append("- (바인딩된 모듈 없음)")
+    lines += ["", "## MCP 접속 주소 (전체 URL — 문서에도 이 형태로 적는다)"]
+    lines.append(f"- 작업 지시·진행 보고(플랫폼): `{constraints.get('plan_mcp_url', '')}`")
+    for svr in constraints.get("mcp_servers") or []:
+        lines.append(f"- {svr['name']}: `{svr['url']}`")
+    lines.append("- API 키는 문서에 적지 않는다 — 배포 시 환경변수로 주입된다.")
     lines += ["", "## 가용 자원 목록"]
     resources = constraints.get("available_resources") or []
     if resources:
