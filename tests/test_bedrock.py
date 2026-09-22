@@ -410,26 +410,77 @@ def test_sso_login_without_the_cli_says_so(monkeypatch, tmp_path):
         bedrock.start_sso_login("p", tmp_path / "logs")
 
 
-def test_sso_login_returns_the_verification_url_and_code(monkeypatch, tmp_path):
-    """승인 주소와 코드를 로그에서 뽑아 화면으로 올린다 — 서버에 접속해 읽게 두지 않는다."""
-    log_dir = tmp_path / "logs"
+# AWS CLI 2.36이 `--no-browser --use-device-code`로 실제로 찍는 출력(실측).
+# 마지막 주소가 코드를 자동 입력해 준다 — AWS가 문구로 그렇게 안내한다.
+_DEVICE_OUTPUT = """Browser will not be automatically opened.
+Please visit the following URL:
+
+https://d-9b67717466.awsapps.com/start/#/device
+
+Then enter the code:
+
+GZHT-DLVD
+
+Alternatively, you may visit the following URL which will autofill the code upon loading:
+https://d-9b67717466.awsapps.com/start/#/device?user_code=GZHT-DLVD
+"""
+
+
+def _fake_cli(monkeypatch, output: str, wait: int = 2) -> dict:
+    """CLI를 흉내내고 실행 인자를 잡아 둔다."""
+    seen: dict = {}
     monkeypatch.setattr(bedrock, "aws_cli_path", lambda: "aws.exe")
-    monkeypatch.setattr(bedrock, "LOGIN_WAIT_SECONDS", 2)
+    monkeypatch.setattr(bedrock, "LOGIN_WAIT_SECONDS", wait)
 
     class _Popen:
         def __init__(self, argv, **kw):
-            # CLI가 찍는 모양(버전마다 문구가 달라 형태로 찾는다)
-            kw["stdout"].write(
-                "Attempting to automatically open the SSO authorization page...\n"
-                "https://device.sso.ap-northeast-2.amazonaws.com/\n"
-                "Then enter the code:\n\nWXYZ-ABCD\n")
+            seen["argv"] = argv
+            kw["stdout"].write(output)
             kw["stdout"].flush()
 
     monkeypatch.setattr(bedrock.subprocess, "Popen", _Popen)
-    out = bedrock.start_sso_login("bedrock-dev", log_dir)
-    assert out["verification_url"] == "https://device.sso.ap-northeast-2.amazonaws.com/"
-    assert out["user_code"] == "WXYZ-ABCD"
+    return seen
+
+
+def test_sso_login_uses_the_device_code_grant(monkeypatch, tmp_path):
+    """기본값(authorization code + PKCE)은 서버에서 쓸 수 없다.
+
+    실측: `redirect_uri=http://127.0.0.1:{포트}/oauth/callback`로 돌아오는데 그 리스너는
+    CLI가 도는 **서버**에 있다. 사용자가 자기 브라우저로 그 주소를 열면 승인 후 자기 PC의
+    127.0.0.1로 리다이렉트되어 로그인이 영원히 끝나지 않는다. device code 방식은 CLI가
+    AWS에 폴링하므로 어느 기계 브라우저에서 승인해도 된다.
+    """
+    seen = _fake_cli(monkeypatch, _DEVICE_OUTPUT)
+    bedrock.start_sso_login("bedrock-dev", tmp_path / "logs")
+    assert "--use-device-code" in seen["argv"]
+    assert "--no-browser" in seen["argv"]
+
+
+def test_sso_login_prefers_the_url_that_autofills_the_code(monkeypatch, tmp_path):
+    """코드 입력 단계는 없앨 수 있다 — AWS가 코드를 박은 주소를 함께 준다.
+
+    맨 주소가 먼저 찍히므로 첫 URL을 잡으면 사람이 코드를 옮겨 적어야 한다. 남는 사람
+    동작을 '허용' 클릭 하나로 줄이는 것이 이 선택의 목적이다.
+    """
+    _fake_cli(monkeypatch, _DEVICE_OUTPUT)
+    out = bedrock.start_sso_login("bedrock-dev", tmp_path / "logs")
+    assert out["verification_url"] == (
+        "https://d-9b67717466.awsapps.com/start/#/device?user_code=GZHT-DLVD")
+    assert out["code_autofilled"] is True
+    assert out["user_code"] == "GZHT-DLVD"  # 주소가 막혔을 때 손으로 넣을 수 있게 남긴다
     assert out["profile"] == "bedrock-dev"
+
+
+def test_sso_login_falls_back_to_the_plain_url(monkeypatch, tmp_path):
+    """자동 입력 주소를 주지 않는 버전도 있다 — 그때는 맨 주소와 코드를 그대로 보여 준다."""
+    _fake_cli(monkeypatch, (
+        "Please visit the following URL:\n"
+        "https://device.sso.ap-northeast-2.amazonaws.com/\n"
+        "Then enter the code:\n\nWXYZ-ABCD\n"), wait=1)
+    out = bedrock.start_sso_login("bedrock-dev", tmp_path / "logs")
+    assert out["verification_url"] == "https://device.sso.ap-northeast-2.amazonaws.com/"
+    assert out["code_autofilled"] is False
+    assert out["user_code"] == "WXYZ-ABCD"
 
 
 def test_sso_login_shows_the_log_when_it_cannot_parse(monkeypatch, tmp_path):

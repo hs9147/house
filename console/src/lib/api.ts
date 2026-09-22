@@ -401,6 +401,8 @@ export const api = {
   startAwsSsoLogin: (profile: string) =>
     request<{
       profile: string; verification_url: string; user_code: string;
+      // 주소에 코드가 박혀 있으면 사람이 옮겨 적을 것이 없다 — 승인 클릭 하나만 남는다.
+      code_autofilled: boolean;
       log_path: string; log_tail: string;
     }>('POST', `/llm/aws/login?profile=${encodeURIComponent(profile)}`),
   listAwsProfiles: () => request<{

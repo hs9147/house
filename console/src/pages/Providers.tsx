@@ -31,7 +31,8 @@ export default function Providers() {
   // 만료됐을 때 서버에서 SSO 로그인을 시작한다. 승인은 사람이 브라우저에서 해야 하므로
   // (SSO는 그렇게 설계돼 있다) 주소·코드를 띄우고, 승인이 끝났는지는 프로필 상태를 다시
   // 물어 확인한다 — 이 응답만으로는 알 수 없다(프로세스가 기다리는 중이다).
-  const [login, setLogin] = useState<{ url: string; code: string; tail: string } | null>(null);
+  const [login, setLogin] = useState<
+    { url: string; code: string; autofilled: boolean; tail: string } | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
 
   const startLogin = async () => {
@@ -40,7 +41,10 @@ export default function Providers() {
     setLogin(null);
     try {
       const r = await api.startAwsSsoLogin(form.aws_profile);
-      setLogin({ url: r.verification_url, code: r.user_code, tail: r.log_tail });
+      setLogin({
+        url: r.verification_url, code: r.user_code,
+        autofilled: r.code_autofilled, tail: r.log_tail,
+      });
       if (r.verification_url) window.open(r.verification_url, '_blank', 'noopener');
       // 승인을 기다린다 — 되면 프로필 상태가 ok로 바뀌고 모델 목록도 따라 열린다.
       // **직접 물어본다.** useApi의 reload()는 Promise가 아니고, 이 루프가 잡고 있는
@@ -354,11 +358,14 @@ export default function Providers() {
                       <div style={{ marginTop: 6 }}>
                         {login.url ? (
                           <>
-                            브라우저에서 <a href={login.url} target="_blank" rel="noopener">
-                              {login.url}
-                            </a>
-                            {login.code && <> 를 열고 코드 <b className="mono">{login.code}</b>를 승인하세요.</>}
-                            {' '}승인되면 이 화면이 스스로 갱신됩니다.
+                            {/* 코드가 박힌 주소면 옮겨 적을 것이 없다 — '허용' 한 번이 전부다. */}
+                            열린 브라우저에서{' '}
+                            {login.autofilled ? <b>[허용]을 누르면 끝입니다</b> : (
+                              <>코드 <b className="mono">{login.code}</b>를 입력하고 허용하세요</>
+                            )}
+                            . 창이 닫혔으면{' '}
+                            <a href={login.url} target="_blank" rel="noopener">이 주소</a>를
+                            다시 여세요.{' '}승인되면 이 화면이 스스로 갱신됩니다.
                           </>
                         ) : (
                           /* 주소를 못 뽑았다 — CLI 문구가 바뀌었거나 오류다. 감추지 않는다. */
