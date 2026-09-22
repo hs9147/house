@@ -56,10 +56,16 @@ def create_provider(
         raise HTTPException(status_code=409, detail="provider name already exists")
     if body.organization_id is not None and db.get(Organization, body.organization_id) is None:
         raise HTTPException(status_code=404, detail="organization not found")
+    base_url = body.base_url
+    if not base_url and body.aws_profile:
+        # 비워 온 것은 "프로필이 정하게 해 달라"는 뜻이다. 호출할 때마다 다시 유추하지 않고
+        # 등록 시점에 확정해 기록한다 — 목록에 실제 주소가 보이고, 리전이 어디로 정해졌는지
+        # 사람이 확인할 수 있다(호출 때만 정하면 어디로 나가는지 화면에 없다).
+        base_url = bedrock.runtime_url(bedrock.region_from_url("", body.aws_profile))
     row = LlmProvider(
         name=body.name,
         kind=LlmProviderKind(body.kind),
-        base_url=body.base_url,
+        base_url=base_url,
         api_key_encrypted=encrypt_value(body.api_key) if body.api_key else None,
         aws_profile=body.aws_profile or None,
         model=body.model,
@@ -88,7 +94,7 @@ def aws_profiles(_: ApiKey = Depends(require_admin)):
         # 서비스 계정의 것이다(nssm 기본값은 LocalSystem →
         # C:\Windows\system32\config\systemprofile) — 그러면 `aws sso login`을 해도
         # 목록이 비어 있고, 경로를 보여 주지 않으면 왜 비었는지 알 방법이 없다.
-        "config_path": str(bedrock.config_path()),
+        **bedrock.config_state(),
         "profiles": [{**entry, **bedrock.profile_status(entry["name"])} for entry in profiles],
     }
 

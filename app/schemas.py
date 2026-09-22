@@ -127,7 +127,9 @@ class EnvVarSet(BaseModel):
 class LlmProviderCreate(BaseModel):
     name: str
     kind: str = Field(pattern=r"^(openai|anthropic|aws|azure|gcp|internal)$")
-    base_url: str  # internal은 project://<프로젝트명> 형식만 허용 (아래 검증)
+    # internal은 project://<프로젝트명> 형식만 허용 (아래 검증). aws는 자격증명 프로필을
+    # 고르면 비워도 된다 — 프로필의 리전이 런타임 주소를 결정한다(사람이 적을 값이 아니다).
+    base_url: str = ""
     api_key: str | None = None
     # kind="aws"(Bedrock)는 정적 키 대신 서버 ~/.aws의 자격증명 프로필로 서명한다.
     aws_profile: str | None = None
@@ -150,6 +152,10 @@ class LlmProviderCreate(BaseModel):
         # 호출에는 안 쓰여서, 설정한 사람은 적용됐다고 믿는다.
         if self.aws_profile and self.kind != "aws":
             raise ValueError("aws_profile은 kind='aws'(Bedrock)에서만 사용합니다")
+        # Endpoint가 필요한지는 고른 프로필이 정한다. Bedrock을 자격증명으로 부를 때는
+        # 리전에서 주소가 유도되므로 비워도 되고, 그 밖에는 어디로 보낼지 알 수 없다.
+        if not self.base_url and not (self.kind == "aws" and self.aws_profile):
+            raise ValueError("base_url이 필요합니다 (aws는 자격증명 프로필을 고르면 생략 가능)")
         return self
 
 

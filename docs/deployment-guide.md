@@ -403,6 +403,22 @@ npm run build
   다시 넣으면) 항상 같은 결과를 낸다(`services/proxy/iis_proxy.py`의
   `_splice_managed_rules`).
 - 서비스 등록(부팅 시 자동 시작): [NSSM](https://nssm.cc)으로 uvicorn·caddy를 Windows 서비스로 등록.
+- **Bedrock(AWS 자격증명)을 쓸 거면 서비스의 홈 디렉터리를 맞춰야 한다.** LLM 관리에서
+  `kind=aws`는 서버의 `~/.aws`에서 프로필을 읽고 SSO 토큰 캐시로 서명한다. nssm 기본값인
+  LocalSystem으로 돌면 홈이 `C:\Windows\system32\config\systemprofile`이라, 사람이
+  `aws sso login`을 해도 **프로필 목록이 비어 보인다.** 화면이 실제로 읽은 경로를 띄우니
+  그 값이 로그인한 계정의 홈인지 먼저 확인할 것. 맞추는 방법은 둘 중 하나다:
+
+  ```powershell
+  # (가) 서비스를 그 계정으로 돌린다 - SSO 토큰 갱신도 같은 계정에서 하면 된다
+  nssm set paas ObjectName ".\사용자이름" "비밀번호"
+
+  # (나) 서비스 환경변수로 홈을 지정한다 - 토큰 캐시 경로도 홈을 따르므로 USERPROFILE까지
+  nssm set paas AppEnvironmentExtra USERPROFILE=C:\Users\사용자이름
+  ```
+
+  `AWS_CONFIG_FILE`만 지정하면 프로필 목록은 보이지만 토큰 캐시(`~/.aws/sso/cache`)는
+  여전히 서비스 계정 홈을 보므로 서명이 실패한다 — 홈 자체를 맞출 것.
 - **방화벽(외부에는 80/443만).** `PAAS_PORT_RANGE_START`~`PAAS_PORT_RANGE_END`(기본
   8100-8999) 대역은 배포된 프로젝트가 뜨는 내부 포트다 — Windows Defender 방화벽에서
   이 대역의 외부 인바운드를 반드시 차단할 것(3.1절 "방화벽" 참고). `windows_service`

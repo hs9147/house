@@ -28,6 +28,8 @@ export default function Providers() {
     [form.kind, form.aws_profile],
   );
   const modelOptions = awsModels.data?.models ?? [];
+  // 프로필을 고르면 Endpoint는 리전에서 정해진다 — 그때만 입력을 선택으로 푼다.
+  const endpointFromProfile = form.kind === 'aws' && Boolean(form.aws_profile);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -142,8 +144,20 @@ export default function Providers() {
                 </select>
               </label>
             </div>
+            {/* Endpoint가 필요한지는 고른 프로필이 정한다. Bedrock을 자격증명으로 부를
+                때는 리전이 주소를 결정하므로 사람이 적을 값이 아니다. */}
             <label className="field">
               Endpoint URL
+              {endpointFromProfile && (
+                <span className="mutedtext" style={{ fontWeight: 400, fontSize: 12 }}>
+                  {' '}— 비워 두면 프로필 리전으로 정해집니다
+                  {selectedProfile?.region && (
+                    <>: <span className="mono">
+                      https://bedrock-runtime.{selectedProfile.region}.amazonaws.com
+                    </span></>
+                  )}
+                </span>
+              )}
               <input
                 className="mono"
                 value={form.base_url}
@@ -161,7 +175,7 @@ export default function Providers() {
                     ? 'https://api.anthropic.com'
                     : 'https://api.openai.com/v1'
                 }
-                required
+                required={!endpointFromProfile}
               />
             </label>
             <div className="row">
@@ -234,18 +248,31 @@ export default function Providers() {
                 호출이 실패한다 — 그때 무엇을 해야 하는지를 등록 시점에도 보여 둔다. */}
             {form.kind === 'aws' && (
               <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
-                {awsProfiles.data && !awsProfiles.data.botocore_available ? (
+                {awsProfiles.loading ? (
+                  <>서버 <span className="mono">~/.aws</span>를 읽는 중…</>
+                ) : awsProfiles.error ? (
+                  /* 조회 자체가 실패한 것을 "프로필이 없습니다"로 말하면 엉뚱한 곳을 찾게
+                     된다(백엔드가 옛 코드면 404다) — 받은 오류를 그대로 보여 준다. */
+                  <>❌ 프로필 목록을 받지 못했습니다: {awsProfiles.error}</>
+                ) : awsProfiles.data && !awsProfiles.data.botocore_available ? (
                   <>⚠️ 서버에 botocore가 없어 자격증명을 쓸 수 없습니다 —{' '}
                     <span className="mono">pip install botocore</span> 후 백엔드를 재시작하세요.</>
                 ) : (awsProfiles.data?.profiles ?? []).length === 0 ? (
                   /* 경로를 밝힌다 — 서비스로 돌면 홈이 서비스 계정 것이라(nssm 기본값은
                      LocalSystem) `aws sso login`을 해도 목록이 빈다. 경로를 안 보여 주면
                      왜 비었는지 알 방법이 없다. */
-                  <>⚠️ 프로필이 없습니다. 읽은 경로:{' '}
+                  <>⚠️ 프로필이 없습니다 —{' '}
+                    {awsProfiles.data?.config_exists
+                      ? '파일은 있는데 프로필 섹션이 없습니다'
+                      : '이 경로에 파일이 없습니다'}:{' '}
                     <span className="mono">{awsProfiles.data?.config_path}</span>
-                    {' '}— 이 경로가 로그인한 계정의 것이 아니면(서비스 계정) 그 계정으로{' '}
-                    <span className="mono">aws sso login</span>을 하거나{' '}
-                    <span className="mono">AWS_CONFIG_FILE</span>을 지정하세요.</>
+                    {!awsProfiles.data?.config_exists && (
+                      <>{' '}— 백엔드가 서비스로 돌면 홈이 로그인한 계정이 아니라 서비스 계정의
+                        것입니다. 그 계정으로 <span className="mono">aws sso login</span>을
+                        하거나, 서비스 환경변수{' '}
+                        <span className="mono">AWS_CONFIG_FILE</span>·
+                        <span className="mono">USERPROFILE</span>을 실제 홈으로 지정하세요.</>
+                    )}</>
                 ) : !selectedProfile ? (
                   <>프로필을 고르면 자격증명이 지금 유효한지 확인해 보여 줍니다.</>
                 ) : selectedProfile.ok === false ? (

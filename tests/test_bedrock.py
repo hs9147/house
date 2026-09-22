@@ -328,3 +328,58 @@ def test_models_endpoint_reports_the_region_it_listed(aws_config, monkeypatch):
     # Endpoint에 리전이 없으면 프로필 설정을 따른다
     body = c.get("/paas/api/v1/llm/aws/models?profile=bedrock-dev", headers=ADMIN).json()
     assert body["region"] == "us-east-1"
+
+
+def test_endpoint_is_optional_when_a_profile_is_chosen(aws_config):
+    """Endpoint가 필요한지는 고른 프로필이 정한다 — 리전이 주소를 결정한다.
+
+    사람이 `https://bedrock-runtime.<리전>.amazonaws.com`을 적게 두면 리전을 두 곳에
+    적는 셈이고, 프로필 리전과 어긋나면 서명 리전과 요청 주소가 갈린다.
+    """
+    c = TestClient(create_app())
+    r = c.post("/paas/api/v1/llm/providers", json={
+        "name": "bd-noendpoint", "kind": "aws", "model": "global.anthropic.claude-sonnet-5",
+        "aws_profile": "bedrock-dev",  # 이 프로필의 region = us-east-1
+    }, headers=ADMIN)
+    assert r.status_code == 201, r.text
+    # 비워 온 것을 등록 시점에 확정해 기록한다 — 목록에 실제 주소가 보여야 한다
+    assert r.json()["base_url"] == "https://bedrock-runtime.us-east-1.amazonaws.com"
+
+
+def test_endpoint_is_still_required_without_a_profile(aws_config):
+    """프로필이 없으면 어디로 보낼지 알 수 없다 — 비워 두게 하면 안 된다."""
+    c = TestClient(create_app())
+    for body in (
+        {"name": "no-url-aws", "kind": "aws", "model": "m"},
+        {"name": "no-url-openai", "kind": "openai", "model": "m"},
+    ):
+        r = c.post("/paas/api/v1/llm/providers", json=body, headers=ADMIN)
+        assert r.status_code == 422, r.text
+        assert "base_url" in r.text
+
+
+def test_explicit_endpoint_wins_over_the_profile_region(aws_config):
+    """적어 준 주소가 가장 구체적인 의사표시다 — 유도값으로 덮지 않는다."""
+    c = TestClient(create_app())
+    r = c.post("/paas/api/v1/llm/providers", json={
+        "name": "bd-explicit", "kind": "aws", "model": "m", "aws_profile": "bedrock-dev",
+        "base_url": "https://bedrock-runtime.eu-west-1.amazonaws.com",
+    }, headers=ADMIN)
+    assert r.status_code == 201, r.text
+    assert r.json()["base_url"] == "https://bedrock-runtime.eu-west-1.amazonaws.com"
+
+
+def test_config_state_distinguishes_missing_file_from_no_profiles(tmp_path, monkeypatch):
+    """둘의 대처가 다르다 — 파일이 없으면 홈이 남의 것이고, 있으면 설정이 다르다."""
+    missing = tmp_path / "nope" / "config"
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(missing))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "nope" / "credentials"))
+    state = bedrock.config_state()
+    assert state["config_exists"] is False
+    assert state["config_path"] == str(missing)
+
+    empty = tmp_path / "config"
+    empty.write_text("# 주석만 있다\n", encoding="utf-8")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(empty))
+    assert bedrock.config_state()["config_exists"] is True
+    assert bedrock.list_profiles() == []

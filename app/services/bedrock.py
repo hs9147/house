@@ -42,6 +42,21 @@ def _credentials_path() -> Path:
     return Path(env) if env else Path.home() / ".aws" / "credentials"
 
 
+def config_state() -> dict:
+    """프로필 목록이 비었을 때 **왜** 비었는지 가릴 수 있는 사실들.
+
+    "프로필이 없습니다"만으로는 파일이 없는 것(서비스 계정 홈을 보고 있다)과 파일은 있는데
+    프로필 섹션이 없는 것(로그인은 했지만 설정이 다르다)이 구분되지 않는다. 둘의 대처가
+    다르므로 갈라서 보여 준다.
+    """
+    config, credentials = config_path(), _credentials_path()
+    return {
+        "config_path": str(config),
+        "config_exists": config.is_file(),
+        "credentials_exists": credentials.is_file(),
+    }
+
+
 def botocore_available() -> bool:
     try:
         import botocore.auth  # noqa: F401, PLC0415
@@ -202,6 +217,11 @@ def region_from_url(base_url: str, profile: str = "") -> str:
     return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or DEFAULT_REGION
 
 
+def runtime_url(region: str) -> str:
+    """리전이 정해지면 런타임 주소도 정해진다 — 사람이 적을 값이 아니다."""
+    return f"https://bedrock-runtime.{region}.amazonaws.com"
+
+
 def _to_converse(messages: list[dict]) -> tuple[list[dict], list[dict]]:
     """OpenAI 메시지 → Converse. system은 별도 필드이고, 도구 결과는 user 쪽에 실린다."""
     system: list[dict] = []
@@ -299,7 +319,7 @@ def converse(
     if tools:
         body["toolConfig"] = _tool_config(tools)
     # 모델 ID에는 `.`과 `:`이 들어간다(anthropic.claude-sonnet-4:0) — 경로 조각으로 인코딩한다.
-    url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{quote(model_id, safe='')}/converse"
+    url = f"{runtime_url(region)}/model/{quote(model_id, safe='')}/converse"
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
     return _from_converse(_post_signed(url, payload, frozen, region, timeout))
 
