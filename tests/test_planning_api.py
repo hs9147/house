@@ -2078,3 +2078,30 @@ def test_constraints_without_a_public_address_stay_relative(monkeypatch, fresh_s
         assert constraints["api_base_url"] == "/paas/api/v1"
     finally:
         db.close()
+
+
+def test_subpath_rewrite_is_documented_as_the_platforms_job(fresh_settings):
+    """rewrite는 플랫폼이 한다 — 앱이 접두사를 직접 다루면 두 곳이 같은 일을 하고 어긋난다.
+
+    기준이 문서 어디에도 없었다. 구현하는 쪽은 서브패스 배포를 모르고 절대 경로를 박고,
+    그러면 `/{조직}/{프로젝트}/` 아래에서 자원이 404가 된다.
+    """
+    from app.db import SessionLocal
+    from app.models import PlanStage, Project
+    from app.services import planning as planning_service
+
+    prompt = planning_service.stage_prompt(PlanStage.principles)
+    assert "PAAS_BASE_PATH" in prompt
+    assert "rewrite는 플랫폼" in prompt
+
+    # 같은 사실이 제약으로도 나가야 한다 — 외주 빌더는 MCP get_constraints로 이것을 읽는다
+    c = _client()
+    pid, _prov = _project_and_provider(c)
+    db = SessionLocal()
+    try:
+        doc = planning_service.render_constraints_doc(
+            planning_service.build_constraints(db, db.get(Project, pid)))
+        assert "PAAS_BASE_PATH" in doc
+        assert "서브패스" in doc
+    finally:
+        db.close()

@@ -117,6 +117,16 @@ STAGES: dict[PlanStage, dict[str, str]] = {
             "'MCP 접속 주소'에 있는 값을 그대로 옮긴다(작업 지시 조회·진행 보고용 주소와 "
             "바인딩된 MCP 서버). 상대 경로로 적으면 이 문서를 읽고 구현하는 사람이 어디로 "
             "붙어야 하는지 알 수 없다. API 키는 적지 말라 — 배포 시 환경변수로 주입된다.\n"
+            "- '배포 및 사용 가이드'에 **서브패스 배포 전제**를 적어라. 앱은 `/{조직}/{프로젝트}/` "
+            "같은 경로 아래에서 서비스되고 **URL rewrite는 플랫폼(프록시)이 한다** — 앱 코드에서 "
+            "접두사를 붙이거나 벗기는 처리를 직접 만들지 말라(release는 프록시가 접두사를 벗겨 "
+            "루트로 넘기고, development는 dev 서버가 받도록 그대로 넘긴다). 대신 앱은 자기 공개 "
+            "경로(base)를 알아야 한다: 플랫폼이 실행 프로세스에 `PAAS_BASE_PATH`를 주고, Vite "
+            "프로젝트면 빌드와 dev 서버에 `--base`를 자동으로 붙인다. 그러니 자원·API 주소를 "
+            "절대 경로(`/api/...`)로 박지 말고 상대 경로나 base 기준"
+            "(Vite는 `import.meta.env.BASE_URL`)으로 쓰고, 라우터 basename도 그 값에 맞춰라. "
+            "Vite가 아닌 빌드 도구(Next·webpack·CRA)는 플랫폼이 base를 넣어 줄 수 없으므로 빌드 "
+            "설정에서 `PAAS_BASE_PATH`를 직접 읽어야 한다 — 그 사실을 문서에 남겨라.\n"
             "- 배포 형상이 갈리는 프로젝트라면 '배포 및 사용 가이드'에 **리포 폴더 구조와 "
             "배포 단위**를 명시하라: 어느 폴더가 각각 어떤 타입으로 빌드되는지"
             "(python·react·node·html·streamlit·llm), 그 폴더에 어떤 시그니처 파일이 있어야 "
@@ -575,6 +585,12 @@ def build_constraints(db: Session, project: Project) -> dict:
             f"A2A: {api}/a2a/agents/{{agent_name}}/task).",
             "문서에 주소를 적을 때는 위와 같이 **전체 URL**로 적는다 — 상대 경로(`/paas/...`)는 "
             "받는 쪽에서 기준을 알 수 없다.",
+            # 이 제약은 MCP get_constraints로 외주 빌더에게도 그대로 간다 — 구현하는 쪽이
+            # 알아야 하는 사실이라 문서만이 아니라 제약에도 싣는다.
+            "앱은 서브패스(`/{조직}/{프로젝트}/`) 아래에서 서비스되고 URL rewrite는 플랫폼이 "
+            "한다 — 앱에서 접두사를 붙이거나 벗기지 않는다. 자기 공개 경로는 실행 환경변수 "
+            "`PAAS_BASE_PATH`로 오고(Vite는 빌드·dev 서버에 `--base`가 자동으로 붙는다), "
+            "자원·API 주소를 절대 경로로 박으면 서브패스 배포에서 깨진다.",
         ],
         "bound_agents": a2a_service.list_project_a2a_cards(db, project),
         "available_resources": modules_service.available_resources(db, project),
