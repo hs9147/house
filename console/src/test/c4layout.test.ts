@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GROUP_HEAD, GROUP_PAD, focusElements, layoutElements } from '../lib/c4layout';
+import { GROUP_HEAD, GROUP_PAD, layoutElements } from '../lib/c4layout';
 import type { C4Element, C4Relation } from '../lib/types';
 
 function element(alias: string, base: C4Element['base'], parent: string | null = null): C4Element {
@@ -45,31 +45,5 @@ describe('layoutElements', () => {
 
   it('요소가 없으면 배치 결과도 없다', () => {
     expect(layoutElements([], [])).toEqual([]);
-  });
-});
-
-describe('focusElements', () => {
-  const elements = [
-    element('paas', 'boundary'),
-    element('api', 'boundary', 'paas'),
-    element('planner', 'component', 'api'),
-    element('gitea', 'system'),
-  ];
-
-  it('경계로 좁히면 그 경계는 빠지고 직속 자식이 최상위가 된다', () => {
-    const focused = focusElements(elements, 'api');
-    expect(focused.map((e) => e.alias)).toEqual(['planner']);
-    expect(focused[0].parent).toBeNull();
-  });
-
-  it('바깥 경계로 좁히면 그 아래 계층은 그대로 남는다', () => {
-    const focused = focusElements(elements, 'paas');
-    expect(focused.map((e) => e.alias)).toEqual(['api', 'planner']);
-    expect(focused.find((e) => e.alias === 'api')!.parent).toBeNull();
-    expect(focused.find((e) => e.alias === 'planner')!.parent).toBe('api'); // 중첩 유지
-  });
-
-  it('없는 경계로 좁히면 빈 목록 — 호출부가 전체 그림으로 되돌린다', () => {
-    expect(focusElements(elements, 'nope')).toEqual([]);
   });
 });

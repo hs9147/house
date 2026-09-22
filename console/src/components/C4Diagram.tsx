@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow,
   type Edge, type Node, type NodeProps,
@@ -8,22 +8,25 @@ import Async from './Async';
 import CodeStructure from './CodeStructure';
 import { codeLevel } from '../lib/codelevel';
 import { api } from '../lib/api';
-import { focusElements, layoutElements } from '../lib/c4layout';
+import { layoutElements } from '../lib/c4layout';
 import { useApi } from '../lib/hooks';
 import type { C4Element, C4Level } from '../lib/types';
 
 // C4 모델 시각화 — 확정 산출물에 실린 mermaid C4 블록이 원천이다(app/services/c4.py).
-// 지도처럼 확대·축소한다: 노드를 클릭하면 한 단계 안으로(context → container →
-// component → code), '상위 레벨'로 한 단계 밖으로 나간다. 뷰포트 자체의 확대·축소는
-// React Flow의 Controls(＋/－/맞춤)와 휠·드래그가 처리한다.
+// 레벨은 위 버튼으로 고르고, 각 레벨은 **그 레벨 전체**를 한 장에 그린다. 확대·축소는
+// 뷰포트로만 한다(React Flow의 Controls·휠·드래그·미니맵).
+//
+// 노드를 클릭해 한 단계 안으로 들어가는 '단위 확대'는 없앴다: 어느 단위 안에 있는지가
+// 화면 상태로 숨고, 같은 레벨을 볼 때마다 경로가 달라져 그림을 비교할 수 없었다.
+// code 레벨도 컴포넌트별이 아니라 리포 전체다 — 문서에 $link을 적지 않았다는 이유로
+// 코드가 안 보이는 일이 없어야 한다.
 
 type DocLevel = 'context' | 'container' | 'component';
 type Level = DocLevel | 'code';
 
 // 그릴 수 없는 레벨에는 **어느 단계에서 무엇을 써야 생기는지**를 알려 준다. 초안이든
 // 확정본이든 사용자가 할 일은 같으므로(그 단계 문서에 그 블록을 싣는다) 두 경우를
-// 가려내지 않는다. code 레벨은 상황마다 할 일이 달라 여기 문구를 두지 않고 아래
-// codeHint()가 상태를 보고 만든다.
+// 가려내지 않는다. code 레벨은 문서가 원천이 아니라 여기 문구를 두지 않는다.
 const LEVELS: { key: Level; label: string; origin: string }[] = [
   {
     key: 'context',
@@ -80,78 +83,29 @@ export default function C4Diagram({
     [sessionId, reloadKey, stage, settledDraft],
   );
   const [level, setLevel] = useState<Level>('context');
-  // 특정 컨테이너 안으로 들어간 상태 — 그 경계에 속한 요소만 그린다.
-  const [focus, setFocus] = useState<string | null>(null);
-  const [codeTarget, setCodeTarget] = useState<C4Element | null>(null);
 
   const levels = model.data?.levels ?? {};
   const current: C4Level | undefined = level === 'code' ? undefined : levels[level];
 
-  const zoomOut = () => {
-    const back: Record<Level, Level> = {
-      code: 'component', component: 'container', container: 'context', context: 'context',
-    };
-    setLevel(back[level]);
-    setFocus(null);
-    setCodeTarget(null);
-  };
-
-  const selectLevel = (next: Level) => {
-    setLevel(next);
-    setFocus(null);
-    if (next !== 'code') setCodeTarget(null);
-  };
-
-  // code 레벨을 그릴 수 있는 component들 — $link이 가리키는 파일이 리포에 실제로 있는 것.
-  const components = levels.component?.elements.filter((e) => e.base === 'component') ?? [];
-  const withCode = components.filter((e) => e.paths.length > 0);
-
-  // code 레벨은 "왜 못 그리는지"가 상황마다 다르고, 그때마다 할 일도 다르다 —
-  // 컴포넌트가 아예 없는 것 · 있는데 $link을 안 적은 것 · 코드가 아직 커밋되지 않은 것 ·
-  // 그릴 수 있는데 아직 고르지 않은 것은 전부 다른 안내가 필요하다.
-  const codeHint = (): string => {
-    if (components.length === 0) {
-      return '② 아키텍처 설계 단계 문서에 C4Component 블록을 실으면 컴포넌트가 생기고, '
-        + '각 Component에 $link로 구현 경로를 적으면 그 코드 구조를 볼 수 있습니다.';
-    }
-    if (withCode.length === 0) {
-      const noLink = components.filter((e) => !e.link).length;
-      return noLink > 0
-        ? `컴포넌트 ${components.length}개 중 ${noLink}개에 $link 경로가 없습니다 — `
-          + '② 아키텍처 설계나 ③ 솔루션 구성 단계에서 '
-          + 'Component(..., $link="app/services/foo.py")처럼 구현 경로를 적으세요.'
-        : `$link 경로(${components.map((e) => e.link).filter(Boolean).join(', ')})가 `
-          + '가리키는 파일이 리포에 아직 없습니다 — 외주 빌드가 커밋하면 여기서 열립니다.';
-    }
-    return `Component 레벨에서 컴포넌트를 클릭하세요 — 코드가 있는 컴포넌트 ${withCode.length}개`
-      + ` (${withCode.map((e) => e.label).join(', ')}).`;
-  };
-
-  const hintFor = (level: Level): string =>
-    (level === 'code' ? codeHint() : LEVELS.find((l) => l.key === level)?.origin ?? '');
-
-  // 클릭해서 한 단계 안으로 들어갈 수 있는 노드 — 판정과 실제 이동(onDrill)을 한 자리에
-  // 둔다. 들어갈 곳이 없으면(다음 레벨 그림이 없거나 코드가 없으면) 클릭도 막는다.
-  const drillable = useCallback((element: C4Element): boolean => {
-    if (level === 'context') return element.base === 'system' && !element.external && !!levels.container;
-    if (level === 'container') return element.base === 'container' && !!levels.component;
-    if (level === 'component') return element.base === 'component' && element.paths.length > 0;
-    return false;
-  }, [level, levels]);
+  // code 레벨은 문서가 아니라 리포가 원천이라 "그릴 수 있는가"가 산출물과 무관하다 —
+  // 파싱할 코드 파일이 있으면 열린다. 실제 파일 수는 캔버스가 받아 본 뒤에야 알 수 있어
+  // 여기서는 잠그지 않는다(잠가 두면 코드가 있는데도 못 여는 경우가 생긴다).
+  const hintFor = (key: Level): string =>
+    (key === 'code'
+      ? '리포의 코드 구조를 정적 파싱해 그립니다 — 파일이 경계, 클래스·함수가 노드입니다.'
+      : LEVELS.find((l) => l.key === key)?.origin ?? '');
 
   return (
     <>
       <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         {LEVELS.map((l) => {
-          // code 레벨은 "고른 컴포넌트가 있는지"가 아니라 "그릴 수 있는 코드가 있는지"로
-          // 잠근다 — 고르는 것은 잠금이 풀린 다음의 일이다.
-          const available = l.key === 'code' ? withCode.length > 0 : !!levels[l.key as DocLevel];
+          const available = l.key === 'code' ? true : !!levels[l.key as DocLevel];
           return (
             <button
               key={l.key}
               className={level === l.key ? 'primary small' : 'secondary small'}
               style={{ opacity: available ? 1 : 0.45 }}
-              onClick={() => selectLevel(l.key)}
+              onClick={() => setLevel(l.key)}
               title={available ? '' : hintFor(l.key)}
             >
               {available ? '' : '🔒 '}{l.label}
@@ -159,9 +113,6 @@ export default function C4Diagram({
           );
         })}
         <div className="spacer" />
-        {(level !== 'context' || focus) && (
-          <button className="secondary small" onClick={zoomOut}>⤴ 상위 레벨</button>
-        )}
         <button className="secondary small" onClick={() => model.reload()}>새로고침</button>
       </div>
 
@@ -173,11 +124,7 @@ export default function C4Diagram({
               <span style={{ color: 'var(--yellow)' }}>초안(미확정)</span>
             )}의 C4 블록
             {current.title && <> · {current.title}</>}
-            {focus && <> · <span className="mono">{focus}</span> 안쪽만</>}
-            {' '}· 노드를 클릭하면 한 단계 안으로 들어갑니다
           </>
-        ) : codeTarget ? (
-          <>리포 코드 구조 — <b>{codeTarget.label}</b> 컴포넌트로 구현된 파일</>
         ) : (
           hintFor(level)
         )}
@@ -185,27 +132,8 @@ export default function C4Diagram({
 
       <Async state={model}>
         {() => (level === 'code'
-          ? <CodeLevel projectId={projectId} component={codeTarget} />
-          : current && (
-            <LevelCanvas
-              level={level}
-              data={current}
-              focus={focus}
-              drillable={drillable}
-              onDrill={(element) => {
-                if (level === 'context' && levels.container) {
-                  setLevel('container');
-                  setFocus(null);
-                } else if (level === 'container' && levels.component) {
-                  setLevel('component');
-                  setFocus(element.alias); // 같은 alias의 Container_Boundary로 좁힌다
-                } else if (level === 'component') {
-                  setLevel('code');
-                  setCodeTarget(element);
-                }
-              }}
-            />
-          ))}
+          ? <CodeLevel projectId={projectId} />
+          : current && <LevelCanvas level={level} data={current} />)}
       </Async>
     </>
   );
@@ -217,16 +145,11 @@ interface CanvasProps {
   // React Flow를 다시 마운트할 key에만 쓰인다 — code 레벨도 같은 캔버스를 쓴다.
   level: Level;
   data: C4Level;
-  focus: string | null;
-  drillable: (element: C4Element) => boolean;
-  onDrill: (element: C4Element) => void;
 }
 
-function LevelCanvas({ level, data, focus, drillable, onDrill }: CanvasProps) {
-  const { nodes, edges, elements } = useMemo(() => {
-    // 좁혀 본 결과가 비면(그 경계가 이 레벨에 없으면) 전체를 그린다.
-    const narrowed = focus ? focusElements(data.elements, focus) : data.elements;
-    const shown = narrowed.length > 0 ? narrowed : data.elements;
+function LevelCanvas({ level, data }: CanvasProps) {
+  const { nodes, edges } = useMemo(() => {
+    const shown = data.elements;
     const aliases = new Set(shown.map((e) => e.alias));
     const relations = data.relations.filter(
       (r) => aliases.has(r.source) && aliases.has(r.target),
@@ -242,7 +165,7 @@ function LevelCanvas({ level, data, focus, drillable, onDrill }: CanvasProps) {
         // style로만 크기를 주면 미니맵에 노드가 하나도 그려지지 않는다.
         width: box?.w,
         height: box?.h,
-        data: { element, drillable: drillable(element) },
+        data: { element },
         draggable: false,
         selectable: element.base !== 'boundary',
         ...(element.parent && aliases.has(element.parent)
@@ -262,9 +185,8 @@ function LevelCanvas({ level, data, focus, drillable, onDrill }: CanvasProps) {
         markerEnd: { type: MarkerType.ArrowClosed },
         markerStart: r.bidirectional ? { type: MarkerType.ArrowClosed } : undefined,
       })),
-      elements: new Map(shown.map((e) => [e.alias, e])),
     };
-  }, [level, data, focus, drillable]);
+  }, [data]);
 
   if (nodes.length === 0) {
     return <p className="mutedtext" style={{ fontSize: 12 }}>이 레벨에 그릴 요소가 없습니다.</p>;
@@ -272,8 +194,8 @@ function LevelCanvas({ level, data, focus, drillable, onDrill }: CanvasProps) {
   return (
     <div className="c4-wrap">
       <ReactFlow
-        // 레벨·좁힘이 바뀌면 다시 마운트해 화면에 맞춰 다시 잡는다(fitView).
-        key={`${level}:${focus ?? ''}`}
+        // 레벨이 바뀌면 다시 마운트해 화면에 맞춰 다시 잡는다(fitView).
+        key={level}
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
@@ -282,10 +204,6 @@ function LevelCanvas({ level, data, focus, drillable, onDrill }: CanvasProps) {
         minZoom={0.2}
         maxZoom={2}
         nodesConnectable={false}
-        onNodeClick={(_event, node) => {
-          const element = elements.get(node.id);
-          if (element && (node.data as C4NodeData).drillable) onDrill(element);
-        }}
       >
         <Background gap={20} />
         {/* 노드 색은 CSS(.c4-node)에 있어 미니맵이 읽지 못한다 — 여기서 직접 준다. */}
@@ -298,22 +216,20 @@ function LevelCanvas({ level, data, focus, drillable, onDrill }: CanvasProps) {
 
 // --- 노드 ---
 
-type C4NodeData = { element: C4Element; drillable: boolean };
+type C4NodeData = { element: C4Element };
 
 function C4NodeView({ data }: NodeProps) {
-  const { element, drillable } = data as C4NodeData;
+  const { element } = data as C4NodeData;
   return (
     <div
       className={[
         'c4-node', `c4-${element.base}`,
         element.external ? 'c4-ext' : '',
-        drillable ? 'c4-drillable' : '',
       ].filter(Boolean).join(' ')}
     >
       <Handle type="target" position={Position.Top} className="c4-handle" />
       <div className="c4-node-kind">
         <span className="mono">{element.kind}</span>
-        {drillable && <span className="c4-drill-mark">확대 ▸</span>}
       </div>
       <div className="c4-node-label">{element.label}</div>
       {element.technology && <div className="c4-node-tech">[{element.technology}]</div>}
@@ -342,52 +258,39 @@ const NODE_TYPES = { c4node: C4NodeView, c4group: C4GroupView };
 
 // --- code 레벨 — 문서가 아니라 리포가 원천이다(services/codemap의 정적 파싱) ---
 
-function CodeLevel({ projectId, component }: { projectId: number; component: C4Element | null }) {
+function CodeLevel({ projectId }: { projectId: number }) {
   const codemap = useApi(() => api.projectCodemap(projectId), [projectId]);
-  // 안내 문구는 호출측(hintFor)이 상태를 보고 이미 띄웠다 — 여기서 또 쓰면 어긋난다.
-  if (component === null) return null;
   return (
     <Async state={codemap}>
       {(data) => {
-        const paths = new Set(component.paths);
-        const files = data.files.filter((f) => paths.has(f.path));
+        // 컴포넌트별로 나누지 않고 **리포 전체**를 그린다. 나누면 $link이 적힌 컴포넌트만
+        // 볼 수 있어서, 문서에 경로를 안 적었다는 이유로 코드가 안 보였다.
+        const files = data.files;
+        if (files.length === 0) {
+          return (
+            <p className="mutedtext" style={{ fontSize: 12 }}>
+              구조를 파싱할 코드 파일이 없습니다 (Python·JS/TS 대상).
+            </p>
+          );
+        }
         return (
           <>
-            <div style={{ fontSize: 12, marginBottom: 6 }}>
-              <b>{component.label}</b>
-              {component.technology && <span className="mutedtext"> · {component.technology}</span>}
-              {' '}— 구현 파일 {component.paths.length}개
-              {component.link && (
-                <span className="mutedtext"> · $link <span className="mono">{component.link}</span></span>
-              )}
+            <div className="mutedtext" style={{ fontSize: 12, marginBottom: 6 }}>
+              리포 전체 · 파일 {files.length}개 · 선언{' '}
+              {files.reduce((n, f) => n + f.children.length, 0)}개 — 파일이 경계,
+              클래스·함수가 노드, 선은 상속입니다
             </div>
-            {files.length === 0 ? (
-              <p className="mutedtext" style={{ fontSize: 12 }}>
-                구조를 파싱할 코드 파일이 없습니다 (Python·JS/TS 대상).
-                {' '}대상 경로: <span className="mono">{component.paths.join(', ') || '—'}</span>
-              </p>
-            ) : (
-              <>
-                {/* 다른 레벨과 **같은 캔버스**를 쓴다 — 레벨마다 다른 엔진을 두면 확대·축소
-                    동작이 레벨별로 미묘하게 달라진다. 이 레벨은 더 내려갈 곳이 없어
-                    파고들기를 끈다. */}
-                <LevelCanvas
-                  level="code"
-                  data={codeLevel(files, component.label)}
-                  focus={null}
-                  drillable={() => false}
-                  onDrill={() => {}}
-                />
-                {/* 그림은 무엇이 있고 무엇을 상속하는지를 말한다. 메서드 시그니처와 설명은
-                    박스에 담을 수 없으니 접어서 함께 둔다 — 정보를 잃지 않는다. */}
-                <details style={{ marginTop: 8 }}>
-                  <summary style={{ fontSize: 12, cursor: 'pointer' }}>
-                    파일별 상세 (시그니처·설명)
-                  </summary>
-                  <CodeStructure files={files} />
-                </details>
-              </>
-            )}
+            {/* 다른 레벨과 **같은 캔버스**를 쓴다 — 레벨마다 다른 엔진을 두면 확대·축소
+                동작이 레벨별로 미묘하게 달라진다. */}
+            <LevelCanvas level="code" data={codeLevel(files, '리포 전체')} />
+            {/* 그림은 무엇이 있고 무엇을 상속하는지를 말한다. 메서드 시그니처와 설명은
+                박스에 담을 수 없으니 접어서 함께 둔다 — 정보를 잃지 않는다. */}
+            <details style={{ marginTop: 8 }}>
+              <summary style={{ fontSize: 12, cursor: 'pointer' }}>
+                파일별 상세 (시그니처·설명)
+              </summary>
+              <CodeStructure files={files} />
+            </details>
           </>
         );
       }}

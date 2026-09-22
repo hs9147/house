@@ -322,13 +322,10 @@ pre.logbox {
 .c4-node.c4-component { border-color: var(--yellow); }
 /* 외부(_Ext) — 우리가 만들지 않는 사용자·시스템·솔루션은 점선으로 갈라 둔다 */
 .c4-node.c4-ext { border-style: dashed; border-color: var(--muted); background: rgba(255, 255, 255, 0.03); }
-.c4-node.c4-drillable { cursor: zoom-in; }
-.c4-node.c4-drillable:hover { border-color: var(--accent); background: rgba(74, 108, 247, 0.12); }
 .c4-node-kind {
   display: flex; justify-content: space-between; gap: 6px;
   font-size: 9px; color: var(--muted);
 }
-.c4-drill-mark { color: var(--accent); }
 .c4-node-label { font-size: 12px; font-weight: 600; line-height: 1.25; }
 .c4-node-tech {
   font-size: 10px; color: var(--accent);

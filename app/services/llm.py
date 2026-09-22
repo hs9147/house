@@ -93,12 +93,16 @@ class LlmTruncated(RuntimeError):
     가장 나쁘다 — 문서 끝의 C4 블록이 사라진 채 확정된다.
     """
 
-    def __init__(self, partial: str):
+    def __init__(self, partial: str, limit: int = 0):
+        # 한도 숫자를 문구에 넣는다 — "늘리세요"만 보면 무엇에서 얼마로 올릴지 알 수 없다.
+        current = f"현재 한도 {limit} 토큰" if limit > 0 else "한도를 보내지 않는 설정(0)"
         super().__init__(
-            "LLM 응답이 길이 제한에서 잘렸습니다 — 문서가 문장 중간에서 끝납니다. "
-            "PAAS_LLM_MAX_OUTPUT_TOKENS를 늘리거나 요청 범위를 좁혀 다시 생성하세요."
+            f"LLM 응답이 길이 제한에서 잘렸습니다({current}) — 문서가 문장 중간에서 "
+            "끝납니다. PAAS_LLM_MAX_OUTPUT_TOKENS를 늘리거나 요청 범위를 좁혀 다시 "
+            "생성하세요(모델이 허용하는 최대 출력 토큰까지 올릴 수 있습니다)."
         )
         self.partial = partial
+        self.limit = limit
 
 
 def chat_completion(
@@ -151,7 +155,7 @@ def chat_completion(
     # 엉뚱한 자리에서 AttributeError로 터진다.
     text = message.get("content") or ""
     if truncated:
-        raise LlmTruncated(text)
+        raise LlmTruncated(text, get_settings().llm_max_output_tokens)
     return text
 
 

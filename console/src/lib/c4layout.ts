@@ -108,22 +108,3 @@ export function layoutElements(elements: C4Element[], relations: C4Relation[]): 
       ? box
       : { ...box, x: box.x + GROUP_PAD, y: box.y + GROUP_HEAD }));
 }
-
-/** alias를 감싼 경계들(가까운 것부터). 특정 컨테이너로 좁혀 볼 때 쓴다. */
-export function ancestorsOf(alias: string, elements: C4Element[]): string[] {
-  const byAlias = new Map(elements.map((e) => [e.alias, e]));
-  const chain: string[] = [];
-  let parent = byAlias.get(alias)?.parent ?? null;
-  while (parent && byAlias.has(parent) && !chain.includes(parent)) {
-    chain.push(parent);
-    parent = byAlias.get(parent)?.parent ?? null;
-  }
-  return chain;
-}
-
-/** 경계 하나로 좁힌 요소 목록 — 그 경계 자신은 빼고 직속 자식을 최상위로 올린다. */
-export function focusElements(elements: C4Element[], focus: string): C4Element[] {
-  return elements
-    .filter((e) => e.alias !== focus && ancestorsOf(e.alias, elements).includes(focus))
-    .map((e) => (e.parent === focus ? { ...e, parent: null } : e));
-}
