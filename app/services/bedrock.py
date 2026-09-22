@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from urllib.parse import quote
 
@@ -54,6 +55,11 @@ def config_state() -> dict:
         "config_path": str(config),
         "config_exists": config.is_file(),
         "credentials_exists": credentials.is_file(),
+        # **어느 파이썬이 찾고 있는지.** "botocore가 없다"는 보고를 받고 venv에 설치했는데도
+        # 그대로인 경우가 있다 — 서비스가 다른 인터프리터로 돌고 있으면 그 venv의
+        # site-packages를 보지 않는다. 설치할 대상을 이 값으로 특정한다.
+        "python": sys.executable,
+        "botocore_available": botocore_available(),
     }
 
 

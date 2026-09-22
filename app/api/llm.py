@@ -89,7 +89,7 @@ def aws_profiles(_: ApiKey = Depends(require_admin)):
     """
     profiles = bedrock.list_profiles()
     return {
-        "botocore_available": bedrock.botocore_available(),
+        # config_state가 읽은 경로·파일 존재·**어느 파이썬인지**·botocore 여부를 함께 낸다.
         # 어디를 읽었는지 밝힌다. 서비스로 돌면 홈 디렉터리가 로그인한 사람의 것이 아니라
         # 서비스 계정의 것이다(nssm 기본값은 LocalSystem →
         # C:\Windows\system32\config\systemprofile) — 그러면 `aws sso login`을 해도

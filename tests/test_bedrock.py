@@ -383,3 +383,20 @@ def test_config_state_distinguishes_missing_file_from_no_profiles(tmp_path, monk
     monkeypatch.setenv("AWS_CONFIG_FILE", str(empty))
     assert bedrock.config_state()["config_exists"] is True
     assert bedrock.list_profiles() == []
+
+
+def test_config_state_names_the_interpreter_that_is_looking(aws_config):
+    """venv에 설치했는데도 "botocore가 없다"가 남는 경우가 있다 — 백엔드가 다른
+    인터프리터로 돌면 그 venv의 site-packages를 보지 않는다. 설치 대상을 특정해야 한다."""
+    import sys
+
+    state = bedrock.config_state()
+    assert state["python"] == sys.executable
+    assert state["botocore_available"] is bedrock.botocore_available()
+
+
+def test_profiles_endpoint_carries_the_interpreter(aws_config):
+    c = TestClient(create_app())
+    body = c.get("/paas/api/v1/llm/aws/profiles", headers=ADMIN).json()
+    assert body["python"].endswith(("python.exe", "python", "python3"))
+    assert "botocore_available" in body

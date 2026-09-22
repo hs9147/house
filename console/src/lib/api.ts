@@ -388,6 +388,7 @@ export const api = {
     config_path: string; // 어디를 읽었는지 — 서비스 계정이면 홈이 달라 목록이 빈다
     config_exists: boolean;      // 파일 자체가 없는 것과 프로필만 없는 것은 대처가 다르다
     credentials_exists: boolean;
+    python: string;              // 어느 인터프리터가 찾고 있는지 — 설치 대상을 특정한다
     profiles: {
       name: string; region: string; sso_session: string; sso_start_url: string;
       ok: boolean | null; reason: string;

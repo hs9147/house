@@ -263,8 +263,14 @@ export default function Providers() {
                      된다(백엔드가 옛 코드면 404다) — 받은 오류를 그대로 보여 준다. */
                   <>❌ 프로필 목록을 받지 못했습니다: {awsProfiles.error}</>
                 ) : awsProfiles.data && !awsProfiles.data.botocore_available ? (
-                  <>⚠️ 서버에 botocore가 없어 자격증명을 쓸 수 없습니다 —{' '}
-                    <span className="mono">pip install botocore</span> 후 백엔드를 재시작하세요.</>
+                  /* venv에 설치했는데도 이 문구가 남는 경우가 있다 — 백엔드가 그 venv가 아닌
+                     다른 인터프리터로 돌고 있으면 그쪽 site-packages를 보지 않는다. 그래서
+                     "pip install"이 아니라 **찾고 있는 인터프리터**로 명령을 못 박는다. */
+                  <>⚠️ 서버에 botocore가 없어 자격증명을 쓸 수 없습니다. 백엔드가 쓰는
+                    인터프리터에 설치해야 합니다:{' '}
+                    <span className="mono">
+                      "{awsProfiles.data.python}" -m pip install botocore
+                    </span></>
                 ) : (awsProfiles.data?.profiles ?? []).length === 0 ? (
                   /* 경로를 밝힌다 — 서비스로 돌면 홈이 서비스 계정 것이라(nssm 기본값은
                      LocalSystem) `aws sso login`을 해도 목록이 빈다. 경로를 안 보여 주면
