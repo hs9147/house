@@ -61,6 +61,11 @@ def test_sw_update_schedules_git_pull_and_restart():
             assert script.index("-m pip install") < script.index("Restart-Service")
             # 실패해도 재시작까지는 간다 — 대신 실패를 말한다(적재 중인 .pyd는 못 덮는다)
             assert "pip install 실패" in script
+            # **스키마도 올린다.** 코드만 당기면 컬럼이 늘어난 화면이 500으로 죽는다 —
+            # 기동 경고를 읽고 alembic을 손으로 돌리는 일은 잊힌다(실측: 세 컬럼이 빠져 있었다).
+            assert "alembic upgrade head" in script
+            assert script.index("alembic upgrade head") < script.index("Restart-Service")
+            assert "alembic 실패" in script
             # 코드 갱신에 실패하면 **멈춘다** — 갱신 전 파일로 설치·재시작하면 "업데이트한
             # 줄 알았는데 아무것도 바뀌지 않은" 상태가 된다(실측).
             assert "fast-forward 불가" in script

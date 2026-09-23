@@ -926,6 +926,17 @@ def sw_update(
         "  if ($LASTEXITCODE -ne 0) { "
         "    Write-Host '[SW Update] !! pip install 실패 — 적재 중인 모듈은 덮어쓰지 못할 수 있습니다'; } "
         "} "
+        # **스키마도 올린다.** 코드만 당기면 컬럼이 늘어난 화면이 500으로 죽는다 — 플랫폼은
+        # 기동 시 그 사실을 경고로 말하지만(main.py의 schema_missing), 경고를 읽고 alembic을
+        # 손으로 돌리는 일은 잊힌다. 실측으로 세 컬럼이 그렇게 빠져 있었다
+        # (llm_providers.aws_profile · projects.start_scripts · build_tasks.number).
+        # 마이그레이션은 앞으로만 간다(추가 위주) — 실패하면 크게 남기고 재시작은 진행한다:
+        # 서비스를 내려 둔 채 사람을 기다리는 것이 더 나쁘다.
+        "Write-Host '[SW Update] alembic upgrade head...'; "
+        f"& '{escaped_python}' -m alembic upgrade head; "
+        "if ($LASTEXITCODE -ne 0) { "
+        "  Write-Host '[SW Update] !! alembic 실패 — DB 스키마가 코드보다 뒤처집니다"
+        "(해당 화면이 500으로 실패할 수 있습니다). /paas/health의 schema_missing을 보세요.'; } "
         # 콘솔은 플랫폼 자신이라 배포 파이프라인이 없다 — 여기서 빌드하지 않으면
         # 의존성이 늘었을 때 예전 dist가 조용히 계속 서빙된다.
         f"if (Test-Path '{escaped_console}\package.json') {{ "
