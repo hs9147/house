@@ -198,3 +198,53 @@ def test_timeout_setting_is_actually_used(monkeypatch, fresh_settings):
     monkeypatch.setattr(llm_service.httpx, "post", fake_post)
     llm_service.chat_completion(_provider(), [{"role": "user", "content": "x"}])
     assert seen["timeout"] == 300
+
+
+def test_error_body_is_included_so_400_says_why(monkeypatch):
+    """httpx의 raise_for_status는 상태 코드만 남긴다 — 400의 이유는 본문에만 있다.
+
+    실측: 기본 프로바이더(Azure)가 400으로 죽었는데 화면에는 "400 Bad Request"만 남아, 어느
+    파라미터가 문제인지 알 수 없었다.
+    """
+    class _Res:
+        status_code = 400
+        text = '{"error": {"message": "Unsupported value: something"}}'
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(llm_service.httpx, "post", lambda *a, **kw: _Res())
+    with pytest.raises(llm_service.LlmCallFailed) as raised:
+        llm_service._post_chat("http://x/v1/chat/completions", {}, {"model": "m"})
+    assert "Unsupported value" in str(raised.value)
+    assert raised.value.status == 400
+
+
+def test_max_tokens_is_retried_as_max_completion_tokens(monkeypatch):
+    """Azure의 최신 모델·OpenAI 추론 모델은 `max_completion_tokens`만 받고 옛 이름을 거부한다.
+
+    프로바이더별 표를 만들면 모델이 새로 나올 때마다 뒤처진다 — 거부당하면 이름만 바꿔
+    한 번 더 보낸다.
+    """
+    sent: list[dict] = []
+
+    class _Res:
+        def __init__(self, status, text='{"choices": [{"message": {"content": "ok"}}]}'):
+            self.status_code = status
+            self.text = text
+
+        def json(self):
+            import json as _json
+            return _json.loads(self.text)
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.append(json)
+        if "max_tokens" in json:
+            return _Res(400, '{"error": {"message": "Use max_completion_tokens instead"}}')
+        return _Res(200)
+
+    monkeypatch.setattr(llm_service.httpx, "post", fake_post)
+    out = llm_service._post_chat("http://x/v1/chat/completions", {},
+                                 {"model": "m", "max_tokens": 1000})
+    assert out["choices"][0]["message"]["content"] == "ok"
+    assert "max_tokens" not in sent[1] and sent[1]["max_completion_tokens"] == 1000

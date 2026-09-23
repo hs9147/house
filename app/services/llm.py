@@ -119,6 +119,24 @@ class LlmTimeout(RuntimeError):
         self.seconds = seconds
 
 
+class LlmCallFailed(RuntimeError):
+    """프로바이더가 오류로 답했다 — **본문을 함께 싣는다.**
+
+    httpx의 raise_for_status는 상태 코드와 URL만 남긴다. 400의 이유는 본문에만 있는데
+    (어느 파라미터가 거부됐는지, 배포 이름이 틀렸는지, 한도를 넘었는지) 그것을 버리면 화면에
+    "400 Bad Request"만 남고 사람은 추측부터 시작한다 — 실측에서 Azure 프로바이더가 그렇게
+    이유 없이 죽었다. 본문은 길 수 있으므로 앞부분만 싣는다.
+    """
+
+    def __init__(self, status: int, url: str, body: str):
+        super().__init__(
+            f"LLM 프로바이더가 HTTP {status}로 답했습니다 — {body.strip()[:600] or '(본문 없음)'}"
+        )
+        self.status = status
+        self.url = url
+        self.body = body
+
+
 class LlmTruncated(RuntimeError):
     """응답이 길이 제한에서 끊겼다 — 받은 부분을 함께 들고 간다.
 
@@ -279,7 +297,22 @@ def _post_chat(url: str, headers: dict, payload: dict) -> dict:
         # 기다렸는지와 어디를 고치는지 말한다. 출력 한도를 올리면 생성이 길어져 이쪽이
         # 먼저 끊긴다(둘은 함께 움직인다).
         raise LlmTimeout(seconds, get_settings().llm_max_output_tokens)
-    res.raise_for_status()
+    # **`max_tokens`를 거부하는 엔드포인트가 있다.** Azure OpenAI의 최신 모델과 OpenAI의
+    # 추론 모델은 `max_completion_tokens`만 받고, 옛 이름에는 400으로 답한다. 실측에서
+    # 기본 프로바이더(Azure gpt-5.2)가 그 400으로 죽었고, 화면에는 이유 없는
+    # "400 Bad Request"만 남았다. 이름만 바꿔 한 번 더 보낸다 — 프로바이더마다 표를 만들면
+    # 모델이 새로 나올 때마다 그 표가 뒤처진다.
+    if res.status_code == 400 and "max_tokens" in payload:
+        body = res.text[:500]
+        if "max_completion_tokens" in body or "max_tokens" in body:
+            retry = {k: v for k, v in payload.items() if k != "max_tokens"}
+            retry["max_completion_tokens"] = payload["max_tokens"]
+            res = httpx.post(url, headers=headers, json=retry, timeout=seconds)
+    if res.status_code >= 400:
+        # **본문을 싣는다.** 400의 이유는 본문에만 있다(어느 파라미터가 문제인지, 배포
+        # 이름이 틀렸는지). 그것을 버리면 화면에 남는 것은 상태 코드뿐이고, 그러면 사람은
+        # 추측부터 시작한다.
+        raise LlmCallFailed(res.status_code, url, res.text)
     return res.json()
 
 
