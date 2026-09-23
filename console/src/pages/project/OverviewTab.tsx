@@ -95,7 +95,9 @@ export default function OverviewTab() {
                       <td><StatusPill value={profile} /></td>
                       <td><StatusPill value={status[profile] ?? 'unknown'} /></td>
                       <td className="mono">
-                        {health.data && status[profile] === 'running' ? (
+                        {/* 복합 프로젝트는 "running (2/2)"처럼 집계돼 온다 — 정확히
+                            'running'만 보면 복합 배포의 주소 링크가 죽는다. */}
+                        {health.data && (status[profile] ?? '').startsWith('running') ? (
                           <a
                             href={fullUrl}
                             target="_blank"

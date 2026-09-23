@@ -72,6 +72,43 @@ def _get_project(db: Session, project_id: int) -> Project:
     return project
 
 
+def _composite_units(project: Project) -> list[str]:
+    """복합 프로젝트의 배포 유닛 이름 — **감지된 구조**가 원천이다.
+
+    예전에는 ("backend", "frontend") 고정 목록을 썼다. 복합 배포는 감지된 구조로
+    일반화됐는데(services/structure) 여기만 남아서, `api/`+`web/`처럼 이름이 다른 리포는
+    중지·상태 조회가 없는 유닛을 가리켰다 — 중지가 아무것도 내리지 않고 상태는 늘
+    stopped였다. 구조가 없는 예전 레코드는 그때의 규칙으로 떨어진다.
+    """
+    names = [str(c.get("name")) for c in (project.structure or {}).get("components") or []]
+    return [n for n in names if n] or list(COMPOSITE_COMPONENTS)
+
+
+def _composite_status(runtime, project: Project, profile: BuildProfile) -> str:
+    """복합 프로젝트의 프로필 상태를 **한 문자열로** 집계한다.
+
+    예전에는 컴포넌트별 dict를 돌려줬는데, 화면은 프로필당 문자열을 기대한다 —
+    StatusPill이 객체에 .split()을 불러 프로젝트 조회 진입 자체가 실패했다(실측).
+    응답 모양이 타입에 따라 갈리면 화면은 언젠가 한쪽을 잊는다.
+
+    "progressing (1/2)" 형태는 StatusPill이 이미 지원하는 표기다(첫 낱말로 색을 정한다).
+    """
+    units = _composite_units(project)
+    values = [runtime.status(f"{project.name}-{unit}", profile) for unit in units]
+    total = len(values)
+    running = sum(v == "running" for v in values)
+    if running == total:
+        return "running" if total == 1 else f"running ({running}/{total})"
+    if running:
+        return f"progressing ({running}/{total})"
+    # 아무것도 안 돌 때 — 실패가 섞여 있으면 그것을 말한다(stopped로 뭉개면 원인이 숨는다).
+    if "failed" in values:
+        return f"failed (0/{total})"
+    if len(set(values)) == 1:
+        return values[0]
+    return f"stopped (0/{total})"
+
+
 @router.get("", response_model=list[ProjectOut])
 def list_projects(db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
     rows = db.execute(select(Project).order_by(Project.id)).scalars()
@@ -243,7 +280,7 @@ def delete_project(
 
     # 배포본 정지 — 레코드가 사라지면 콘솔에서 내릴 방법이 없어진다(런타임 미가용은 무시).
     if is_enabled("deploy"):
-        units = ([f"{name}-{c}" for c in COMPOSITE_COMPONENTS]
+        units = ([f"{name}-{c}" for c in _composite_units(project)]
                  if project.type == ProjectType.composite else [name])
         for unit in units:
             for profile in BuildProfile:
@@ -392,7 +429,7 @@ def stop_project(
     project = _get_project(db, project_id)
     runtime = deployer.get_runtime()
     if project.type == ProjectType.composite:
-        for name in COMPOSITE_COMPONENTS:
+        for name in _composite_units(project):
             runtime.stop(f"{project.name}-{name}", profile)
     else:
         runtime.stop(project.name, profile)
@@ -458,7 +495,7 @@ def project_logs(
     if project.type == ProjectType.composite:
         return {
             name: runtime.logs(f"{project.name}-{name}", profile, tail)
-            for name in COMPOSITE_COMPONENTS
+            for name in _composite_units(project)
         }
     return {"logs": runtime.logs(project.name, profile, tail)}
 
@@ -472,13 +509,7 @@ def project_status(
     project = _get_project(db, project_id)
     runtime = deployer.get_runtime()
     if project.type == ProjectType.composite:
-        return {
-            profile.value: {
-                name: runtime.status(f"{project.name}-{name}", profile)
-                for name in COMPOSITE_COMPONENTS
-            }
-            for profile in BuildProfile
-        }
+        return {p.value: _composite_status(runtime, project, p) for p in BuildProfile}
     return {
         profile.value: runtime.status(project.name, profile)
         for profile in BuildProfile

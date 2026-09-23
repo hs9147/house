@@ -6,7 +6,8 @@
  * 갈라지면 어느 쪽이 실제 동작인지 알 수 없게 된다.
  */
 export default function AutoDeployMark({ status, branch }: { status: string; branch?: string }) {
-  if (status !== 'running') return null;
+  // 복합 프로젝트는 "running (2/2)"로 집계돼 온다(api/projects._composite_status).
+  if (!status.startsWith('running')) return null;
   const target = branch ? `${branch} 브랜치` : '기본 브랜치';
   return (
     <span title={`${target}에 push·merge가 들어오면 자동으로 다시 배포됩니다`} aria-label="자동배포 켜짐">

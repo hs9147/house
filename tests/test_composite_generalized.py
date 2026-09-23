@@ -182,3 +182,70 @@ def test_single_component_is_not_a_composite_deploy(monkeypatch, tmp_path):
             deployer.deploy_composite_sync(db, project, BuildProfile.release)
     finally:
         db.close()
+
+
+def test_status_is_a_single_string_per_profile(monkeypatch, tmp_path):
+    """복합도 프로필당 **문자열**이다 — 예전에는 컴포넌트별 dict를 돌려줬다.
+
+    화면(StatusPill)은 문자열을 전제로 .split()을 부르므로, dict가 오면 프로젝트 조회
+    진입 자체가 실패했다(실측). 응답 모양이 타입에 따라 갈리면 화면은 언젠가 한쪽을 잊는다.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.api import projects as projects_api
+
+    _write(tmp_path, "api/requirements.txt", "fastapi\n")
+    _write(tmp_path, "web/package.json", '{"dependencies": {"react": "18"}}')
+    db = SessionLocal()
+    try:
+        project, _b, runtime, _r = _setup(db, monkeypatch, tmp_path, "status-a")
+        deployer.deploy_composite_sync(db, project, BuildProfile.release)
+        pid = project.id
+    finally:
+        db.close()
+
+    # 감지된 유닛 이름(api·web)으로 상태를 묻는다 — backend/frontend 고정이 아니다
+    asked: list[str] = []
+
+    class _Runtime(_FakeRuntime):
+        def status(self, project_name, profile):
+            asked.append(project_name)
+            return "running" if project_name.endswith("-api") else "stopped"
+
+    monkeypatch.setattr(deployer, "get_runtime", lambda: _Runtime())
+    body = TestClient(create_app()).get(
+        f"/paas/api/v1/projects/{pid}/status", headers={"x-api-key": "test-admin-key"}).json()
+
+    assert all(isinstance(v, str) for v in body.values()), body
+    assert body["release"] == "progressing (1/2)"  # 하나만 돌고 있다
+    assert "status-a-api" in asked and "status-a-web" in asked
+    assert not any(n.endswith("-backend") for n in asked)
+    assert projects_api._composite_units(  # 헬퍼도 감지된 이름을 쓴다
+        type("P", (), {"structure": {"components": [{"name": "api"}, {"name": "web"}]}})()
+    ) == ["api", "web"]
+
+
+def test_status_aggregates_running_and_failed(monkeypatch, tmp_path):
+    """집계 문구는 StatusPill이 첫 낱말로 색을 정한다 — 실패는 stopped로 뭉개지 않는다."""
+    from app.api.projects import _composite_status
+
+    project = type("P", (), {
+        "name": "agg",
+        "structure": {"components": [{"name": "a"}, {"name": "b"}]},
+    })()
+
+    class _R:
+        def __init__(self, values):
+            self.values = values
+
+        def status(self, name, profile):
+            return self.values[name.rsplit("-", 1)[1]]
+
+    assert _composite_status(_R({"a": "running", "b": "running"}), project,
+                             BuildProfile.release) == "running (2/2)"
+    assert _composite_status(_R({"a": "running", "b": "failed"}), project,
+                             BuildProfile.release) == "progressing (1/2)"
+    assert _composite_status(_R({"a": "failed", "b": "stopped"}), project,
+                             BuildProfile.release) == "failed (0/2)"
+    assert _composite_status(_R({"a": "stopped", "b": "stopped"}), project,
+                             BuildProfile.release) == "stopped"
