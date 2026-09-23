@@ -81,6 +81,17 @@ class Project(Base):
     #   {"method", "detected_at", "git_sha", "source",
     #    "components": [{"name", "path", "type"}, ...]}
     structure: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # windows_service 런타임의 기동 스크립트(start.cmd) 본문 — **컴포넌트별**로 둔다.
+    #   {"": "...단일 배포용...", "api": "...", "web": "..."}
+    # 복합 배포는 컴포넌트마다 유닛·포트·공개 경로가 따로이므로 스크립트도 따로여야 한다.
+    # 비어 있으면(또는 그 키가 없으면) 플랫폼의 제네릭 템플릿을 쓴다
+    # (services/build._START_SCRIPT — 리포 시그니처로 실행 방법을 추정).
+    #
+    # 값이 있으면 그것이 이긴다. 템플릿은 흔한 모양만 맞히므로, 맞지 않는 프로젝트는
+    # LLM이 리포를 보고 제안한 스크립트를 **사람이 확인해** 여기에 넣는다(리포에 Dockerfile이
+    # 있으면 그것을 쓰는 것과 같은 원칙 — 구체적인 의사표시가 추정보다 앞선다).
+    # 서버에서 서비스 권한으로 실행되는 값이라 저장 전에 검증한다(services/startscript).
+    start_scripts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     organization: Mapped["Organization | None"] = relationship(back_populates="projects")

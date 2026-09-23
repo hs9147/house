@@ -3,8 +3,8 @@
 예전 파이프라인은 `backend/`·`frontend/` 두 이름만 다뤘다. 그래서 `api/`+`web/`처럼 이름이
 다른 리포나 컴포넌트가 셋인 리포는 감지는 되어도 배포가 실패했다. 여기서는 그 경로를
 직접 태운다 — 이 파일의 테스트는 `.env`의 PAAS_RUNTIME_BACKEND와 무관하게 docker 런타임을
-못 박는다(windows_service는 단일 start.cmd만 실행해 복합을 지원하지 않으므로, 그 설정이
-새면 새 코드가 아예 실행되지 않는다).
+못 박는다(windows_service는 이미지를 만들지 않고 컴포넌트 폴더의 start.cmd로 도는 다른
+경로다 — test_startscript의 네이티브 복합 배포 테스트가 그쪽을 본다).
 """
 from pathlib import Path
 

@@ -150,11 +150,13 @@ def list_registered_services() -> list[tuple[str, str]]:
 class WindowsServiceRuntime(Runtime):
     def start(self, spec: RuntimeSpec) -> Endpoint:
         settings = get_settings()
-        workdir = settings.work_dir / spec.project_name
+        # 복합 배포는 컴포넌트마다 폴더가 다르다 — spec.work_subdir가 그 폴더다(빈
+        # 문자열이면 리포 루트). 여기를 AppDirectory로 쓰고 그 안의 start.cmd를 실행한다.
+        workdir = settings.work_dir / spec.project_name / (spec.work_subdir or "")
         start_script = workdir / "start.cmd"
         if not start_script.exists():
             raise WindowsServiceError(
-                "windows_service 런타임은 리포 루트에 start.cmd가 필요합니다 "
+                "windows_service 런타임은 실행 폴더에 start.cmd가 필요합니다 "
                 f"(배포 시 자동 생성됨 — PORT/HOST 환경변수로 리슨 포트·바인드 주소 전달): {start_script}"
             )
 

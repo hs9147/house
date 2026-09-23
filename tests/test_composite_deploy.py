@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.db import SessionLocal
 from app.main import create_app
 from app.models import BuildProfile, Deployment, DeploymentStatus, Project, ProjectType
@@ -15,8 +16,14 @@ from app.services.runtime.base import Endpoint
 
 
 @pytest.fixture(autouse=True)
-def _init_db():
+def _init_db(monkeypatch, fresh_settings):
     create_app()  # Base.metadata.create_all(engine) — 이 파일은 TestClient 없이 직접 세션을 연다
+    # 이 파일이 검증하는 것은 **docker 경로**다(build_image 호출·이미지 태그). `.env`가
+    # windows_service면 배포가 이미지를 만들지 않는 네이티브 경로로 가서, 여기 단정들이
+    # "빌드가 없었다"로 무너진다 — test_composite_generalized와 같은 이유로 못 박는다
+    # (네이티브 복합 배포는 test_startscript가 본다).
+    monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "docker")
+    get_settings.cache_clear()
 
 
 # ---- services/build.py: 자동 감지 ----

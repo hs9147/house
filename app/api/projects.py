@@ -14,6 +14,7 @@ from ..features import is_enabled, require_feature
 from ..git_policy import enforce_internal_git_url
 from ..models import (
     ApiKey,
+    LlmProvider,
     AuditEvent,
     BuildProfile,
     ChatMessage,
@@ -34,6 +35,9 @@ from ..models import (
 from ..schemas import (
     DeploymentOut,
     ProjectSourceSubdirSet,
+    StartScriptOut,
+    StartScriptProposeIn,
+    StartScriptSet,
     DeployRequest,
     EnvVarSet,
     ModuleHistoryItem,
@@ -44,7 +48,10 @@ from ..schemas import (
     ProjectUploadForm,
 )
 from ..security import can_view_git_url, encrypt_value, require_admin, require_api_key, viewer_org_ids
-from ..services import deploydiag, deployer, gitea, structure, upload
+from ..services import build as build_module
+from ..services import (
+    deploydiag, deployer, gitea, startscript, structure, upload, workspace,
+)
 from ..services.build import COMPOSITE_COMPONENTS, checkout
 from ..services.deployer import DeployInProgress, NoRollbackTarget, ProfileConflict
 from ..services.gitea import GiteaError, GiteaNotConfigured
@@ -332,6 +339,133 @@ async def detect_project_structure(
         actor=key.name, source="repo", git_sha=git_sha,
     )
     return _serialize_project(project, key, viewer_org_ids(db, key))
+
+
+def _script_components(project: Project) -> list[str]:
+    """스크립트를 따로 둘 수 있는 유닛 목록. 단일 배포는 비어 있다("" 하나뿐).
+
+    복합 배포는 컴포넌트마다 유닛·포트·공개 경로가 따로이므로 스크립트도 따로여야 한다 —
+    한 스크립트가 둘을 띄우면 서비스 감시자(nssm)는 자식 하나만 보고, 헬스체크도 포트
+    하나만 본다. 목록은 감지된 구조에서 온다(_composite_units와 같은 원천).
+    """
+    return _composite_units(project) if project.type == ProjectType.composite else []
+
+
+def _validate_component(project: Project, component: str) -> str:
+    """요청이 가리킨 유닛을 확인한다. 없는 컴포넌트는 조용히 ""로 떨어지면 안 된다 —
+    그러면 컴포넌트 스크립트를 저장한 줄 알고 단일 스크립트를 덮어쓴다."""
+    if not component:
+        return ""
+    if component not in _script_components(project):
+        raise HTTPException(
+            status_code=404,
+            detail=f"감지된 구조에 없는 컴포넌트입니다: {component}",
+        )
+    return component
+
+
+@router.get("/{project_id}/start-script", response_model=StartScriptOut,
+            dependencies=[Depends(require_feature("deploy"))])
+def get_start_script(
+    project_id: int,
+    component: str = "",
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """지금 쓰이는 기동 스크립트 — 이 유닛에 지정된 것이 있으면 그것, 없으면 템플릿."""
+    project = _get_project(db, project_id)
+    component = _validate_component(project, component)
+    saved = (project.start_scripts or {}).get(component)
+    common = {"component": component, "components": _script_components(project)}
+    if saved:
+        return StartScriptOut(script=saved, problems=startscript.validate(saved),
+                              source="project", **common)
+    return StartScriptOut(script=build_module._START_SCRIPT, source="template", **common)
+
+
+@router.post("/{project_id}/start-script/propose", response_model=StartScriptOut,
+             dependencies=[Depends(require_feature("deploy"))])
+async def propose_start_script(
+    project_id: int,
+    body: StartScriptProposeIn,
+    component: str = "",
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """LLM이 리포를 보고 기동 스크립트를 쓴다 — **저장하지 않는다.**
+
+    이 스크립트는 서버에서 서비스 권한으로 실행된다. LLM이 쓴 것을 그대로 저장·실행하면
+    그것은 원격 코드 실행이다. 그래서 검증 결과를 함께 돌려주고, 저장은 사람이 확인한 뒤
+    별도 요청으로 한다(PUT). 프로바이더도 사람이 고른다 — 어느 모델로 쓸지 추측하지 않는다.
+    """
+    project = _get_project(db, project_id)
+    component = _validate_component(project, component)
+    provider = db.get(LlmProvider, body.provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="LLM provider not found")
+    try:
+        workdir = await asyncio.to_thread(workspace.code_workdir, project)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"리포를 가져올 수 없습니다: {str(e)[:300]}")
+    try:
+        result = await asyncio.to_thread(
+            startscript.propose, db, project, provider, workdir, component)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"스크립트 작성 실패: {str(e)[:500]}")
+    audit.record(db, admin.name, "project.start_script.propose", project.name,
+                 {"provider": provider.name, "component": component,
+                  "problems": len(result["problems"])})
+    return StartScriptOut(source="project", component=component,
+                          components=_script_components(project), **result)
+
+
+@router.put("/{project_id}/start-script", response_model=StartScriptOut,
+            dependencies=[Depends(require_feature("deploy"))])
+def set_start_script(
+    project_id: int,
+    body: StartScriptSet,
+    component: str = "",
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """확인한 스크립트를 저장한다 — 검증을 통과하지 못하면 거부한다.
+
+    경고만 하고 통과시키면 아무도 읽지 않는다. 다음 배포에서 이 스크립트가 해당 유닛의
+    폴더에 start.cmd로 쓰인다.
+    """
+    project = _get_project(db, project_id)
+    component = _validate_component(project, component)
+    problems = startscript.validate(body.script)
+    if problems:
+        raise HTTPException(status_code=422, detail="; ".join(problems))
+    # JSON 컬럼은 **새 dict를 대입**해야 변경으로 잡힌다 — 제자리에서 고치면 SQLAlchemy가
+    # 더티로 보지 않아 조용히 저장되지 않는다.
+    project.start_scripts = {**(project.start_scripts or {}), component: body.script}
+    db.commit()
+    audit.record(db, admin.name, "project.start_script.set", project.name,
+                 {"component": component, "chars": len(body.script)})
+    return StartScriptOut(script=body.script, source="project", component=component,
+                          components=_script_components(project))
+
+
+@router.delete("/{project_id}/start-script", response_model=StartScriptOut,
+               dependencies=[Depends(require_feature("deploy"))])
+def reset_start_script(
+    project_id: int,
+    component: str = "",
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """이 유닛의 지정을 지우고 템플릿으로 되돌린다 — 되돌릴 길이 없으면 아무도 지정하지 않는다."""
+    project = _get_project(db, project_id)
+    component = _validate_component(project, component)
+    remaining = {k: v for k, v in (project.start_scripts or {}).items() if k != component}
+    project.start_scripts = remaining or None
+    db.commit()
+    audit.record(db, admin.name, "project.start_script.reset", project.name,
+                 {"component": component})
+    return StartScriptOut(script=build_module._START_SCRIPT, source="template",
+                          component=component, components=_script_components(project))
 
 
 @router.put("/{project_id}/source-subdir", response_model=ProjectOut)

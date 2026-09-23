@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import Async from '../../components/Async';
 import DeployDiagnoseModal from '../../components/DeployDiagnoseModal';
+import StartScriptModal from '../../components/StartScriptModal';
 import StatusPill from '../../components/StatusPill';
 import { api } from '../../lib/api';
 import type { BuildProfile } from '../../lib/types';
@@ -14,12 +15,18 @@ export default function DeploymentsTab() {
   const state = useApi(() => api.deployments(project.id), [project.id]);
   // 실패한 배포에서만 연다 — 성공한 배포를 진단하라고 권할 이유가 없다.
   const [diagnosing, setDiagnosing] = useState<BuildProfile | null>(null);
+  // 기동 스크립트는 "실패한 다음"에만 보는 것이 아니다 — 배포 전에 무엇이 실행되는지
+  // 확인할 수 있어야 한다.
+  const [editingScript, setEditingScript] = useState(false);
 
   return (
     <div className="panel">
       <div className="row" style={{ marginBottom: 10 }}>
         <h2 style={{ margin: 0 }}>배포 이력</h2>
         <div className="spacer" />
+        <button className="secondary small" onClick={() => setEditingScript(true)}>
+          기동 스크립트
+        </button>
         <button className="secondary small" onClick={state.reload}>
           새로고침
         </button>
@@ -72,6 +79,9 @@ export default function DeploymentsTab() {
           </table>
         )}
       </Async>
+      {editingScript && (
+        <StartScriptModal projectId={project.id} onClose={() => setEditingScript(false)} />
+      )}
       {diagnosing && (
         <DeployDiagnoseModal
           projectId={project.id}

@@ -268,14 +268,30 @@ def dockerfile_for(project_type: ProjectType, profile: BuildProfile, workdir: Pa
     return template
 
 
-def write_start_script(workdir: Path) -> Path:
-    """windows_service 런타임용 start.cmd를 조건 없이 자동 생성한다(매 배포 시 덮어씀).
+def start_script_for(project: Project | None, component: str = "") -> str:
+    """이 컴포넌트에 쓸 스크립트 본문 — 지정된 것이 있으면 그것, 없으면 템플릿.
 
-    타입별 규칙 없이 리포 시그니처로 실행 방법을 추정하는 제네릭 스크립트라 프로젝트
-    타입/프로필을 가리지 않는다 — docker의 dockerfile_for가 이미지 빌드를 담당하는
-    자리를 windows_service에서 이 함수가 대신한다."""
+    복합 배포는 컴포넌트마다 유닛·포트·공개 경로가 따로이므로 스크립트도 따로다. 단일
+    배포는 빈 문자열 키를 쓴다(컴포넌트가 없다는 뜻을 키로 그대로 표현한다).
+    """
+    scripts = (project.start_scripts or {}) if project else {}
+    return str(scripts.get(component) or "") or _START_SCRIPT
+
+
+def write_start_script(workdir: Path, project: Project | None = None,
+                       component: str = "") -> Path:
+    """windows_service 런타임용 start.cmd를 매 배포 시 자동 생성한다.
+
+    기본은 제네릭 템플릿이다 — 타입별 규칙 없이 리포 시그니처로 실행 방법을 추정하며,
+    docker의 dockerfile_for가 이미지 빌드를 담당하는 자리를 windows_service에서 대신한다.
+
+    **프로젝트에 지정된 스크립트가 있으면 그것이 이긴다**(Project.start_script). 템플릿은
+    흔한 모양만 맞히므로, 맞지 않는 프로젝트는 LLM이 리포를 보고 제안한 스크립트를 사람이
+    확인해 저장한다(services/startscript) — 리포에 Dockerfile이 있으면 그것을 쓰는 것과
+    같은 원칙이다. 구체적인 의사표시가 추정보다 앞선다.
+    """
     path = workdir / START_SCRIPT_NAME
-    path.write_text(_START_SCRIPT, encoding="utf-8")
+    path.write_text(start_script_for(project, component), encoding="utf-8")
     # vite preview 분기가 --config로 참조한다. node 프로젝트일 때만 쓴다 — 파이썬
     # 프로젝트 작업 디렉터리에 쓸모없는 파일을 남기지 않는다.
     if (workdir / "package.json").exists():

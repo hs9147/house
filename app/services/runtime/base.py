@@ -28,8 +28,12 @@ class RuntimeSpec:
     replicas: int = 1
     gpu: bool = False
     health_check_path: str = "/"
-    # composite 프로젝트에서만 사용 — "backend"/"frontend". 일반 프로젝트는 None.
+    # composite 프로젝트에서만 사용 — 감지된 컴포넌트 이름. 일반 프로젝트는 None.
     component: str | None = None
+    # 리포 안에서 이 유닛이 도는 폴더(컴포넌트 경로). 네이티브 런타임은 여기를 작업
+    # 디렉터리로 쓰고 그 안의 start.cmd를 실행한다 — 복합 배포는 컴포넌트마다 다르다.
+    # 빈 문자열이면 리포 루트다(단일 배포).
+    work_subdir: str = ""
     # 이 배포가 외부에서 열리는 서브패스(/apps/{조직}/{프로젝트}[~dev]/). dev 서버는
     # 자기 공개 경로를 알아야 그 접두사가 붙은 요청을 받을 수 있어 런타임이 넘겨준다.
     base_path: str = "/"

@@ -118,6 +118,33 @@ class DeploymentOut(BaseModel):
     component: str | None = None
 
 
+class StartScriptProposeIn(BaseModel):
+    """기동 스크립트 제안 요청 — 어느 LLM으로 쓸지는 사람이 고른다(추측하지 않는다)."""
+
+    provider_id: int
+
+
+class StartScriptSet(BaseModel):
+    """사람이 확인한 기동 스크립트. 검증을 통과하지 못하면 저장하지 않는다."""
+
+    script: str = Field(min_length=1)
+
+
+class StartScriptOut(BaseModel):
+    """제안·현재 스크립트와 **검증 결과**. problems가 비어 있지 않으면 저장할 수 없다."""
+
+    script: str
+    problems: list[str] = []
+    # 프롬프트에 실은 사실 — 무엇을 보고 쓴 것인지 사람이 확인할 수 있어야 한다.
+    facts: str = ""
+    source: str = "template"  # template | project
+    # 이 스크립트가 어느 유닛의 것인지. 복합 배포는 컴포넌트마다 스크립트가 따로다
+    # (유닛·포트·공개 경로가 이미 컴포넌트별이다). ""는 단일 배포.
+    component: str = ""
+    # 이 프로젝트에서 고를 수 있는 컴포넌트 — 화면이 목록을 따로 조회하지 않게 함께 준다.
+    components: list[str] = []
+
+
 class ProjectSourceSubdirSet(BaseModel):
     """빌드 대상 폴더 — 배포 실패 진단이 제안한 값을 적용하는 입력.
 

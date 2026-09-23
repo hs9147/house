@@ -1,0 +1,329 @@
+"""기동 스크립트(start.cmd)를 LLM이 쓴다 — 제안까지만, 저장은 사람이.
+
+이 스크립트는 서버에서 **서비스 권한으로** 실행된다. 그래서 두 가지를 테스트가 지킨다:
+검증을 통과하지 못한 스크립트는 저장되지 않는다는 것, 그리고 복합 배포는 컴포넌트마다
+스크립트가 따로라는 것(한 스크립트가 둘을 띄우면 서비스 감시자가 자식 하나만 본다).
+"""
+import subprocess
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.config import get_settings
+from app.db import SessionLocal
+from app.main import create_app
+from app.models import BuildProfile, LlmProvider, Project, ProjectType
+from app.services import build as build_module
+from app.services import deployer, startscript
+from app.services.runtime.base import Endpoint
+
+ADMIN = {"x-api-key": "test-admin-key"}
+API = "/paas/api/v1"
+
+GOOD = """@echo off
+REM 예전에는 curl로 내려받았다 — 지금은 플랫폼이 설치한다(주석은 판정에서 빠진다).
+python -m streamlit run app.py --server.port %PORT% --server.address %HOST%
+"""
+
+
+def _write(root: Path, rel: str, body: str = "x") -> None:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+
+
+def _git_repo(root: Path) -> None:
+    """file_tree는 `git ls-files`다 — 커밋되지 않은 파일은 사실로 치지 않는다."""
+    quiet = {"cwd": root, "capture_output": True}
+    subprocess.run(["git", "init", "-q"], **quiet, check=True)
+    subprocess.run(["git", "add", "-A", "-f"], **quiet, check=True)
+    subprocess.run(
+        # 빈 리포도 쓴다 — "파일이 하나도 없는 리포"도 사실 중 하나다(그때 제안이 실패하는지
+        # 보는 테스트가 있다). --allow-empty 없이는 커밋 자체가 실패한다.
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init",
+         "--allow-empty"],
+        **quiet, check=True,
+    )
+
+
+# --- 검증 ---
+
+def test_accepts_a_plain_start_script():
+    assert startscript.validate(GOOD) == []
+
+
+def test_rejects_the_script_without_the_injected_port():
+    """포트를 박아 넣으면 프록시가 보는 포트에서 뜨지 않는다 — 조용히 502가 된다."""
+    problems = startscript.validate("@echo off\npython -m uvicorn app:app --port 8000\n")
+    assert any("%PORT%" in p for p in problems)
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("rd /s /q node_modules", "폴더 일괄 삭제"),
+    ("curl -o x.exe http://example.com/x.exe", "내려받는"),
+    ("powershell -enc SQBFAFgA", "인코딩된"),
+    ("nssm install paas-x cmd", "서비스 등록"),
+    ("cd /d C:\\Windows", "절대 경로"),
+])
+def test_rejects_commands_a_start_script_has_no_business_running(line, expected):
+    problems = startscript.validate(f"@echo off\n{line}\napp --port %PORT%\n")
+    assert any(expected in p for p in problems), problems
+
+
+def test_rejects_an_empty_script():
+    assert startscript.validate("   \n") == ["스크립트가 비어 있습니다."]
+
+
+# --- 사실(프롬프트 입력) ---
+
+def test_facts_scope_to_the_component_folder(tmp_path):
+    """컴포넌트 스크립트는 그 폴더의 사실로 쓰인다 — 리포 루트의 package.json이 아니다."""
+    _write(tmp_path, "api/requirements.txt", "fastapi\nuvicorn\n")
+    _write(tmp_path, "web/package.json", '{"scripts": {"dev": "vite"}}')
+    _git_repo(tmp_path)
+    project = Project(name="shop-f", type=ProjectType.composite,
+                      git_url="https://git.example.com/x",
+                      structure={"components": [
+                          {"name": "api", "path": "api", "type": "fastapi"},
+                          {"name": "web", "path": "web", "type": "react"},
+                      ]})
+
+    web = startscript._facts(tmp_path, project, "web")
+    assert "dev: vite" in web
+    assert "fastapi" not in web
+    # 실행 폴더를 명시한다 — 복합은 컴포넌트 폴더에서 돌고, 단일은 리포 루트에서 돈다.
+    assert "working directory: web" in web
+
+    api = startscript._facts(tmp_path, project, "api")
+    assert "fastapi" in api and "dev: vite" not in api
+
+
+def test_facts_reject_a_component_that_is_not_in_the_detected_structure(tmp_path):
+    _git_repo(tmp_path)
+    project = Project(name="shop-g", type=ProjectType.composite,
+                      git_url="https://git.example.com/x", structure={"components": []})
+    with pytest.raises(ValueError):
+        startscript._facts(tmp_path, project, "nope")
+
+
+# --- 저장된 스크립트가 배포에 쓰이는가 ---
+
+def test_start_script_for_falls_back_to_the_template():
+    project = Project(name="shop-h", type=ProjectType.python,
+                      git_url="https://git.example.com/x")
+    assert build_module.start_script_for(project) == build_module._START_SCRIPT
+    assert build_module.start_script_for(None) == build_module._START_SCRIPT
+
+
+def test_start_script_for_picks_the_component_entry():
+    project = Project(name="shop-i", type=ProjectType.composite,
+                      git_url="https://git.example.com/x",
+                      start_scripts={"": "root", "web": "web-only"})
+    assert build_module.start_script_for(project, "web") == "web-only"
+    assert build_module.start_script_for(project) == "root"
+    # 저장되지 않은 컴포넌트는 템플릿이다 — 다른 컴포넌트의 스크립트를 빌려 쓰면 안 된다.
+    assert build_module.start_script_for(project, "api") == build_module._START_SCRIPT
+
+
+# --- API ---
+
+@pytest.fixture
+def client():
+    app = create_app()
+    with TestClient(app) as c:
+        yield c
+
+
+def _project(db, name: str, **kw) -> Project:
+    project = Project(name=name, git_url="https://git.example.com/x",
+                      type=kw.pop("type", ProjectType.python), **kw)
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+def test_saving_requires_passing_validation(client):
+    db = SessionLocal()
+    try:
+        project = _project(db, "script-api-1")
+    finally:
+        db.close()
+
+    bad = client.put(f"{API}/projects/{project.id}/start-script",
+                     json={"script": "@echo off\nshutdown /r\n"}, headers=ADMIN)
+    assert bad.status_code == 422
+    assert "시스템 종료" in bad.json()["detail"]
+    # 거부된 스크립트는 저장되지 않는다 — 경고만 하고 통과시키면 아무도 읽지 않는다.
+    current = client.get(f"{API}/projects/{project.id}/start-script", headers=ADMIN)
+    assert current.json()["source"] == "template"
+
+    ok = client.put(f"{API}/projects/{project.id}/start-script",
+                    json={"script": GOOD}, headers=ADMIN)
+    assert ok.status_code == 200
+    again = client.get(f"{API}/projects/{project.id}/start-script", headers=ADMIN).json()
+    assert again["source"] == "project"
+    assert again["script"] == GOOD
+    assert again["components"] == []  # 단일 배포에는 고를 유닛이 없다
+
+
+def test_component_scripts_are_stored_separately(client):
+    db = SessionLocal()
+    try:
+        project = _project(db, "script-api-2", type=ProjectType.composite,
+                           structure={"components": [
+                               {"name": "api", "path": "api", "type": "fastapi"},
+                               {"name": "web", "path": "web", "type": "react"},
+                           ]})
+    finally:
+        db.close()
+
+    url = f"{API}/projects/{project.id}/start-script"
+    assert client.put(url, json={"script": GOOD}, headers=ADMIN,
+                      params={"component": "api"}).status_code == 200
+    assert client.put(url, json={"script": GOOD.replace("app.py", "web.py")},
+                      headers=ADMIN, params={"component": "web"}).status_code == 200
+
+    api_out = client.get(url, headers=ADMIN, params={"component": "api"}).json()
+    web_out = client.get(url, headers=ADMIN, params={"component": "web"}).json()
+    assert "app.py" in api_out["script"] and "web.py" in web_out["script"]
+    assert api_out["components"] == ["api", "web"]
+
+    # 되돌리기는 그 유닛만 되돌린다 — 다른 컴포넌트의 스크립트가 함께 사라지면 안 된다.
+    assert client.delete(url, headers=ADMIN, params={"component": "api"}).status_code == 200
+    assert client.get(url, headers=ADMIN,
+                      params={"component": "api"}).json()["source"] == "template"
+    assert client.get(url, headers=ADMIN,
+                      params={"component": "web"}).json()["source"] == "project"
+
+
+def test_unknown_component_is_rejected_instead_of_falling_back(client):
+    """없는 컴포넌트가 조용히 ""로 떨어지면, 컴포넌트 스크립트를 저장한 줄 알고
+    단일 스크립트를 덮어쓴다."""
+    db = SessionLocal()
+    try:
+        project = _project(db, "script-api-3", type=ProjectType.composite,
+                           structure={"components": [{"name": "api", "path": "api"}]})
+    finally:
+        db.close()
+    res = client.put(f"{API}/projects/{project.id}/start-script",
+                     json={"script": GOOD}, headers=ADMIN, params={"component": "nope"})
+    assert res.status_code == 404
+
+
+def test_propose_does_not_save(client, monkeypatch, tmp_path):
+    """LLM이 쓴 것을 그대로 저장하면 그것은 원격 코드 실행이다 — 제안은 저장하지 않는다."""
+    _write(tmp_path, "app.py", "print(1)")
+    _git_repo(tmp_path)
+    db = SessionLocal()
+    try:
+        project = _project(db, "script-api-4")
+        provider = LlmProvider(name="p", kind="openai", base_url="http://x",
+                               model="m", api_key_encrypted=None)
+        db.add(provider)
+        db.commit()
+        db.refresh(provider)
+    finally:
+        db.close()
+
+    monkeypatch.setattr(startscript.workspace, "code_workdir", lambda p: tmp_path)
+    monkeypatch.setattr("app.services.workspace.code_workdir", lambda p: tmp_path)
+    monkeypatch.setattr(
+        startscript.llm_service, "chat_completion",
+        lambda *a, **kw: f"설명입니다.\n```bat\n{GOOD}```\n",
+    )
+
+    res = client.post(f"{API}/projects/{project.id}/start-script/propose",
+                      json={"provider_id": provider.id}, headers=ADMIN)
+    assert res.status_code == 200, res.text
+    assert res.json()["script"].strip() == GOOD.strip()
+    assert res.json()["problems"] == []
+    assert res.json()["facts"]  # 무엇을 보고 썼는지 사람이 확인할 수 있어야 한다
+    # 저장은 별도 요청으로만 — 제안 직후의 현재 스크립트는 아직 템플릿이다.
+    assert client.get(f"{API}/projects/{project.id}/start-script",
+                      headers=ADMIN).json()["source"] == "template"
+
+
+def test_propose_reports_problems_instead_of_hiding_them(client, monkeypatch, tmp_path):
+    _git_repo(tmp_path)
+    db = SessionLocal()
+    try:
+        project = _project(db, "script-api-5")
+        provider = LlmProvider(name="p2", kind="openai", base_url="http://x", model="m")
+        db.add(provider)
+        db.commit()
+        db.refresh(provider)
+    finally:
+        db.close()
+    monkeypatch.setattr("app.services.workspace.code_workdir", lambda p: tmp_path)
+    monkeypatch.setattr(startscript.llm_service, "chat_completion",
+                        lambda *a, **kw: "```bat\n@echo off\nrd /s /q C:\\x\n```")
+    res = client.post(f"{API}/projects/{project.id}/start-script/propose",
+                      json={"provider_id": provider.id}, headers=ADMIN).json()
+    assert res["problems"]
+
+
+# --- 복합 네이티브 배포 ---
+
+class _FakeRuntime:
+    def __init__(self):
+        self.specs = []
+
+    def start(self, spec):
+        self.specs.append(spec)
+        return Endpoint(host="127.0.0.1", port=9000 + len(self.specs))
+
+    def stop(self, *a): ...
+    def status(self, project_name, profile): return "stopped"
+    def logs(self, *a, **kw): return ""
+
+
+def test_native_composite_deploy_writes_a_script_per_component(
+    monkeypatch, tmp_path, fresh_settings,
+):
+    """회귀: windows_service는 "리포 루트의 단일 start.cmd만 실행한다"며 복합을 거부했다.
+
+    컴포넌트마다 그 폴더에 스크립트를 쓰면 유닛·포트·공개 경로가 이미 컴포넌트별인
+    구조와 아귀가 맞는다 — 이미지는 만들지 않는다(docker를 찾다 실패하면 안 된다).
+    """
+    create_app()
+    monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "windows_service")
+    monkeypatch.setenv("PAAS_TIER", "small")
+    get_settings.cache_clear()
+
+    _write(tmp_path, "api/requirements.txt", "fastapi\n")
+    _write(tmp_path, "web/package.json", '{"dependencies": {"react": "18"}}')
+
+    db = SessionLocal()
+    try:
+        project = _project(db, "native-composite", type=ProjectType.composite)
+        project.start_scripts = {"web": GOOD.replace("app.py", "web.py")}
+        db.commit()
+
+        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "b" * 40))
+        monkeypatch.setattr(deployer, "build_image", _must_not_build)
+        installed: list[Path] = []
+        monkeypatch.setattr(deployer, "install_dependencies",
+                            lambda workdir, log, **kw: installed.append(workdir))
+        runtime = _FakeRuntime()
+        monkeypatch.setattr(deployer, "get_runtime", lambda: runtime)
+        monkeypatch.setattr(deployer.proxy, "configure_paths", lambda *a, **kw: None)
+
+        records = deployer.deploy_composite_sync(db, project, BuildProfile.release)
+
+        assert set(records) == {"api", "web"}
+        # 설치·기동은 컴포넌트 폴더에서 — 리포 루트에서 npm ci를 돌리면 아무것도 못 찾는다.
+        assert sorted(installed) == sorted([tmp_path / "api", tmp_path / "web"])
+        assert sorted(s.work_subdir for s in runtime.specs) == ["api", "web"]
+        # 저장된 스크립트는 그 컴포넌트에, 없는 컴포넌트는 템플릿이 쓰인다.
+        assert "web.py" in (tmp_path / "web" / "start.cmd").read_text(encoding="utf-8")
+        assert (tmp_path / "api" / "start.cmd").read_text(encoding="utf-8") \
+            == build_module._START_SCRIPT
+    finally:
+        db.close()
+        get_settings.cache_clear()
+
+
+def _must_not_build(*a, **kw):
+    raise AssertionError("네이티브 런타임은 이미지를 만들지 않는다")

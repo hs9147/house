@@ -391,6 +391,19 @@ export interface ProjectFilesOut {
   files: string[];
 }
 
+// 기동 스크립트(start.cmd). problems가 비어 있지 않으면 저장할 수 없다 — 이 스크립트는
+// 서버에서 서비스 권한으로 실행되므로, 검증을 통과하지 못한 것을 경고만 하고 넘기지 않는다.
+export interface StartScriptOut {
+  script: string;
+  problems: string[];
+  // 프롬프트에 실은 사실 — 무엇을 보고 쓴 것인지 사람이 확인할 수 있어야 한다.
+  facts: string;
+  source: 'template' | 'project';
+  // 이 스크립트가 어느 유닛의 것인지(''는 단일 배포), 그리고 고를 수 있는 컴포넌트 목록.
+  component: string;
+  components: string[];
+}
+
 // 코드 구조 시각화 — 정적 파싱으로 만든 파일→클래스/함수 계층 트리(요청 1)
 export interface CodeMapNode {
   kind: 'class' | 'function' | 'method';

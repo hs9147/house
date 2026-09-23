@@ -8,6 +8,7 @@ import threading
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -56,6 +57,15 @@ def runtime_name() -> str:
 # GPU를 배정할 수 있는 런타임. windows_service(nssm 네이티브 프로세스)에는 GPU 배정이라는
 # 개념 자체가 없다 — 그 런타임은 RuntimeSpec.gpu를 읽지도 않는다.
 GPU_CAPABLE_RUNTIMES = ("docker", "k8s")
+
+
+def uses_native_runtime() -> bool:
+    """이미지 대신 start.cmd로 도는 런타임인가.
+
+    windows_service(nssm)와 dev 프로세스 런타임이 그렇다 — 둘 다 컴포넌트 폴더의 start.cmd를
+    실행한다. 복합 배포가 이 경우에 build_image를 부르면 docker를 찾다 실패한다.
+    """
+    return get_settings().runtime_backend == "windows_service"
 
 
 def uses_dev_process(profile: BuildProfile) -> bool:
@@ -173,10 +183,16 @@ def secret_env_keys(db: Session, project: Project) -> frozenset[str]:
 def make_spec(
     db: Session, project: Project, image_tag: str, profile: BuildProfile,
     *, component: str | None = None, internal_port_override: int | None = None,
+    work_subdir: str = "", base_path_relative: str = "",
 ) -> RuntimeSpec:
     """component가 주어지면(composite 전용) unit_name·이미지가 컴포넌트별로 분리되고,
     internal_port_override로 해당 컴포넌트의 실제 내부 포트를 지정한다(빌드 시점에
-    감지된 타입 기준 — project.type은 composite 자체라 포트 매핑이 없다)."""
+    감지된 타입 기준 — project.type은 composite 자체라 포트 매핑이 없다).
+
+    work_subdir는 네이티브 런타임이 쓸 실행 폴더(컴포넌트 경로)다 — 이름이 아니라 경로다.
+    base_path_relative는 그 컴포넌트가 프로젝트 주소 아래에서 받는 경로다(structure.routes_for) —
+    dev 서버는 자기 공개 경로가 붙은 요청만 받으므로, 루트가 아닌 컴포넌트에 프로젝트 주소를
+    주면 요청이 어긋난다."""
     from .host import gpu_allowed  # noqa: PLC0415
 
     settings = get_settings()
@@ -196,7 +212,8 @@ def make_spec(
         internal_port=port,
         profile=profile,
         domain=proxy.domain_for(project.name, profile),
-        base_path=proxy.path_prefix_for(_org_name(project), project.name, profile),
+        base_path=proxy.path_prefix_for(
+            _org_name(project), project.name, profile) + base_path_relative,
         env=resolve_env(db, project, profile),
         secret_keys=secret_env_keys(db, project),
         memory_limit=project.memory_limit or settings.default_memory_limit,
@@ -205,6 +222,7 @@ def make_spec(
         gpu=project.type.value == "llm" and gpu_allowed(),
         health_check_path=project.health_check_path,
         component=component,
+        work_subdir=work_subdir,
         host_port=host_port,
     )
 
@@ -272,7 +290,7 @@ def deploy_sync(
                 # Windows Service에 등록해 네이티브 실행한다 — docker build를 건너뛴다
                 # (image_tag는 이 런타임이 사용하지 않는다). start.cmd를 조건 없이
                 # 자동 생성한다(dockerfile_for와 대칭 — 매 배포 시 갱신).
-                write_start_script(workdir)
+                write_start_script(workdir, project)
                 # npm/pip install을 여기서 먼저 끝낸다(build_image의 docker build와 대응
                 # 되는 명시적 build 단계) — runtime.start()의 헬스체크 창 안에서 설치까지
                 # 겸하면, 설치가 느릴 때 원인이 "헬스체크 실패"로만 보이고 배포 상태도
@@ -507,22 +525,6 @@ def deploy_composite_sync(
         raise DeployInProgress(project.name)
     try:
         assert_no_profile_conflict(project, profile)
-        if get_settings().runtime_backend == "windows_service":
-            # windows_service는 리포 루트의 단일 start.cmd만 실행하므로 backend/frontend
-            # 두 컴포넌트를 네이티브로 나눠 띄울 수 없다 — docker build로 조용히 실패하지 않고
-            # 여기서 명확히 실패시킨다.
-            msg = (
-                f"{project.name}: windows_service 런타임은 composite(backend/frontend) "
-                "프로젝트를 지원하지 않습니다 — 리포 루트의 단일 start.cmd만 실행합니다. "
-                "docker 런타임을 쓰거나 각 컴포넌트를 별도 프로젝트로 분리하세요."
-            )
-            if records:
-                for rec in records.values():
-                    rec.status = DeploymentStatus.failed
-                    rec.error = msg
-                    rec.finished_at = datetime.now(timezone.utc)
-                db.commit()
-            raise BuildError(msg)
         workdir, sha = checkout(project, git_sha)
         # 단일 배포와 같은 이유로 구조를 다시 읽어 저장한다 — 화면·감사기록이 실제로
         # 배포한 구성을 말해야 한다.
@@ -569,6 +571,10 @@ def deploy_composite_sync(
         endpoints: dict[str, Endpoint] = {}
         failed_component: str | None = None
         failure: Exception | None = None
+        # 컴포넌트가 외부에서 열리는 경로 — 프록시 라우팅과 **같은 원천**에서 받는다
+        # (structure.routes_for). 프런트엔드 빌드에 넘기는 --base가 이 경로와 다르면
+        # HTML이 없는 주소로 자산을 참조해 제목만 뜨는 빈 화면이 된다.
+        relatives = dict(structure.routes_for(detected))
         for name, (comp_path, comp_type) in components.items():
             rec = records[name]
             # 이 컴포넌트의 빌드를 시작하기 전에 로그 경로를 커밋한다 — build_image 호출이
@@ -576,18 +582,42 @@ def deploy_composite_sync(
             rec.build_log_path = str(docker_build_log_path(project.name, sha, profile, name))
             db.commit()
             try:
-                result = build_image(
-                    project, workdir, sha, profile, component=name,
-                    component_type=comp_type, context_subdir=comp_path,
-                )
-                rec.image_tag = result.image_tag
-                rec.internal_port = result.internal_port
-                db.commit()
+                if uses_native_runtime():
+                    # 네이티브 런타임은 이미지를 만들지 않는다 — 컴포넌트 폴더에 그 컴포넌트의
+                    # start.cmd를 쓰고, 그 폴더에서 설치·기동한다. 예전에는 "리포 루트의 단일
+                    # start.cmd만 실행한다"며 복합을 거부했는데, 스크립트를 컴포넌트마다 두면
+                    # 유닛·포트·공개 경로가 이미 컴포넌트별인 구조와 아귀가 맞는다.
+                    comp_dir = workdir / comp_path if comp_path else workdir
+                    write_start_script(comp_dir, project, component=name)
+                    rec.internal_port = internal_port(comp_type, profile)
+                    rec.build_log_path = str(
+                        env_setup_log_path(f"{project.name}-{name}", sha, profile))
+                    db.commit()
+                    install_dependencies(
+                        comp_dir, Path(rec.build_log_path),
+                        base_path=proxy.path_prefix_for(
+                            _org_name(project), project.name, profile,
+                        ) + relatives.get(name, ""),
+                        build=profile != BuildProfile.development,
+                    )
+                    spec = make_spec(
+                        db, project, "", profile, component=name,
+                        internal_port_override=rec.internal_port, work_subdir=comp_path,
+                        base_path_relative=relatives.get(name, ""),
+                    )
+                else:
+                    result = build_image(
+                        project, workdir, sha, profile, component=name,
+                        component_type=comp_type, context_subdir=comp_path,
+                    )
+                    rec.image_tag = result.image_tag
+                    rec.internal_port = result.internal_port
+                    db.commit()
 
-                spec = make_spec(
-                    db, project, result.image_tag, profile,
-                    component=name, internal_port_override=result.internal_port,
-                )
+                    spec = make_spec(
+                        db, project, result.image_tag, profile,
+                        component=name, internal_port_override=result.internal_port,
+                    )
                 endpoints[name] = get_runtime().start(spec)
             except (BuildError, RuntimeError) as e:
                 failed_component = name

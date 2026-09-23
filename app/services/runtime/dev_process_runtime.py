@@ -88,13 +88,14 @@ def _port_open(port: int) -> bool:
 class DevProcessRuntime(Runtime):
     def start(self, spec: RuntimeSpec) -> Endpoint:
         settings = get_settings()
-        workdir = settings.work_dir / spec.project_name
-        if spec.component:
-            workdir = workdir / spec.component
+        # 컴포넌트 폴더는 **경로**로 받는다(spec.work_subdir). 예전에는 컴포넌트 이름을
+        # 폴더로 썼는데, 이름과 경로는 다를 수 있다 — `apps/web`은 이름이 `apps-web`이다
+        # (docker 태그에 슬래시를 넣을 수 없어 그렇게 정했다, services/structure).
+        workdir = settings.work_dir / spec.project_name / (spec.work_subdir or "")
         start_script = workdir / "start.cmd"
         if not start_script.exists():
             raise DevProcessError(
-                "개발 배포는 리포 루트에 start.cmd가 필요합니다 "
+                "개발 배포는 실행 폴더에 start.cmd가 필요합니다 "
                 f"(배포 시 자동 생성됨 — build.write_start_script): {start_script}"
             )
         if spec.host_port is None:
