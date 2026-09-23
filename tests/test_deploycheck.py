@@ -132,10 +132,52 @@ def test_endpoint_returns_items_without_changing_anything(monkeypatch, tmp_path,
     body = c.get(f"{API}/projects/{pid}/deploy/check", headers=ADMIN).json()
     keys = {i["key"] for i in body["items"]}
     assert {"dependencies", "entry", "source_subdir", "start_script"} <= keys
-    assert body["run_dir"] == "(리포 루트)"
+    assert body["run_dir"] == "단일=(리포 루트)"
     # 점검은 프로젝트를 바꾸지 않는다.
     db = SessionLocal()
     try:
         assert db.get(Project, pid).start_scripts is None
     finally:
         db.close()
+
+
+def test_composite_is_checked_per_component(tmp_path):
+    """실측(negowith): 점검이 폴더 하나만 보고 다른 컴포넌트의 문제를 "확인"으로 덮었다.
+
+    복합 배포는 컴포넌트마다 폴더·유닛이 따로다 — 점검도 그렇게 봐야 배포와 같은 것을 본다.
+    source_subdir는 복합에서 실행 폴더가 아니므로 기준이 되어서도 안 된다.
+    """
+    _write(tmp_path, "api/app/main.py", "import pandas\n")   # 선언되지 않은 import
+    _write(tmp_path, "api/requirements.txt", "fastapi\n")
+    _write(tmp_path, "web/package.json", '{"dependencies": {"react": "18"}}')
+    _git_repo(tmp_path)
+    project = Project(name="nego-like", type=ProjectType.composite, git_url="g",
+                      source_subdir="web",  # 복합에서는 이 값이 실행 폴더가 아니다
+                      structure={"components": [
+                          {"name": "api", "path": "api", "type": "python"},
+                          {"name": "web", "path": "web", "type": "react"},
+                      ]})
+
+    result = deploycheck.run(tmp_path, project)
+    keys = {i["key"] for i in result["items"]}
+    assert "api:dependencies" in keys and "web:dependencies" in keys
+    # api 쪽 문제가 web 점검에 묻히지 않는다.
+    api_imports = next(i for i in result["items"] if i["key"] == "api:undeclared_imports")
+    assert api_imports["status"] == "warn"
+    assert "pandas" in api_imports["detail"]
+    assert "[api]" in api_imports["title"]
+
+
+def test_undeclared_imports_ignores_stdlib_and_local_modules(tmp_path):
+    """오탐이 나면 아무도 읽지 않는다 — 표준 라이브러리와 같은 리포의 모듈은 빼야 한다."""
+    _write(tmp_path, "requirements.txt", "fastapi\npython-dotenv\n")
+    _write(tmp_path, "main.py",
+           "import os\nimport json\nfrom pathlib import Path\n"
+           "import fastapi\nfrom dotenv import load_dotenv\nimport helpers\n")
+    _write(tmp_path, "helpers.py", "x = 1\n")
+    _git_repo(tmp_path)
+    project = Project(name="clean-imports", type=ProjectType.python, git_url="g")
+
+    item = next(i for i in deploycheck.run(tmp_path, project)["items"]
+                if i["key"] == "undeclared_imports")
+    assert item["status"] == "ok", item
