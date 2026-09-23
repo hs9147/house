@@ -143,6 +143,11 @@ Hard rules:
   line gets executed as a command. Write REM comments in English.
 - You launch ONE unit. If the repo has several components, only start the one described
   as "this unit" - the platform runs each component as its own service on its own port.
+- **Vite: always pass `--config paas-preview.config.mjs`** (the platform writes that file next
+  to this script, for both `vite preview` and `vite`/`npm run dev`). Vite checks the Host header
+  and answers 403 "Blocked request. This host is not allowed." to the reverse proxy otherwise -
+  the deployment then reports success while every page is 403 (measured). That config merges the
+  project's own vite.config and only adds allowedHosts, so nothing else changes.
 """
 
 
@@ -188,6 +193,9 @@ def _facts(workdir: Path, project: Project, component: str = "",
         # 이 둘을 섞으면 "cd 없이 package.json이 있다고 믿는" 스크립트가 나온다.
         f"start.cmd runs with this folder as the working directory: "
         f"{_rel(base if component else workdir, workdir)}",
+        # 플랫폼이 같은 폴더에 써 두는 파일 — 이것을 모르면 vite에 --config를 주지 않는다.
+        "the platform writes paas-preview.config.mjs next to start.cmd for node projects "
+        "(it merges the project's vite.config and adds allowedHosts)",
         f"this unit's files are in: {_rel(base, workdir)}",
         "",
         f"files (git ls-files, up to {MAX_FILES_IN_PROMPT}):",

@@ -181,3 +181,38 @@ def test_undeclared_imports_ignores_stdlib_and_local_modules(tmp_path):
     item = next(i for i in deploycheck.run(tmp_path, project)["items"]
                 if i["key"] == "undeclared_imports")
     assert item["status"] == "ok", item
+
+
+def test_vite_without_the_preview_config_is_flagged(tmp_path):
+    """실측(negowith web): `vite preview`를 플랫폼 설정 없이 부르면 Vite가 프록시의 Host를
+    403으로 거절한다 — 배포는 성공으로 보고되고(헬스체크는 403도 응답으로 센다) 모든 페이지가
+    403이 된다. 배포 전에 말할 수 있는 것이다."""
+    _write(tmp_path, "package.json", '{"scripts": {"build": "vite build"}}')
+    _write(tmp_path, "index.html", "<html></html>")
+    _git_repo(tmp_path)
+    project = Project(name="vite-host", type=ProjectType.react, git_url="g",
+                      start_scripts={
+                          build_module.script_key(BuildProfile.release):
+                              # **raw 문자열로 쓴다.** 보통 문자열에서 "\vite"는 `\v`
+                              # (수직 탭)로 해석돼 "vite"라는 낱말이 사라진다 —
+                              # _START_SCRIPT가 주석으로 경고하는 그 함정이고, 이 테스트가
+                              # 처음 거기에 걸렸다(점검이 통과라고 답했다).
+                              "@echo off\n"
+                              r"node_modules\.bin\vite.cmd preview "
+                              "--host %HOST% --port %PORT%\n",
+                      })
+    item = next(i for i in deploycheck.run(tmp_path, project)["items"]
+                if i["key"] == "vite_host")
+    assert item["status"] == "warn"
+    assert "paas-preview.config.mjs" in item["fix"]
+
+    # 설정을 주면 통과한다.
+    project.start_scripts = {
+        build_module.script_key(BuildProfile.release):
+            "@echo off\n"
+            r"node_modules\.bin\vite.cmd preview "
+            "--config paas-preview.config.mjs --host %HOST% --port %PORT%\n",
+    }
+    ok = next(i for i in deploycheck.run(tmp_path, project)["items"]
+              if i["key"] == "vite_host")
+    assert ok["status"] == "ok"

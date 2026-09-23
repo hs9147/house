@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from ..models import BuildProfile, Project, ProjectType
 from . import deploydiag, startscript, structure
-from .build import start_script_for
+from .build import PREVIEW_CONFIG_NAME, start_script_for
 from .workspace import file_tree
 
 # 커밋되면 안 되는 것들. 비밀 파일은 노출이고(실측: supplier-pool의 Strategy/.env), 설치
@@ -104,6 +104,7 @@ def run(workdir: Path, project: Project,
     # 프로젝트 전체에 한 번만 보는 것들
     items += [
         _start_script_item(project, profile),
+        _vite_host_item(project, profile),
         _secret_item(files),
         _artifact_item(files),
     ]
@@ -278,6 +279,35 @@ def _start_script_item(project: Project, profile: BuildProfile) -> dict:
                      "늘었을 수 있습니다).")
     return _item("start_script", "기동 스크립트", OK,
                  f"저장된 스크립트 {len(keys)}개가 검증을 통과합니다({profile.value}).")
+
+
+def _vite_host_item(project: Project, profile: BuildProfile) -> dict:
+    """Vite를 쓰는 저장된 스크립트가 플랫폼의 preview 설정을 주는가.
+
+    Vite는 Host 헤더를 검사하고, 리버스 프록시가 넘긴 공개 도메인을 403
+    "Blocked request. This host is not allowed."로 거절한다. 그래서 배포는 **성공으로
+    보고되고**(헬스체크는 403도 응답으로 센다) 모든 페이지가 403이 된다 — 실측 negowith web.
+    플랫폼은 그 검사를 푸는 설정을 스크립트 옆에 써 두므로, 쓰기만 하면 된다.
+    """
+    saved = project.start_scripts or {}
+    offenders: list[str] = []
+    for key, script in saved.items():
+        if not key.startswith(f"{profile.value}:"):
+            continue
+        body = "\n".join(ln for ln in script.splitlines()
+                          if not ln.strip().upper().startswith("REM"))
+        if "vite" in body.lower() and PREVIEW_CONFIG_NAME not in body:
+            offenders.append(key.split(":", 1)[1] or "단일")
+    if not offenders:
+        return _item("vite_host", "Vite Host 검사", OK,
+                     "Vite를 쓰는 스크립트가 없거나, 모두 플랫폼 preview 설정을 씁니다.")
+    return _item(
+        "vite_host", "Vite Host 검사", WARN,
+        f"저장된 스크립트가 vite를 부르는데 {PREVIEW_CONFIG_NAME}를 주지 않습니다: "
+        f"{' · '.join(offenders)}",
+        f"vite 명령에 `--config {PREVIEW_CONFIG_NAME}`를 넣으세요 — 없으면 Vite가 프록시의 "
+        "Host를 403으로 거절하고, 배포는 성공으로 보이는데 모든 페이지가 403이 됩니다"
+        "(프로젝트의 vite.config에 allowedHosts를 직접 켠 경우라면 그대로 두세요).")
 
 
 def _streamlit_item(project: Project, run_dir: Path) -> dict:

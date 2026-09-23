@@ -409,10 +409,9 @@ export const api = {
   },
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),
-  bindModule: (projectId: number, moduleId: number, env_prefix: string) =>
-    request<{ injected_env: string[] }>(
-      'POST', `/projects/${projectId}/modules/${moduleId}/bind`, { env_prefix },
-    ),
+  // 바인딩 **생성**은 화면에서 하지 않는다 — 기획 "솔루션 구성" 단계가 문서와 함께 정한다
+  // (감사 기록: 34건 중 32건이 그 경로, 손으로 만든 2건은 같은 날 해제됐다). 서버의
+  // POST .../bind 엔드포인트는 그대로 있다: 에이전트·API 클라이언트가 쓴다.
   unbindModule: (projectId: number, bindingId: number) =>
     request<void>('DELETE', `/projects/${projectId}/modules/bindings/${bindingId}`),
 
