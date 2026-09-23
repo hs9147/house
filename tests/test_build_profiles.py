@@ -166,14 +166,35 @@ def test_build_image_uses_source_subdir_as_context(monkeypatch, tmp_path):
     assert result.internal_port == 80  # react release — internal_port(project.type, profile)
 
 
-def _fake_run_ok(monkeypatch, calls: list):
+def _fake_run_ok(monkeypatch, calls: list, envs: list | None = None):
     class _FakeProc:
         returncode = 0
 
-    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None):
+    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None, env=None):
         calls.append(cmd)
+        if envs is not None:
+            envs.append(env or {})
         return _FakeProc()
     monkeypatch.setattr(build_service.subprocess, "run", fake_run)
+
+
+def test_pip_runs_in_utf8_mode(monkeypatch, tmp_path):
+    """pip은 requirements.txt에 쿠키가 없으면 **로케일 인코딩**으로 디코드한다 — 한글 주석
+    한 줄에 설치가 통째로 실패했다(실측 세 번: 플랫폼 자신, negowith api).
+
+    리포마다 쿠키를 넣게 요구할 일이 아니다. pip을 부르는 쪽이 UTF-8 모드를 켠다.
+    """
+    (tmp_path / "requirements.txt").write_text(
+        "# 한글 주석\nfastapi\n", encoding="utf-8")
+    calls: list = []
+    envs: list = []
+    _fake_run_ok(monkeypatch, calls, envs)
+    monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    install_dependencies(tmp_path, tmp_path / "env.log")
+
+    assert any("pip" in " ".join(map(str, c)) for c in calls), calls
+    assert envs and all(e.get("PYTHONUTF8") == "1" for e in envs), envs
 
 
 def test_install_dependencies_runs_npm_ci_when_lockfile_present(monkeypatch, tmp_path):
@@ -288,7 +309,7 @@ def test_install_dependencies_raises_clear_error_on_npm_timeout(monkeypatch, tmp
     (tmp_path / "package.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(build_service.shutil, "which", lambda name: f"/usr/bin/{name}")
 
-    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None):
+    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None, env=None):
         raise build_service.subprocess.TimeoutExpired(cmd, timeout)
     monkeypatch.setattr(build_service.subprocess, "run", fake_run)
 
@@ -301,7 +322,7 @@ def test_install_dependencies_raises_clear_error_on_npm_timeout(monkeypatch, tmp
 def test_install_dependencies_raises_clear_error_on_venv_timeout(monkeypatch, tmp_path):
     (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
 
-    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None):
+    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None, env=None):
         raise build_service.subprocess.TimeoutExpired(cmd, timeout)
     monkeypatch.setattr(build_service.subprocess, "run", fake_run)
 
@@ -313,7 +334,7 @@ def test_install_dependencies_raises_clear_error_on_pip_timeout(monkeypatch, tmp
     (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
     (tmp_path / ".venv").mkdir()  # venv 생성을 건너뛰어 pip install 호출만 남긴다
 
-    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None):
+    def fake_run(cmd, cwd=None, stdout=None, stderr=None, timeout=None, env=None):
         raise build_service.subprocess.TimeoutExpired(cmd, timeout)
     monkeypatch.setattr(build_service.subprocess, "run", fake_run)
 

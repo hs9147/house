@@ -263,3 +263,23 @@ def test_explain_endpoint_needs_a_provider_and_returns_the_analysis(monkeypatch,
     assert body["cause"]
     # 무엇을 보고 썼는지 사람이 확인할 수 있어야 한다.
     assert "start.cmd that actually runs" in body["facts"]
+
+
+def test_pip_encoding_failure_is_not_lumped_with_missing_packages(tmp_path):
+    """실측(negowith api): pip이 requirements.txt를 **읽지 못해** 설치가 죽었다.
+
+    이름이 틀린 것과 전혀 다른 문제인데 로그만 보면 둘 다 "pip install 실패"다. 고칠 것도
+    다르다 — 패키지 이름이 아니라 파일 인코딩이다. 원인을 갈라 말해야 사람이 맞는 곳을 본다.
+    """
+    _write(tmp_path, "requirements.txt", "# 주석\nfastapi\n")
+    log = tmp_path / "build.log"
+    log.write_text(
+        "  File \"pip/_internal/utils/encoding.py\", line 34, in auto_decode\n"
+        "UnicodeDecodeError: 'charmap' codec can't decode byte 0x9d in position 33\n"
+        "decoding with 'cp1252' codec failed\n", encoding="utf-8")
+
+    result = deploydiag.diagnose(tmp_path, error="pip install 실패 (exit 2)",
+                                 log_path=str(log))
+    assert result["cause"] == "pip_encoding"
+    assert "인코딩" in result["detail"]
+    assert "coding: utf-8" in " ".join(result["fix"]["needs"])

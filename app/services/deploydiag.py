@@ -126,6 +126,20 @@ def diagnose(workdir: Path, *, source_subdir: str = "", is_streamlit: bool = Fal
         result["cause"] = "npm_failed"
         result["detail"] = "npm 단계에서 실패했습니다 — 아래 로그 꼬리를 확인하세요."
         return result
+    # pip이 requirements.txt를 **읽지 못한** 경우. 이름이 틀린 것과 전혀 다른 문제인데
+    # 로그만 보면 둘 다 "pip install 실패"로 보인다 — 실측에서 세 번 겹쳤다(플랫폼 자신,
+    # negowith api). pip은 BOM·PEP-263 쿠키가 없으면 로케일 인코딩으로 디코드하므로
+    # 한글 주석 한 줄에 전체 설치가 죽는다.
+    if "UnicodeDecodeError" in tail and ("auto_decode" in tail or "codec failed" in tail
+                                        or "requirements" in tail):
+        result["cause"] = "pip_encoding"
+        result["detail"] = (
+            "pip가 requirements.txt를 읽지 못했습니다(로케일 인코딩으로 디코드하다 실패) — "
+            "파일에 한글 주석이 있고 인코딩 쿠키가 없을 때 그렇습니다."
+        )
+        result["fix"] = {"kind": "repo", "needs": ["requirements.txt 첫 줄에 "
+                                                  "`# -*- coding: utf-8 -*-`"]}
+        return result
     if "ERROR: Could not find a version" in tail or "No matching distribution" in tail:
         result["cause"] = "pip_failed"
         result["detail"] = (

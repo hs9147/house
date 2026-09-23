@@ -39,6 +39,7 @@ const CAUSE_LABEL: Record<string, string> = {
   missing_source_dir: '빌드 대상 폴더가 없습니다',
   npm_failed: 'npm 단계에서 실패했습니다',
   pip_failed: 'pip가 의존성을 찾지 못했습니다',
+  pip_encoding: 'pip가 requirements.txt를 읽지 못했습니다(인코딩)',
   build_failed: '빌드·설치가 실패했습니다',
   unknown: '원인을 짚지 못했습니다',
 };
