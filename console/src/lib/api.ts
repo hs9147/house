@@ -476,6 +476,19 @@ export const api = {
   planBuildStatus: (sessionId: number, signal?: AbortSignal) =>
     request<PlanBuildStatus>('GET', `/plan/sessions/${sessionId}/build-status`,
       undefined, undefined, signal),
+  // 등록된 레포를 검토해 공통 제약사항·단계 프롬프트에 더할 것을 제안한다(관리자).
+  // 아무것도 바꾸지 않는다 — 적용은 사람이 고른다.
+  planAdvice: () =>
+    request<{
+      inspected: string[];
+      skipped: string[];
+      type_counts: Record<string, number>;
+      proposals: {
+        kind: 'common_constraint' | 'stage_prompt';
+        stage: string; text: string; reason: string;
+        evidence: string[]; evidence_count: number;
+      }[];
+    }>('GET', '/plan/advice'),
   planConstraints: (projectId: number) =>
     request<{ document: string }>('GET', `/plan/projects/${projectId}/constraints`),
   // 모든 프로젝트에 적용되는 공통 제약사항 — 등록·삭제는 관리자만

@@ -63,6 +63,7 @@ from ..services import c4 as c4_service
 from ..services import codemap as codemap_service
 from ..services import compliance as compliance_service
 from ..services import llm as llm_service
+from ..services import planadvice
 from ..services import mcp_server
 from ..services import modules as modules_service
 from ..services import planning as planning_service
@@ -966,6 +967,24 @@ def get_plan_constraints(
 
 def _constraint_out(row: PlanConstraint) -> PlanConstraintOut:
     return PlanConstraintOut(id=row.id, text=row.text, created_at=row.created_at)
+
+
+@router.get("/plan/advice")
+def survey_repos_for_plan_advice(
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_admin),
+):
+    """등록된 레포를 검토해 공통 제약사항·단계 프롬프트에 더할 것을 제안한다(관리자).
+
+    **아무것도 바꾸지 않는다.** 공통 제약사항은 화면에서 골라 추가하고(기존 등록 경로),
+    단계 프롬프트는 코드 상수라서 제안 문구만 내놓는다 — 플랫폼이 제 소스를 고치면 무엇이
+    왜 바뀌었는지 git에 남지 않는다.
+
+    워킹카피가 없는 프로젝트는 보지 않는다(원격을 당기지 않는다) — 그래서 응답에 무엇을
+    봤고 무엇을 건너뛰었는지 싣는다. "제안이 없다"가 "문제가 없다"인지 "보지 못했다"인지
+    구분돼야 한다.
+    """
+    return planadvice.survey(db)
 
 
 @router.get("/plan/constraints", response_model=list[PlanConstraintOut])

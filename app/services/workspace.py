@@ -83,6 +83,22 @@ def read_context_files(workdir: Path, paths: list[str]) -> dict[str, str]:
     return result
 
 
+def code_workdir(project: Project) -> Path:
+    """리포를 읽을 워킹카피 — 있으면 그대로, 없으면 한 번 체크아웃한다.
+
+    paas-code MCP(api/mcp_servers._code_workdir)와 **같은 규칙**이다. 리포를 읽는 기능이
+    저마다 다른 규칙을 쓰면(한쪽은 fetch하고 한쪽은 안 하고) 같은 질문에 다른 답이 나온다.
+    최신화는 배포·기획 확정 경로가 이미 하므로 여기서 fetch하지 않는다.
+
+    가져올 수 없으면 BuildError가 그대로 올라간다 — 호출부가 "보지 못했다"로 다뤄야 한다.
+    """
+    workdir = workdir_for(project)
+    if workdir.exists():
+        return workdir
+    workdir, _sha = checkout(project)
+    return workdir
+
+
 def read_file_at_ref(workdir: Path, ref: str, rel: str) -> str | None:
     """특정 브랜치(ref)에 커밋된 파일 내용. 없으면 None.
 

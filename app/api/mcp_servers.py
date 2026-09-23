@@ -490,20 +490,12 @@ def _mcp_visible(db: Session, key: ApiKey, project: Project) -> bool:
 
 
 def _code_workdir(project: Project) -> Path:
-    """워크스페이스 워킹카피 — 있으면 그대로 쓰고, 없을 때만 체크아웃한다.
-
-    도구 호출마다 git fetch를 돌리면(코드 확인 화면 api/llm.py는 그렇게 한다) LLM 턴이
-    매번 네트워크를 기다린다. 최신화는 배포·기획 확정 경로가 이미 하므로 여기서는 있는
-    것을 읽는다.
-    """
-    workdir = workspace.workdir_for(project)
-    if workdir.exists():
-        return workdir
+    """워킹카피 결정은 services/workspace.code_workdir 하나로 둔다 — 리포를 읽는 기능이
+    저마다 다른 규칙을 쓰면 같은 질문에 다른 답이 나온다. 여기서는 실패를 도구 오류로 바꿀 뿐이다."""
     try:
-        workdir, _sha = checkout(project)
+        return workspace.code_workdir(project)
     except BuildError as e:
         raise mcp_server.McpToolError(f"리포를 가져올 수 없습니다: {str(e)[:300]}")
-    return workdir
 
 
 def _code_call(project: Project, name: str, args: dict) -> str:

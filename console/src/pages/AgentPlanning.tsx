@@ -110,6 +110,9 @@ export default function AgentPlanning() {
     [me.data?.is_admin],
   );
   const [constraintText, setConstraintText] = useState('');
+  // 등록된 레포 검토 결과 — 누를 때만 조회한다(리포를 훑으므로 화면을 열 때마다 돌릴 일이 아니다).
+  const [advice, setAdvice] = useState<Awaited<ReturnType<typeof api.planAdvice>> | null>(null);
+  const [advising, setAdvising] = useState(false);
   // 프로젝트 페이지와 동일한 CreateModal(빈 프로젝트 옵션 포함)을 재사용한다.
   const [showCreate, setShowCreate] = useState(false);
 
@@ -210,6 +213,33 @@ export default function AgentPlanning() {
       await api.deletePlanSession(row.id);
       if (session?.id === row.id) setSession(null);
       history.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  // 리포를 훑어 제안을 받는다. 서버는 아무것도 바꾸지 않는다 — 여기서 골라 추가한다.
+  const runAdvice = async () => {
+    setAdvising(true);
+    setError('');
+    try {
+      setAdvice(await api.planAdvice());
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setAdvising(false);
+    }
+  };
+
+  // 제안을 공통 제약사항으로 등록한다 — 기존 등록 경로를 그대로 쓴다.
+  const acceptProposal = async (text: string) => {
+    try {
+      await api.addCommonConstraint(text);
+      commonConstraints.reload();
+      // 채택한 것은 목록에서 뺀다 — 다시 누르면 같은 제약이 두 번 등록된다.
+      setAdvice((prev) => (prev
+        ? { ...prev, proposals: prev.proposals.filter((p) => p.text !== text) }
+        : prev));
     } catch (err) {
       setError((err as Error).message);
     }
@@ -508,13 +538,74 @@ export default function AgentPlanning() {
         <div className="panel">
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
             <h3 style={{ margin: 0 }}>📌 공통 제약사항 (모든 프로젝트 적용)</h3>
-            <button className="secondary small" onClick={() => commonConstraints.reload()}>새로고침</button>
+            <div className="row" style={{ gap: 6 }}>
+              {/* 무엇이 반복되는 실수인지는 등록된 레포에 이미 남아 있다 — 사람이 매번
+                  발견해 문구를 손으로 고치는 대신 근거와 함께 제안받는다. */}
+              <button className="secondary small" onClick={runAdvice} disabled={advising}>
+                {advising ? '레포 검토 중...' : '🔎 등록된 레포 검토'}
+              </button>
+              <button className="secondary small" onClick={() => commonConstraints.reload()}>새로고침</button>
+            </div>
           </div>
           <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
             여기에 등록한 제약은 기획 ①~⑤ 각 단계의 제약 문서에 함께 실려 매 단계에서 고려되고,
             작업 지시 생성과 외주 빌더(MCP <span className="mono">get_constraints</span>)·
             위반 검사 수정 지시에도 그대로 전달됩니다.
           </p>
+          {/* 검토 결과 — 근거 없는 제안은 지켜야 할 이유를 설명할 수 없어서, 어느 프로젝트의
+              어느 파일 때문인지 함께 보여 준다. */}
+          {advice && (
+            <div style={{ margin: '8px 0 12px', padding: 10, borderRadius: 8,
+                          background: 'rgba(255,255,255,0.03)' }}>
+              <div className="mutedtext" style={{ fontSize: 12, marginBottom: 6 }}>
+                검토한 레포 {advice.inspected.length}개
+                {advice.skipped.length > 0 && (
+                  <> · 보지 못함 {advice.skipped.length}개 ({advice.skipped.join(', ')})</>
+                )}
+                {Object.keys(advice.type_counts).length > 0 && (
+                  <> · 타입 {Object.entries(advice.type_counts)
+                    .map(([k, v]) => `${k} ${v}`).join(', ')}</>
+                )}
+              </div>
+              {advice.proposals.length === 0 ? (
+                <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+                  더할 제안이 없습니다
+                  {advice.skipped.length > 0 && ' (보지 못한 레포가 있어 확정은 아닙니다)'}.
+                </p>
+              ) : advice.proposals.map((p, i) => (
+                <div key={i} style={{ marginBottom: 10, fontSize: 13 }}>
+                  <span
+                    style={{
+                      fontSize: 10, padding: '1px 6px', borderRadius: 4, marginRight: 6,
+                      background: p.kind === 'common_constraint'
+                        ? 'rgba(16,185,129,0.2)' : 'rgba(245,158,11,0.2)',
+                      color: p.kind === 'common_constraint' ? '#10b981' : '#f59e0b',
+                    }}
+                  >
+                    {p.kind === 'common_constraint' ? '공통 제약사항' : `단계 프롬프트 · ${p.stage}`}
+                  </span>
+                  <span style={{ whiteSpace: 'pre-wrap' }}>{p.text}</span>
+                  <div className="mutedtext" style={{ fontSize: 12, marginTop: 2 }}>
+                    근거: {p.reason} — {p.evidence.join(' · ')}
+                    {p.evidence_count > p.evidence.length && ` 외 ${p.evidence_count - p.evidence.length}건`}
+                  </div>
+                  {p.kind === 'common_constraint' ? (
+                    <button className="small" style={{ marginTop: 4 }}
+                            onClick={() => acceptProposal(p.text)}>
+                      + 제약사항으로 추가
+                    </button>
+                  ) : (
+                    /* 단계 프롬프트는 코드 상수다(services/planning.STAGES) — 플랫폼이 제
+                       소스를 고치면 무엇이 왜 바뀌었는지 git에 남지 않는다. 문구만 준다. */
+                    <div className="mutedtext" style={{ fontSize: 12, marginTop: 2 }}>
+                      단계 프롬프트는 코드에 있습니다 — 이 문구를 개발에 전달해
+                      <span className="mono"> services/planning.STAGES</span>에 반영하세요.
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           <form onSubmit={addConstraint} className="row" style={{ alignItems: 'flex-start', marginBottom: 8 }}>
             <textarea
               style={{ flex: 1, minHeight: 60, fontFamily: 'inherit' }}
