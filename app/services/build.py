@@ -285,7 +285,8 @@ def write_start_script(workdir: Path, project: Project | None = None,
     기본은 제네릭 템플릿이다 — 타입별 규칙 없이 리포 시그니처로 실행 방법을 추정하며,
     docker의 dockerfile_for가 이미지 빌드를 담당하는 자리를 windows_service에서 대신한다.
 
-    **프로젝트에 지정된 스크립트가 있으면 그것이 이긴다**(Project.start_script). 템플릿은
+    **프로젝트에 지정된 스크립트가 있으면 그것이 이긴다**(Project.start_scripts의 해당
+    컴포넌트 항목 — 복합 배포는 유닛마다 스크립트가 따로다). 템플릿은
     흔한 모양만 맞히므로, 맞지 않는 프로젝트는 LLM이 리포를 보고 제안한 스크립트를 사람이
     확인해 저장한다(services/startscript) — 리포에 Dockerfile이 있으면 그것을 쓰는 것과
     같은 원칙이다. 구체적인 의사표시가 추정보다 앞선다.
