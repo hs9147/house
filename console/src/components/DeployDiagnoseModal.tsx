@@ -51,7 +51,9 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
   const [writingScript, setWritingScript] = useState(false);
   // LLM 분석은 **누를 때만** 돈다 — 매번 자동으로 부르면 느리고, 비용이 들고, 결정론
   // 진단만으로 충분한 경우가 대부분이다.
-  const [providers, setProviders] = useState<{ id: number; name: string; model: string }[]>([]);
+  const [providers, setProviders] = useState<
+    { id: number; name: string; model: string; is_default?: boolean }[]>([]);
+  // 0 = 기본 LLM(서버가 고른다). 선택 상자는 그 결정을 덮어쓰는 수단일 뿐이다.
   const [providerId, setProviderId] = useState(0);
   const [analysis, setAnalysis] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
@@ -80,7 +82,6 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
       (rows) => {
         if (!alive) return;
         setProviders(rows);
-        if (rows.length) setProviderId((cur) => cur || rows[0].id);
       },
       () => {},  // 프로바이더를 못 읽어도 결정론 진단은 그대로 쓸 수 있다
     );
@@ -91,6 +92,8 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
     setAnalyzing(true);
     setError('');
     try {
+      // providerId 0 = 기본 프로바이더로 돈다(서버가 고른다) — 원인을 묻는 자리에서
+      // "어느 모델로?"를 다시 묻지 않는다. 고르고 싶으면 선택 상자로 덮어쓴다.
       const res = await api.explainDeployFailure(projectId, providerId, profile);
       setAnalysis(res.analysis);
     } catch (err) {
@@ -147,17 +150,19 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
               className="small"
               value={providerId}
               onChange={(e) => setProviderId(Number(e.target.value))}
-              disabled={!providers.length || analyzing}
+              disabled={analyzing}
             >
-              {providers.length === 0 && <option value={0}>등록된 LLM이 없습니다</option>}
+              <option value={0}>기본 LLM</option>
               {providers.map((p) => (
-                <option key={p.id} value={p.id}>{p.name} ({p.model})</option>
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.model}){p.is_default ? ' ★' : ''}
+                </option>
               ))}
             </select>
             <button
               className="small secondary"
               onClick={explain}
-              disabled={analyzing || !providerId}
+              disabled={analyzing}
             >
               {analyzing ? '로그를 읽는 중…' : 'LLM으로 원인 분석'}
             </button>

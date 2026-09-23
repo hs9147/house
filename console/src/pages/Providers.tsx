@@ -114,6 +114,7 @@ export default function Providers() {
                   <th>모델</th>
                   <th>인증</th>
                   <th>사용 범위</th>
+                  <th>기본값</th>
                   {admin && <th>작업</th>}
                 </tr>
               </thead>
@@ -133,6 +134,29 @@ export default function Providers() {
                         : p.has_api_key ? 'API 키 설정됨' : '-'}
                     </td>
                     <td>{p.org_name ? `🏢 ${p.org_name}` : '전역'}</td>
+                    {/* 배포 점검·실패 원인 분석·레포 검토는 버튼 하나로 도는 자리라
+                        모델을 물을 곳이 없다 — 그 자리에서 쓰는 모델을 여기서 한 번 정한다. */}
+                    <td>
+                      {p.is_default ? (
+                        <span title="배포 점검·실패 원인 분석·레포 검토가 이 모델로 돕니다">
+                          ★ 기본
+                        </span>
+                      ) : admin ? (
+                        <button
+                          className="small secondary"
+                          onClick={async () => {
+                            try {
+                              await api.setDefaultProvider(p.id);
+                              state.reload();
+                            } catch (err) {
+                              alert((err as Error).message);
+                            }
+                          }}
+                        >
+                          기본값으로
+                        </button>
+                      ) : '-'}
+                    </td>
                     {admin && (
                       <td>
                         <button

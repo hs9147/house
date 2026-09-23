@@ -72,6 +72,29 @@ export default function DeployCheckModal({
               ))}
             </tbody>
           </table>
+          {/* 규칙표는 아는 모양만 맞힌다 — 같은 사실을 기본 LLM에게 읽히고 "무엇이 더
+              걸릴 것 같은가"를 받는다. 못 받으면 그 이유를 말한다(빈 칸으로 두면
+              "문제 없음"으로 읽힌다). */}
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>
+              LLM 판단{data.provider && ` — ${data.provider}`}
+            </div>
+            {data.advice ? (
+              <pre
+                className="mono"
+                style={{
+                  background: '#0d1117', padding: 10, borderRadius: 6, fontSize: 12,
+                  maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', margin: 0,
+                }}
+              >
+                {data.advice}
+              </pre>
+            ) : (
+              <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+                {data.error || '판단을 받지 못했습니다.'}
+              </p>
+            )}
+          </div>
           <p className="mutedtext" style={{ fontSize: 12, marginTop: 8 }}>
             점검은 아무것도 바꾸지 않고, 배포를 막지도 않습니다 — 감지가 못 맞히는 구성이
             있으므로 판단은 사람이 합니다.

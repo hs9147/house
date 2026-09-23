@@ -15,8 +15,13 @@
   - negowith(복합): 점검이 폴더 하나만 보면 나머지 컴포넌트의 문제를 "전부 확인"으로 덮는다 —
     실제로 그랬다(web만 보고 api를 놓쳤다). 복합은 **컴포넌트마다** 본다.
 
-그래서 **읽기만 하는 점검**을 둔다. LLM을 쓰지 않는다 — 여기서 보는 것은 전부 파일 시스템과
-프로젝트 설정에 있는 사실이고, 근거를 파일 이름으로 댈 수 있어야 사람이 바로 고친다.
+그래서 **읽기만 하는 점검**을 둔다. 항목 판정은 결정론이다 — 여기서 보는 것은 전부 파일
+시스템과 프로젝트 설정에 있는 사실이고, 근거를 파일 이름으로 댈 수 있어야 사람이 바로 고친다.
+
+**그 위에 LLM 판단을 붙인다(advise).** 규칙표는 아는 모양만 맞히고, 항목이 전부 "확인"이어도
+배포가 죽는 경우가 남는다(실측: negowith는 선언이 있었지만 코드가 그 밖의 것을 import했다).
+그래서 같은 사실을 기본 프로바이더에게 읽히고 "무엇이 더 걸릴 것 같은가"를 받는다. 기본
+프로바이더가 없거나 호출이 실패하면 항목만 돌려준다 — 판단이 없다고 점검이 죽으면 안 된다.
 
 **막지 않는다.** 배포 버튼을 잠그면 "플랫폼이 틀렸는데 배포도 못 하는" 상황이 생긴다(감지가
 못 맞히는 구성은 늘 있다). 점검은 말하고, 배포는 사람이 결정한다.
@@ -24,6 +29,8 @@
 import re
 import sys
 from pathlib import Path
+
+from sqlalchemy.orm import Session
 
 from ..models import BuildProfile, Project, ProjectType
 from . import deploydiag, startscript, structure
@@ -36,6 +43,8 @@ SECRET_FILE_NAMES = (".env", ".env.local", ".env.production", "credentials.json"
                      "id_rsa", "secrets.yaml", "secrets.yml")
 INSTALL_ARTIFACT_DIRS = ("node_modules/", ".venv/", "venv/", "__pycache__/")
 MAX_FILES = 2000
+# LLM에 실을 파일 목록 상한 — 판단에 필요한 것은 구조이고, 전부 실으면 토큰만 먹는다.
+MAX_FILES_IN_ADVICE = 200
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 
@@ -312,3 +321,60 @@ def _artifact_item(files: list[str]) -> dict:
 def structure_summary(workdir: Path) -> str:
     """점검 응답에 함께 실을 감지 구조 한 줄(화면이 같은 화면에서 보여 준다)."""
     return structure.summary(structure.detect(workdir)) if workdir.exists() else ""
+
+
+ADVICE_PROMPT = """You review a deployment readiness report for an internal Windows PaaS.
+
+You get the platform's deterministic findings (each with a status and the file evidence) and a
+file list. The platform installs dependencies from the unit folder, writes a start.cmd there and
+runs it as a service on an injected %PORT%.
+
+Answer in Korean, plain text, at most 12 lines. List only what the findings do NOT already say -
+things likely to break this deployment or the app right after it starts. For each: one line,
+"무엇 - 왜 - 무엇을 하면 되는가". If you see nothing beyond the findings, say exactly
+"추가로 걸릴 것으로 보이는 것은 없습니다." and stop.
+
+Rules:
+- Only use the given facts. Do not invent files, versions or settings.
+- Do not repeat a finding that is already reported.
+- No headings, no code fences, no markdown lists.
+"""
+
+
+def advise(db: Session, project: Project, result: dict, files: list[str]) -> dict:
+    """결정론 항목 위에 LLM 판단을 붙인다 — 실패해도 점검 결과는 그대로 살아 있다.
+
+    반환: {"advice": 글, "provider": 이름, "error": 사유} — 셋 중 무엇이 비었는지가 곧
+    "판단을 못 붙인 이유"다(빈 문자열 하나로 뭉개면 "문제 없음"과 구분되지 않는다).
+    """
+    from . import llm as llm_service  # noqa: PLC0415 — 순환 import 회피
+
+    provider = llm_service.default_provider(db)
+    if provider is None:
+        return {"advice": "", "provider": "",
+                "error": "기본 LLM 프로바이더가 없습니다 — LLM 관리에서 기본값을 지정하세요."}
+    facts = _advice_facts(project, result, files)
+    try:
+        text = llm_service.chat_completion(
+            provider,
+            [{"role": "system", "content": ADVICE_PROMPT},
+             {"role": "user", "content": facts}],
+            db,
+        ).strip()
+    except Exception as e:  # noqa: BLE001 — 판단이 없다고 점검이 죽으면 안 된다
+        return {"advice": "", "provider": provider.name, "error": f"LLM 호출 실패: {e}"[:300]}
+    return {"advice": text, "provider": provider.name, "error": ""}
+
+
+def _advice_facts(project: Project, result: dict, files: list[str]) -> str:
+    lines = [
+        f"project: {project.name} (declared type: {project.type.value})",
+        f"run folders: {result.get('run_dir')}",
+        "",
+        "--- deterministic findings ---",
+    ]
+    for it in result.get("items", []):
+        lines.append(f"[{it['status']}] {it['title']}: {it['detail']}")
+    lines += ["", f"--- committed files (up to {MAX_FILES_IN_ADVICE}) ---"]
+    lines += [f"  {f}" for f in files[:MAX_FILES_IN_ADVICE]]
+    return "\n".join(lines)

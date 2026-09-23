@@ -119,9 +119,14 @@ class DeploymentOut(BaseModel):
 
 
 class StartScriptProposeIn(BaseModel):
-    """기동 스크립트 제안 요청 — 어느 LLM으로 쓸지는 사람이 고른다(추측하지 않는다)."""
+    """LLM 호출 요청. provider_id를 비우면 **기본 프로바이더**로 돈다.
 
-    provider_id: int
+    기동 스크립트 작성은 사람이 고르는 자리가 있어서 그대로 받고(화면에 선택 상자가 있다),
+    실패 원인 분석처럼 버튼 하나로 도는 자리에서는 비워 보낸다 — 그때마다 모델을 묻는 것은
+    일을 하나 더 만드는 것이다(services/llm.default_provider).
+    """
+
+    provider_id: int | None = None
 
 
 class StartScriptSet(BaseModel):
@@ -237,6 +242,9 @@ class LlmProviderOut(BaseModel):
     base_url: str
     model: str
     has_api_key: bool
+    # 사람이 고르지 않아도 도는 판단(배포 점검·실패 원인 분석·레포 검토)이 쓰는 모델.
+    # 하나만 참이다 — 화면마다 선택 상자를 늘리는 대신 여기서 한 번 정한다.
+    is_default: bool = False
     aws_profile: str | None = None
     organization_id: int | None = None
     org_name: str | None = None

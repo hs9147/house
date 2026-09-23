@@ -168,3 +168,61 @@ def survey(db: Session) -> dict:
         "type_counts": types,
         "proposals": proposals,
     }
+
+
+# LLM에 실을 근거 상한 — 목록이 길어도 판단은 몇 줄이면 서고, 전부 실으면 토큰만 먹는다.
+MAX_EVIDENCE_IN_ADVICE = 40
+
+ADVICE_PROMPT = """You review an internal PaaS platform's repository survey.
+
+You get: the deterministic proposals the platform already made (with evidence), the list of
+inspected/skipped repositories, and the detected deployment-type distribution. The proposals go
+into a shared "common constraints" list (applies to every project) or into a planning stage
+prompt.
+
+Answer in Korean, plain text, at most 12 lines. Propose only what the platform did NOT already
+propose, and only what the given evidence supports. One line each:
+"제안 - 근거". If you have nothing to add, say exactly "추가로 제안할 것은 없습니다." and stop.
+
+Rules:
+- Only use the given facts. Never invent a repository, file or number.
+- Do not restate an existing proposal in other words - that costs the reader twice.
+- A constraint nobody can check is worse than none: say how it would be verified.
+- No headings, no code fences, no markdown lists.
+"""
+
+
+def advise(db: Session, result: dict) -> dict:
+    """결정론 제안 위에 **기본 LLM**의 판단을 붙인다 — 실패해도 제안 목록은 살아 있다.
+
+    규칙표는 아는 모양(커밋된 .env·생성물·절대 경로·진입점 없음)만 맞힌다. 반복되는 실수가
+    그 밖에 있으면 아무도 알려 주지 않는다 — 같은 근거를 읽히고 그것을 묻는다.
+    """
+    from . import llm as llm_service  # noqa: PLC0415 — 순환 import 회피
+
+    provider = llm_service.default_provider(db)
+    if provider is None:
+        return {"advice": "", "provider": "",
+                "error": "기본 LLM 프로바이더가 없습니다 — LLM 관리에서 기본값을 지정하세요."}
+    lines = [
+        f"inspected repositories: {', '.join(result.get('inspected') or []) or '(none)'}",
+        f"skipped (no working copy): {', '.join(result.get('skipped') or []) or '(none)'}",
+        f"detected type counts: {result.get('type_counts') or {}}",
+        "",
+        "--- proposals the platform already made ---",
+    ]
+    for p in result.get("proposals") or []:
+        lines.append(f"[{p['kind']}] {p['text']}")
+        lines.append(f"    근거: {p['reason']}")
+        for ev in (p.get("evidence") or [])[:MAX_EVIDENCE_IN_ADVICE]:
+            lines.append(f"    - {ev}")
+    try:
+        text = llm_service.chat_completion(
+            provider,
+            [{"role": "system", "content": ADVICE_PROMPT},
+             {"role": "user", "content": "\n".join(lines)}],
+            db,
+        ).strip()
+    except Exception as e:  # noqa: BLE001 — 판단이 없다고 검토가 죽으면 안 된다
+        return {"advice": "", "provider": provider.name, "error": f"LLM 호출 실패: {e}"[:300]}
+    return {"advice": text, "provider": provider.name, "error": ""}

@@ -42,6 +42,28 @@ Reply in Korean as a JSON array of findings:
 Return [] if the diff looks fine. Reply with JSON only."""
 
 
+def default_provider(db: Session) -> LlmProvider | None:
+    """자동으로 도는 판단(배포 점검·실패 원인·레포 검토)이 쓸 프로바이더.
+
+    **없으면 None을 돌려준다.** 예외를 올리면 그 기능 전체가 죽는데, 그 기능들은 LLM 없이도
+    돌려줄 사실(파일·로그·설정)을 이미 가지고 있다 — 사실을 주고 "기본 LLM이 없어 판단은
+    붙이지 못했다"고 말하는 쪽이 낫다. 기본값이 없고 프로바이더가 하나뿐이면 그것을 쓴다:
+    하나뿐인 설치본에서 "기본값 미지정"으로 멈추는 것은 설명이 아니라 실수다.
+    """
+    rows = list(db.execute(select(LlmProvider).order_by(LlmProvider.id)).scalars())
+    for row in rows:
+        if row.is_default:
+            return row
+    return rows[0] if len(rows) == 1 else None
+
+
+def set_default(db: Session, provider: LlmProvider) -> None:
+    """이 프로바이더를 기본값으로 — 하나만 참이어야 하므로 나머지를 내린다."""
+    for row in db.execute(select(LlmProvider)).scalars():
+        row.is_default = row.id == provider.id
+    db.commit()
+
+
 def require_provider_access(provider: LlmProvider, project: Project, key: ApiKey) -> None:
     """프로바이더 사용 권한은 Module과 동일한 조직 범위 규칙을 따른다.
 

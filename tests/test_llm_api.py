@@ -7,6 +7,7 @@ from app.main import create_app
 from app.services import llm as llm_service
 
 ADMIN = {"x-api-key": "test-admin-key"}
+API = "/paas/api/v1"
 
 
 def _client() -> TestClient:
@@ -249,3 +250,58 @@ def test_unbind_module_removes_only_that_binding():
     # 이미 지운 바인딩을 다시 지우면 404
     assert c.delete(f"/paas/api/v1/projects/{pid}/modules/bindings/{binding_id}",
                     headers=ADMIN).status_code == 404
+
+
+def test_default_provider_is_single_and_used_when_none_is_given(monkeypatch, fresh_settings):
+    """자동으로 도는 판단(배포 점검·실패 원인·레포 검토)은 모델을 물을 자리가 없다.
+
+    그래서 기본값을 한 곳에서 정하고 **하나만** 참으로 둔다 — 여러 개가 참이면 "어느 것으로
+    돌았나"를 화면이 설명할 수 없다.
+    """
+    from app.db import SessionLocal
+    from app.services import llm as llm_service
+
+    c = TestClient(create_app())
+    ids = []
+    for name in ("first", "second"):
+        r = c.post(f"{API}/llm/providers", json={
+            "name": name, "kind": "openai", "base_url": "http://x", "model": "m",
+            "api_key": "k",
+        }, headers=ADMIN)
+        assert r.status_code == 201, r.text
+        ids.append(r.json()["id"])
+
+    # 둘 이상이면 기본값을 고르지 않는다 — 어느 것으로 돌지는 사람이 정한다.
+    db = SessionLocal()
+    try:
+        assert llm_service.default_provider(db) is None
+    finally:
+        db.close()
+
+    assert c.post(f"{API}/llm/providers/{ids[1]}/default", headers=ADMIN).json()["is_default"]
+    assert c.post(f"{API}/llm/providers/{ids[0]}/default", headers=ADMIN).json()["is_default"]
+    rows = {p["id"]: p["is_default"] for p in c.get(f"{API}/llm/providers", headers=ADMIN).json()}
+    assert rows[ids[0]] is True and rows[ids[1]] is False  # 하나만 참
+
+    db = SessionLocal()
+    try:
+        assert llm_service.default_provider(db).id == ids[0]
+    finally:
+        db.close()
+
+
+def test_default_provider_falls_back_to_the_only_one(fresh_settings):
+    """하나뿐인 설치본에서 "기본값 미지정"으로 멈추는 것은 설명이 아니라 실수다."""
+    from app.db import SessionLocal
+    from app.services import llm as llm_service
+
+    c = TestClient(create_app())
+    r = c.post(f"{API}/llm/providers", json={
+        "name": "only", "kind": "openai", "base_url": "http://x", "model": "m", "api_key": "k",
+    }, headers=ADMIN)
+    assert r.status_code == 201
+    db = SessionLocal()
+    try:
+        assert llm_service.default_provider(db).name == "only"
+    finally:
+        db.close()

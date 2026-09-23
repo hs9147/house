@@ -44,6 +44,7 @@ def _provider_out(p: LlmProvider) -> LlmProviderOut:
         aws_profile=p.aws_profile,
         organization_id=p.organization_id,
         org_name=p.organization.name if p.organization_id and p.organization else None,
+        is_default=bool(p.is_default),
     )
 
 
@@ -148,6 +149,27 @@ def aws_models(profile: str, base_url: str = "", _: ApiKey = Depends(require_adm
 def list_providers(db: Session = Depends(get_db), _: ApiKey = Depends(require_api_key)):
     rows = db.execute(select(LlmProvider).order_by(LlmProvider.id)).scalars()
     return [_provider_out(p) for p in rows]
+
+
+@router.post("/llm/providers/{provider_id}/default", response_model=LlmProviderOut)
+def set_default_provider(
+    provider_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """이 프로바이더를 **기본값**으로 — 자동으로 도는 판단이 이 모델을 쓴다.
+
+    배포 점검·실패 원인 분석·레포 검토는 사람이 모델을 고를 자리가 없다(버튼 하나로 돈다).
+    그래서 기본값을 한 곳에서 정하고, 하나만 참으로 둔다 — 여러 개가 참이면 "어느 것으로
+    돌았나"를 화면이 설명할 수 없다.
+    """
+    row = db.get(LlmProvider, provider_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="provider not found")
+    llm_service.set_default(db, row)
+    audit.record(db, admin.name, "llm.provider.default", row.name, {"provider_id": row.id})
+    db.refresh(row)
+    return _provider_out(row)
 
 
 @router.delete("/llm/providers/{provider_id}", status_code=204)

@@ -284,7 +284,9 @@ export const api = {
     request<{
       deployment_id: number; profile: string; cause: string;
       analysis: string; facts: string;
-    }>('POST', `/projects/${id}/deploy/diagnose/explain`, { provider_id }, { profile }),
+    }>('POST', `/projects/${id}/deploy/diagnose/explain`,
+      // 0이면 보내지 않는다 — 서버가 기본 프로바이더를 고른다.
+      { provider_id: provider_id || null }, { profile }),
   // 진단이 제안한 빌드 대상 폴더를 적용한다 — 다음 배포에서 스크립트가 다시 만들어진다.
   setSourceSubdir: (id: number, source_subdir: string) =>
     request<ProjectOut>('PUT', `/projects/${id}/source-subdir`, { source_subdir }),
@@ -423,6 +425,9 @@ export const api = {
 
   // LLM
   listProviders: () => request<LlmProviderOut[]>('GET', '/llm/providers'),
+  // 기본 프로바이더 — 배포 점검·실패 원인 분석·레포 검토가 이 모델로 돈다.
+  setDefaultProvider: (id: number) =>
+    request<LlmProviderOut>('POST', `/llm/providers/${id}/default`),
   deleteProvider: (id: number) => request<void>('DELETE', `/llm/providers/${id}`),
   createProvider: (body: {
     name: string; kind: string; base_url: string; api_key?: string; model: string;

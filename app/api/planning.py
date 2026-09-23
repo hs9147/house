@@ -984,7 +984,10 @@ def survey_repos_for_plan_advice(
     봤고 무엇을 건너뛰었는지 싣는다. "제안이 없다"가 "문제가 없다"인지 "보지 못했다"인지
     구분돼야 한다.
     """
-    return planadvice.survey(db)
+    result = planadvice.survey(db)
+    # 결정론 제안 위에 **기본 LLM**의 판단을 붙인다 — 규칙표는 아는 모양만 맞힌다.
+    # 실패하면 advice가 비고 이유가 실린다(제안 목록은 그대로 돌려준다).
+    return {**result, **planadvice.advise(db, result)}
 
 
 @router.get("/plan/constraints", response_model=list[PlanConstraintOut])

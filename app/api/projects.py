@@ -52,6 +52,7 @@ from ..security import (
     viewer_org_ids,
 )
 from ..services import build as build_module
+from ..services import llm as llm_service
 from ..services import (
     deploycheck, deploydiag, deployer, gitea, startscript, structure, upload,
     workspace,
@@ -406,9 +407,15 @@ async def propose_start_script(
     """
     project = _get_project(db, project_id)
     component = _validate_component(project, component)
-    provider = db.get(LlmProvider, body.provider_id)
+    # 화면은 모델을 고르게 하지만(스크립트는 사람이 읽고 저장하는 물건이다), 비워 보내면
+    # 기본 프로바이더로 돈다 — 자동으로 부르는 쪽과 규칙을 맞춘다.
+    provider = (db.get(LlmProvider, body.provider_id) if body.provider_id
+                else llm_service.default_provider(db))
     if provider is None:
-        raise HTTPException(status_code=404, detail="LLM provider not found")
+        raise HTTPException(
+            status_code=404,
+            detail=("LLM 프로바이더를 찾을 수 없습니다 — 기본 프로바이더를 지정하거나 "
+                    "provider_id를 주세요."))
     try:
         workdir = await asyncio.to_thread(workspace.code_workdir, project)
     except Exception as e:  # noqa: BLE001
@@ -579,10 +586,15 @@ async def check_deploy_readiness(
     except Exception:  # noqa: BLE001 — 가져오지 못한 것도 점검 결과의 하나다
         workdir = get_settings().work_dir / project.name
     result = await asyncio.to_thread(deploycheck.run, workdir, project, profile)
+    # 결정론 항목 위에 **기본 LLM**의 판단을 붙인다 — 규칙표가 아는 모양만 맞히기 때문이다.
+    # 실패하면 advice가 비고 이유가 실린다(항목은 그대로 돌려준다).
+    files = await asyncio.to_thread(workspace.file_tree, workdir, deploycheck.MAX_FILES_IN_ADVICE)
+    advice = await asyncio.to_thread(deploycheck.advise, db, project, result, files)
     return {
         "profile": profile.value,
         "detected": await asyncio.to_thread(deploycheck.structure_summary, workdir),
         **result,
+        **advice,
     }
 
 
@@ -605,9 +617,16 @@ async def explain_deploy_failure(
     사람이 확인해 넣는다: source_subdir 적용, 기동 스크립트 저장.
     """
     project = _get_project(db, project_id)
-    provider = db.get(LlmProvider, body.provider_id)
+    # 프로바이더를 고르지 않으면 **기본 프로바이더**로 돈다 — 실패 원인을 묻는 자리에서
+    # "어느 모델로?"를 다시 묻는 것은 일을 하나 더 만드는 것이다(화면은 그 선택을 덮어쓸 수
+    # 있게 남겨 둔다).
+    provider = (db.get(LlmProvider, body.provider_id) if body.provider_id
+                else llm_service.default_provider(db))
     if provider is None:
-        raise HTTPException(status_code=404, detail="LLM provider not found")
+        raise HTTPException(
+            status_code=404,
+            detail=("LLM 프로바이더를 찾을 수 없습니다 — 기본 프로바이더를 지정하거나 "
+                    "provider_id를 주세요."))
     last = db.execute(
         select(Deployment)
         .where(Deployment.project_id == project_id, Deployment.profile == profile)

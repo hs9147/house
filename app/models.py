@@ -306,6 +306,11 @@ class LlmProvider(Base):
         ForeignKey("organizations.id"), nullable=True
     )
     organization: Mapped["Organization | None"] = relationship()
+    # **기본 프로바이더.** 사람이 고르지 않아도 도는 기능(배포 점검·실패 원인 분석·레포 검토)이
+    # 쓸 모델이다. 그 기능들은 "어느 모델로?"를 물을 자리가 없다 — 물으면 화면마다 선택
+    # 상자가 하나씩 늘고, 정작 기본값은 아무도 정하지 않는다. 하나만 참이어야 하므로
+    # 설정 시 나머지를 내린다(services/llm.set_default).
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

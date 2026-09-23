@@ -182,6 +182,8 @@ export interface LlmProviderOut {
   // kind='aws'(Bedrock)가 서명에 쓰는 서버 ~/.aws 프로필 이름. 비밀이 아니라 어떤
   // 자격증명을 쓸지 고른 결과다 — 만료 시 어느 프로필로 재로그인할지 알아야 한다.
   aws_profile?: string | null;
+  // 사람이 고르지 않아도 도는 판단(배포 점검·실패 원인·레포 검토)이 쓰는 모델. 하나만 참이다.
+  is_default?: boolean;
   // 미지정(null) = 전역(모든 프로젝트에서 사용 가능), 지정 시 해당 조직 소속 프로젝트에서만 사용 가능
   organization_id?: number | null;
   org_name?: string | null;
@@ -407,6 +409,10 @@ export interface DeployCheckOut {
   run_dir: string;
   items: DeployCheckItem[];
   summary: { ok: number; warn: number; fail: number };
+  // 결정론 항목 위에 얹히는 기본 LLM의 판단. 못 받았으면 advice가 비고 error에 이유가 온다.
+  advice: string;
+  provider: string;
+  error: string;
 }
 
 // 기동 스크립트(start.cmd). problems가 비어 있지 않으면 저장할 수 없다 — 이 스크립트는
