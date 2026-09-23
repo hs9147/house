@@ -47,7 +47,10 @@ from ..schemas import (
     ProjectOut,
     ProjectUploadForm,
 )
-from ..security import can_view_git_url, encrypt_value, require_admin, require_api_key, viewer_org_ids
+from ..security import (
+    can_view_git_url, decrypt_value, encrypt_value, require_admin, require_api_key,
+    viewer_org_ids,
+)
 from ..services import build as build_module
 from ..services import (
     deploycheck, deploydiag, deployer, gitea, startscript, structure, upload,
@@ -861,9 +864,36 @@ def list_env_vars(
 ):
     _get_project(db, project_id)
     rows = db.execute(select(EnvVar).where(EnvVar.project_id == project_id)).scalars()
-    # 시크릿 값은 마스킹해서만 노출
-    return [{"key": r.key, "is_secret": r.is_secret, "value": "•••" if r.is_secret else "(set)"}
+    # **시크릿만 가린다.** 시크릿이 아닌 값은 그대로 보여 준다 — 예전에는 전부 "(set)"이라
+    # 적어서, 무엇이 들어 있는지 확인할 방법이 화면에 없었다(배포된 앱이 그 값으로 도는데
+    # 사람은 그 값을 모르는 상태). 시크릿은 여전히 되돌릴 수 없다: 값을 보여 주면 화면·로그·
+    # 브라우저 이력에 남고, 그건 암호화 저장의 의미를 지운다.
+    return [{"key": r.key, "is_secret": r.is_secret,
+             "value": "•••" if r.is_secret else decrypt_value(r.value_encrypted)}
             for r in rows]
+
+
+@router.delete("/{project_id}/env/{env_key}", status_code=204)
+def delete_env_var(
+    project_id: int,
+    env_key: str,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """환경변수 하나를 지운다 — **다음 배포부터** 주입되지 않는다.
+
+    이미 떠 있는 앱의 프로세스 환경은 바뀌지 않는다(그건 재배포가 하는 일이다). 값은 감사
+    기록에도 남기지 않는다: 지운 값을 로그에서 되살릴 수 있으면 지운 것이 아니다.
+    """
+    project = _get_project(db, project_id)
+    row = db.execute(
+        select(EnvVar).where(EnvVar.project_id == project_id, EnvVar.key == env_key)
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"환경변수가 없습니다: {env_key}")
+    db.delete(row)
+    db.commit()
+    audit.record(db, key.name, "env.delete", project.name, {"key": env_key})
 
 
 @router.get("/{project_id}/module-report", response_model=ProjectModuleReportOut)

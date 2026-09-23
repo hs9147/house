@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 
 ADMIN = {"x-api-key": "test-admin-key"}
+API = "/paas/api/v1"
 
 
 def _client() -> TestClient:
@@ -279,3 +280,32 @@ def test_health_public_scheme_is_null_when_unset(monkeypatch, fresh_settings):
     monkeypatch.delenv("PAAS_PLATFORM_PUBLIC_URL", raising=False)
     get_settings.cache_clear()
     assert TestClient(create_app()).get("/paas/health").json()["public_scheme"] is None
+
+
+def test_env_vars_show_non_secret_values_and_can_be_deleted():
+    """시크릿만 가린다 — 시크릿이 아닌 값은 그대로 보여야 무엇으로 도는지 확인할 수 있다.
+
+    예전에는 전부 "(set)"이라 적어서, 배포된 앱이 그 값으로 도는데 사람은 그 값을 몰랐다.
+    삭제는 다음 배포부터 적용된다(떠 있는 프로세스의 환경은 재배포까지 그대로다).
+    """
+    client = _client()
+    pid = client.post(f"{API}/projects", json={
+        "name": "envproj", "type": "python", "git_url": "https://git.example.com/o/e",
+    }, headers=ADMIN).json()["id"]
+
+    assert client.put(f"{API}/projects/{pid}/env", headers=ADMIN, json={
+        "key": "LOG_LEVEL", "value": "debug", "is_secret": False}).status_code == 204
+    assert client.put(f"{API}/projects/{pid}/env", headers=ADMIN, json={
+        "key": "TOKEN", "value": "s3cret", "is_secret": True}).status_code == 204
+
+    rows = {r["key"]: r for r in client.get(f"{API}/projects/{pid}/env", headers=ADMIN).json()}
+    assert rows["LOG_LEVEL"]["value"] == "debug"
+    assert rows["TOKEN"]["value"] == "•••"       # 시크릿은 되돌릴 수 없다
+    assert "s3cret" not in json.dumps(rows, ensure_ascii=False)
+
+    assert client.delete(f"{API}/projects/{pid}/env/LOG_LEVEL",
+                         headers=ADMIN).status_code == 204
+    left = {r["key"] for r in client.get(f"{API}/projects/{pid}/env", headers=ADMIN).json()}
+    assert left == {"TOKEN"}
+    # 없는 키를 지우면 404 — 조용히 성공하면 무엇이 지워졌는지 알 수 없다.
+    assert client.delete(f"{API}/projects/{pid}/env/NOPE", headers=ADMIN).status_code == 404

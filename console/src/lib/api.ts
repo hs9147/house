@@ -307,6 +307,9 @@ export const api = {
   listEnv: (id: number) => request<EnvVarRow[]>('GET', `/projects/${id}/env`),
   setEnv: (id: number, key: string, value: string, is_secret: boolean) =>
     request<void>('PUT', `/projects/${id}/env`, { key, value, is_secret }),
+  // 지우면 **다음 배포부터** 주입되지 않는다(떠 있는 프로세스의 환경은 그대로다).
+  deleteEnv: (id: number, key: string) =>
+    request<void>('DELETE', `/projects/${id}/env/${encodeURIComponent(key)}`),
 
   // 코드 확인 화면 (읽기 전용 — 수정은 채팅/diff 승인으로만)
   projectFiles: (id: number) => request<ProjectFilesOut>('GET', `/projects/${id}/files`),
