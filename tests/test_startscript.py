@@ -21,8 +21,10 @@ from app.services.runtime.base import Endpoint
 ADMIN = {"x-api-key": "test-admin-key"}
 API = "/paas/api/v1"
 
+# 주석은 판정에서 빠진다(REM에 curl이 적혀 있어도 거부하지 않는다). ASCII만 쓴다 —
+# cmd가 콘솔 코드페이지로 읽어 한글이 섞이면 줄 경계가 밀린다.
 GOOD = """@echo off
-REM 예전에는 curl로 내려받았다 — 지금은 플랫폼이 설치한다(주석은 판정에서 빠진다).
+REM The platform installs dependencies; this used to run curl (comments are ignored).
 python -m streamlit run app.py --server.port %PORT% --server.address %HOST%
 """
 
@@ -69,6 +71,18 @@ def test_rejects_the_script_without_the_injected_port():
 def test_rejects_commands_a_start_script_has_no_business_running(line, expected):
     problems = startscript.validate(f"@echo off\n{line}\napp --port %PORT%\n")
     assert any(expected in p for p in problems), problems
+
+
+def test_rejects_non_ascii_even_in_comments():
+    """실측: UTF-8 한글이 든 start.cmd는 기동 전에 rc=255로 죽었다(codepage 949).
+
+    cmd는 이 파일을 콘솔 코드페이지로 읽는다. 한글이 섞이면 2바이트 판독이 어긋나 줄
+    경계가 밀리고, 다음 줄의 REM이 먹히면서 주석이 명령으로 실행된다 — 화면에는 nssm의
+    "SERVICE_PAUSED"만 남아 원인이 보이지 않았다. 주석까지 영어여야 한다.
+    """
+    problems = startscript.validate(
+        "@echo off\nREM 한글 주석\napp --port %PORT%\n")
+    assert any("ASCII" in p for p in problems), problems
 
 
 def test_rejects_an_empty_script():

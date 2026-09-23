@@ -74,9 +74,11 @@ Hard rules:
 - Stay inside the repository. Do not cd to absolute paths.
 - If you cannot tell how to start the app, echo what is missing and `exit /b 1`.
   A wrong guess is worse than a clear failure.
-- Korean comments (REM) explaining why, not what.
+- ASCII ONLY, including comments. cmd.exe parses the file with the console codepage
+  (Korean Windows uses 949); non-ASCII bytes desync its double-byte reader and the next
+  line gets executed as a command. Write REM comments in English.
 - You launch ONE unit. If the repo has several components, only start the one described
-  as "this unit" — the platform runs each component as its own service on its own port.
+  as "this unit" - the platform runs each component as its own service on its own port.
 """
 
 
@@ -151,6 +153,16 @@ def validate(script: str) -> list[str]:
         return ["스크립트가 비어 있습니다."]
     if len(text) > MAX_SCRIPT_CHARS:
         problems.append(f"너무 깁니다({len(text)}자, 최대 {MAX_SCRIPT_CHARS}) — 기동 스크립트가 아닙니다.")
+    # **ASCII만 허용한다.** cmd.exe는 이 파일을 콘솔 코드페이지(한국어 윈도우는 949)로
+    # 읽는다. 한글이 섞이면 2바이트 판독이 어긋나 줄 경계가 밀리고, 다음 줄이 명령으로
+    # 실행된다 — 실측에서 UTF-8 한글 주석이 든 start.cmd는 기동 전에 rc=255로 죽었다
+    # (그것이 nssm의 "SERVICE_PAUSED"로 보였다). 주석까지 영어로 써야 한다.
+    if not text.isascii():
+        outside = sorted({c for c in text if not c.isascii()})
+        problems.append(
+            "ASCII 문자만 쓸 수 있습니다 — cmd가 콘솔 코드페이지로 읽어 줄 경계가 밀립니다"
+            f"(문제 문자: {' '.join(outside[:8])})"
+        )
     # 주석(REM)은 판정에서 뺀다 — "예전에는 curl을 썼다" 같은 설명이 걸리면 안 된다.
     commands = "\n".join(
         ln for ln in text.splitlines() if not ln.strip().upper().startswith("REM")

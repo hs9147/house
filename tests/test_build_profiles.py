@@ -126,8 +126,10 @@ def test_start_script_detects_start_script_with_node_not_text_search(tmp_path):
     # (streamlit 판정은 requirements.txt를 findstr로 본다 — 거기서는 이름 한 줄이 곧 사실이다).
     assert not any("findstr" in ln and "package.json" in ln for ln in content.splitlines())
     # 배치 블록 안에서 &&·|| 는 따옴표 밖으로 새면 블록을 깨뜨린다 — 아예 쓰지 않는다.
-    node_line = next(ln for ln in content.splitlines() if ln.strip().startswith("node -e"))
-    assert "&&" not in node_line and "||" not in node_line
+    node_lines = [ln for ln in content.splitlines() if ln.strip().startswith("node -e")]
+    assert len(node_lines) >= 2, node_lines  # start 판정 + dev 판정
+    for line in node_lines:
+        assert "&&" not in line and "||" not in line, line
 
 
 def test_html_serves_static_files_port_80():
@@ -585,6 +587,23 @@ def test_start_script_runs_dev_server_for_development_profile(tmp_path):
     assert "call npm run dev" in content
 
 
+def test_dev_deploy_uses_the_projects_dev_script(tmp_path):
+    """개발 배포는 프로젝트의 `npm run dev`로 띄운다 — 실행 방법은 프로젝트가 정한다.
+
+    예전에는 vite.cmd를 직접 불러서 dev 스크립트에 있던 준비 단계가 빠졌다. 플랫폼이 정한
+    포트·바인드·공개 경로와 Host 검사 설정은 `--` 뒤로 넘긴다 — 프록시가 %PORT%를 보고,
+    dev 서버는 자기 base가 붙은 요청만 받는다.
+    """
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    dev_cmd = ("call npm run dev -- --config paas-preview.config.mjs "
+               "--host %HOST% --port %PORT% --base %PAAS_BASE_PATH%")
+    assert dev_cmd in content
+    # dev 스크립트가 있는지 먼저 본다 — 없으면 "Missing script: dev"로 죽는다.
+    assert "p.scripts?p.scripts.dev:0" in content
+    # 그때만 vite 직접 실행으로 떨어진다(예전 경로를 보루로 남긴다).
+    assert r'No "dev" script - starting Vite directly' in content
+
+
 def test_start_script_runs_streamlit_not_uvicorn(tmp_path):
     """streamlit 앱은 uvicorn으로 뜨지 않는다 — docker 템플릿에만 있던 분기가 여기 빠져 있었다.
 
@@ -600,7 +619,7 @@ def test_start_script_runs_streamlit_not_uvicorn(tmp_path):
     assert "--server.enableCORS false" in content
     assert "--server.enableXsrfProtection false" in content
     # 진입 파일을 못 찾으면 조용히 uvicorn으로 흘러가지 않고 실패한다
-    assert "streamlit 앱인데 진입 파일을 찾지 못했습니다" in content
+    assert "streamlit app but no entry file found" in content
 
 
 def test_start_script_sets_streamlit_flags_outside_the_block(tmp_path):
@@ -631,5 +650,5 @@ def test_start_script_refuses_to_serve_an_unknown_repo_statically(tmp_path):
     commands = [ln.strip() for ln in tail.splitlines()
                 if ln.strip() and not ln.strip().startswith("REM")]
     assert not any("http.server" in ln for ln in commands)
-    assert "실행 방법을 알 수 없습니다" in tail
+    assert "Cannot tell how to start this repo" in tail
     assert "exit /b 1" in tail
