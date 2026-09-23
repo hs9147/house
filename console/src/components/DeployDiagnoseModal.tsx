@@ -44,6 +44,12 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
   const [error, setError] = useState('');
   const [subdir, setSubdir] = useState('');
   const [writingScript, setWritingScript] = useState(false);
+  // LLM 분석은 **누를 때만** 돈다 — 매번 자동으로 부르면 느리고, 비용이 들고, 결정론
+  // 진단만으로 충분한 경우가 대부분이다.
+  const [providers, setProviders] = useState<{ id: number; name: string; model: string }[]>([]);
+  const [providerId, setProviderId] = useState(0);
+  const [analysis, setAnalysis] = useState('');
+  const [analyzing, setAnalyzing] = useState(false);
   const state = useDiagnosis(projectId, profile, setSubdir);
 
   const confirm = async () => {
@@ -60,6 +66,32 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
       setError((err as Error).message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    let alive = true;
+    api.listProviders().then(
+      (rows) => {
+        if (!alive) return;
+        setProviders(rows);
+        if (rows.length) setProviderId((cur) => cur || rows[0].id);
+      },
+      () => {},  // 프로바이더를 못 읽어도 결정론 진단은 그대로 쓸 수 있다
+    );
+    return () => { alive = false; };
+  }, []);
+
+  const explain = async () => {
+    setAnalyzing(true);
+    setError('');
+    try {
+      const res = await api.explainDeployFailure(projectId, providerId, profile);
+      setAnalysis(res.analysis);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setAnalyzing(false);
     }
   };
 
@@ -101,6 +133,40 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
               아래 <b>기동 스크립트 작성</b>으로 이 리포에 맞는 start.cmd를 저장하세요
               (LLM이 제안하고 사람이 확인합니다). 저장한 스크립트는 다음 배포에 바로 쓰입니다.
             </p>
+          )}
+
+          {/* 결정론 판정이 짚지 못한 경우가 남는다(build_failed·unknown) — 그때부터
+              사람이 로그를 읽던 일을 LLM에 맡긴다. 결과는 글이고, 적용은 사람이 한다. */}
+          <div className="row" style={{ gap: 8, margin: '10px 0 4px', flexWrap: 'wrap' }}>
+            <select
+              className="small"
+              value={providerId}
+              onChange={(e) => setProviderId(Number(e.target.value))}
+              disabled={!providers.length || analyzing}
+            >
+              {providers.length === 0 && <option value={0}>등록된 LLM이 없습니다</option>}
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>{p.name} ({p.model})</option>
+              ))}
+            </select>
+            <button
+              className="small secondary"
+              onClick={explain}
+              disabled={analyzing || !providerId}
+            >
+              {analyzing ? '로그를 읽는 중…' : 'LLM으로 원인 분석'}
+            </button>
+          </div>
+          {analysis && (
+            <pre
+              className="mono"
+              style={{
+                background: '#0d1117', padding: 10, borderRadius: 6, fontSize: 12,
+                maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap', margin: '0 0 8px',
+              }}
+            >
+              {analysis}
+            </pre>
           )}
 
           {state.data.log_tail && (

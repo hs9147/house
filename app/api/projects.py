@@ -552,6 +552,72 @@ async def diagnose_deploy_failure(
     }
 
 
+@router.post("/{project_id}/deploy/diagnose/explain",
+             dependencies=[Depends(require_feature("deploy"))])
+async def explain_deploy_failure(
+    project_id: int,
+    body: StartScriptProposeIn,
+    profile: BuildProfile = BuildProfile.release,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """LLM이 로그와 리포를 읽고 실패 원인을 설명한다 — **아무것도 바꾸지 않는다.**
+
+    결정론 진단(위 엔드포인트)이 덮는 것은 알려진 모양뿐이고, 나머지는 `build_failed` 한
+    줄과 로그 꼬리로 남는다. 거기서부터 사람이 로그를 읽고 추측해 온 일을 LLM에 맡긴다.
+    어느 모델로 읽을지는 사람이 고른다(프로바이더 id) — 추측하지 않는다.
+
+    싣는 사실에 환경변수 값은 없다(services/deploydiag.facts_for_llm). 고침은 기존 경로로
+    사람이 확인해 넣는다: source_subdir 적용, 기동 스크립트 저장.
+    """
+    project = _get_project(db, project_id)
+    provider = db.get(LlmProvider, body.provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="LLM provider not found")
+    last = db.execute(
+        select(Deployment)
+        .where(Deployment.project_id == project_id, Deployment.profile == profile)
+        .order_by(Deployment.id.desc())
+    ).scalars().first()
+    if last is None:
+        raise HTTPException(status_code=404, detail="이 프로필의 배포 이력이 없습니다.")
+
+    try:
+        workdir = await asyncio.to_thread(workspace.code_workdir, project)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"리포를 가져올 수 없습니다: {str(e)[:300]}")
+
+    detected = structure.detect(workdir) if workdir.exists() else {"components": []}
+    result = deploydiag.diagnose(
+        workdir,
+        source_subdir=project.source_subdir or "",
+        is_streamlit=project.type == ProjectType.streamlit,
+        error=last.error or "",
+        log_path=last.build_log_path,
+    )
+    facts = deploydiag.facts_for_llm(
+        workdir, project,
+        result=result,
+        # 화면에 없던 사실 하나가 여기서 중요하다: **실제로 실행되는** 스크립트.
+        # 템플릿을 읽고 추측하면 저장된 스크립트로 도는 프로젝트를 틀리게 진단한다.
+        script=build_module.start_script_for(project, "", profile),
+        detected_summary=structure.summary(detected),
+        error=last.error or "",
+        files=await asyncio.to_thread(workspace.file_tree, workdir,
+                                      deploydiag.MAX_FILES_FOR_LLM),
+    )
+    try:
+        analysis = await asyncio.to_thread(
+            deploydiag.explain, db, project, provider, facts=facts)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"원인 분석 실패: {str(e)[:500]}")
+    audit.record(db, admin.name, "project.deploy.explain", project.name,
+                 {"provider": provider.name, "deployment": last.id,
+                  "cause": result.get("cause")})
+    return {"deployment_id": last.id, "profile": profile.value,
+            "cause": result.get("cause"), "analysis": analysis, "facts": facts}
+
+
 @router.post("/{project_id}/deploy", response_model=DeploymentOut | list[DeploymentOut],
              dependencies=[Depends(require_feature("deploy"))])
 async def deploy_project(

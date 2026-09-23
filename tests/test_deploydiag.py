@@ -169,3 +169,97 @@ def test_applying_the_fix_rejects_a_folder_that_is_not_there(monkeypatch, tmp_pa
     cleared = c.put(f"{API}/projects/{pid}/source-subdir",
                     json={"source_subdir": ""}, headers=ADMIN)
     assert cleared.json()["source_subdir"] is None
+
+
+# --- LLM 분석(결정론 판정 위에 얹히는 별도 경로) ---
+
+def test_facts_carry_the_script_that_actually_runs_and_no_env_values(tmp_path):
+    """LLM에 싣는 사실에는 **실제로 실행되는** start.cmd가 들어가야 한다.
+
+    템플릿을 읽고 추측하면, 저장된 스크립트로 도는 프로젝트를 틀리게 진단한다. 그리고
+    환경변수 값은 절대 싣지 않는다 — 비밀이 모델·화면·로그로 새면 되돌릴 수 없다.
+    """
+    from app.models import BuildProfile
+    from app.services import build as build_module
+
+    _write(tmp_path, "requirements.txt", "fastapi\n")
+    project = Project(name="diag-llm", type=ProjectType.python,
+                      git_url="https://git.example.com/x",
+                      start_scripts={
+                          build_module.script_key(BuildProfile.release): "@echo off\nSAVED-ONE",
+                      })
+    result = deploydiag.diagnose(tmp_path, error="boom")
+    facts = deploydiag.facts_for_llm(
+        tmp_path, project,
+        result=result,
+        script=build_module.start_script_for(project, "", BuildProfile.release),
+        detected_summary="app=python",
+        error="boom",
+        files=["requirements.txt", "app/main.py"],
+    )
+    assert "SAVED-ONE" in facts
+    assert "app/main.py" in facts
+    assert "boom" in facts
+    assert result["cause"] in facts  # 결정론 판정을 먼저 알려 준다(대체가 아니라 덧붙임)
+    # 프롬프트에 비밀이 실릴 자리가 없다 — env 값을 넘기는 인자 자체가 없다.
+    assert "SECRET" not in facts
+
+
+def test_explain_asks_for_korean_three_sections_and_returns_text(monkeypatch):
+    """돌려주는 것은 글이다 — 저장하지도, 적용하지도 않는다."""
+    seen = {}
+
+    def fake_chat(provider, messages, db):
+        seen["system"] = messages[0]["content"]
+        seen["user"] = messages[1]["content"]
+        return "  원인: 진입 파일이 없습니다\n근거: start.cmd exit /b 1\n고칠 것: main.py 추가  "
+
+    from app.services import llm as llm_service
+    monkeypatch.setattr(llm_service, "chat_completion", fake_chat)
+    out = deploydiag.explain(object(), Project(name="x", git_url="g"), object(),
+                             facts="facts here")
+    assert out.startswith("원인:")
+    assert "facts here" == seen["user"]
+    assert "원인:" in seen["system"] and "근거:" in seen["system"] and "고칠 것:" in seen["system"]
+
+
+def test_explain_endpoint_needs_a_provider_and_returns_the_analysis(monkeypatch, tmp_path,
+                                                                    fresh_settings):
+    """어느 모델로 읽을지는 사람이 고른다 — 없는 프로바이더는 404다."""
+    from app.models import LlmProvider
+    from app.services import build as build_service
+    from app.services import llm as llm_service
+
+    pid = _project_with_failed_deploy(monkeypatch, tmp_path, name="explain-app")
+    work = tmp_path / "workspaces" / "explain-app"
+    _write(work, "requirements.txt", "fastapi\n")
+    monkeypatch.setattr(build_service, "checkout", lambda p, git_sha=None: (work, "a" * 40))
+    from app.api import projects as projects_api
+    monkeypatch.setattr(projects_api, "checkout", lambda p, git_sha=None: (work, "a" * 40))
+    monkeypatch.setattr(projects_api.workspace, "code_workdir", lambda p: work)
+    monkeypatch.setattr(projects_api.workspace, "file_tree",
+                        lambda w, limit=200: ["requirements.txt"])
+    monkeypatch.setattr(llm_service, "chat_completion",
+                        lambda *a, **kw: "원인: pip 인덱스에 닿지 못했습니다")
+
+    c = TestClient(create_app())
+    url = f"{API}/projects/{pid}/deploy/diagnose/explain?profile=release"
+    assert c.post(url, json={"provider_id": 9999}, headers=ADMIN).status_code == 404
+
+    db = SessionLocal()
+    try:
+        provider = LlmProvider(name="p-diag", kind="openai", base_url="http://x", model="m")
+        db.add(provider)
+        db.commit()
+        provider_id = provider.id
+    finally:
+        db.close()
+
+    res = c.post(url, json={"provider_id": provider_id}, headers=ADMIN)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["analysis"].startswith("원인:")
+    # 결정론 판정도 함께 온다 — LLM 분석이 그것을 대체하지 않는다.
+    assert body["cause"]
+    # 무엇을 보고 썼는지 사람이 확인할 수 있어야 한다.
+    assert "start.cmd that actually runs" in body["facts"]

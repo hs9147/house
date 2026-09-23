@@ -383,6 +383,48 @@ def _must_not_build(*a, **kw):
     raise AssertionError("네이티브 런타임은 이미지를 만들지 않는다")
 
 
+def test_api_saved_script_is_the_file_the_deploy_runs(client, monkeypatch, tmp_path,
+                                                      fresh_settings):
+    """화면에서 저장한 그 본문이, 배포가 실행하는 start.cmd 파일이 된다(개발 프로필).
+
+    저장(API) → 배포(write_start_script) → 런타임(그 폴더의 start.cmd 실행)까지를 한 번에
+    본다. 중간에 파일을 덮어쓰는 다른 경로가 생기면 이 테스트가 먼저 깨진다.
+    """
+    _write(tmp_path, "package.json", '{"scripts": {"dev": "vite"}}')
+    db = SessionLocal()
+    try:
+        project = _project(db, "runs-what-i-saved", type=ProjectType.react)
+        pid = project.id
+    finally:
+        db.close()
+
+    dev_script = GOOD.replace("app.py", "dev_entry.py")
+    saved = client.put(f"{API}/projects/{pid}/start-script", json={"script": dev_script},
+                       headers=ADMIN, params={"profile": "development"})
+    assert saved.status_code == 200, saved.text
+
+    monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "windows_service")
+    monkeypatch.setenv("PAAS_TIER", "small")
+    get_settings.cache_clear()
+    monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "d" * 40))
+    monkeypatch.setattr(deployer, "build_image", _must_not_build)
+    monkeypatch.setattr(deployer, "install_dependencies", lambda *a, **kw: None)
+    runtime = _FakeRuntime()
+    monkeypatch.setattr(deployer, "get_runtime", lambda: runtime)
+    monkeypatch.setattr(deployer.proxy, "configure", lambda *a, **kw: None)
+
+    db = SessionLocal()
+    try:
+        deployer.deploy_sync(db, db.get(Project, pid), BuildProfile.development)
+    finally:
+        db.close()
+        get_settings.cache_clear()
+
+    assert (tmp_path / "start.cmd").read_text(encoding="utf-8") == dev_script
+    # 런타임은 그 파일이 있는 폴더를 실행 폴더로 받는다(work_subdir "" = 리포 루트).
+    assert runtime.specs and runtime.specs[0].work_subdir == ""
+
+
 def test_saved_script_is_applied_on_the_very_next_deploy(monkeypatch, tmp_path, fresh_settings):
     """저장한 스크립트는 **다음 배포에 바로** start.cmd가 된다 — 다른 조작이 필요 없다.
 

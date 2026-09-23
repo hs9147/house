@@ -274,6 +274,13 @@ export const api = {
       fix: { kind: 'source_subdir'; value: string; options: string[] }
         | { kind: 'repo'; needs: string[] } | null;
     }>('GET', `/projects/${id}/deploy/diagnose`, undefined, { profile }),
+  // LLM이 로그·리포를 읽고 원인을 설명한다 — 아무것도 바꾸지 않는다(글만 돌려준다).
+  // 결정론 진단이 짚지 못한 경우(build_failed 등)에 사람이 로그를 읽던 일을 대신한다.
+  explainDeployFailure: (id: number, provider_id: number, profile: BuildProfile) =>
+    request<{
+      deployment_id: number; profile: string; cause: string;
+      analysis: string; facts: string;
+    }>('POST', `/projects/${id}/deploy/diagnose/explain`, { provider_id }, { profile }),
   // 진단이 제안한 빌드 대상 폴더를 적용한다 — 다음 배포에서 스크립트가 다시 만들어진다.
   setSourceSubdir: (id: number, source_subdir: string) =>
     request<ProjectOut>('PUT', `/projects/${id}/source-subdir`, { source_subdir }),

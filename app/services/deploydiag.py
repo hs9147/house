@@ -12,8 +12,23 @@
     기준으로 다시 만든다(build.py의 컨텍스트 결정과 start.cmd 생성이 그 값을 따른다).
   - 리포 수정 — 시그니처 파일·진입 파일이 아예 없을 때. 플랫폼이 대신 만들 수 없다.
 적용과 재시도는 사람이 확인한다(api/projects의 진단 엔드포인트 → 콘솔 확인/취소).
+
+**explain()은 LLM에게 로그를 읽히는 별도 경로다.** 위 판정이 덮는 것은 알려진 모양뿐이고,
+남는 것은 늘 `build_failed`·`unknown` 한 줄과 로그 꼬리다 — 거기서부터는 사람이 로그를 읽고
+추측해 왔다. 그 읽기를 LLM에게 맡긴다. 세 가지를 지킨다:
+
+  1. **결정론 판정을 대체하지 않는다.** 파일 시스템에 답이 있는 것(시그니처·진입 파일·하위
+     폴더)은 그대로 코드가 정한다. LLM 분석은 그 위에 얹히는 설명이고, 사람이 눌러야 돈다.
+  2. **사실만 준다.** 실제로 실행되는 start.cmd, 감지된 구조, 커밋된 파일 목록, 로그 꼬리,
+     오류 문구. 환경변수 값은 싣지 않는다 — 비밀이 로그·화면·모델로 새면 되돌릴 수 없다.
+  3. **아무것도 적용하지 않는다.** 돌려주는 것은 글이다. 고침은 기존 경로(source_subdir 적용,
+     기동 스크립트 저장)로 사람이 확인해 넣는다.
 """
 from pathlib import Path
+
+from sqlalchemy.orm import Session
+
+from ..models import LlmProvider, Project
 
 # start.cmd가 실행 방법을 고를 때 보는 파일들(build.py의 분기와 같은 순서·같은 근거).
 ENTRY_MARKERS = ("package.json", "requirements.txt", "main.py", "app.py", "index.html")
@@ -124,3 +139,65 @@ def diagnose(workdir: Path, *, source_subdir: str = "", is_streamlit: bool = Fal
         f"{'배포 오류: ' + error.strip()[:200] if error else '아래 로그 꼬리를 확인하세요.'}"
     )
     return result
+
+
+# LLM에 싣는 상한 — 로그는 꼬리가, 파일 목록은 앞부분이 쓸모 있다.
+MAX_LOG_CHARS_FOR_LLM = 8000
+MAX_FILES_FOR_LLM = 150
+MAX_SCRIPT_CHARS_FOR_LLM = 6000
+
+EXPLAIN_PROMPT = """You diagnose a failed deployment on an internal Windows PaaS.
+
+The platform checked out the repository, ran dependency installation, wrote a start.cmd
+and started it as a Windows service (or a dev-server process). You get the facts it has:
+the effective start.cmd, the detected components, the committed file list, the recorded
+error and the tail of the build log.
+
+Answer in Korean, plain text, at most 25 lines, in exactly these three sections:
+
+원인: one sentence naming the single most likely cause.
+근거: the specific lines/files from the facts that support it (quote them briefly).
+고칠 것: concrete steps. If the fix belongs in the repository, say which file and what.
+  If the start.cmd is wrong for this repo, say what it should run instead.
+
+Rules:
+- Only use the facts given. If the facts are not enough, say what is missing instead of
+  guessing - a wrong cause costs more than an honest "모르겠습니다".
+- Do not propose changing the platform. Do not propose secrets or credentials.
+- No markdown headings, no code fences except a single short command line if needed.
+"""
+
+
+def facts_for_llm(workdir: Path, project: Project, *, result: dict, script: str,
+                  detected_summary: str, error: str, files: list[str]) -> str:
+    """LLM에 싣는 사실 — 환경변수 값은 절대 넣지 않는다(비밀이 새면 되돌릴 수 없다)."""
+    lines = [
+        f"project: {project.name}",
+        f"declared type: {project.type.value}",
+        f"build directory: {project.source_subdir or '(repo root)'}",
+        f"detected components: {detected_summary or '(none)'}",
+        f"deterministic verdict: {result.get('cause')} - {result.get('detail')}",
+        f"recorded error: {(error or '(none)').strip()[:1000]}",
+        "",
+        "--- start.cmd that actually runs ---",
+        script[:MAX_SCRIPT_CHARS_FOR_LLM] or "(none)",
+        "",
+        f"--- committed files (git ls-files, up to {MAX_FILES_FOR_LLM}) ---",
+        *[f"  {f}" for f in files[:MAX_FILES_FOR_LLM]],
+        "",
+        "--- build log tail ---",
+        (result.get("log_tail") or "(empty)")[-MAX_LOG_CHARS_FOR_LLM:],
+    ]
+    return "\n".join(lines)
+
+
+def explain(db: Session, project: Project, provider: LlmProvider, *, facts: str) -> str:
+    """LLM이 사실을 읽고 쓴 분석. 저장하지도, 적용하지도 않는다 — 글만 돌려준다."""
+    from . import llm as llm_service  # noqa: PLC0415 — 순환 import 회피
+
+    return llm_service.chat_completion(
+        provider,
+        [{"role": "system", "content": EXPLAIN_PROMPT},
+         {"role": "user", "content": facts}],
+        db,
+    ).strip()
