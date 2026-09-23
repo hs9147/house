@@ -33,6 +33,7 @@ from ..models import (
 )
 from ..schemas import (
     DeploymentOut,
+    ProjectSourceSubdirSet,
     DeployRequest,
     EnvVarSet,
     ModuleHistoryItem,
@@ -43,7 +44,7 @@ from ..schemas import (
     ProjectUploadForm,
 )
 from ..security import can_view_git_url, encrypt_value, require_admin, require_api_key, viewer_org_ids
-from ..services import deployer, gitea, structure, upload
+from ..services import deploydiag, deployer, gitea, structure, upload
 from ..services.build import COMPOSITE_COMPONENTS, checkout
 from ..services.deployer import DeployInProgress, NoRollbackTarget, ProfileConflict
 from ..services.gitea import GiteaError, GiteaNotConfigured
@@ -331,6 +332,81 @@ async def detect_project_structure(
         actor=key.name, source="repo", git_sha=git_sha,
     )
     return _serialize_project(project, key, viewer_org_ids(db, key))
+
+
+@router.put("/{project_id}/source-subdir", response_model=ProjectOut)
+def set_source_subdir(
+    project_id: int,
+    body: ProjectSourceSubdirSet,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """빌드 대상 폴더를 바꾼다 — 배포 실패 진단의 제안을 적용하는 자리.
+
+    다음 배포에서 배포 스크립트(start.cmd)와 빌드 컨텍스트가 이 폴더 기준으로 다시 만들어진다
+    (services/build). 리포에 실제로 있는 폴더인지 여기서 확인한다 — 없는 폴더를 넣으면
+    다음 배포가 같은 자리에서 다시 실패하고, 그때는 원인이 하나 더 늘어난다.
+    """
+    project = _get_project(db, project_id)
+    value = body.source_subdir.strip().strip("/")
+    if value:
+        workdir = get_settings().work_dir / project.name
+        if workdir.exists() and not (workdir / value).is_dir():
+            raise HTTPException(
+                status_code=422,
+                detail=f"리포에 그런 폴더가 없습니다: {value} (워킹카피 기준)",
+            )
+    project.source_subdir = value or None
+    db.commit()
+    audit.record(db, key.name, "project.source_subdir", project.name, {"value": value})
+    return _serialize_project(project, key, viewer_org_ids(db, key))
+
+
+@router.get("/{project_id}/deploy/diagnose",
+            dependencies=[Depends(require_feature("deploy"))])
+async def diagnose_deploy_failure(
+    project_id: int,
+    profile: BuildProfile = BuildProfile.release,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """마지막 실패한 배포를 진단한다 — 원인과 **고칠 것**을 돌려준다(바꾸지는 않는다).
+
+    적용과 재시도를 여기서 하지 않는 이유: 배포는 되돌리기 쉬운 일이 아니고, 고침이
+    프로젝트 설정(source_subdir)을 바꾸는 경우도 있다. 사람이 진단을 보고 확인하거나
+    취소해야 한다(콘솔이 그 자리에서 묻는다).
+    """
+    project = _get_project(db, project_id)
+    last = db.execute(
+        select(Deployment)
+        .where(Deployment.project_id == project_id, Deployment.profile == profile)
+        .order_by(Deployment.id.desc())
+    ).scalars().first()
+    if last is None:
+        raise HTTPException(status_code=404, detail="이 프로필의 배포 이력이 없습니다.")
+
+    # 리포를 최신으로 두고 본다 — 실패 원인이 이미 고쳐졌을 수도 있다(그러면 그렇게 말해야 한다).
+    try:
+        workdir, _sha = await asyncio.to_thread(checkout, project)
+    except Exception:  # noqa: BLE001 — 원격이 없어도 워킹카피로 진단한다
+        workdir = get_settings().work_dir / project.name
+
+    detected = structure.detect(workdir) if workdir.exists() else {"components": []}
+    result = deploydiag.diagnose(
+        workdir,
+        source_subdir=project.source_subdir or "",
+        is_streamlit=project.type == ProjectType.streamlit,
+        error=last.error or "",
+        log_path=last.build_log_path,
+    )
+    return {
+        "deployment_id": last.id,
+        "status": last.status.value,
+        "profile": profile.value,
+        "source_subdir": project.source_subdir or "",
+        "detected": structure.summary(detected) or "(감지된 배포 단위 없음)",
+        **result,
+    }
 
 
 @router.post("/{project_id}/deploy", response_model=DeploymentOut | list[DeploymentOut],

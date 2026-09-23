@@ -264,6 +264,18 @@ export const api = {
     request<{ logs: string }>('GET', `/projects/${id}/logs`, undefined, { profile, tail }),
   projectStatus: (id: number) =>
     request<Record<BuildProfile, string>>('GET', `/projects/${id}/status`),
+  // 배포 실패 진단 — 원인과 고칠 것을 돌려준다(바꾸지는 않는다). 적용·재시도는 사람이 확인한다.
+  diagnoseDeploy: (id: number, profile: BuildProfile) =>
+    request<{
+      deployment_id: number; status: string; profile: string;
+      source_subdir: string; detected: string;
+      cause: string; detail: string; log_tail: string;
+      fix: { kind: 'source_subdir'; value: string; options: string[] }
+        | { kind: 'repo'; needs: string[] } | null;
+    }>('GET', `/projects/${id}/deploy/diagnose`, undefined, { profile }),
+  // 진단이 제안한 빌드 대상 폴더를 적용한다 — 다음 배포에서 스크립트가 다시 만들어진다.
+  setSourceSubdir: (id: number, source_subdir: string) =>
+    request<ProjectOut>('PUT', `/projects/${id}/source-subdir`, { source_subdir }),
   listEnv: (id: number) => request<EnvVarRow[]>('GET', `/projects/${id}/env`),
   setEnv: (id: number, key: string, value: string, is_secret: boolean) =>
     request<void>('PUT', `/projects/${id}/env`, { key, value, is_secret }),

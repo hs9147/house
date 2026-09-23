@@ -118,6 +118,17 @@ class DeploymentOut(BaseModel):
     component: str | None = None
 
 
+class ProjectSourceSubdirSet(BaseModel):
+    """빌드 대상 폴더 — 배포 실패 진단이 제안한 값을 적용하는 입력.
+
+    프로젝트 설정 전체를 고치는 경로를 열지 않는다: 진단이 제안하는 것은 이 값 하나이고,
+    다른 값(타입·git_url 등)을 함께 받으면 "진단 적용"이 무엇을 바꾼 것인지 알 수 없게 된다.
+    빈 문자열은 "리포 루트"다(지정 해제).
+    """
+
+    source_subdir: str = Field(default="", max_length=255)
+
+
 class EnvVarSet(BaseModel):
     key: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
     value: str
