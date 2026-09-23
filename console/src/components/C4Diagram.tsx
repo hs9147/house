@@ -8,7 +8,7 @@ import Async from './Async';
 import CodeStructure from './CodeStructure';
 import { codeLevel } from '../lib/codelevel';
 import { api } from '../lib/api';
-import { layoutElements } from '../lib/c4layout';
+import { layoutElements, layoutFlow } from '../lib/c4layout';
 import { useApi } from '../lib/hooks';
 import type { C4Element, C4Level } from '../lib/types';
 
@@ -154,7 +154,10 @@ function LevelCanvas({ level, data }: CanvasProps) {
     const relations = data.relations.filter(
       (r) => aliases.has(r.source) && aliases.has(r.target),
     );
-    const boxes = new Map(layoutElements(shown, relations).map((b) => [b.alias, b]));
+    // code 레벨은 선이 없는 박스가 대부분이라 dagre가 전부 한 줄로 늘어놓는다 —
+    // 줄바꿈 배치로 접는다(c4layout.layoutFlow의 주석 참고).
+    const placed = level === 'code' ? layoutFlow(shown) : layoutElements(shown, relations);
+    const boxes = new Map(placed.map((b) => [b.alias, b]));
     const nodeList: Node[] = shown.map((element) => {
       const box = boxes.get(element.alias);
       return {
@@ -186,7 +189,7 @@ function LevelCanvas({ level, data }: CanvasProps) {
         markerStart: r.bidirectional ? { type: MarkerType.ArrowClosed } : undefined,
       })),
     };
-  }, [data]);
+  }, [data, level]);
 
   if (nodes.length === 0) {
     return <p className="mutedtext" style={{ fontSize: 12 }}>이 레벨에 그릴 요소가 없습니다.</p>;
@@ -228,7 +231,9 @@ function C4NodeView({ data }: NodeProps) {
       ].filter(Boolean).join(' ')}
     >
       <Handle type="target" position={Position.Top} className="c4-handle" />
-      <div className="c4-node-kind">
+      {/* 멤버 목록은 박스에 몇 개만 들어간다("+N") — 전체는 hover로 본다. */}
+      <div className="c4-node-kind" title={`${element.label}
+${element.description}`}>
         <span className="mono">{element.kind}</span>
       </div>
       <div className="c4-node-label">{element.label}</div>

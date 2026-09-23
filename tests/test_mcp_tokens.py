@@ -63,8 +63,8 @@ def _project(db, name: str, org: Organization | None, git_url: str) -> Project:
     return project
 
 
-def test_token_is_rejected_outside_mcp(gitea_configured):
-    """개발자 기계의 설정 파일에 놓이는 값이다 — 새어도 MCP 밖으로는 아무것도 못 해야 한다."""
+def test_token_is_rejected_outside_mcp_and_gateway(gitea_configured):
+    """개발자 기계의 설정 파일에 놓이는 값이다 — 새어도 배포·터미널·계정 관리는 못 해야 한다."""
     c = gitea_configured
     db = SessionLocal()
     try:
@@ -74,9 +74,42 @@ def test_token_is_rejected_outside_mcp(gitea_configured):
         db.close()
 
     headers = {"authorization": f"Bearer {token}"}
-    # MCP가 아닌 경로는 이 토큰을 모른다
+    # 관리 API는 이 토큰을 모른다
     assert c.get(f"{API}/projects", headers=headers).status_code == 401
     assert c.get(f"{API}/system/host", headers=headers).status_code in (401, 403, 404)
+    assert c.get(f"{API}/audit", headers=headers).status_code in (401, 403)
+
+
+def test_token_opens_the_gateway(gitea_configured):
+    """에이전트는 MCP로 무엇을 만들지 읽고 **게이트웨이로 자원에 닿는다** — 둘이 다 필요하다.
+
+    MCP만 열어 두면 게이트웨이 연동을 검증할 방법이 없어서 "직접 인증 불가"로 막힌다
+    (negowith 과제에서 실제로 보고됐다).
+    """
+    c = gitea_configured
+    db = SessionLocal()
+    try:
+        _user(db, "gw@example.com", None)
+        token = issue_mcp_token(db, "gw@example.com", "laptop", is_admin=False)
+    finally:
+        db.close()
+
+    headers = {"authorization": f"Bearer {token}"}
+    # A2A 카드 목록 — 인증이 통해야 200이다(401이면 자격이 거부된 것이다)
+    assert c.get(f"{API}/a2a/agents", headers=headers).status_code == 200
+    # LLM 프록시는 프로바이더가 없어 404지만, 401이 아니라는 것이 요점이다
+    assert c.post(f"{API}/proxy/llm?provider_id=999",
+                  json={"messages": [{"role": "user", "content": "x"}]},
+                  headers=headers).status_code == 404
+
+
+def test_issued_token_comes_with_the_gateway_address(gitea_configured, monkeypatch):
+    """주소를 손으로 짜맞추게 두면 거기서 막힌다 — 발급 응답이 함께 준다."""
+    monkeypatch.setenv("PAAS_MCP_INTERNAL_BASE_URL", "http://gpax.lge.com/paas")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    body = c.post(f"{API}/mcp/tokens", headers=ADMIN, json={"label": "노트북"}).json()
+    assert body["gateway_base_url"] == "http://gpax.lge.com/paas/api/v1"
 
 
 def test_token_opens_the_project_mcp_of_its_own_org(gitea_configured):

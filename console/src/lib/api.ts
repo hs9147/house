@@ -369,7 +369,7 @@ export const api = {
   // 개인 MCP 토큰 — 외주 개발 에이전트는 API 키가 없다. 로그인한 사람이 자기 몫을
   // 발급하고, 접근 권한은 그 사람의 조직으로 판정된다. 원문은 발급 응답에 한 번만 온다.
   createMcpToken: (label: string, project?: string) =>
-    request<{ token: string; url: string; ttl_days: number }>(
+    request<{ token: string; url: string; gateway_base_url: string; ttl_days: number }>(
       'POST', '/mcp/tokens', { label, project }),
   listMcpTokens: () =>
     request<{

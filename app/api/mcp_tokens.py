@@ -49,12 +49,14 @@ def create_mcp_token(
     db: Session = Depends(get_db),
     key: ApiKey = Depends(require_api_key),
 ):
-    """자기 몫의 MCP 토큰을 발급한다 — 남의 것은 만들 수 없다(주체가 요청자 자신이다).
+    """자기 몫의 에이전트 토큰을 발급한다 — 남의 것은 만들 수 없다(주체가 요청자 자신이다).
 
-    project를 주면 그 프로젝트의 MCP 주소까지 함께 돌려준다. 붙여 넣을 설정을 화면이 바로
-    만들어 줄 수 있어야 한다 — 주소와 토큰을 따로 찾아 조립하게 두면 거기서 틀린다.
+    이 토큰으로 두 곳을 쓴다: MCP 서버(무엇을 만들지 읽는다)와 게이트웨이(/proxy·/a2a로
+    자원에 닿는다). 그래서 응답에 MCP 주소와 게이트웨이 기준 주소를 함께 싣는다 — 주소와
+    토큰을 따로 찾아 조립하게 두면 거기서 틀린다.
     """
     token = issue_mcp_token(db, key.name, body.label, key.is_admin)
+    base = mcp_search.internal_base_url()
     url = ""
     if body.project:
         project = db.execute(
@@ -64,11 +66,15 @@ def create_mcp_token(
             raise HTTPException(status_code=404, detail=f"project not found: {body.project}")
         # 발급 시점에 권한을 확인한다 — 쓸 수 없는 주소를 돌려주면 붙여 넣고 나서 401을 본다.
         require_project_mcp_access(db, key, project)
-        base = mcp_search.internal_base_url()
         url = f"{base}/api/v1/plan/projects/{project.id}/mcp" if base else ""
     audit.record(db, key.name, "mcp.token.issue", body.label or "(라벨 없음)",
                  {"project": body.project or None, "ttl_days": MCP_TOKEN_TTL.days})
-    return McpTokenIssued(token=token, url=url, ttl_days=MCP_TOKEN_TTL.days)
+    # 게이트웨이 주소도 함께 준다 — 같은 토큰으로 /proxy·/a2a를 부른다. 이 값을 주지
+    # 않으면 에이전트가 주소를 짜맞추다 막힌다("직접 인증 불가"로 보고된 지점).
+    return McpTokenIssued(
+        token=token, url=url, ttl_days=MCP_TOKEN_TTL.days,
+        gateway_base_url=f"{base}/api/v1" if base else "",
+    )
 
 
 @router.get("/mcp/tokens", response_model=list[McpTokenOut])

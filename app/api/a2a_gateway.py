@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import ApiKey, Module, Project
-from ..security import require_api_key
+from ..security import require_agent_key
 from ..services import a2a as a2a_service
 
 router = APIRouter(tags=["a2a_gateway"])
@@ -19,7 +19,7 @@ def list_a2a_agents(
     category: str | None = None,
     project_id: int | None = None,
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
+    _: ApiKey = Depends(require_agent_key),
 ):
     """등재된 A2A 에이전트(모듈) 카드 목록 — 이름을 미리 몰라도 찾을 수 있는 디스커버리 창구.
 
@@ -37,7 +37,7 @@ def list_a2a_agents(
 def get_a2a_agent_card(
     agent_name: str,
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
+    _: ApiKey = Depends(require_agent_key),
 ):
     """특정 모듈/에이전트의 A2A Agent Card (Discovery Spec) 조회."""
     module = db.execute(select(Module).where(Module.name == agent_name)).scalar_one_or_none()
@@ -51,7 +51,7 @@ async def execute_a2a_task(
     agent_name: str,
     request: Request,
     db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_agent_key),
 ):
     """에이전트 간(Agent-to-Agent) 표준 Task 실행 요청 수신 및 PaaS 중계 실행."""
     module = db.execute(select(Module).where(Module.name == agent_name)).scalar_one_or_none()

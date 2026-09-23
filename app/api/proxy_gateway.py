@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .. import audit
 from ..db import get_db
 from ..models import ApiKey, LlmProvider, Module
-from ..security import decrypt_value, require_api_key
+from ..security import decrypt_value, require_agent_key
 from ..services import egress
 from ..services import llm as llm_service
 from ..services import modules as modules_service
@@ -21,7 +21,7 @@ def proxy_llm_call(
     provider_id: int,
     body: dict,
     db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_agent_key),
 ):
     """에이전트가 LLM을 직접 호출하지 않고 PaaS를 거쳐 입출력을 처리하는 게이트웨이 API."""
     provider = db.get(LlmProvider, provider_id)
@@ -46,7 +46,7 @@ async def proxy_module_call(
     path: str,
     request: Request,
     db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_agent_key),
 ):
     """에이전트가 외부/내부 모듈이나 API를 직접 호출하지 않고 PaaS를 거쳐 입출력을 처리하는 모듈 게이트웨이."""
     row = db.execute(select(Module).where(Module.name == module_name)).scalar_one_or_none()

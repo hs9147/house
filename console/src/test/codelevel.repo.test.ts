@@ -33,12 +33,15 @@ const REAL: CodeMapFile[] = [
 ];
 
 describe('codeLevel — 실제 파서 출력', () => {
-  it('파일 2개가 경계, 최상위 선언이 노드가 된다', () => {
+  it('클래스가 있는 파일만 경계가 되고, 함수는 파일 박스로 접힌다', () => {
     const level = codeLevel(REAL, 'backend');
     const boundaries = level.elements.filter((e) => e.base === 'boundary');
     expect(boundaries.map((e) => e.label)).toEqual(['app/models.py', 'app/db.py']);
-    // 파일 안의 노드 4 + 1, 그림 밖 상위 클래스(str · Enum · DeclarativeBase) 3
-    expect(level.elements.filter((e) => e.parent !== null)).toHaveLength(5);
+    // 경계 안에는 클래스만 — models.py의 3개 + db.py의 1개(utcnow 함수는 접혔다)
+    expect(level.elements.filter((e) => e.parent !== null).map((e) => e.label))
+      .toEqual(['ProjectType', 'BuildProfile', 'Project', 'Base']);
+    // models.py 박스가 그 함수를 목록으로 들고 있다
+    expect(boundaries[0].description).toBe('utcnow');
     expect(level.elements.filter((e) => e.external).map((e) => e.label))
       .toEqual(['str', 'Enum', 'DeclarativeBase']);
   });

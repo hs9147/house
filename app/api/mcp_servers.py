@@ -30,7 +30,11 @@ PAAS_DOC_ROOTS_READONLY에 적은 폴더에서만 쓰기·삭제 도구가 빠�
 사내에서 실제로 닿는 주소를 넣는다 — 공개 도메인이 이 플랫폼으로 라우팅되지 않는
 구성이면 내부 주소를 쓴다(예: http://localhost:7000/paas/api/v1/mcp/ops).
 
-인증은 다른 엔드포인트와 같은 API 키다. 관리자 전용으로 올리지 않은 이유가 있다 —
+인증은 API 키 또는 **개인 에이전트 토큰**이다(security.require_agent_key). 외주 개발
+에이전트에게는 API 키가 없어서 콘솔에서 SSO로 발급한 개인 토큰으로 붙는다 — 그 토큰은
+여기와 게이트웨이(/proxy·/a2a)에서만 통하고 배포·터미널·계정 관리로는 나가지 못한다.
+
+관리자 전용으로 올리지 않은 이유도 그대로다 —
 mcp 모듈의 api_key는 배포된 앱의 환경변수로도 주입되므로(services/modules.binding_env),
 여기에 관리자 키를 넣게 만들면 관리자 권한이 앱 env로 새어 나간다. 대신 위험은 도구
 쪽에서 막는다: db 서버는 SELECT 전용 + 허용 목록, 나머지 셋은 읽기 전용이거나 모듈
@@ -55,7 +59,7 @@ from ..models import (
     ApiKey, AuditEvent, BuildProfile, Deployment, DeploymentStatus, Module, ModuleType,
     Project, ProjectType,
 )
-from ..security import require_api_key, require_mcp_key, require_project_mcp_access
+from ..security import require_agent_key, require_project_mcp_access
 from ..services import apisearch
 from ..services import codemap as codemap_service
 from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, workspace
@@ -225,7 +229,7 @@ _OPS_TOOLS = [
 async def ops_mcp_server(
     request: Request,
     db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_agent_key),
 ):
     """운영 MCP 서버(JSON-RPC 2.0).
 
@@ -449,12 +453,12 @@ _CODE_TOOLS = [
 async def code_mcp_server(
     request: Request,
     db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_mcp_key),
+    key: ApiKey = Depends(require_agent_key),
 ):
     """코드 조회 MCP 서버(JSON-RPC 2.0) — 읽기 전용, **접근 권한이 있는 프로젝트만**.
 
     외주 에이전트는 API 키가 없어 콘솔에서 SSO로 발급받은 개인 MCP 토큰으로 붙는다
-    (require_mcp_key). 예전에는 유효한 키면 남의 조직 프로젝트 코드까지 읽혔다.
+    (require_agent_key). 예전에는 유효한 키면 남의 조직 프로젝트 코드까지 읽혔다.
     """
     return mcp_server.dispatch(
         await mcp_server.read_payload(request),
@@ -602,7 +606,7 @@ _DOCS_TOOLS = [
 async def docs_mcp_server(
     request: Request,
     db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_agent_key),
 ):
     """사내 문서 검색 MCP 서버(JSON-RPC 2.0) — 읽기 전용.
 
@@ -842,7 +846,7 @@ async def storage_mcp_server(
     store_name: str,
     request: Request,
     db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_agent_key),
 ):
     """저장소 파일 MCP 서버(JSON-RPC 2.0).
 
@@ -1026,7 +1030,7 @@ async def db_mcp_server(
     module_name: str,
     request: Request,
     db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_agent_key),
 ):
     """database 모듈 조회 MCP 서버(JSON-RPC 2.0) — SELECT 전용.
 
@@ -1221,7 +1225,7 @@ _APIS_TOOLS = [
 async def apis_mcp_server(
     request: Request,
     db: Session = Depends(get_db),
-    key: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_agent_key),
 ):
     """외부 API 카탈로그 검색 MCP 서버(JSON-RPC 2.0) — 읽기 전용, DB만 읽는다.
 
@@ -1342,7 +1346,7 @@ _GRAPH_TOOLS = [
 async def graph_mcp_server(
     request: Request,
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
+    _: ApiKey = Depends(require_agent_key),
 ):
     """사내 문서 온톨로지 MCP 서버(JSON-RPC 2.0) — 읽기 전용.
 

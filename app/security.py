@@ -326,17 +326,21 @@ def resolve_mcp_token(db: Session, token: str) -> ApiKey | None:
     return ApiKey(name=row.email, key_hash="", is_admin=row.is_admin)
 
 
-def require_mcp_key(
+def require_agent_key(
     x_api_key: str = Header(default=""),
     authorization: str = Header(default=""),
     db: Session = Depends(get_db),
 ) -> ApiKey:
-    """MCP 서버 전용 인증 — 개인 MCP 토큰을 **여기서만** 받는다.
+    """외주 개발 에이전트가 쓰는 인증 — 개인 토큰을 **여기서만** 받는다.
 
-    MCP 규약은 자격증명을 `Authorization: Bearer`로 싣는다. 외주 에이전트는 API 키가 없고
-    콘솔에서 발급받은 개인 토큰을 그 자리에 넣는다. require_api_key가 이 토큰을 받지 않는
-    것이 핵심이다 — 개발자 기계의 설정 파일에 놓이는 값이라, 새어도 MCP 밖으로는 아무것도
-    못 하게 둔다(배포·터미널·계정 관리 등).
+    쓰이는 곳은 두 종류다: MCP 서버(작업 지시·산출물·코드)와 **게이트웨이**(/proxy/llm,
+    /proxy/modules, /a2a). 에이전트는 이 둘을 다 써야 한다 — 전자로 무엇을 만들지 읽고,
+    후자로 자원에 닿는 규약을 확인하고 실제로 호출한다. MCP만 열어 두면 게이트웨이 연동을
+    검증할 방법이 없어서 "직접 인증 불가"로 막힌다(실제 보고).
+
+    **그 밖으로는 나가지 않는다.** require_api_key는 이 토큰을 받지 않는다 — 개발자 기계의
+    설정 파일에 놓이는 값이라, 새어도 배포·터미널·계정 관리는 못 한다. 만료(90일)되고
+    폐기할 수 있으며, 감사 기록에 발급자 이메일로 남는다.
     """
     token = x_api_key
     if not token and authorization.lower().startswith("bearer "):

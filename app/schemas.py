@@ -136,6 +136,9 @@ class McpTokenIssued(BaseModel):
 
     token: str
     url: str = ""
+    # 게이트웨이(/proxy·/a2a)의 기준 주소. 에이전트는 MCP로 "무엇을 만들지"를 읽고
+    # 게이트웨이로 자원에 닿는다 — 둘을 같이 주지 않으면 주소를 손으로 짜맞추게 된다.
+    gateway_base_url: str = ""
     ttl_days: int
 
 
