@@ -2105,3 +2105,46 @@ def test_subpath_rewrite_is_documented_as_the_platforms_job(fresh_settings):
         assert "서브패스" in doc
     finally:
         db.close()
+
+
+def test_confirmed_stage_is_not_labelled_a_draft(monkeypatch, fresh_settings, tmp_path):
+    """확정된 단계를 열어 보기만 해도 "초안(미확정)"으로 보였다.
+
+    편집기에는 확정본 본문이 들어 있어서 draft로 그 내용이 그대로 올라온다 — 예전에는
+    "지금 편집 중인 단계"라는 사실만 보고 초안이라고 표시했다(실측: supplier-pool 기획서가
+    "확정됨"인데 C4는 초안으로 표시). 초안인지는 **내용**으로 가린다.
+    """
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _confirm_stage_doc(c, monkeypatch, sid, repo, "spec", "01-기획서.md", _C4_SPEC_DOC)
+
+    # 확정본을 그대로 들고 있는 편집기 = 초안이 아니다
+    levels = _c4(c, sid, stage="spec", draft=_C4_SPEC_DOC)["levels"]
+    assert levels["context"]["confirmed"] is True
+    assert levels["context"]["stage"] == "spec"
+
+    # 산문만 고친 것도 같은 그림이다 — 라벨이 말하는 것은 그림이다
+    levels = _c4(c, sid, stage="spec",
+                 draft=_C4_SPEC_DOC.replace("# 기획서", "# 기획서 (v2)"))["levels"]
+    assert levels["context"]["confirmed"] is True
+
+    # 그림을 고치면 그때는 미확정이다
+    edited = _C4_SPEC_DOC.replace('"기획자"', '"기획 담당자"')
+    levels = _c4(c, sid, stage="spec", draft=edited)["levels"]
+    assert levels["context"]["confirmed"] is False
+
+
+def test_unconfirmed_stage_draft_stays_a_draft(monkeypatch, fresh_settings, tmp_path):
+    """확정하지 않은 단계의 초안은 그대로 미확정이다 — 내용 비교가 그것을 뒤집지 않는다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    assert repo  # 확정은 하지 않는다
+
+    levels = _c4(c, sid, stage="spec", draft=_C4_SPEC_DOC)["levels"]
+    assert levels["context"]["confirmed"] is False

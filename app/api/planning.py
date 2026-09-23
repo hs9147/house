@@ -654,16 +654,27 @@ def get_plan_c4_model(
     # 단계 순서를 지켜 훑는다. 초안이 있는 단계는 확정본 대신 초안을 싣는다 — 확정된
     # 단계로 되돌아가 고치는 중일 수도 있고, 그때 검토 대상은 화면의 초안이다.
     stage_docs: list[tuple[str, str]] = []
+    # **초안인지는 내용으로 가린다.** 예전에는 "지금 편집 중인 단계"라는 사실만 보고
+    # 초안이라고 표시했다 — 확정된 단계를 열어 보기만 해도(편집기에 확정본이 들어 있다)
+    # 확정 산출물의 그림이 "초안(미확정)"으로 보였다(실측: supplier-pool 기획서 2fec2e3).
+    draft_is_unconfirmed = bool(draft_stage)
     for stage in planning_service.STAGE_ORDER:
         if stage.value == draft_stage:
             stage_docs.append((stage.value, draft))
+            confirmed_body = (
+                _artifact_content(db, project, session, stage)
+                if _is_confirmed(db, session_id, stage) else None
+            )
+            if confirmed_body and c4_service.same_blocks(confirmed_body, draft):
+                draft_is_unconfirmed = False
             continue
         if not _is_confirmed(db, session_id, stage):
             continue
         content = _artifact_content(db, project, session, stage)
         if content:
             stage_docs.append((stage.value, content))
-    levels = c4_service.model_from_stages(stage_docs, draft_stage=draft_stage or None)
+    levels = c4_service.model_from_stages(
+        stage_docs, draft_stage=draft_stage if draft_is_unconfirmed else None)
 
     # component가 없으면 리포를 훑지 않는다 — 초안을 편집하는 동안 이 요청이 반복되므로
     # 매번 git ls-files를 부를 이유가 없다.

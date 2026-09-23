@@ -166,3 +166,32 @@ def test_component_paths_with_directory_link():
     assert c4.component_paths(element, tree) == [
         "console/src/pages/AgentPlanning.tsx", "console/src/pages",
     ]
+
+
+def test_same_blocks_ignores_prose_and_whitespace():
+    """라벨이 말하는 것은 **그림**이다 — 산문을 고쳤다고 그림이 미확정이 되면 안 된다."""
+    edited = SPEC.replace("목적과 범위.", "목적과 범위를 더 자세히 적었다.")
+    assert c4.same_blocks(SPEC, edited)
+    # 여백·마지막 개행 차이도 같은 그림이다(편집기·커밋 사이에서 흔히 생긴다)
+    assert c4.same_blocks(SPEC, SPEC + "\n\n")
+
+
+def test_same_blocks_detects_a_changed_diagram():
+    changed = SPEC.replace('Person(planner, "기획자"', 'Person(planner, "기획 담당자"')
+    assert not c4.same_blocks(SPEC, changed)
+    # 블록이 아예 없어진 것도 다른 그림이다(잘린 문서가 확정되면 이렇게 된다)
+    assert not c4.same_blocks(SPEC, "# 기획서\n\n블록 없음\n")
+
+
+def test_model_marks_untouched_confirmed_stage_as_confirmed():
+    """확정된 단계를 열어 보기만 해도 "초안(미확정)"으로 보이던 문제의 판정 지점.
+
+    편집기에는 확정본이 들어 있으므로, 내용이 같으면 그 단계를 draft로 넘기지 않는다
+    (api/planning.get_plan_c4_model이 same_blocks로 가린다).
+    """
+    as_draft = c4.model_from_stages([("spec", SPEC)], draft_stage="spec")
+    assert as_draft["context"]["confirmed"] is False  # 초안으로 넘기면 미확정
+
+    as_confirmed = c4.model_from_stages([("spec", SPEC)], draft_stage=None)
+    assert as_confirmed["context"]["confirmed"] is True
+    assert as_confirmed["context"]["stage"] == "spec"  # 어느 단계에서 왔는지는 그대로

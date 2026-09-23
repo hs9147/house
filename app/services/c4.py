@@ -125,6 +125,22 @@ def parse_block(body: str) -> dict:
     return {"title": title, "elements": elements, "relations": relations}
 
 
+def same_blocks(left: str, right: str) -> bool:
+    """두 문서가 **같은 그림**을 담고 있는가(C4 블록만 비교, 여백 무시).
+
+    확정된 단계를 열어 보기만 해도 "초안(미확정)"으로 표시되던 문제 때문에 필요하다.
+    편집기에는 확정본 본문이 들어 있으므로 문서는 확정본과 같은데, 화면은 "지금 편집 중인
+    단계"라는 사실만 보고 초안이라고 말했다.
+
+    문서 전체가 아니라 블록만 비교한다 — 라벨이 말하는 것은 그림이다. 산문을 고쳤다는
+    이유로 그림이 미확정이 되면 안 된다.
+    """
+    def blocks(text: str) -> dict[str, str]:
+        return {level: body.strip() for level, body in extract_blocks(text).items()}
+
+    return blocks(left) == blocks(right)
+
+
 def model_from_stages(
     stage_docs: list[tuple[str, str]], draft_stage: str | None = None,
 ) -> dict[str, dict]:
