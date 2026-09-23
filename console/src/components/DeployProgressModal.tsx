@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import DeployDiagnoseModal from './DeployDiagnoseModal';
 import Modal from './Modal';
 import { api, ApiError } from '../lib/api';
 import type { BuildProfile, DeploymentStatus } from '../lib/types';
@@ -22,6 +23,12 @@ export default function DeployProgressModal({
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState(false);
   const [failed, setFailed] = useState(false);
+  // 실패를 본 자리에서 원인을 묻는다 — 예전에는 배포 이력 화면으로 가야 했다. 진단은
+  // 리포와 로그를 실제로 보고 짚어 주고, 고침 적용·재시도는 사람이 확인한다(취소 가능).
+  const [diagnosing, setDiagnosing] = useState(false);
+  // 재시도하면 새 배포 레코드가 생긴다 — 그 진행을 이 창에서 그대로 이어 본다. 창을 닫고
+  // 다시 찾아 들어가게 하면 "무엇이 달라졌나"를 따라갈 수 없다.
+  const [ids, setIds] = useState<number[]>(deploymentIds);
   // 진행 중(building)인 레코드의 현재 빌드/설치 로그 tail — "지금 실행 중인 명령/출력"을
   // 보여준다. record id별로 보관해 composite(backend/frontend 등) 배포도 구분해 표시한다.
   const [liveLogs, setLiveLogs] = useState<Record<number, { label: string; content: string }>>({});
@@ -48,7 +55,7 @@ export default function DeployProgressModal({
       try {
         const rows = await api.deployments(projectId);
         if (cancelledRef.current) return;
-        const mine = rows.filter((r) => deploymentIds.includes(r.id));
+        const mine = rows.filter((r) => ids.includes(r.id));
         for (const r of mine) {
           if (lastStatusRef.current[r.id] !== r.status) {
             lastStatusRef.current[r.id] = r.status;
@@ -84,7 +91,7 @@ export default function DeployProgressModal({
         }
 
         const allTerminal =
-          mine.length === deploymentIds.length && mine.every((r) => TERMINAL.includes(r.status));
+          mine.length === ids.length && mine.every((r) => TERMINAL.includes(r.status));
         if (allTerminal) {
           const anyFail = mine.some((r) => r.status === 'failed');
           append(anyFail ? '배포 실패.' : '배포 완료.');
@@ -122,7 +129,20 @@ export default function DeployProgressModal({
       cancelledRef.current = true;
       if (timerRef.current) window.clearTimeout(timerRef.current);
     };
-  }, [projectId, profile, projectName, deploymentIds]);
+  }, [projectId, profile, projectName, ids]);
+
+  // 재시도 — 새 레코드로 폴링을 다시 시작한다(같은 창, 이어지는 로그).
+  const retry = async () => {
+    const result = await api.deployQueued(projectId, profile);
+    const records = Array.isArray(result) ? result : [result];
+    lastStatusRef.current = {};
+    setLiveLogs({});
+    setDone(false);
+    setFailed(false);
+    append(`--- 재시도 (#${records.map((r) => r.id).join(', #')}) ---`);
+    startedRef.current = false;  // 새 id로 루프를 다시 열게 한다
+    setIds(records.map((r) => r.id));
+  };
 
   return (
     <Modal title={`배포 진행 — ${projectName} (${profile})`} onClose={onClose} closable={done}>
@@ -168,10 +188,26 @@ export default function DeployProgressModal({
         </div>
       ))}
       <div className="row" style={{ justifyContent: 'flex-end', marginTop: 16 }}>
+        {/* 오류 한 줄로는 "리포가 잘못됐나 · 설정이 잘못됐나"가 갈리지 않는다 — 실패했을
+            때만 보여 준다(성공한 배포를 진단하라고 권할 이유가 없다). */}
+        {done && failed && (
+          <button className="secondary" onClick={() => setDiagnosing(true)}>
+            🔍 실패 원인 진단
+          </button>
+        )}
+        <div className="spacer" />
         <button className={failed ? 'danger' : ''} onClick={onClose} disabled={!done}>
           {done ? '확인' : '진행 중…'}
         </button>
       </div>
+      {diagnosing && (
+        <DeployDiagnoseModal
+          projectId={projectId}
+          profile={profile}
+          onClose={() => setDiagnosing(false)}
+          onRetry={retry}
+        />
+      )}
     </Modal>
   );
 }

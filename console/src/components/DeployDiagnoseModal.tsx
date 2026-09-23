@@ -88,7 +88,7 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
             <p className="mutedtext" style={{ fontSize: 12 }}>
               템플릿이 실행 방법을 찾지 못했습니다 — 리포에{' '}
               <span className="mono">{fix.needs.join(' · ')}</span> 중 하나를 넣거나,
-              배포 이력 화면의 <b>기동 스크립트</b>에서 이 리포에 맞는 start.cmd를 작성해
+              개요 화면의 <b>기동 스크립트</b>에서 이 리포에 맞는 start.cmd를 작성해
               저장하세요(LLM이 제안하고 사람이 확인합니다).
             </p>
           )}
