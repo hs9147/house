@@ -7,7 +7,7 @@ import asyncio
 import threading
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import select
@@ -203,22 +203,40 @@ def _close_still_building(db: Session, records, error: BaseException | str) -> N
 def _close_orphaned_building(
     db: Session, project: Project, profile: BuildProfile, keep_ids: set[int],
 ) -> None:
-    """이전 시도에서 building으로 남은 행을 닫는다 — 이번 배포의 행은 건드리지 않는다.
+    """**이전** 시도에서 building으로 남은 행을 닫는다 — 이번 시도와 그 뒤의 행은 건드리지 않는다.
 
     플랫폼 프로세스가 배포 도중 재시작되면(자기 자신을 배포할 때가 그렇다) 진행 중이던
     행을 아무도 닫지 못한다. 그 행은 화면에서 계속 "빌드 중"으로 보이고, 사람은 끝나기를
-    기다린다. 같은 프로필의 배포는 프로젝트 락이 직렬화하므로, 여기까지 왔다면 남아 있는
-    building 행은 이번 시도의 것이 아니다.
+    기다린다.
+
+    **"이번 시도보다 먼저 만들어진 것"만 닫는다.** 남은 building 행을 전부 닫으면, 거의
+    동시에 큐에 오른 다른 요청의 자리 행까지 닫아 버린다 — 그 요청은 잠시 뒤 "이미 배포가
+    진행 중입니다"로 자기 사유를 적어야 하는데, 이유가 엉뚱한 문장으로 덮인다(실측: 동시
+    배포 테스트가 이것을 잡았다). 고아는 늘 우리보다 먼저 만들어졌으므로 이 기준으로 갈린다.
     """
-    rows = db.execute(
+    rows = list(db.execute(
         select(Deployment).where(
             Deployment.project_id == project.id,
             Deployment.profile == profile,
             Deployment.status == DeploymentStatus.building,
         )
-    ).scalars()
+    ).scalars())
+    ours = [r for r in rows if r.id in keep_ids]
+    cutoff = min((r.created_at for r in ours if r.created_at), default=None)
+    if cutoff is None:
+        # 우리 행이 아직 없는 경로(동기 배포)에서는 시각으로 가를 수 없다 — 기다리는
+        # 형제 요청도 우리보다 먼저 만들어져 있다. 그래서 "정상 빌드가 걸릴 수 있는 시간"을
+        # 넘긴 것만 고아로 본다(그 상한이 곧 빌드 타임아웃이다).
+        limit = get_settings().build_timeout_seconds
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=limit)
+    stale = [
+        r for r in rows
+        if r.id not in keep_ids and r.created_at is not None
+        # created_at은 naive UTC로 저장된다 — 비교 기준을 같은 모양으로 맞춘다.
+        and r.created_at.replace(tzinfo=timezone.utc) < cutoff.replace(tzinfo=timezone.utc)
+    ]
     _close_still_building(
-        db, [r for r in rows if r.id not in keep_ids],
+        db, stale,
         "이전 배포 시도가 끝나지 않은 채 남아 있었습니다 "
         "(플랫폼 재시작 또는 예기치 못한 오류) — 이 시도는 취소된 것으로 봅니다.",
     )
@@ -331,11 +349,25 @@ def deploy_sync(
         db.commit()
         try:
             if get_settings().runtime_backend == "windows_service":
-                # windows_service 런타임은 이미지 대신 리포 루트의 start.cmd를 nssm으로
-                # Windows Service에 등록해 네이티브 실행한다 — docker build를 건너뛴다
-                # (image_tag는 이 런타임이 사용하지 않는다). start.cmd를 조건 없이
-                # 자동 생성한다(dockerfile_for와 대칭 — 매 배포 시 갱신).
-                write_start_script(workdir, project, profile=profile)
+                # windows_service 런타임은 이미지 대신 start.cmd를 nssm으로 Windows Service에
+                # 등록해 네이티브 실행한다 — docker build를 건너뛴다(image_tag는 이 런타임이
+                # 사용하지 않는다). start.cmd를 조건 없이 자동 생성한다(dockerfile_for와
+                # 대칭 — 매 배포 시 갱신).
+                #
+                # **source_subdir가 실행 폴더다.** 예전에는 이 값을 docker 빌드 컨텍스트에만
+                # 쓰고 네이티브 경로는 늘 리포 루트에서 설치·기동했다. 그래서 "소스가 하위
+                # 폴더에 있습니다 → source_subdir를 지정하세요"라는 진단의 제안이 이 런타임에
+                # 서는 **아무 효과가 없었다**(실측 supplier-pool: 소스가 Strategy/에 있는데
+                # 루트에서 설치를 찾다 아무것도 설치하지 않고, 앱은 의존성이 없어 죽었다).
+                # 복합 배포가 컴포넌트 폴더를 쓰는 것과 같은 규칙으로 맞춘다(work_subdir).
+                source_subdir = project.source_subdir or ""
+                rundir = workdir / source_subdir if source_subdir else workdir
+                if not rundir.is_dir():
+                    raise BuildError(
+                        f"{project.name}: 빌드 대상 폴더가 리포에 없습니다: {source_subdir} "
+                        "— 프로젝트의 source_subdir를 확인하세요."
+                    )
+                write_start_script(rundir, project, profile=profile)
                 # npm/pip install을 여기서 먼저 끝낸다(build_image의 docker build와 대응
                 # 되는 명시적 build 단계) — runtime.start()의 헬스체크 창 안에서 설치까지
                 # 겸하면, 설치가 느릴 때 원인이 "헬스체크 실패"로만 보이고 배포 상태도
@@ -349,7 +381,7 @@ def deploy_sync(
                 # 외부에서 열리는 서브패스를 빌드에 넘긴다 — 프록시가 접두어를 벗겨
                 # 넘기므로 앱은 "/"를 받지만 브라우저가 보는 주소는 서브패스다.
                 install_dependencies(
-                    workdir, log_path,
+                    rundir, log_path,
                     base_path=proxy.path_prefix_for(
                         _org_name(project), project.name, profile,
                     ),
@@ -365,7 +397,13 @@ def deploy_sync(
                 record.image_tag = result.image_tag
                 image_tag = result.image_tag
 
-            spec = make_spec(db, project, image_tag, profile)
+            # 네이티브 런타임은 이 폴더에서 start.cmd를 돌린다(docker는 이미지가 정하므로
+            # 빈 문자열이다 — work_subdir를 읽지 않는다).
+            spec = make_spec(
+                db, project, image_tag, profile,
+                work_subdir=(project.source_subdir or ""
+                             if get_settings().runtime_backend == "windows_service" else ""),
+            )
             endpoint = get_runtime().start(spec)
             if get_settings().tier == "small":
                 path_prefix = proxy.path_prefix_for(_org_name(project), project.name, profile)

@@ -553,3 +553,62 @@ def test_rejects_overwriting_the_injected_port():
         "node server.js --port %PORT%\n") == []
     assert startscript.validate(
         "@echo off\nset PORT=%PORT%\nnode server.js --port %PORT%\n") == []
+
+
+def test_native_single_deploy_uses_source_subdir_as_the_run_folder(monkeypatch, tmp_path,
+                                                                  fresh_settings):
+    """실측(supplier-pool): 소스가 `Strategy/`에 있는데 네이티브 배포는 리포 루트에서
+    설치를 찾았다 — 아무것도 설치되지 않고 앱은 의존성이 없어 죽었다(nssm SERVICE_PAUSED).
+
+    진단이 "source_subdir를 지정하세요"라고 제안하는데 그 값이 이 런타임에서 아무 효과가
+    없었다는 뜻이다. 설치·스크립트·실행 폴더가 모두 그 폴더여야 한다.
+    """
+    create_app()
+    monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "windows_service")
+    monkeypatch.setenv("PAAS_TIER", "small")
+    get_settings.cache_clear()
+
+    _write(tmp_path, "Strategy/requirements.txt", "streamlit\n")
+    _write(tmp_path, "Strategy/app.py", "print(1)")
+    db = SessionLocal()
+    try:
+        project = _project(db, "subdir-native", type=ProjectType.streamlit,
+                           source_subdir="Strategy")
+        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "e" * 40))
+        monkeypatch.setattr(deployer, "build_image", _must_not_build)
+        installed: list[Path] = []
+        monkeypatch.setattr(deployer, "install_dependencies",
+                            lambda workdir, log, **kw: installed.append(workdir))
+        runtime = _FakeRuntime()
+        monkeypatch.setattr(deployer, "get_runtime", lambda: runtime)
+        monkeypatch.setattr(deployer.proxy, "configure", lambda *a, **kw: None)
+
+        deployer.deploy_sync(db, project, BuildProfile.release)
+
+        assert installed == [tmp_path / "Strategy"]
+        assert (tmp_path / "Strategy" / "start.cmd").is_file()
+        assert not (tmp_path / "start.cmd").exists()  # 루트에 쓰면 런타임이 못 찾는다
+        assert runtime.specs[0].work_subdir == "Strategy"
+    finally:
+        db.close()
+        get_settings.cache_clear()
+
+
+def test_native_deploy_fails_clearly_when_source_subdir_is_not_in_the_repo(
+        monkeypatch, tmp_path, fresh_settings):
+    """없는 폴더를 가리키면 "설치할 것이 없다"가 아니라 그 사실을 말해야 한다."""
+    create_app()
+    monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "windows_service")
+    get_settings.cache_clear()
+    db = SessionLocal()
+    try:
+        project = _project(db, "subdir-missing", type=ProjectType.python,
+                           source_subdir="nope")
+        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "f" * 40))
+        monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
+        with pytest.raises(build_module.BuildError) as raised:
+            deployer.deploy_sync(db, project, BuildProfile.release)
+        assert "nope" in str(raised.value)
+    finally:
+        db.close()
+        get_settings.cache_clear()
