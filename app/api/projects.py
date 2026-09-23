@@ -1,5 +1,6 @@
 import asyncio
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
@@ -560,6 +561,54 @@ async def diagnose_deploy_failure(
         "source_subdir": project.source_subdir or "",
         "detected": structure.summary(detected) or "(감지된 배포 단위 없음)",
         **result,
+    }
+
+
+@router.post("/{project_id}/deployments/{deployment_id}/cancel",
+             dependencies=[Depends(require_feature("deploy"))])
+def cancel_deployment(
+    project_id: int,
+    deployment_id: int,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """진행 중인 배포를 **실제로** 취소한다 — 돌고 있는 설치 프로세스를 끝낸다.
+
+    설치(npm ci·pip install)는 배포 시간의 대부분이라, 그 안에서 끊지 못하면 취소가 아니다.
+    파이프라인은 1초마다 취소 여부를 보고, 요청을 받으면 실행 중인 프로세스를 트리째 끝내고
+    멈춘다(services/build.run_cancellable).
+
+    **이미 기동한 배포는 취소가 아니라 중지다.** 여기서는 진행 중인 것만 다룬다 — 떠 있는
+    서비스를 내리는 것은 POST /stop이 하는 다른 일이다.
+
+    파이프라인이 이 프로세스에 없으면(플랫폼이 재시작됐다) 요청이 닿을 곳이 없으므로 레코드를
+    지금 닫는다 — 그러지 않으면 화면이 영원히 "빌드 중"을 보여 준다.
+    """
+    project = _get_project(db, project_id)
+    row = db.get(Deployment, deployment_id)
+    if row is None or row.project_id != project_id:
+        raise HTTPException(status_code=404, detail="배포 레코드를 찾을 수 없습니다.")
+    if row.status != DeploymentStatus.building:
+        raise HTTPException(
+            status_code=409,
+            detail=f"진행 중인 배포가 아닙니다(상태: {row.status.value}).")
+
+    deployer.request_cancel(deployment_id)
+    running = deployer.deploy_is_running(project_id)
+    if not running:
+        row.status = DeploymentStatus.failed
+        row.error = "취소됨 — 진행 중인 파이프라인이 없어(플랫폼 재시작 등) 레코드만 닫았습니다."
+        row.finished_at = datetime.now(timezone.utc)
+        db.commit()
+    audit.record(db, key.name, "deploy.cancel", project.name,
+                 {"deployment": deployment_id, "pipeline_running": running})
+    return {
+        "deployment_id": deployment_id,
+        "requested": True,
+        "pipeline_running": running,
+        "detail": ("취소를 요청했습니다 — 실행 중인 설치 프로세스를 끝내고 멈춥니다."
+                   if running else
+                   "진행 중인 파이프라인이 없어 레코드를 닫았습니다."),
     }
 
 

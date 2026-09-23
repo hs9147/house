@@ -275,6 +275,11 @@ export const api = {
       fix: { kind: 'source_subdir'; value: string; options: string[] }
         | { kind: 'repo'; needs: string[] } | null;
     }>('GET', `/projects/${id}/deploy/diagnose`, undefined, { profile }),
+  // 진행 중인 배포를 실제로 취소한다 — 돌고 있는 설치 프로세스를 끝낸다.
+  cancelDeployment: (id: number, deploymentId: number) =>
+    request<{
+      deployment_id: number; requested: boolean; pipeline_running: boolean; detail: string;
+    }>('POST', `/projects/${id}/deployments/${deploymentId}/cancel`),
   // 배포 전 점검 — 아무것도 바꾸지 않고, 걸기 전에 알 수 있는 것만 돌려준다.
   deployCheck: (id: number, profile: BuildProfile) =>
     request<DeployCheckOut>('GET', `/projects/${id}/deploy/check`, undefined, { profile }),

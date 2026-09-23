@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -391,8 +392,69 @@ def _utf8_env() -> dict:
     return {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
 
+class BuildCancelled(RuntimeError):
+    """사람이 배포를 취소했다 — 실패와 구분한다(고칠 것이 없다)."""
+
+
+def run_cancellable(cmd: list[str], *, cwd: Path, log, timeout: int,
+                    env: dict | None = None,
+                    should_cancel=None) -> subprocess.CompletedProcess:
+    """subprocess.run과 같은 자리를 채우되, **중간에 끊을 수 있다.**
+
+    설치(npm ci·pip install)는 배포 시간의 대부분이고 몇 분씩 걸린다. subprocess.run은 끝날
+    때까지 돌아오지 않으므로, 그 안에서는 취소를 알 방법이 없다 — 사람이 "취소"를 눌러도
+    설치가 다 끝난 뒤에야 멈추면 그것은 취소가 아니다. Popen으로 띄우고 1초마다 두 가지를
+    본다: 끝났는가, 취소됐는가.
+
+    **트리째 끝낸다.** npm은 자식(node)을 띄우고 pip도 빌드 백엔드를 띄운다 — 부모만 죽이면
+    자식이 남아 폴더를 물고, 다음 배포가 그 자리에서 막힌다(dev 프로세스 런타임에서 이미
+    겪은 함정과 같다).
+    """
+    if should_cancel is None:
+        # 취소를 볼 필요가 없으면 예전 경로 그대로다 — 폴링은 취소를 위해서만 존재하고,
+        # 없을 때까지 Popen으로 바꾸면 얻는 것 없이 실행 경계만 두 가지가 된다.
+        return subprocess.run(cmd, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
+                              timeout=timeout, env=env)
+    poll_interval = 1.0
+    proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT,
+                            env=env)
+    waited = 0.0
+    while True:
+        code = proc.poll()
+        if code is not None:
+            return subprocess.CompletedProcess(cmd, code)
+        if should_cancel is not None and should_cancel():
+            _kill_tree(proc)
+            log.write("[env-setup] 사용자가 취소했습니다 — 실행 중인 프로세스를 끝냈습니다.\n")
+            log.flush()
+            raise BuildCancelled("사용자가 배포를 취소했습니다.")
+        if waited >= timeout:
+            _kill_tree(proc)
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       capture_output=True, text=True, errors="replace", timeout=20)
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), 15)
+        except OSError:
+            proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def install_dependencies(
     workdir: Path, log_path: Path, base_path: str | None = None, build: bool = True,
+    should_cancel=None,
 ) -> None:
     """windows_service 런타임의 명시적 환경설정 단계 — npm/pip install을 배포의 build
     단계로 끝내고, 실패하면 배포 자체를 실패로 남긴다(Docker의 build_image와 대응).
@@ -455,9 +517,9 @@ def install_dependencies(
                 log.write(f"[env-setup] {' '.join(npm_cmd)} (cwd={workdir})\n")
                 log.flush()
                 try:
-                    proc = subprocess.run(
-                        npm_cmd, cwd=workdir, stdout=log, stderr=subprocess.STDOUT,
-                        timeout=timeout_seconds,
+                    proc = run_cancellable(
+                        npm_cmd, cwd=workdir, log=log, timeout=timeout_seconds,
+                        should_cancel=should_cancel,
                     )
                 except OSError as e:
                     raise BuildError(f"npm 실행 실패: {e}", log_path) from e
@@ -499,10 +561,9 @@ def install_dependencies(
                 log.write(f"[env-setup] {' '.join(build_cmd)} (cwd={workdir})\n")
                 log.flush()
                 try:
-                    proc = subprocess.run(
-                        build_cmd,
-                        cwd=workdir, stdout=log, stderr=subprocess.STDOUT,
-                        timeout=timeout_seconds,
+                    proc = run_cancellable(
+                        build_cmd, cwd=workdir, log=log, timeout=timeout_seconds,
+                        should_cancel=should_cancel,
                     )
                 except subprocess.TimeoutExpired as e:
                     raise BuildError(
@@ -518,10 +579,10 @@ def install_dependencies(
                 log.write("[env-setup] python -m venv .venv\n")
                 log.flush()
                 try:
-                    proc = subprocess.run(
+                    proc = run_cancellable(
                         [sys.executable, "-m", "venv", str(venv_dir)],
-                        cwd=workdir, stdout=log, stderr=subprocess.STDOUT,
-                        timeout=timeout_seconds, env=_utf8_env(),
+                        cwd=workdir, log=log, timeout=timeout_seconds, env=_utf8_env(),
+                        should_cancel=should_cancel,
                     )
                 except subprocess.TimeoutExpired as e:
                     raise BuildError(
@@ -533,11 +594,11 @@ def install_dependencies(
             log.write("[env-setup] pip install -r requirements.txt\n")
             log.flush()
             try:
-                proc = subprocess.run(
+                proc = run_cancellable(
                     [str(venv_python), "-m", "pip", "install", "--disable-pip-version-check",
                      "-r", "requirements.txt"],
-                    cwd=workdir, stdout=log, stderr=subprocess.STDOUT,
-                    timeout=timeout_seconds, env=_utf8_env(),
+                    cwd=workdir, log=log, timeout=timeout_seconds, env=_utf8_env(),
+                    should_cancel=should_cancel,
                 )
             except FileNotFoundError as e:
                 raise BuildError(f"venv python을 찾을 수 없습니다: {e}", log_path) from e

@@ -26,6 +26,10 @@ export default function DeployProgressModal({
   // 실패를 본 자리에서 원인을 묻는다 — 예전에는 배포 이력 화면으로 가야 했다. 진단은
   // 리포와 로그를 실제로 보고 짚어 주고, 고침 적용·재시도는 사람이 확인한다(취소 가능).
   const [diagnosing, setDiagnosing] = useState(false);
+  // 취소는 **진짜 취소**다 — 서버가 실행 중인 설치 프로세스를 끝낸다. 요청한 뒤에도 폴링은
+  // 계속한다: 레코드가 닫히는 것을 보고 끝을 알려야 한다(요청만 하고 창을 닫으면 무슨 일이
+  // 일어났는지 알 수 없다).
+  const [cancelling, setCancelling] = useState(false);
   // 재시도하면 새 배포 레코드가 생긴다 — 그 진행을 이 창에서 그대로 이어 본다. 창을 닫고
   // 다시 찾아 들어가게 하면 "무엇이 달라졌나"를 따라갈 수 없다.
   const [ids, setIds] = useState<number[]>(deploymentIds);
@@ -188,6 +192,28 @@ export default function DeployProgressModal({
         </div>
       ))}
       <div className="row" style={{ justifyContent: 'flex-end', marginTop: 16 }}>
+        {!done && (
+          <button
+            className="secondary"
+            disabled={cancelling}
+            onClick={async () => {
+              setCancelling(true);
+              try {
+                for (const id of ids) {
+                  const res = await api.cancelDeployment(projectId, id);
+                  append(`· #${id}: ${res.detail}`);
+                }
+              } catch (e) {
+                append(`취소 요청 실패: ${(e as ApiError).message}`);
+              } finally {
+                setCancelling(false);
+              }
+            }}
+          >
+            {cancelling ? '취소 요청 중…' : '배포 취소'}
+          </button>
+        )}
+        <div className="spacer" />
         {/* 오류 한 줄로는 "리포가 잘못됐나 · 설정이 잘못됐나"가 갈리지 않는다 — 실패했을
             때만 보여 준다(성공한 배포를 진단하라고 권할 이유가 없다). */}
         {done && failed && (

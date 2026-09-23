@@ -22,6 +22,7 @@ from . import ports, proxy
 from . import structure
 from .build import (
     PROFILES,
+    BuildCancelled,
     BuildError,
     build_image,
     checkout,
@@ -35,6 +36,43 @@ from .runtime import upstream_host
 from .runtime.base import Endpoint, Runtime, RuntimeSpec
 
 _locks: dict[int, threading.Lock] = defaultdict(threading.Lock)
+
+
+class DeployCancelled(RuntimeError):
+    """사람이 배포를 취소했다 — 실패와 구분해 기록한다(고칠 것이 없다)."""
+
+
+# 취소를 요청받은 배포 id. **프로세스 안에서만 유효하다** — 파이프라인이 그 프로세스의
+# 스레드에서 돌기 때문이다(services/jobs). 플랫폼이 재시작되면 그 파이프라인 자체가 사라지고,
+# 남은 building 행은 다음 배포가 닫는다(_close_orphaned_building).
+_cancel_requests: set[int] = set()
+_cancel_lock = threading.Lock()
+
+
+def request_cancel(deployment_id: int) -> None:
+    with _cancel_lock:
+        _cancel_requests.add(deployment_id)
+
+
+def is_cancelled(deployment_id: int | None) -> bool:
+    if deployment_id is None:
+        return False
+    with _cancel_lock:
+        return deployment_id in _cancel_requests
+
+
+def clear_cancel(*deployment_ids: int | None) -> None:
+    """배포가 끝나면 요청을 지운다 — 남겨 두면 그 id를 재사용하는 일은 없지만, 집합이
+    영원히 자란다."""
+    with _cancel_lock:
+        for did in deployment_ids:
+            _cancel_requests.discard(did)
+
+
+def deploy_is_running(project_id: int) -> bool:
+    """이 프로세스에서 그 프로젝트의 파이프라인이 돌고 있는가 — 취소 요청이 누군가에게
+    닿을지 판단하는 근거다(아무도 안 돌면 레코드를 지금 닫아야 한다)."""
+    return _locks[project_id].locked()
 
 
 def runtime_name() -> str:
@@ -387,6 +425,8 @@ def deploy_sync(
                     ),
                     # dev는 dev 서버가 소스를 즉석에서 서빙하므로 빌드 산출물을 쓰지 않는다.
                     build=profile != BuildProfile.development,
+                    # 설치는 배포 시간의 대부분이다 — 그 안에서 끊을 수 있어야 취소가 취소다.
+                    should_cancel=lambda: is_cancelled(record.id if record else None),
                 )
                 image_tag = ""
             else:
@@ -399,6 +439,10 @@ def deploy_sync(
 
             # 네이티브 런타임은 이 폴더에서 start.cmd를 돌린다(docker는 이미지가 정하므로
             # 빈 문자열이다 — work_subdir를 읽지 않는다).
+            # 기동 **전에** 한 번 더 본다. 여기서 띄우고 나서 취소되면 서비스를 다시
+            # 내려야 하는데, 그건 취소가 아니라 배포와 중지를 잇는 다른 일이다.
+            if is_cancelled(record.id):
+                raise DeployCancelled("사용자가 배포를 취소했습니다.")
             spec = make_spec(
                 db, project, image_tag, profile,
                 work_subdir=(project.source_subdir or ""
@@ -423,6 +467,14 @@ def deploy_sync(
             db.commit()
             _mark_previous_stopped(db, record)
             return record
+        except (BuildCancelled, DeployCancelled) as e:
+            # 취소는 실패가 아니다 — 고칠 것이 없고, 다시 걸면 된다. 그 사실을 레코드에
+            # 그대로 적는다(실패 목록에 섞이면 원인을 찾는 사람이 헛수고한다).
+            record.status = DeploymentStatus.failed
+            record.error = f"취소됨 — {e}"
+            record.finished_at = datetime.now(timezone.utc)
+            db.commit()
+            raise DeployCancelled(str(e)) from e
         except (BuildError, RuntimeError) as e:
             record.status = DeploymentStatus.failed
             record.error = str(e)
@@ -695,6 +747,10 @@ def deploy_composite_sync(
         relatives = dict(structure.routes_for(detected))
         for name, (comp_path, comp_type) in components.items():
             rec = records[name]
+            # 컴포넌트 하나가 끝난 뒤 취소됐으면 다음 것을 시작하지 않는다 — 복합 배포는
+            # 컴포넌트마다 몇 분이라, 여기서 보지 않으면 취소가 한참 뒤에 듣는다.
+            if any(is_cancelled(r.id) for r in records.values()):
+                raise DeployCancelled("사용자가 배포를 취소했습니다.")
             # 이 컴포넌트의 빌드를 시작하기 전에 로그 경로를 커밋한다 — build_image 호출이
             # 오래 걸리거나 멈춰도 그 시점까지의 진행 상황을 조회할 수 있어야 한다.
             rec.build_log_path = str(docker_build_log_path(project.name, sha, profile, name))
@@ -717,6 +773,7 @@ def deploy_composite_sync(
                             _org_name(project), project.name, profile,
                         ) + relatives.get(name, ""),
                         build=profile != BuildProfile.development,
+                        should_cancel=lambda: is_cancelled(rec.id),
                     )
                     spec = make_spec(
                         db, project, "", profile, component=name,
@@ -807,6 +864,10 @@ def deploy_composite_sync(
         if failed_component:
             raise failure
         return records
+    except (BuildCancelled, DeployCancelled) as e:
+        # 취소는 실패가 아니다 — 남은 컴포넌트 행에 그 사실을 적는다.
+        _close_still_building(db, (records or {}).values(), f"취소됨 — {e}")
+        raise DeployCancelled(str(e)) from e
     except Exception as e:
         # 여기까지 오는 예외가 레코드에 기록됐다는 보장은 없다 — 기록은 각 raise 자리에서
         # 손으로 하기 때문이다. 남은 building 행을 닫고 예외는 그대로 올린다.
