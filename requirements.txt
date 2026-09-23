@@ -8,6 +8,12 @@ PyYAML>=6.0
 PyJWT>=2.8
 alembic>=1.13
 python-multipart>=0.0.9
+# PDF 본문 추출(services/doctext.py). **선택이 아니다** — 사내 문서 폴더의 상당수가 PDF고,
+# 없으면 스토리지·문서 MCP가 그 파일마다 "추출기가 없습니다"로 실패한다(실측:
+# paas-storage-credit·paas-storage-intro·paas-docs 전부). docx·xlsx·pptx는 표준
+# 라이브러리로 읽으므로 이것만 있으면 흔한 형식이 다 덮인다. 스캔 PDF의 OCR 폴백
+# (pypdfium2·Pillow·Tesseract)은 무겁고 드물어서 아래에 선택으로 남긴다.
+pypdf>=4.0
 
 # 선택 의존성 — 없는 환경에서도 서버는 기동되며 해당 기능만 비활성화됩니다.
 # docker>=7.0          # 1차(small) 런타임
@@ -20,8 +26,7 @@ python-multipart>=0.0.9
 #                      # ConPTY는 Windows 10 1809 / Server 2019부터다 — **Server 2016**이면
 #                      # PAAS_PTY_BACKEND=winpty로 못 박아야 할 수 있다.
 # psycopg[binary]>=3.1 # DB 조회 MCP 서버(/mcp/db/{모듈})가 PostgreSQL을 볼 때
-# pypdf>=4.0           # 문서 텍스트 추출(services/doctext.py)에서 PDF를 읽을 때.
-#                      # docx·xlsx·pptx는 표준 라이브러리만으로 읽으므로 이것만 있으면 된다.
+# (pypdf는 위 필수 목록으로 옮겼다 — PDF가 흔해서 선택으로 두면 계속 실패한다.)
 #                      # 97-2003 바이너리(.doc/.xls/.ppt)는 LibreOffice가 필요하다(PAAS_SOFFICE_PATH).
 # pypdfium2>=4.0       # 스캔·깨진 PDF의 OCR 폴백(페이지 렌더링). Pillow와 Tesseract(kor 언어
 # Pillow>=10.0         # 데이터 포함, PAAS_TESSERACT_PATH)가 함께 있어야 동작한다 — 셋 중
