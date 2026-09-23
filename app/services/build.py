@@ -265,31 +265,41 @@ def dockerfile_for(project_type: ProjectType, profile: BuildProfile, workdir: Pa
     return template
 
 
-def start_script_for(project: Project | None, component: str = "") -> str:
-    """이 컴포넌트에 쓸 스크립트 본문 — 지정된 것이 있으면 그것, 없으면 템플릿.
+def script_key(profile: BuildProfile | str, component: str = "") -> str:
+    """start_scripts 맵의 키 — `{프로필}:{컴포넌트}`.
 
-    복합 배포는 컴포넌트마다 유닛·포트·공개 경로가 따로이므로 스크립트도 따로다. 단일
-    배포는 빈 문자열 키를 쓴다(컴포넌트가 없다는 뜻을 키로 그대로 표현한다).
+    **프로필마다 스크립트가 따로다.** 개발 배포와 운영 배포는 기동 방법이 아예 다르다
+    (dev 서버로 띄우기 vs 빌드본 서빙) — 템플릿조차 %PAAS_PROFILE%로 갈라진다. 하나로
+    묶으면 사람이나 LLM이 쓴 스크립트도 그 분기를 다시 써야 하고, 한쪽을 고치면 다른 쪽이
+    조용히 같이 바뀐다. 컴포넌트는 복합 배포의 유닛이고, 단일 배포는 빈 문자열이다.
     """
+    value = profile.value if isinstance(profile, BuildProfile) else str(profile)
+    return f"{value}:{component}"
+
+
+def start_script_for(project: Project | None, component: str = "",
+                     profile: BuildProfile | str = BuildProfile.release) -> str:
+    """이 프로필·컴포넌트에 쓸 스크립트 본문 — 지정된 것이 있으면 그것, 없으면 템플릿."""
     scripts = (project.start_scripts or {}) if project else {}
-    return str(scripts.get(component) or "") or _START_SCRIPT
+    return str(scripts.get(script_key(profile, component)) or "") or _START_SCRIPT
 
 
 def write_start_script(workdir: Path, project: Project | None = None,
-                       component: str = "") -> Path:
+                       component: str = "",
+                       profile: BuildProfile | str = BuildProfile.release) -> Path:
     """windows_service 런타임용 start.cmd를 매 배포 시 자동 생성한다.
 
     기본은 제네릭 템플릿이다 — 타입별 규칙 없이 리포 시그니처로 실행 방법을 추정하며,
     docker의 dockerfile_for가 이미지 빌드를 담당하는 자리를 windows_service에서 대신한다.
 
     **프로젝트에 지정된 스크립트가 있으면 그것이 이긴다**(Project.start_scripts의 해당
-    컴포넌트 항목 — 복합 배포는 유닛마다 스크립트가 따로다). 템플릿은
-    흔한 모양만 맞히므로, 맞지 않는 프로젝트는 LLM이 리포를 보고 제안한 스크립트를 사람이
-    확인해 저장한다(services/startscript) — 리포에 Dockerfile이 있으면 그것을 쓰는 것과
-    같은 원칙이다. 구체적인 의사표시가 추정보다 앞선다.
+    프로필·컴포넌트 항목 — script_key 참고). 템플릿은 흔한 모양만 맞히므로, 맞지 않는
+    프로젝트는 LLM이 리포를 보고 제안한 스크립트를 사람이 확인해 저장한다
+    (services/startscript) — 리포에 Dockerfile이 있으면 그것을 쓰는 것과 같은 원칙이다.
+    구체적인 의사표시가 추정보다 앞선다.
     """
     path = workdir / START_SCRIPT_NAME
-    path.write_text(start_script_for(project, component), encoding="utf-8")
+    path.write_text(start_script_for(project, component, profile), encoding="utf-8")
     # vite preview 분기가 --config로 참조한다. node 프로젝트일 때만 쓴다 — 파이썬
     # 프로젝트 작업 디렉터리에 쓸모없는 파일을 남기지 않는다.
     if (workdir / "package.json").exists():

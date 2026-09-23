@@ -335,7 +335,7 @@ def deploy_sync(
                 # Windows Service에 등록해 네이티브 실행한다 — docker build를 건너뛴다
                 # (image_tag는 이 런타임이 사용하지 않는다). start.cmd를 조건 없이
                 # 자동 생성한다(dockerfile_for와 대칭 — 매 배포 시 갱신).
-                write_start_script(workdir, project)
+                write_start_script(workdir, project, profile=profile)
                 # npm/pip install을 여기서 먼저 끝낸다(build_image의 docker build와 대응
                 # 되는 명시적 build 단계) — runtime.start()의 헬스체크 창 안에서 설치까지
                 # 겸하면, 설치가 느릴 때 원인이 "헬스체크 실패"로만 보이고 배포 상태도
@@ -668,7 +668,7 @@ def deploy_composite_sync(
                     # start.cmd만 실행한다"며 복합을 거부했는데, 스크립트를 컴포넌트마다 두면
                     # 유닛·포트·공개 경로가 이미 컴포넌트별인 구조와 아귀가 맞는다.
                     comp_dir = workdir / comp_path if comp_path else workdir
-                    write_start_script(comp_dir, project, component=name)
+                    write_start_script(comp_dir, project, component=name, profile=profile)
                     rec.internal_port = internal_port(comp_type, profile)
                     rec.build_log_path = str(
                         env_setup_log_path(f"{project.name}-{name}", sha, profile))

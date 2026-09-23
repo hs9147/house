@@ -4,6 +4,7 @@ import Async from '../../components/Async';
 import AutoDeployMark from '../../components/AutoDeployMark';
 import DeployProgressModal from '../../components/DeployProgressModal';
 import { Confirm } from '../../components/Modal';
+import StartScriptModal from '../../components/StartScriptModal';
 import StatusPill from '../../components/StatusPill';
 import { api, ApiError } from '../../lib/api';
 import { useApi } from '../../lib/hooks';
@@ -24,6 +25,10 @@ export default function OverviewTab() {
   // 배포는 서버구성 화면과 동일하게 큐(비블로킹)로 요청하고, 받은 레코드 id를
   // 진행 로그 모달에 넘겨 폴링으로 보여준다(DeployProgressModal).
   const [deployFor, setDeployFor] = useState<{ ids: number[]; profile: BuildProfile } | null>(null);
+  // 기동 스크립트는 **프로필마다 따로**다(개발은 dev 서버, 운영은 빌드본) — 어느 행에서
+  // 열었는지가 곧 대상 프로필이다. 배포 전에 무엇이 실행되는지 볼 수 있어야 해서 동작의
+  // 맨 앞에 둔다.
+  const [scriptFor, setScriptFor] = useState<BuildProfile | null>(null);
 
   const run = async () => {
     if (!action) return;
@@ -72,7 +77,7 @@ export default function OverviewTab() {
                   <th>프로필</th>
                   <th>상태</th>
                   <th>도메인</th>
-                  <th style={{ width: 260 }}>동작</th>
+                  <th style={{ width: 380 }}>동작</th>
                   <th>자동배포</th>
                 </tr>
               </thead>
@@ -119,6 +124,12 @@ export default function OverviewTab() {
                       </td>
                       <td>
                         <div className="row">
+                          <button
+                            className="small secondary"
+                            onClick={() => setScriptFor(profile)}
+                          >
+                            기동 스크립트
+                          </button>
                           <button
                             className="small"
                             disabled={busy}
@@ -174,6 +185,13 @@ export default function OverviewTab() {
           busy={busy}
           onConfirm={run}
           onClose={() => !busy && setAction(null)}
+        />
+      )}
+      {scriptFor && (
+        <StartScriptModal
+          projectId={project.id}
+          profile={scriptFor}
+          onClose={() => setScriptFor(null)}
         />
       )}
       {deployFor && (

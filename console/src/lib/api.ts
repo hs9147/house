@@ -281,15 +281,18 @@ export const api = {
   // 기동 스크립트(start.cmd). 복합 배포는 컴포넌트마다 따로다 — component를 비우면 단일.
   // propose는 **저장하지 않는다**: 이 스크립트는 서버에서 서비스 권한으로 실행되므로
   // 사람이 읽고 확인한 뒤 setStartScript로 저장한다.
-  startScript: (id: number, component = '') =>
-    request<StartScriptOut>('GET', `/projects/${id}/start-script`, undefined, { component }),
-  proposeStartScript: (id: number, provider_id: number, component = '') =>
+  startScript: (id: number, profile: BuildProfile, component = '') =>
+    request<StartScriptOut>('GET', `/projects/${id}/start-script`, undefined,
+      { component, profile }),
+  proposeStartScript: (id: number, provider_id: number, profile: BuildProfile, component = '') =>
     request<StartScriptOut>(
-      'POST', `/projects/${id}/start-script/propose`, { provider_id }, { component }),
-  setStartScript: (id: number, script: string, component = '') =>
-    request<StartScriptOut>('PUT', `/projects/${id}/start-script`, { script }, { component }),
-  resetStartScript: (id: number, component = '') =>
-    request<StartScriptOut>('DELETE', `/projects/${id}/start-script`, undefined, { component }),
+      'POST', `/projects/${id}/start-script/propose`, { provider_id }, { component, profile }),
+  setStartScript: (id: number, script: string, profile: BuildProfile, component = '') =>
+    request<StartScriptOut>('PUT', `/projects/${id}/start-script`, { script },
+      { component, profile }),
+  resetStartScript: (id: number, profile: BuildProfile, component = '') =>
+    request<StartScriptOut>('DELETE', `/projects/${id}/start-script`, undefined,
+      { component, profile }),
   listEnv: (id: number) => request<EnvVarRow[]>('GET', `/projects/${id}/env`),
   setEnv: (id: number, key: string, value: string, is_secret: boolean) =>
     request<void>('PUT', `/projects/${id}/env`, { key, value, is_secret }),

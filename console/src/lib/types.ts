@@ -402,6 +402,8 @@ export interface StartScriptOut {
   // 이 스크립트가 어느 유닛의 것인지(''는 단일 배포), 그리고 고를 수 있는 컴포넌트 목록.
   component: string;
   components: string[];
+  // 프로필도 따로다 — 개발 배포는 dev 서버로, 운영 배포는 빌드본으로 뜬다.
+  profile: BuildProfile;
 }
 
 // 코드 구조 시각화 — 정적 파싱으로 만든 파일→클래스/함수 계층 트리(요청 1)

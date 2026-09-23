@@ -368,14 +368,16 @@ def _validate_component(project: Project, component: str) -> str:
 def get_start_script(
     project_id: int,
     component: str = "",
+    profile: BuildProfile = BuildProfile.release,
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_api_key),
 ):
-    """지금 쓰이는 기동 스크립트 — 이 유닛에 지정된 것이 있으면 그것, 없으면 템플릿."""
+    """지금 쓰이는 기동 스크립트 — 이 프로필·유닛에 지정된 것이 있으면 그것, 없으면 템플릿."""
     project = _get_project(db, project_id)
     component = _validate_component(project, component)
-    saved = (project.start_scripts or {}).get(component)
-    common = {"component": component, "components": _script_components(project)}
+    saved = (project.start_scripts or {}).get(build_module.script_key(profile, component))
+    common = {"component": component, "profile": profile,
+              "components": _script_components(project)}
     if saved:
         return StartScriptOut(script=saved, problems=startscript.validate(saved),
                               source="project", **common)
@@ -388,6 +390,7 @@ async def propose_start_script(
     project_id: int,
     body: StartScriptProposeIn,
     component: str = "",
+    profile: BuildProfile = BuildProfile.release,
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
@@ -408,13 +411,13 @@ async def propose_start_script(
         raise HTTPException(status_code=502, detail=f"리포를 가져올 수 없습니다: {str(e)[:300]}")
     try:
         result = await asyncio.to_thread(
-            startscript.propose, db, project, provider, workdir, component)
+            startscript.propose, db, project, provider, workdir, component, profile)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"스크립트 작성 실패: {str(e)[:500]}")
     audit.record(db, admin.name, "project.start_script.propose", project.name,
                  {"provider": provider.name, "component": component,
-                  "problems": len(result["problems"])})
-    return StartScriptOut(source="project", component=component,
+                  "profile": profile.value, "problems": len(result["problems"])})
+    return StartScriptOut(source="project", component=component, profile=profile,
                           components=_script_components(project), **result)
 
 
@@ -424,6 +427,7 @@ def set_start_script(
     project_id: int,
     body: StartScriptSet,
     component: str = "",
+    profile: BuildProfile = BuildProfile.release,
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
@@ -439,12 +443,14 @@ def set_start_script(
         raise HTTPException(status_code=422, detail="; ".join(problems))
     # JSON 컬럼은 **새 dict를 대입**해야 변경으로 잡힌다 — 제자리에서 고치면 SQLAlchemy가
     # 더티로 보지 않아 조용히 저장되지 않는다.
-    project.start_scripts = {**(project.start_scripts or {}), component: body.script}
+    key = build_module.script_key(profile, component)
+    project.start_scripts = {**(project.start_scripts or {}), key: body.script}
     db.commit()
     audit.record(db, admin.name, "project.start_script.set", project.name,
-                 {"component": component, "chars": len(body.script)})
+                 {"component": component, "profile": profile.value,
+                  "chars": len(body.script)})
     return StartScriptOut(script=body.script, source="project", component=component,
-                          components=_script_components(project))
+                          profile=profile, components=_script_components(project))
 
 
 @router.delete("/{project_id}/start-script", response_model=StartScriptOut,
@@ -452,19 +458,23 @@ def set_start_script(
 def reset_start_script(
     project_id: int,
     component: str = "",
+    profile: BuildProfile = BuildProfile.release,
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
-    """이 유닛의 지정을 지우고 템플릿으로 되돌린다 — 되돌릴 길이 없으면 아무도 지정하지 않는다."""
+    """이 프로필·유닛의 지정을 지우고 템플릿으로 되돌린다 — 되돌릴 길이 없으면 아무도
+    지정하지 않는다. 다른 프로필의 스크립트는 건드리지 않는다."""
     project = _get_project(db, project_id)
     component = _validate_component(project, component)
-    remaining = {k: v for k, v in (project.start_scripts or {}).items() if k != component}
+    key = build_module.script_key(profile, component)
+    remaining = {k: v for k, v in (project.start_scripts or {}).items() if k != key}
     project.start_scripts = remaining or None
     db.commit()
     audit.record(db, admin.name, "project.start_script.reset", project.name,
-                 {"component": component})
+                 {"component": component, "profile": profile.value})
     return StartScriptOut(script=build_module._START_SCRIPT, source="template",
-                          component=component, components=_script_components(project))
+                          component=component, profile=profile,
+                          components=_script_components(project))
 
 
 @router.put("/{project_id}/source-subdir", response_model=ProjectOut)

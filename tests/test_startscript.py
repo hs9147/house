@@ -130,14 +130,23 @@ def test_start_script_for_falls_back_to_the_template():
     assert build_module.start_script_for(None) == build_module._START_SCRIPT
 
 
-def test_start_script_for_picks_the_component_entry():
+def test_start_script_for_picks_the_profile_and_component_entry():
+    """프로필·컴포넌트마다 따로 저장된다 — 개발 배포와 운영 배포는 기동 방법이 아예 다르다."""
     project = Project(name="shop-i", type=ProjectType.composite,
                       git_url="https://git.example.com/x",
-                      start_scripts={"": "root", "web": "web-only"})
-    assert build_module.start_script_for(project, "web") == "web-only"
-    assert build_module.start_script_for(project) == "root"
-    # 저장되지 않은 컴포넌트는 템플릿이다 — 다른 컴포넌트의 스크립트를 빌려 쓰면 안 된다.
+                      start_scripts={
+                          "release:": "root-release",
+                          "release:web": "web-release",
+                          "development:web": "web-dev",
+                      })
+    assert build_module.start_script_for(project, "web") == "web-release"
+    assert build_module.start_script_for(
+        project, "web", BuildProfile.development) == "web-dev"
+    assert build_module.start_script_for(project) == "root-release"
+    # 저장되지 않은 조합은 템플릿이다 — 다른 프로필·컴포넌트의 것을 빌려 쓰면 안 된다.
     assert build_module.start_script_for(project, "api") == build_module._START_SCRIPT
+    assert build_module.start_script_for(
+        project, "", BuildProfile.development) == build_module._START_SCRIPT
 
 
 # --- API ---
@@ -210,6 +219,37 @@ def test_component_scripts_are_stored_separately(client):
                       params={"component": "api"}).json()["source"] == "template"
     assert client.get(url, headers=ADMIN,
                       params={"component": "web"}).json()["source"] == "project"
+
+
+def test_profiles_keep_separate_scripts(client):
+    """개요 화면의 프로필 행마다 버튼이 따로인 이유 — 저장도 따로여야 한다.
+
+    한 스크립트로 두 프로필을 덮으면 사람이나 LLM이 %PAAS_PROFILE% 분기를 다시 써야 하고,
+    한쪽을 고치면 다른 쪽이 조용히 같이 바뀐다.
+    """
+    db = SessionLocal()
+    try:
+        project = _project(db, "script-api-6")
+    finally:
+        db.close()
+
+    url = f"{API}/projects/{project.id}/start-script"
+    dev = GOOD.replace("app.py", "dev.py")
+    assert client.put(url, json={"script": GOOD}, headers=ADMIN,
+                      params={"profile": "release"}).status_code == 200
+    assert client.put(url, json={"script": dev}, headers=ADMIN,
+                      params={"profile": "development"}).status_code == 200
+
+    assert "app.py" in client.get(url, headers=ADMIN,
+                                  params={"profile": "release"}).json()["script"]
+    assert "dev.py" in client.get(url, headers=ADMIN,
+                                  params={"profile": "development"}).json()["script"]
+    # 한쪽을 되돌려도 다른 쪽은 남는다.
+    assert client.delete(url, headers=ADMIN, params={"profile": "development"}).status_code == 200
+    assert client.get(url, headers=ADMIN,
+                      params={"profile": "development"}).json()["source"] == "template"
+    assert client.get(url, headers=ADMIN,
+                      params={"profile": "release"}).json()["source"] == "project"
 
 
 def test_unknown_component_is_rejected_instead_of_falling_back(client):
@@ -312,7 +352,7 @@ def test_native_composite_deploy_writes_a_script_per_component(
     db = SessionLocal()
     try:
         project = _project(db, "native-composite", type=ProjectType.composite)
-        project.start_scripts = {"web": GOOD.replace("app.py", "web.py")}
+        project.start_scripts = {"release:web": GOOD.replace("app.py", "web.py")}
         db.commit()
 
         monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "b" * 40))

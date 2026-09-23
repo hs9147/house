@@ -24,7 +24,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from ..models import LlmProvider, Project
+from ..models import BuildProfile, LlmProvider, Project
 from . import llm as llm_service
 from . import structure, workspace
 
@@ -101,8 +101,9 @@ def _rel(path: Path, workdir: Path) -> str:
     return path.relative_to(workdir).as_posix() or "(repo root)"
 
 
-def _facts(workdir: Path, project: Project, component: str = "") -> str:
-    """프롬프트에 실을 **사실**. 리포에서 읽은 것만 넣는다."""
+def _facts(workdir: Path, project: Project, component: str = "",
+           profile: BuildProfile = BuildProfile.release) -> str:
+    """프롬프트에 실을 **사실**. 리포에서 읽은 것만 넣는다(프로필은 플랫폼의 사실이다)."""
     files = workspace.file_tree(workdir, limit=MAX_FILES_IN_PROMPT)
     detected = structure.detect(workdir)
     base = component_dir(workdir, project, component)
@@ -112,6 +113,12 @@ def _facts(workdir: Path, project: Project, component: str = "") -> str:
         f"detected components: {structure.summary(detected) or '(none)'}",
         (f"this unit: component '{component}'"
          if component else "this unit: the whole repo"),
+        # 프로필이 기동 방법을 정한다 — 같은 리포에 두 스크립트가 필요한 이유다.
+        f"deploy profile: {profile.value}",
+        ("this profile serves the built output (build once at deploy time, then serve it)"
+         if profile != BuildProfile.development else
+         "this profile runs the project's dev server (HMR); %PAAS_BASE_PATH% is the "
+         "public sub-path the proxy forwards WITHOUT stripping, so pass it as the base"),
         # 스크립트가 어느 폴더에서 실행되는지 명시한다 — 복합 배포는 컴포넌트 폴더에서
         # 돌지만(런타임이 그 폴더를 실행 폴더로 잡는다), 단일 배포는 리포 루트에서 돈다.
         # 이 둘을 섞으면 "cd 없이 package.json이 있다고 믿는" 스크립트가 나온다.
@@ -183,13 +190,14 @@ def _extract(reply: str) -> str:
 
 
 def propose(db: Session, project: Project, provider: LlmProvider, workdir: Path,
-            component: str = "") -> dict:
+            component: str = "", profile: BuildProfile = BuildProfile.release) -> dict:
     """LLM에게 기동 스크립트를 쓰게 하고 **검증 결과와 함께** 돌려준다(저장하지 않는다).
 
     복합 배포는 컴포넌트마다 따로 부른다 — 한 스크립트가 여러 컴포넌트를 띄우면 서비스
-    감시자(nssm)가 자식 하나만 보고, 헬스체크도 포트 하나만 본다.
+    감시자(nssm)가 자식 하나만 보고, 헬스체크도 포트 하나만 본다. 프로필도 따로다:
+    개발 배포는 dev 서버로, 운영 배포는 빌드본으로 뜬다.
     """
-    facts = _facts(workdir, project, component)
+    facts = _facts(workdir, project, component, profile)
     reply = llm_service.chat_completion(
         provider,
         [{"role": "system", "content": SYSTEM_PROMPT},

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import Modal from './Modal';
 import { api } from '../lib/api';
-import type { StartScriptOut } from '../lib/types';
+import type { BuildProfile, StartScriptOut } from '../lib/types';
 
 /**
  * 기동 스크립트(start.cmd) 확인·수정 — LLM이 쓰고, **사람이 확인해 저장한다.**
@@ -14,15 +14,18 @@ import type { StartScriptOut } from '../lib/types';
  * 것을 그대로 저장·실행하면 그것은 원격 코드 실행이다. 그래서 검증 결과(problems)를 함께
  * 보여 주고, 하나라도 걸리면 저장 버튼이 막힌다 — 경고만 하고 통과시키면 아무도 읽지 않는다.
  *
- * 복합 배포는 컴포넌트마다 스크립트가 따로다 — 유닛·포트·공개 경로가 이미 컴포넌트별이고,
- * 한 스크립트가 둘을 띄우면 서비스 감시자가 자식 하나만 본다.
+ * 스크립트는 **프로필·컴포넌트마다 따로**다. 개발 배포와 운영 배포는 기동 방법이 아예 다르고
+ * (dev 서버 vs 빌드본 서빙), 복합 배포는 컴포넌트마다 유닛·포트·공개 경로가 따로다 — 한
+ * 스크립트가 둘을 띄우면 서비스 감시자가 자식 하나만 본다.
  */
 interface Props {
   projectId: number;
+  /** 어느 프로필의 스크립트인가 — 개요 화면의 프로필 행에서 그대로 넘어온다. */
+  profile: BuildProfile;
   onClose: () => void;
 }
 
-export default function StartScriptModal({ projectId, onClose }: Props) {
+export default function StartScriptModal({ projectId, profile, onClose }: Props) {
   const [component, setComponent] = useState('');
   const [data, setData] = useState<StartScriptOut | null>(null);
   const [script, setScript] = useState('');
@@ -40,7 +43,7 @@ export default function StartScriptModal({ projectId, onClose }: Props) {
     setError('');
     setNotice('');
     setBusy('불러오는 중…');
-    api.startScript(projectId, component).then(
+    api.startScript(projectId, profile, component).then(
       (res) => {
         if (!alive) return;
         setComponents(res.components);
@@ -62,7 +65,7 @@ export default function StartScriptModal({ projectId, onClose }: Props) {
       },
     );
     return () => { alive = false; };
-  }, [projectId, component]);
+  }, [projectId, profile, component]);
 
   useEffect(() => {
     let alive = true;
@@ -97,14 +100,16 @@ export default function StartScriptModal({ projectId, onClose }: Props) {
 
   const propose = () => run(
     'LLM이 리포를 보고 작성하는 중… (수십 초 걸릴 수 있습니다)',
-    () => api.proposeStartScript(projectId, providerId, component),
+    () => api.proposeStartScript(projectId, providerId, profile, component),
   );
   const save = async () => {
-    const res = await run('저장 중…', () => api.setStartScript(projectId, script, component));
+    const res = await run('저장 중…',
+      () => api.setStartScript(projectId, script, profile, component));
     if (res) setNotice('저장했습니다 — 다음 배포에서 이 스크립트가 쓰입니다.');
   };
   const reset = async () => {
-    const res = await run('되돌리는 중…', () => api.resetStartScript(projectId, component));
+    const res = await run('되돌리는 중…',
+      () => api.resetStartScript(projectId, profile, component));
     if (res) setNotice('템플릿으로 되돌렸습니다.');
   };
 
@@ -114,7 +119,7 @@ export default function StartScriptModal({ projectId, onClose }: Props) {
   const blocked = !unchecked && (data?.problems.length ?? 0) > 0;
 
   return (
-    <Modal title="기동 스크립트 (start.cmd)" onClose={onClose}>
+    <Modal title={`기동 스크립트 (start.cmd) — ${profile}`} onClose={onClose}>
       <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
         {components.length > 0 && (
           <label className="field" style={{ margin: 0 }}>
@@ -149,8 +154,8 @@ export default function StartScriptModal({ projectId, onClose }: Props) {
 
       <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 6px' }}>
         현재: {data?.source === 'project' ? '이 프로젝트에 지정된 스크립트' : '플랫폼 템플릿'}
-        {' · '}이 스크립트는 서버에서 서비스 권한으로 실행됩니다 — 내용을 읽고 확인한 뒤
-        저장하세요.
+        {' · '}{profile} 프로필에만 적용됩니다{' · '}이 스크립트는 서버에서 서비스 권한으로
+        실행됩니다 — 내용을 읽고 확인한 뒤 저장하세요.
       </p>
 
       {(data?.problems.length ?? 0) > 0 && (

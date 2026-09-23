@@ -141,6 +141,8 @@ class StartScriptOut(BaseModel):
     # 이 스크립트가 어느 유닛의 것인지. 복합 배포는 컴포넌트마다 스크립트가 따로다
     # (유닛·포트·공개 경로가 이미 컴포넌트별이다). ""는 단일 배포.
     component: str = ""
+    # 프로필도 따로다 — 개발 배포는 dev 서버로, 운영 배포는 빌드본으로 뜬다.
+    profile: BuildProfile = BuildProfile.release
     # 이 프로젝트에서 고를 수 있는 컴포넌트 — 화면이 목록을 따로 조회하지 않게 함께 준다.
     components: list[str] = []
 
