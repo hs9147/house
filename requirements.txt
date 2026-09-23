@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+# 위 한 줄이 **기능**이다. pip은 이 파일을 읽을 때 PEP-263 쿠키나 BOM이 없으면 로케일
+# 인코딩으로 디코드한다(구버전 pip은 utf-8을 먼저 시도하지도 않는다) — 한국어 윈도우에서는
+# cp949라, 아래 한글 주석이 UnicodeDecodeError를 낸다. 실측: 서버 SW 업데이트의
+# `pip install -r requirements.txt`가 codecs.charmap_decode에서 죽어 **의존성이 하나도
+# 설치되지 않았고**, 그래서 pypdf가 없어 PDF 추출이 계속 실패했다. 실패는 로그 한 줄로만
+# 남아 아무도 보지 못했다. 쿠키는 구·신 pip 양쪽이 모두 존중한다.
 fastapi>=0.115
 uvicorn[standard]>=0.30
 sqlalchemy>=2.0
