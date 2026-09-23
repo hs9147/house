@@ -15,10 +15,14 @@ import type { BuildProfile } from '../lib/types';
  * 설정(빌드 대상 폴더)을 바꾸는 경우도 있다. 무엇을 바꾸고 다시 배포하는지 사람이 보고
  * 확인하거나 취소해야 한다.
  *
- * **플랫폼이 고칠 수 없는 원인에는 '그대로 재배포'를 권하지 않는다.** 실행 방법을 못 찾은
- * 리포는 같은 자리에서 또 실패한다 — 그때 필요한 것은 이 리포를 어떻게 띄우는지 적는
- * 일이므로, 기동 스크립트 작성으로 보낸다(LLM이 제안하고 사람이 확인해 저장한다). 저장한
- * 스크립트는 다음 배포에서 그대로 start.cmd가 된다(build.write_start_script).
+ * **'그대로 재배포' 버튼은 없다.** 바꾼 것이 없으면 같은 자리에서 또 실패하는데, 그 버튼이
+ * 있으면 그것이 가장 쉬운 선택이 된다. 남는 길은 둘이다: 플랫폼이 고칠 수 있는 설정을
+ * 적용하고 재배포하거나(빌드 대상 폴더), 이 리포를 어떻게 띄우는지 기동 스크립트에 적는 것
+ * (LLM이 제안하고 사람이 확인해 저장한다 — 저장한 스크립트는 다음 배포에서 그대로
+ * start.cmd가 된다, build.write_start_script).
+ *
+ * LLM 원인 분석을 읽은 뒤에는 기동 스크립트 재작성이 언제나 열려 있다 — 분석이 짚은 것을
+ * 스크립트로 옮기는 일이 대개 그다음 할 일이다.
  */
 interface Props {
   projectId: number;
@@ -186,17 +190,30 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
 
           {error && <p className="error">{error}</p>}
           <div className="row" style={{ marginTop: 10 }}>
-            {/* 같은 자리에서 또 실패할 재배포를 권하지 않는다 — 실행 방법을 적게 한다. */}
-            {needsScript && !fixable ? (
-              <button onClick={() => setWritingScript(true)} disabled={busy}>
-                기동 스크립트 작성
-              </button>
-            ) : (
+            {/* **'그대로 재배포'는 없앴다.** 바꾼 것이 없으면 같은 자리에서 또 실패하고,
+                그 버튼이 있으면 그것이 가장 쉬운 선택이 된다. 남는 길은 둘이다:
+                플랫폼이 고칠 수 있는 설정을 적용하고 재배포하거나(빌드 대상 폴더),
+                이 리포를 어떻게 띄우는지 기동 스크립트에 적는 것. */}
+            {fixable && (
               <button onClick={confirm} disabled={busy}>
-                {busy ? '재배포 중...' : fixable ? '적용하고 재배포' : '그대로 재배포'}
+                {busy ? '재배포 중...' : '적용하고 재배포'}
               </button>
             )}
-            <button className="secondary" onClick={onClose} disabled={busy}>취소</button>
+            {/* LLM 분석을 읽은 뒤에는 언제나 쓸 수 있어야 한다 — 분석이 짚은 것을 스크립트에
+                옮기는 일이 대개 그다음 할 일이다. */}
+            {(needsScript || analysis) && (
+              <button
+                className={fixable ? 'secondary' : ''}
+                onClick={() => setWritingScript(true)}
+                disabled={busy}
+              >
+                {analysis ? '기동 스크립트 재작성' : '기동 스크립트 작성'}
+              </button>
+            )}
+            <div className="spacer" />
+            <button className="secondary" onClick={onClose} disabled={busy}>
+              {fixable || needsScript || analysis ? '취소' : '닫기'}
+            </button>
           </div>
         </>
       )}
