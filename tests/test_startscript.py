@@ -381,3 +381,42 @@ def test_native_composite_deploy_writes_a_script_per_component(
 
 def _must_not_build(*a, **kw):
     raise AssertionError("네이티브 런타임은 이미지를 만들지 않는다")
+
+
+def test_saved_script_is_applied_on_the_very_next_deploy(monkeypatch, tmp_path, fresh_settings):
+    """저장한 스크립트는 **다음 배포에 바로** start.cmd가 된다 — 다른 조작이 필요 없다.
+
+    진단 팝업이 "기동 스크립트 작성"으로 보내는 근거다: 실행 방법을 못 찾아 실패했을 때,
+    스크립트를 저장하고 다시 배포하면 그 스크립트로 뜬다. 그 프로필의 것만 쓰인다 —
+    개발 배포용으로 저장한 것이 운영 배포에 새어 들어가면 안 된다.
+    """
+    create_app()
+    monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "windows_service")
+    monkeypatch.setenv("PAAS_TIER", "small")
+    get_settings.cache_clear()
+
+    _write(tmp_path, "requirements.txt", "fastapi\n")
+    db = SessionLocal()
+    try:
+        project = _project(db, "applies-now", type=ProjectType.python)
+        release_script = GOOD.replace("app.py", "release_entry.py")
+        project.start_scripts = {
+            build_module.script_key(BuildProfile.release): release_script,
+            build_module.script_key(BuildProfile.development): GOOD.replace("app.py", "dev.py"),
+        }
+        db.commit()
+
+        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "c" * 40))
+        monkeypatch.setattr(deployer, "build_image", _must_not_build)
+        monkeypatch.setattr(deployer, "install_dependencies", lambda *a, **kw: None)
+        monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
+        monkeypatch.setattr(deployer.proxy, "configure", lambda *a, **kw: None)
+
+        deployer.deploy_sync(db, project, BuildProfile.release)
+
+        written = (tmp_path / "start.cmd").read_text(encoding="utf-8")
+        assert written == release_script
+        assert "dev.py" not in written
+    finally:
+        db.close()
+        get_settings.cache_clear()

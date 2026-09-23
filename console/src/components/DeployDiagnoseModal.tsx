@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import Modal from './Modal';
+import StartScriptModal from './StartScriptModal';
 import { api } from '../lib/api';
 import type { BuildProfile } from '../lib/types';
 
@@ -13,6 +14,11 @@ import type { BuildProfile } from '../lib/types';
  * 고침을 자동으로 적용하지 않는 이유: 배포는 되돌리기 쉬운 일이 아니고, 고침이 프로젝트
  * 설정(빌드 대상 폴더)을 바꾸는 경우도 있다. 무엇을 바꾸고 다시 배포하는지 사람이 보고
  * 확인하거나 취소해야 한다.
+ *
+ * **플랫폼이 고칠 수 없는 원인에는 '그대로 재배포'를 권하지 않는다.** 실행 방법을 못 찾은
+ * 리포는 같은 자리에서 또 실패한다 — 그때 필요한 것은 이 리포를 어떻게 띄우는지 적는
+ * 일이므로, 기동 스크립트 작성으로 보낸다(LLM이 제안하고 사람이 확인해 저장한다). 저장한
+ * 스크립트는 다음 배포에서 그대로 start.cmd가 된다(build.write_start_script).
  */
 interface Props {
   projectId: number;
@@ -37,6 +43,7 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [subdir, setSubdir] = useState('');
+  const [writingScript, setWritingScript] = useState(false);
   const state = useDiagnosis(projectId, profile, setSubdir);
 
   const confirm = async () => {
@@ -58,6 +65,9 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
 
   const fix = state.data?.fix ?? null;
   const fixable = fix?.kind === 'source_subdir';
+  // 리포에 시그니처가 없어 실행 방법을 못 찾은 경우 — 스크립트를 적는 것이 고침이다.
+  const needsScript = fix?.kind === 'repo' || state.data?.cause === 'no_entry_marker'
+    || state.data?.cause === 'streamlit_entry_missing';
 
   return (
     <Modal title={`배포 실패 진단 — ${profile}`} onClose={onClose}>
@@ -88,8 +98,8 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
             <p className="mutedtext" style={{ fontSize: 12 }}>
               템플릿이 실행 방법을 찾지 못했습니다 — 리포에{' '}
               <span className="mono">{fix.needs.join(' · ')}</span> 중 하나를 넣거나,
-              개요 화면의 <b>기동 스크립트</b>에서 이 리포에 맞는 start.cmd를 작성해
-              저장하세요(LLM이 제안하고 사람이 확인합니다).
+              아래 <b>기동 스크립트 작성</b>으로 이 리포에 맞는 start.cmd를 저장하세요
+              (LLM이 제안하고 사람이 확인합니다). 저장한 스크립트는 다음 배포에 바로 쓰입니다.
             </p>
           )}
 
@@ -110,12 +120,26 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
 
           {error && <p className="error">{error}</p>}
           <div className="row" style={{ marginTop: 10 }}>
-            <button onClick={confirm} disabled={busy}>
-              {busy ? '재배포 중...' : fixable ? '적용하고 재배포' : '그대로 재배포'}
-            </button>
+            {/* 같은 자리에서 또 실패할 재배포를 권하지 않는다 — 실행 방법을 적게 한다. */}
+            {needsScript && !fixable ? (
+              <button onClick={() => setWritingScript(true)} disabled={busy}>
+                기동 스크립트 작성
+              </button>
+            ) : (
+              <button onClick={confirm} disabled={busy}>
+                {busy ? '재배포 중...' : fixable ? '적용하고 재배포' : '그대로 재배포'}
+              </button>
+            )}
             <button className="secondary" onClick={onClose} disabled={busy}>취소</button>
           </div>
         </>
+      )}
+      {writingScript && (
+        <StartScriptModal
+          projectId={projectId}
+          profile={profile}
+          onClose={() => setWritingScript(false)}
+        />
       )}
     </Modal>
   );
