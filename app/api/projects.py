@@ -50,7 +50,8 @@ from ..schemas import (
 from ..security import can_view_git_url, encrypt_value, require_admin, require_api_key, viewer_org_ids
 from ..services import build as build_module
 from ..services import (
-    deploydiag, deployer, gitea, startscript, structure, upload, workspace,
+    deploycheck, deploydiag, deployer, gitea, startscript, structure, upload,
+    workspace,
 )
 from ..services.build import checkout
 from ..services.deployer import DeployInProgress, NoRollbackTarget, ProfileConflict
@@ -548,6 +549,36 @@ async def diagnose_deploy_failure(
         "profile": profile.value,
         "source_subdir": project.source_subdir or "",
         "detected": structure.summary(detected) or "(감지된 배포 단위 없음)",
+        **result,
+    }
+
+
+@router.get("/{project_id}/deploy/check",
+            dependencies=[Depends(require_feature("deploy"))])
+async def check_deploy_readiness(
+    project_id: int,
+    profile: BuildProfile = BuildProfile.release,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """배포 전 점검 — 걸기 **전에** 알 수 있는 것을 먼저 말한다(아무것도 바꾸지 않는다).
+
+    진단(diagnose)은 실패한 뒤에 로그를 본다. 그런데 실패의 절반은 걸기 전에 이미 정해져
+    있었다: 의존성 선언이 없거나, 소스가 하위 폴더인데 source_subdir가 비어 있거나, 저장된
+    기동 스크립트가 지금 규칙을 통과하지 못하거나. 그 셋이 실측에서 배포를 죽였다.
+
+    **막지 않는다.** 배포 버튼을 잠그면 감지가 못 맞히는 구성에서 "플랫폼이 틀렸는데 배포도
+    못 하는" 상태가 된다. 점검은 말하고, 배포는 사람이 결정한다.
+    """
+    project = _get_project(db, project_id)
+    try:
+        workdir = await asyncio.to_thread(workspace.code_workdir, project)
+    except Exception:  # noqa: BLE001 — 가져오지 못한 것도 점검 결과의 하나다
+        workdir = get_settings().work_dir / project.name
+    result = await asyncio.to_thread(deploycheck.run, workdir, project, profile)
+    return {
+        "profile": profile.value,
+        "detected": await asyncio.to_thread(deploycheck.structure_summary, workdir),
         **result,
     }
 

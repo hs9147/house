@@ -4,6 +4,7 @@ import Async from '../../components/Async';
 import AutoDeployMark from '../../components/AutoDeployMark';
 import DeployProgressModal from '../../components/DeployProgressModal';
 import { Confirm } from '../../components/Modal';
+import DeployCheckModal from '../../components/DeployCheckModal';
 import StartScriptModal from '../../components/StartScriptModal';
 import StatusPill from '../../components/StatusPill';
 import { api, ApiError } from '../../lib/api';
@@ -29,6 +30,8 @@ export default function OverviewTab() {
   // 열었는지가 곧 대상 프로필이다. 배포 전에 무엇이 실행되는지 볼 수 있어야 해서 동작의
   // 맨 앞에 둔다.
   const [scriptFor, setScriptFor] = useState<BuildProfile | null>(null);
+  // 배포 전 점검 — 실패한 뒤에 로그를 읽는 대신, 걸기 전에 알 수 있는 것을 먼저 본다.
+  const [checkFor, setCheckFor] = useState<BuildProfile | null>(null);
 
   const run = async () => {
     if (!action) return;
@@ -77,7 +80,7 @@ export default function OverviewTab() {
                   <th>프로필</th>
                   <th>상태</th>
                   <th>도메인</th>
-                  <th style={{ width: 380 }}>동작</th>
+                  <th style={{ width: 470 }}>동작</th>
                   <th>자동배포</th>
                 </tr>
               </thead>
@@ -129,6 +132,12 @@ export default function OverviewTab() {
                             onClick={() => setScriptFor(profile)}
                           >
                             기동 스크립트
+                          </button>
+                          <button
+                            className="small secondary"
+                            onClick={() => setCheckFor(profile)}
+                          >
+                            배포 점검
                           </button>
                           <button
                             className="small"
@@ -185,6 +194,13 @@ export default function OverviewTab() {
           busy={busy}
           onConfirm={run}
           onClose={() => !busy && setAction(null)}
+        />
+      )}
+      {checkFor && (
+        <DeployCheckModal
+          projectId={project.id}
+          profile={checkFor}
+          onClose={() => setCheckFor(null)}
         />
       )}
       {scriptFor && (

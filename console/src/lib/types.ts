@@ -391,6 +391,24 @@ export interface ProjectFilesOut {
   files: string[];
 }
 
+// 배포 전 점검 — 걸기 전에 알 수 있는 것(의존성 선언·실행 폴더·기동 스크립트 검증 등).
+// 막지 않는다: 감지가 못 맞히는 구성이 있으므로 판단은 사람이 한다.
+export interface DeployCheckItem {
+  key: string;
+  title: string;
+  status: 'ok' | 'warn' | 'fail';
+  detail: string;
+  fix: string;
+}
+
+export interface DeployCheckOut {
+  profile: string;
+  detected: string;
+  run_dir: string;
+  items: DeployCheckItem[];
+  summary: { ok: number; warn: number; fail: number };
+}
+
 // 기동 스크립트(start.cmd). problems가 비어 있지 않으면 저장할 수 없다 — 이 스크립트는
 // 서버에서 서비스 권한으로 실행되므로, 검증을 통과하지 못한 것을 경고만 하고 넘기지 않는다.
 export interface StartScriptOut {

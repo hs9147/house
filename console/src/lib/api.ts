@@ -11,6 +11,7 @@ import type {
   C4Model,
   CodeMapOut,
   ComplianceOut,
+  DeployCheckOut,
   GiteaSyncResult,
   HealthInfo,
   DeploymentOut,
@@ -274,6 +275,9 @@ export const api = {
       fix: { kind: 'source_subdir'; value: string; options: string[] }
         | { kind: 'repo'; needs: string[] } | null;
     }>('GET', `/projects/${id}/deploy/diagnose`, undefined, { profile }),
+  // 배포 전 점검 — 아무것도 바꾸지 않고, 걸기 전에 알 수 있는 것만 돌려준다.
+  deployCheck: (id: number, profile: BuildProfile) =>
+    request<DeployCheckOut>('GET', `/projects/${id}/deploy/check`, undefined, { profile }),
   // LLM이 로그·리포를 읽고 원인을 설명한다 — 아무것도 바꾸지 않는다(글만 돌려준다).
   // 결정론 진단이 짚지 못한 경우(build_failed 등)에 사람이 로그를 읽던 일을 대신한다.
   explainDeployFailure: (id: number, provider_id: number, profile: BuildProfile) =>
