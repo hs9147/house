@@ -64,6 +64,10 @@ if not defined PORT set PORT=8000
 if not defined HOST set HOST=127.0.0.1
 set PORT=%PORT%
 set HOST=%HOST%
+REM streamlit 공통 인자 — **블록 밖에서** 정한다. 아래 if 체인은 통째로 한 번 파싱되므로
+REM 블록 안에서 set한 변수는 같은 블록에서 %VAR%로 읽히지 않는다(이 파일의 %errorlevel%
+REM 주석과 같은 함정). 여기서 정해 두면 파싱 시점에 이미 값이 있어 그대로 치환된다.
+set STREAMLIT_FLAGS=--server.headless true --server.enableCORS false --server.enableXsrfProtection false
 
 if exist package.json (
   REM 설치와 빌드는 배포의 build 단계에서 이미 끝난다(build.py의 install_dependencies).
@@ -131,6 +135,31 @@ if exist package.json (
   echo [PaaS Auto-Provisioning] Installing Python dependencies from requirements.txt...
   python -m pip install --upgrade pip --disable-pip-version-check
   python -m pip install --disable-pip-version-check -r requirements.txt
+  REM **streamlit은 uvicorn으로 뜨지 않는다.** requirements.txt에 streamlit이 있으면
+  REM streamlit 앱이다(services/structure._is_streamlit와 같은 판정) — 예전에는 이 분기가
+  REM 없어서 windows_service 런타임에서 streamlit 프로젝트가 uvicorn 기동을 시도하다 죽었다.
+  REM docker 템플릿에는 `streamlit run`이 있는데 네이티브 경로에만 빠져 있었다.
+  REM enableCORS/XsrfProtection은 플랫폼 프록시 뒤에서 동작하려고 끈다(Dockerfile과 동일).
+  findstr /I /R "^streamlit" requirements.txt >nul 2>&1
+  if errorlevel 1 (
+    echo [PaaS Auto-Provisioning] uvicorn으로 기동합니다.
+  ) else if exist app\\streamlit_app.py (
+    python -m streamlit run app\\streamlit_app.py --server.port %PORT% --server.address %HOST% %STREAMLIT_FLAGS%
+    exit /b
+  ) else if exist streamlit_app.py (
+    python -m streamlit run streamlit_app.py --server.port %PORT% --server.address %HOST% %STREAMLIT_FLAGS%
+    exit /b
+  ) else if exist app.py (
+    python -m streamlit run app.py --server.port %PORT% --server.address %HOST% %STREAMLIT_FLAGS%
+    exit /b
+  ) else if exist main.py (
+    python -m streamlit run main.py --server.port %PORT% --server.address %HOST% %STREAMLIT_FLAGS%
+    exit /b
+  ) else (
+    echo [PaaS] streamlit 앱인데 진입 파일을 찾지 못했습니다 -
+    echo [PaaS] app/streamlit_app.py · streamlit_app.py · app.py · main.py 중 하나가 필요합니다.
+    exit /b 1
+  )
   if exist app\\main.py (
     python -m uvicorn app.main:app --host %HOST% --port %PORT%
   ) else if exist main.py (
@@ -154,8 +183,18 @@ if exist package.json (
   )
   if exist .venv\\Scripts\\activate.bat call .venv\\Scripts\\activate.bat
   python -m uvicorn app:app --host %HOST% --port %PORT%
-) else (
+) else if exist index.html (
   py -m http.server %PORT% --bind %HOST%
+) else (
+  REM **여기서 실패해야 한다.** 예전에는 이 자리에서도 http.server를 띄웠는데, 그러면
+  REM 실행 방법을 모르는 리포를 **정적 파일 목록으로 서빙**한다 — 소스와 커밋된 .env가
+  REM 공개 주소로 그대로 나간다(실측: supplier-pool은 시그니처 파일이 없고 Strategy/.env가
+  REM 커밋돼 있었다). 정적 사이트는 index.html이 있으므로 위 분기가 받는다.
+  echo [PaaS] 실행 방법을 알 수 없습니다 - 리포 루트에 다음 중 하나가 필요합니다:
+  echo [PaaS]   package.json ^(node/react^) · requirements.txt ^(python/streamlit^)
+  echo [PaaS]   main.py · app.py ^(python^) · index.html ^(정적^)
+  echo [PaaS] 소스가 하위 폴더에 있으면 프로젝트의 source_subdir를 지정하세요.
+  exit /b 1
 )
 """
 

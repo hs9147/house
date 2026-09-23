@@ -122,7 +122,9 @@ def test_start_script_detects_start_script_with_node_not_text_search(tmp_path):
     프로젝트를 있다고 오판한다 — package.json의 scripts.start를 직접 본다."""
     content = write_start_script(tmp_path).read_text(encoding="utf-8")
     assert "p.scripts?p.scripts.start:0" in content
-    assert "findstr" not in content
+    # findstr 자체를 금지하는 것이 아니라 **package.json을** 텍스트 검색하지 말라는 것이다
+    # (streamlit 판정은 requirements.txt를 findstr로 본다 — 거기서는 이름 한 줄이 곧 사실이다).
+    assert not any("findstr" in ln and "package.json" in ln for ln in content.splitlines())
     # 배치 블록 안에서 &&·|| 는 따옴표 밖으로 새면 블록을 깨뜨린다 — 아예 쓰지 않는다.
     node_line = next(ln for ln in content.splitlines() if ln.strip().startswith("node -e"))
     assert "&&" not in node_line and "||" not in node_line
@@ -581,3 +583,53 @@ def test_start_script_runs_dev_server_for_development_profile(tmp_path):
     assert '"%PAAS_PROFILE%"=="development"' in content
     assert "--base %PAAS_BASE_PATH%" in content
     assert "call npm run dev" in content
+
+
+def test_start_script_runs_streamlit_not_uvicorn(tmp_path):
+    """streamlit 앱은 uvicorn으로 뜨지 않는다 — docker 템플릿에만 있던 분기가 여기 빠져 있었다.
+
+    windows_service 런타임(Docker 없는 구성)에서는 이 스크립트가 기동을 담당한다. 판정은
+    requirements.txt에 streamlit이 있는지로 하고(services/structure._is_streamlit와 같은
+    근거), 진입 파일은 흔한 이름 순으로 찾는다.
+    """
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    assert 'findstr /I /R "^streamlit" requirements.txt' in content
+    assert "python -m streamlit run app\streamlit_app.py" in content
+    assert "python -m streamlit run streamlit_app.py" in content
+    # 프록시 뒤에서 동작하기 위한 인자 — Dockerfile 템플릿과 같은 값이어야 한다
+    assert "--server.enableCORS false" in content
+    assert "--server.enableXsrfProtection false" in content
+    # 진입 파일을 못 찾으면 조용히 uvicorn으로 흘러가지 않고 실패한다
+    assert "streamlit 앱인데 진입 파일을 찾지 못했습니다" in content
+
+
+def test_start_script_sets_streamlit_flags_outside_the_block(tmp_path):
+    """괄호 블록 안에서 set한 변수는 같은 블록에서 %VAR%로 읽히지 않는다(cmd 파싱).
+
+    이 파일의 %errorlevel% 주석과 같은 함정이다 — 블록 안에서 정하면 빈 값으로 치환돼
+    streamlit이 인자 없이 뜬다. 그래서 STREAMLIT_FLAGS는 if 체인 **앞**에 있어야 한다.
+    """
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    flags_at = content.index("set STREAMLIT_FLAGS=")
+    chain_at = content.index("if exist package.json (")
+    assert flags_at < chain_at
+
+
+def test_start_script_refuses_to_serve_an_unknown_repo_statically(tmp_path):
+    """실행 방법을 모르는 리포를 정적 서빙하면 소스와 커밋된 .env가 공개 주소로 나간다.
+
+    실측(supplier-pool): 시그니처 파일이 하나도 없고 Strategy/.env가 커밋돼 있었다. 예전
+    스크립트는 그 상태에서 `py -m http.server`로 리포를 목록째 서빙했다. 정적 사이트는
+    index.html이 있으므로 그 분기가 받고, 그 밖에는 실패해야 한다.
+    """
+    content = write_start_script(tmp_path).read_text(encoding="utf-8")
+    assert ") else if exist index.html (" in content
+    assert "py -m http.server" in content
+    # 마지막 분기는 실패다 — 정적 서빙이 캐치올이면 안 된다
+    tail = content[content.rindex(") else ("):]
+    # 주석에는 "예전에는 http.server였다"가 적혀 있다 — 실행되는 줄만 본다.
+    commands = [ln.strip() for ln in tail.splitlines()
+                if ln.strip() and not ln.strip().startswith("REM")]
+    assert not any("http.server" in ln for ln in commands)
+    assert "실행 방법을 알 수 없습니다" in tail
+    assert "exit /b 1" in tail
