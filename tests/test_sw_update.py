@@ -1,4 +1,4 @@
-"""SW 업데이트 엔드포인트 — git pull → 의존성 설치 → 콘솔 빌드 → 재시작(실행은 목킹)."""
+"""SW 업데이트 엔드포인트 — 코드 갱신 → 의존성 설치 → 콘솔 빌드 → 재시작(실행은 목킹)."""
 import shutil
 import subprocess
 import sys
@@ -33,9 +33,13 @@ def test_sw_update_schedules_git_pull_and_restart():
             assert data["status"] == "updating"
             assert data["services"] == ["paas", "paas-console"]
             assert mock_popen.called
-            # 스케줄된 스크립트가 git pull과 Restart-Service를 포함하는지 확인
+            # 스케줄된 스크립트가 코드 갱신과 Restart-Service를 포함하는지 확인
             script = mock_popen.call_args.args[0][-1]
-            assert "git pull" in script
+            # `git pull`을 그냥 부르면 upstream이 없는 체크아웃에서 fetch만 하고 끝난다
+            # (실측: 서버는 master, 원격은 main). fetch + ff-only로 못 박는다.
+            assert "git fetch origin" in script
+            assert "merge --ff-only" in script
+            assert "origin/main" in script
             assert "Restart-Service -Name 'paas'" in script
             assert "Restart-Service -Name 'paas-console'" in script
             # 콘솔은 플랫폼 자신이라 배포 파이프라인이 없다 — 여기서 빌드하지 않으면
@@ -57,6 +61,10 @@ def test_sw_update_schedules_git_pull_and_restart():
             assert script.index("-m pip install") < script.index("Restart-Service")
             # 실패해도 재시작까지는 간다 — 대신 실패를 말한다(적재 중인 .pyd는 못 덮는다)
             assert "pip install 실패" in script
+            # 코드 갱신에 실패하면 **멈춘다** — 갱신 전 파일로 설치·재시작하면 "업데이트한
+            # 줄 알았는데 아무것도 바뀌지 않은" 상태가 된다(실측).
+            assert "fast-forward 불가" in script
+            assert script.index("merge --ff-only") < script.index("-m pip install")
     finally:
         app.dependency_overrides.clear()
 

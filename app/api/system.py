@@ -899,8 +899,24 @@ def sw_update(
         f"New-Item -ItemType Directory -Force -Path '{escaped_log_dir}' | Out-Null; "
         f"Start-Transcript -Path '{escaped_log}' -Force | Out-Null; "
         f"Set-Location '{escaped_repo}'; "
-        "Write-Host '[SW Update] git pull...'; "
-        "git pull; "
+        # **git pull을 그냥 부르지 않는다.** 설치본의 체크아웃 브랜치에 upstream이 없으면
+        # (실측: 서버는 master인데 원격 브랜치는 main이다) pull은 fetch만 하고
+        # "There is no tracking information for the current branch"로 끝난다 — 그런데
+        # 스크립트는 그대로 진행해 **갱신 전 파일로** pip·npm을 돌리고 서비스를 재시작한다.
+        # 업데이트한 줄 알았는데 아무것도 바뀌지 않는 상태가 그렇게 만들어졌다.
+        # fetch 후 upstream(없으면 origin/main)으로 fast-forward만 한다 — 로컬 커밋을
+        # 만들거나 강제로 덮어쓰지 않는다(그건 사람이 판단할 일이다).
+        "Write-Host '[SW Update] git fetch...'; "
+        "git fetch origin; "
+        "$ref = (git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>$null); "
+        "if (-not $ref) { $ref = 'origin/main'; "
+        "  Write-Host '[SW Update] 현재 브랜치에 upstream이 없어 origin/main으로 맞춥니다'; } "
+        "Write-Host \"[SW Update] merge --ff-only $ref\"; "
+        "git merge --ff-only $ref; "
+        "if ($LASTEXITCODE -ne 0) { "
+        "  Write-Host '[SW Update] !! 코드를 갱신하지 못했습니다(fast-forward 불가) — "
+        "로컬 변경이나 브랜치 분기를 확인하세요. 재시작하지 않고 멈춥니다.'; "
+        "  Stop-Transcript | Out-Null; exit 1; } "
         "Start-Sleep -Seconds 1; "
         # 파이썬 의존성 — 지금 도는 프로세스의 인터프리터로 설치한다(어느 venv인지
         # 물어볼 필요가 없다). 재시작 전에 해야 새 의존성이 다음 기동에 반영된다.
