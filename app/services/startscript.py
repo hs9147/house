@@ -57,8 +57,65 @@ FORBIDDEN = (
     (r"\.\.[\\/]\.\.", "상위 폴더 탈출"),
 )
 
-# 기동 스크립트라면 반드시 있어야 하는 것 — 없으면 앱이 프록시가 보는 포트에서 뜨지 않는다.
-REQUIRED = ((r"%PORT%", "리슨 포트(%PORT%)를 쓰지 않습니다 — 플랫폼이 준 포트로 떠야 합니다"),)
+# 포트는 플랫폼이 정한다 — 프록시가 그 포트로 보내고 헬스체크도 그 포트를 본다. 스크립트가
+# 다른 포트로 뜨면 배포는 "성공"인데 주소는 502다. 그래서 형태를 확인한다.
+#
+# **왜 형태를 따지는가.** 실측에서 LLM이 `$PORT`·`$env:PORT`처럼 셸이 다른 문법을 썼다.
+# cmd 배치에서 그것은 값이 아니라 글자라, 앱은 기본 포트로 뜨고 아무도 그 사실을 모른다.
+# 그래서 "왜 거부됐는지"가 아니라 "무엇을 쓰면 되는지"를 말한다(사람과 다음 LLM 시도가
+# 같은 문장을 읽는다).
+_DELAYED_EXPANSION = re.compile(r"setlocal\s+[^\n]*enabledelayedexpansion", re.IGNORECASE)
+_WRONG_PORT_FORMS = (
+    (r"\$env:PORT", "$env:PORT (PowerShell)"),
+    (r"\$\{PORT\}", "${PORT} (POSIX 셸)"),
+    (r"\$PORT\b", "$PORT (POSIX 셸)"),
+    (r"process\.env\.PORT", "process.env.PORT (Node 코드)"),
+)
+
+
+# PORT에 값을 넣는 줄. 세 가지는 괜찮다: `if not defined PORT set PORT=8000`(값이 없을 때의
+# 기본값 — 배포에서는 늘 정의돼 있다), `set PORT=%PORT%`(제자리 대입, 플랫폼 템플릿이 쓴다),
+# 그리고 값 안에 PORT를 참조하는 형태. 그 밖의 대입은 주입된 포트를 **버린다** — %PORT%를
+# 쓰고 있어도 그 값이 8000이면 프록시가 보는 포트가 아니고, 배포는 성공인데 주소는 502다.
+_PORT_ASSIGN = re.compile(r"\bset\s+(?:/a\s+)?PORT\s*=\s*(\S[^\r\n]*)", re.IGNORECASE)
+
+
+def _port_overwrite_problem(commands: str) -> str:
+    for line in commands.splitlines():
+        found = _PORT_ASSIGN.search(line)
+        if not found:
+            continue
+        if re.match(r"\s*if\s+not\s+defined\s+PORT\b", line, re.IGNORECASE):
+            continue  # 기본값 — 주입된 값이 있으면 실행되지 않는다
+        if re.search(r"[%!]PORT[%!]", found.group(1), re.IGNORECASE):
+            continue  # 자기 값을 다시 넣는 것은 버리는 것이 아니다
+        return ("PORT를 스크립트가 덮어씁니다 — 플랫폼이 주입한 포트를 그대로 써야 합니다"
+                f"(문제 줄: `{line.strip()[:80]}`). 기본값이 필요하면 "
+                "`if not defined PORT set PORT=8000` 형태로만 쓰세요.")
+    return ""
+
+
+def _port_problem(commands: str) -> str:
+    """리슨 포트를 플랫폼이 준 값으로 쓰는가 — 문제가 없으면 빈 문자열."""
+    overwritten = _port_overwrite_problem(commands)
+    if overwritten:
+        return overwritten
+    upper = commands.upper()  # cmd의 변수 이름은 대소문자를 가리지 않는다
+    if "%PORT%" in upper:
+        return ""
+    # !PORT!는 지연 확장이 켜져 있을 때만 값이 된다 — 켜지 않고 쓰면 글자 그대로 남는다.
+    if "!PORT!" in upper:
+        if _DELAYED_EXPANSION.search(commands):
+            return ""
+        return ("!PORT!는 지연 확장이 켜져 있어야 값이 들어갑니다 — 첫 줄에 "
+                "`setlocal enabledelayedexpansion`을 넣거나 %PORT%를 쓰세요.")
+    for pattern, shown in _WRONG_PORT_FORMS:
+        if re.search(pattern, commands, re.IGNORECASE):
+            return (f"포트를 {shown} 형태로 썼습니다 — 이 파일은 cmd 배치입니다. "
+                    "명령줄에 %PORT%를 그대로 쓰세요(예: `--port %PORT% --host %HOST%`).")
+    return ("리슨 포트(%PORT%)를 쓰지 않습니다 — 플랫폼이 준 포트로 떠야 합니다"
+            "(예: `--port %PORT% --host %HOST%`). 앱이 환경변수 PORT를 스스로 읽더라도, "
+            "명령줄에 %PORT%를 적어 무엇으로 뜨는지 스크립트에 드러내세요.")
 
 _FENCE = re.compile(r"```[a-zA-Z]*\n(.*?)```", re.DOTALL)
 
@@ -66,7 +123,14 @@ SYSTEM_PROMPT = """You write a Windows batch script (start.cmd) that launches on
 checked-out repository on a given port. Reply with the script only, inside one ```bat fence.
 
 Hard rules:
-- Listen on %PORT% and bind %HOST% (the platform injects both). Never hardcode a port.
+- The command that starts the app MUST contain the literal cmd variables %PORT% and %HOST%,
+  for example: `python -m uvicorn app.main:app --host %HOST% --port %PORT%`.
+  This is a cmd batch file: $PORT, ${PORT}, $env:PORT and process.env.PORT are plain text
+  here, not values. Never hardcode a port number. A platform check rejects the script when
+  %PORT% is missing, because the proxy and the health check only look at that port - an app
+  on any other port looks "deployed" and answers 502.
+  If the app reads PORT from the environment on its own, still pass it on the command line
+  so the script says which port it comes up on.
 - Dependencies are already installed by the platform before this runs. Do not run
   npm ci / npm install / pip install unless the folder for them is missing.
 - Do not download anything. Do not touch services, the registry, accounts or scheduled tasks.
@@ -177,9 +241,9 @@ def validate(script: str) -> list[str]:
     for pattern, label in FORBIDDEN:
         if re.search(pattern, commands, re.IGNORECASE):
             problems.append(f"허용하지 않는 명령: {label}")
-    for pattern, message in REQUIRED:
-        if not re.search(pattern, commands, re.IGNORECASE):
-            problems.append(message)
+    port = _port_problem(commands)
+    if port:
+        problems.append(port)
     return problems
 
 
@@ -198,11 +262,30 @@ def propose(db: Session, project: Project, provider: LlmProvider, workdir: Path,
     개발 배포는 dev 서버로, 운영 배포는 빌드본으로 뜬다.
     """
     facts = _facts(workdir, project, component, profile)
-    reply = llm_service.chat_completion(
-        provider,
-        [{"role": "system", "content": SYSTEM_PROMPT},
-         {"role": "user", "content": facts}],
-        db,
-    )
-    script = _extract(reply)
-    return {"script": script, "problems": validate(script), "facts": facts}
+    messages = [{"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": facts}]
+    script = _extract(llm_service.chat_completion(provider, messages, db))
+    problems = validate(script)
+    attempts = 1
+
+    # **거부되면 한 번은 고치게 한다.** 검증은 저장을 막는 것이지 사람에게 숙제를 내는 것이
+    # 아니다 — 실측에서 %PORT%를 빠뜨린 제안이 그대로 거부되어, 사람이 검증 문구를 읽고 손으로
+    # 고쳐 넣어야 했다. 그 문구를 그대로 모델에게 돌려주면 대개 한 번에 고친다.
+    # 한 번만 한다: 두 번 틀리는 모델은 세 번째도 틀리고, 그때는 사람이 보는 편이 빠르다.
+    if problems:
+        messages += [
+            {"role": "assistant", "content": script},
+            {"role": "user", "content": (
+                "The platform rejected that script:\n"
+                + "\n".join(f"- {p}" for p in problems)
+                + "\nReturn the whole corrected script only, in one ```bat fence."
+            )},
+        ]
+        retried = _extract(llm_service.chat_completion(provider, messages, db))
+        retried_problems = validate(retried)
+        attempts = 2
+        # 나빠지면 첫 제안을 지킨다 — "고쳤다"가 늘 나아짐은 아니다.
+        if len(retried_problems) < len(problems):
+            script, problems = retried, retried_problems
+
+    return {"script": script, "problems": problems, "facts": facts, "attempts": attempts}

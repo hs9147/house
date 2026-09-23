@@ -143,6 +143,9 @@ class StartScriptOut(BaseModel):
     component: str = ""
     # 프로필도 따로다 — 개발 배포는 dev 서버로, 운영 배포는 빌드본으로 뜬다.
     profile: BuildProfile = BuildProfile.release
+    # LLM이 몇 번 썼는지. 검증에 걸리면 그 문구를 돌려주고 한 번 고치게 한다 —
+    # 2면 "한 번 고쳐 다시 제안한 것"이다(화면이 그 사실을 말해 준다).
+    attempts: int = 1
     # 이 프로젝트에서 고를 수 있는 컴포넌트 — 화면이 목록을 따로 조회하지 않게 함께 준다.
     components: list[str] = []
 

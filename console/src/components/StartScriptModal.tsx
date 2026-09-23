@@ -98,10 +98,20 @@ export default function StartScriptModal({ projectId, profile, onClose }: Props)
     }
   };
 
-  const propose = () => run(
-    'LLM이 리포를 보고 작성하는 중… (수십 초 걸릴 수 있습니다)',
-    () => api.proposeStartScript(projectId, providerId, profile, component),
-  );
+  const propose = async () => {
+    const res = await run(
+      'LLM이 리포를 보고 작성하는 중… (수십 초 걸릴 수 있습니다)',
+      () => api.proposeStartScript(projectId, providerId, profile, component),
+    );
+    // 검증에 걸리면 서버가 그 문구를 모델에 돌려주고 한 번 고치게 한다 — 사람이 같은 말을
+    // 다시 적어 넣지 않아도 되지만, "고쳐서 온 것"이라는 사실은 보여야 한다.
+    if (res && res.attempts > 1) {
+      setNotice(res.problems.length === 0
+        ? '첫 제안이 검증에 걸려, 그 지적을 반영해 다시 작성했습니다.'
+        : '두 번 작성했지만 아직 검증을 통과하지 못했습니다 — 아래 항목을 보고 직접 고치세요.');
+    }
+    return res;
+  };
   const save = async () => {
     const res = await run('저장 중…',
       () => api.setStartScript(projectId, script, profile, component));

@@ -404,6 +404,8 @@ export interface StartScriptOut {
   components: string[];
   // 프로필도 따로다 — 개발 배포는 dev 서버로, 운영 배포는 빌드본으로 뜬다.
   profile: BuildProfile;
+  // LLM이 몇 번 썼는지(2 = 검증 문구를 돌려주고 한 번 고친 것).
+  attempts: number;
 }
 
 // 코드 구조 시각화 — 정적 파싱으로 만든 파일→클래스/함수 계층 트리(요청 1)

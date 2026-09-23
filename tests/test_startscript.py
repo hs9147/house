@@ -462,3 +462,94 @@ def test_saved_script_is_applied_on_the_very_next_deploy(monkeypatch, tmp_path, 
     finally:
         db.close()
         get_settings.cache_clear()
+
+
+# --- 포트 판정과 자동 교정 ---
+
+@pytest.mark.parametrize("line,expect", [
+    # cmd가 아닌 셸 문법 — 값이 아니라 글자로 남아 앱이 기본 포트로 뜬다(실측 사례).
+    ("python -m uvicorn app:app --port $PORT", "cmd 배치"),
+    ("python -m uvicorn app:app --port ${PORT}", "cmd 배치"),
+    ("node server.js --port $env:PORT", "cmd 배치"),
+    # 지연 확장을 켜지 않은 !PORT!는 글자 그대로다
+    ("node server.js --port !PORT!", "지연 확장"),
+])
+def test_port_problem_says_what_to_write_instead(line, expect):
+    problems = startscript.validate(f"@echo off\n{line}\n")
+    assert any(expect in p for p in problems), problems
+    # 어느 경우든 무엇을 쓰면 되는지 알려 준다 — 거부 사유만으로는 고칠 수 없다.
+    assert any("%PORT%" in p for p in problems), problems
+
+
+def test_delayed_expansion_makes_bang_port_acceptable():
+    """`!PORT!`도 지연 확장을 켰다면 값이 된다 — 형태만 보고 거부하면 맞는 것도 막는다."""
+    script = ("@echo off\nsetlocal enabledelayedexpansion\n"
+              "node server.js --port !PORT! --host !HOST!\n")
+    assert startscript.validate(script) == []
+
+
+def test_propose_feeds_the_validation_back_and_retries_once(monkeypatch, tmp_path):
+    """실측: %PORT%를 빠뜨린 제안이 그대로 거부되어 사람이 손으로 고쳐야 했다.
+
+    검증은 저장을 막는 장치지 사람에게 내는 숙제가 아니다 — 지적을 그대로 모델에게 돌려주고
+    한 번 고치게 한다. 두 번째도 틀리면 거기서 멈춘다(세 번째도 틀린다).
+    """
+    _git_repo(tmp_path)
+    project = Project(name="retry-port", type=ProjectType.python,
+                      git_url="https://git.example.com/x")
+    replies = [
+        "```bat\n@echo off\npython -m uvicorn app:app --port 8000\n```",
+        f"```bat\n{GOOD}```",
+    ]
+    seen: list[list[dict]] = []
+
+    def fake_chat(provider, messages, db):
+        seen.append(messages)
+        return replies[len(seen) - 1]
+
+    monkeypatch.setattr(startscript.llm_service, "chat_completion", fake_chat)
+    out = startscript.propose(None, project, object(), tmp_path)
+
+    assert out["attempts"] == 2
+    assert out["problems"] == []
+    assert out["script"].strip() == GOOD.strip()
+    # 두 번째 요청에는 첫 스크립트와 거부 사유가 함께 실린다.
+    assert seen[1][-2]["role"] == "assistant"
+    assert "%PORT%" in seen[1][-1]["content"]
+
+
+def test_propose_keeps_the_first_script_when_the_retry_is_worse(monkeypatch, tmp_path):
+    """"고쳤다"가 늘 나아짐은 아니다 — 더 나빠지면 첫 제안을 지킨다."""
+    _git_repo(tmp_path)
+    project = Project(name="retry-worse", type=ProjectType.python,
+                      git_url="https://git.example.com/x")
+    replies = [
+        "```bat\n@echo off\napp.exe --port 8000\n```",              # 문제 1건
+        "```bat\n@echo off\nshutdown /r\ntaskkill /f /im x.exe\n```",  # 문제 3건
+    ]
+    monkeypatch.setattr(startscript.llm_service, "chat_completion",
+                        lambda p, m, d: replies[min(len(m) // 3, 1)])
+    out = startscript.propose(None, project, object(), tmp_path)
+    assert out["attempts"] == 2
+    assert "app.exe" in out["script"]
+    assert len(out["problems"]) == 1
+
+
+def test_the_platform_template_passes_its_own_validation():
+    """우리 템플릿이 우리 검증을 통과해야 한다 — 통과하지 못하면 규칙이 너무 넓다는 뜻이다
+    (실제로 `set PORT=%PORT%`를 덮어쓰기로 오판한 규칙을 이 테스트가 잡았다)."""
+    assert startscript.validate(build_module._START_SCRIPT) == []
+
+
+def test_rejects_overwriting_the_injected_port():
+    """%PORT%를 쓰더라도 그 값을 8000으로 덮어쓰면 프록시가 보는 포트가 아니다 —
+    배포는 성공인데 주소는 502다. 조건 없는 `set PORT=` 대입만 막는다."""
+    problems = startscript.validate(
+        "@echo off\nset PORT=8000\nnode server.js --port %PORT%\n")
+    assert any("덮어씁니다" in p for p in problems), problems
+    # 기본값 형태와 제자리 대입은 막지 않는다(템플릿이 둘 다 쓴다).
+    assert startscript.validate(
+        "@echo off\nif not defined PORT set PORT=8000\n"
+        "node server.js --port %PORT%\n") == []
+    assert startscript.validate(
+        "@echo off\nset PORT=%PORT%\nnode server.js --port %PORT%\n") == []
