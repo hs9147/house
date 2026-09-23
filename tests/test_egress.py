@@ -196,3 +196,47 @@ def test_modules_list_carries_the_verdict(monkeypatch, fresh_settings):
     rows = {m["name"]: m["egress"] for m in c.get(f"{API}/modules", headers=ADMIN).json()}
     assert rows["vendor"]["secured"] is True and rows["vendor"]["scope"] == "external"
     assert rows["leaky"]["secured"] is False and rows["leaky"]["findings"]
+
+
+def test_proxy_does_not_append_a_slash_when_the_path_is_empty(monkeypatch, fresh_settings):
+    """실측: 게이트웨이 경유만 깨지고 직접 호출은 되던 이유.
+
+    `{path:path}`는 `/proxy/modules/{이름}`으로 부를 때 빈 문자열이다. 그때 슬래시를 붙이면
+    대상 주소가 `…/mcp/docs/`가 되고, 사내 MCP 서버는 그것을 다른 자원으로 보고 404·405로
+    답한다. 모듈 점검(mcp_client.check_server)은 모듈 URL을 그대로 불러 정상이었으므로
+    "직접은 되는데 프록시만 안 된다"로 보였다.
+    """
+    sent = {}
+
+    class _FakeResponse:
+        content, status_code, headers = b"{}", 200, {"content-type": "application/json"}
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, method, url, headers, params, content):
+            sent["url"] = url
+            return _FakeResponse()
+
+    from app.api import proxy_gateway
+
+    monkeypatch.setattr(proxy_gateway.httpx, "AsyncClient", lambda **kw: _FakeClient())
+    c = TestClient(create_app())
+    c.post(f"{API}/modules", json={
+        "name": "docs-mcp", "type": "mcp",
+        "config": {"url": "http://gpax.lge.com/paas/api/v1/mcp/docs"},
+    }, headers=ADMIN)
+
+    # 경로 없이 부른다 — 모듈 주소 그대로여야 한다.
+    assert c.post(f"{API}/proxy/modules/docs-mcp", headers={
+        **ADMIN, "content-type": "application/json"}, json={}).status_code == 200
+    assert sent["url"] == "http://gpax.lge.com/paas/api/v1/mcp/docs"
+
+    # 경로가 있으면 하나의 슬래시로 이어 붙인다(중복 슬래시도 안 된다).
+    c.post(f"{API}/proxy/modules/docs-mcp/tools/list", headers={
+        **ADMIN, "content-type": "application/json"}, json={})
+    assert sent["url"] == "http://gpax.lge.com/paas/api/v1/mcp/docs/tools/list"
