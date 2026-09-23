@@ -322,6 +322,23 @@ def missing_root_component(structure: dict | None) -> bool:
     return bool(routes) and all(path for _name, path in routes)
 
 
+def unit_names(structure: dict | None) -> list[str]:
+    """배포 유닛(컴포넌트) 이름 — **감지된 구조가 원천이다.**
+
+    복합 배포는 `backend`/`frontend` 두 이름에 묶여 있었고, 일반화된 뒤에도 그 고정 목록을
+    쓰는 곳이 남아 있었다. 실측에서 negowith(`api`+`web`)의 큐 배포가 그 이름으로 자리
+    행을 만들어, 정작 배포 루프는 감지된 이름을 찾다 KeyError로 죽었다 — 큐 작업이 예외를
+    삼켜 화면은 영원히 building이었다. 이름을 묻는 곳이 셋이 되면 또 갈라지므로 여기 하나를
+    원천으로 둔다(api/projects의 유닛 목록도 이것을 쓴다).
+
+    구조가 없는 예전 레코드는 그때의 규칙(backend/frontend)으로 떨어진다.
+    """
+    from .build import COMPOSITE_COMPONENTS  # noqa: PLC0415 — 순환 import 회피
+
+    names = [str(c.get("name") or "") for c in (structure or {}).get("components") or []]
+    return [n for n in names if n] or list(COMPOSITE_COMPONENTS)
+
+
 def summary(structure: dict | None) -> str:
     """감사 로그·오류 문구에 실을 한 줄 요약: `backend=python, frontend=react`."""
     components = (structure or {}).get("components") or []

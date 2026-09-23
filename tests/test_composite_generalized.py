@@ -9,11 +9,14 @@
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import SessionLocal
 from app.main import create_app
-from app.models import BuildProfile, Project, ProjectType
+from app.models import (
+    BuildProfile, Deployment, DeploymentStatus, Project, ProjectType,
+)
 from app.services import deployer
 from app.services.build import BuildError, BuildResult
 from app.services.runtime.base import Endpoint
@@ -75,6 +78,54 @@ def _setup(db, monkeypatch, tmp_path, name: str):
     monkeypatch.setattr(deployer.proxy, "configure_paths",
                         lambda *a, **kw: routes_seen.append(a))
     return project, builds, runtime, routes_seen
+
+
+def test_queued_deploy_does_not_leave_rows_building_when_names_differ(monkeypatch, tmp_path):
+    """회귀(실측 negowith): 큐 배포가 backend/frontend로 자리 행을 만들어 두고, 배포
+    루프는 감지된 이름(api/web)의 행을 찾다 KeyError로 죽었다. 큐 작업이 그 예외를
+    삼켜 두 행은 영원히 building으로 남았다 — 화면은 끝나지 않는 "빌드 중"이었다.
+
+    자리 행 이름은 감지된 구조에서 받고, 그래도 어긋나면 배포가 맞춘다. 어느 쪽이든
+    building으로 남는 행은 없어야 한다.
+    """
+    _write(tmp_path, "api/requirements.txt", "fastapi\n")
+    _write(tmp_path, "web/package.json", '{"dependencies": {"react": "18"}}')
+    db = SessionLocal()
+    try:
+        project, builds, _runtime, _routes = _setup(db, monkeypatch, tmp_path, "nego-like")
+        # 큐에 올린 시점의 구조는 예전 이름이다(감지 전이거나, 리포가 바뀌었다).
+        project.structure = {"components": [
+            {"name": "backend", "path": "backend", "type": "python"},
+            {"name": "frontend", "path": "frontend", "type": "react"},
+        ]}
+        db.commit()
+        jobs_run: list = []
+        # 큐를 쓰지 않고 작업 본문을 그대로 실행한다 — 스레드로 넘기면 단정 시점이 갈린다.
+        monkeypatch.setattr("app.services.jobs.submit",
+                            lambda fn, *a, **kw: jobs_run.append(fn(*a, **kw)))
+
+        records = deployer.deploy_composite_queued(db, project, BuildProfile.release)
+        assert set(records) == {"backend", "frontend"}  # 자리 행은 그때의 구조 기준
+
+        db.expire_all()
+        rows = db.execute(
+            select(Deployment).where(Deployment.project_id == project.id)
+        ).scalars().all()
+        assert rows, "배포 행이 하나도 없다"
+        assert not [r for r in rows if r.status == DeploymentStatus.building], \
+            [(r.component, r.status) for r in rows]
+        # 감지된 이름으로 실제 배포가 돌았다.
+        assert {b["component"] for b in builds} == {"api", "web"}
+        ran = {r.component: r.status for r in rows}
+        assert ran["api"] == DeploymentStatus.running
+        assert ran["web"] == DeploymentStatus.running
+        # 사라진 컴포넌트의 자리 행은 이유를 남기고 닫힌다 — 조용히 지우면 무엇이
+        # 배포되지 않았는지 알 수 없다.
+        assert ran["backend"] == DeploymentStatus.failed
+        stale = next(r for r in rows if r.component == "backend")
+        assert "감지되지 않습니다" in (stale.error or "")
+    finally:
+        db.close()
 
 
 def test_deploys_components_whose_folders_are_not_backend_frontend(monkeypatch, tmp_path):

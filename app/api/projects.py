@@ -52,7 +52,7 @@ from ..services import build as build_module
 from ..services import (
     deploydiag, deployer, gitea, startscript, structure, upload, workspace,
 )
-from ..services.build import COMPOSITE_COMPONENTS, checkout
+from ..services.build import checkout
 from ..services.deployer import DeployInProgress, NoRollbackTarget, ProfileConflict
 from ..services.gitea import GiteaError, GiteaNotConfigured
 from ..services.upload import UploadError, UploadRejected
@@ -88,8 +88,7 @@ def _composite_units(project: Project) -> list[str]:
     중지·상태 조회가 없는 유닛을 가리켰다 — 중지가 아무것도 내리지 않고 상태는 늘
     stopped였다. 구조가 없는 예전 레코드는 그때의 규칙으로 떨어진다.
     """
-    names = [str(c.get("name")) for c in (project.structure or {}).get("components") or []]
-    return [n for n in names if n] or list(COMPOSITE_COMPONENTS)
+    return structure.unit_names(project.structure)
 
 
 def _composite_status(runtime, project: Project, profile: BuildProfile) -> str:

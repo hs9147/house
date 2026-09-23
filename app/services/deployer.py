@@ -21,7 +21,6 @@ from ..security import decrypt_value
 from . import ports, proxy
 from . import structure
 from .build import (
-    COMPOSITE_COMPONENTS,
     PROFILES,
     BuildError,
     build_image,
@@ -180,6 +179,51 @@ def secret_env_keys(db: Session, project: Project) -> frozenset[str]:
     return frozenset(keys)
 
 
+def _close_still_building(db: Session, records, error: BaseException | str) -> None:
+    """아직 building인 배포 행을 실패로 닫는다.
+
+    **왜 필요한가.** 실패 상태를 각 raise 자리에서 손으로 기록해 왔다. 그러다 예상 밖의
+    예외(감지 이름 불일치로 인한 KeyError가 실측 사례다)가 나면 아무도 기록하지 않고,
+    큐 작업은 그 예외를 삼킨다 — 행은 building으로 남고 화면은 영원히 "빌드 중"을 보여
+    준다. 끝나지 않은 배포보다 실패한 배포가 낫다: 원인을 읽고 다시 시도할 수 있다.
+    """
+    text = str(error) or error.__class__.__name__
+    closed = False
+    for rec in list(records or []):
+        if rec is None or rec.status != DeploymentStatus.building:
+            continue
+        rec.status = DeploymentStatus.failed
+        rec.error = text[:2000]
+        rec.finished_at = datetime.now(timezone.utc)
+        closed = True
+    if closed:
+        db.commit()
+
+
+def _close_orphaned_building(
+    db: Session, project: Project, profile: BuildProfile, keep_ids: set[int],
+) -> None:
+    """이전 시도에서 building으로 남은 행을 닫는다 — 이번 배포의 행은 건드리지 않는다.
+
+    플랫폼 프로세스가 배포 도중 재시작되면(자기 자신을 배포할 때가 그렇다) 진행 중이던
+    행을 아무도 닫지 못한다. 그 행은 화면에서 계속 "빌드 중"으로 보이고, 사람은 끝나기를
+    기다린다. 같은 프로필의 배포는 프로젝트 락이 직렬화하므로, 여기까지 왔다면 남아 있는
+    building 행은 이번 시도의 것이 아니다.
+    """
+    rows = db.execute(
+        select(Deployment).where(
+            Deployment.project_id == project.id,
+            Deployment.profile == profile,
+            Deployment.status == DeploymentStatus.building,
+        )
+    ).scalars()
+    _close_still_building(
+        db, [r for r in rows if r.id not in keep_ids],
+        "이전 배포 시도가 끝나지 않은 채 남아 있었습니다 "
+        "(플랫폼 재시작 또는 예기치 못한 오류) — 이 시도는 취소된 것으로 봅니다.",
+    )
+
+
 def make_spec(
     db: Session, project: Project, image_tag: str, profile: BuildProfile,
     *, component: str | None = None, internal_port_override: int | None = None,
@@ -244,6 +288,7 @@ def deploy_sync(
             db.commit()
         raise DeployInProgress(project.name)
     try:
+        _close_orphaned_building(db, project, profile, {record.id} if record else set())
         try:
             assert_no_profile_conflict(project, profile)
         except ProfileConflict as e:
@@ -348,6 +393,11 @@ def deploy_sync(
             record.finished_at = datetime.now(timezone.utc)
             db.commit()
             raise
+        except Exception as e:
+            # 예상 밖의 예외도 레코드를 닫는다 — 큐 경로는 예외를 삼키므로, 닫지 않으면
+            # 화면이 영원히 "빌드 중"에 머문다.
+            _close_still_building(db, [record], e)
+            raise
     finally:
         lock.release()
 
@@ -406,8 +456,16 @@ async def deploy_composite(
 def deploy_composite_queued(
     db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None
 ) -> dict[str, Deployment]:
-    """composite 프로젝트의 비동기 배포 — deploy_queued와 동일한 패턴이나 backend/frontend
-    두 행을 미리 만들어 즉시 반환한다(컨벤션상 컴포넌트명은 항상 이 둘)."""
+    """composite 프로젝트의 비동기 배포 — deploy_queued와 동일한 패턴이나 컴포넌트마다
+    자리 행을 미리 만들어 즉시 반환한다.
+
+    자리 행의 이름은 **마지막에 감지된 구조**에서 받는다(structure.unit_names). 예전에는
+    backend/frontend로 못 박았는데("컨벤션상 항상 이 둘"), 복합 배포가 일반화된 뒤로는
+    사실이 아니다 — negowith(`api`+`web`)에서 배포 루프가 감지된 이름의 행을 찾다 KeyError로
+    죽었고, 큐 작업이 그 예외를 삼켜 화면은 영원히 building이었다(실측).
+
+    큐에 올린 뒤 체크아웃하면 구조가 달라질 수도 있으므로 이름이 맞는다고 믿지 않는다 —
+    deploy_composite_sync가 감지 결과와 자리 행을 맞춘다."""
     from ..db import SessionLocal  # noqa: PLC0415
     from . import jobs  # noqa: PLC0415
 
@@ -417,7 +475,7 @@ def deploy_composite_queued(
             project_id=project.id, git_sha=git_sha or "", image_tag="", profile=profile,
             status=DeploymentStatus.building, component=name,
         )
-        for name in COMPOSITE_COMPONENTS
+        for name in structure.unit_names(project.structure)
     }
     for rec in records.values():
         db.add(rec)
@@ -524,6 +582,8 @@ def deploy_composite_sync(
             db.commit()
         raise DeployInProgress(project.name)
     try:
+        _close_orphaned_building(
+            db, project, profile, {r.id for r in (records or {}).values() if r.id})
         assert_no_profile_conflict(project, profile)
         workdir, sha = checkout(project, git_sha)
         # 단일 배포와 같은 이유로 구조를 다시 읽어 저장한다 — 화면·감사기록이 실제로
@@ -563,6 +623,26 @@ def deploy_composite_sync(
             for rec in records.values():
                 db.add(rec)
         else:
+            # 큐에 올릴 때 만든 자리 행은 **그때** 알던 구조 기준이다. 체크아웃 후 감지한
+            # 구조가 진짜 배포 명세이므로 어긋나면 맞춘다 — 예전에는 아래 루프의
+            # records[name]에서 KeyError가 나고, 큐 작업이 그 예외를 삼켜 자리 행이
+            # building으로 영원히 남았다(실측: negowith는 api/web인데 자리 행은
+            # backend/frontend였다).
+            for name in components:
+                if name not in records:
+                    records[name] = Deployment(
+                        project_id=project.id, git_sha=sha, image_tag="", profile=profile,
+                        status=DeploymentStatus.building, component=name,
+                    )
+                    db.add(records[name])
+            for name in [n for n in records if n not in components]:
+                stale = records.pop(name)
+                stale.status = DeploymentStatus.failed
+                stale.error = (
+                    f"'{name}' 컴포넌트는 지금 리포에서 감지되지 않습니다 "
+                    f"(감지된 구성: {structure.summary(detected)}) — 이번 배포에서 제외했습니다."
+                )
+                stale.finished_at = datetime.now(timezone.utc)
             for rec in records.values():
                 rec.git_sha = sha
                 rec.deploy_group_id = group_id
@@ -689,6 +769,11 @@ def deploy_composite_sync(
         if failed_component:
             raise failure
         return records
+    except Exception as e:
+        # 여기까지 오는 예외가 레코드에 기록됐다는 보장은 없다 — 기록은 각 raise 자리에서
+        # 손으로 하기 때문이다. 남은 building 행을 닫고 예외는 그대로 올린다.
+        _close_still_building(db, (records or {}).values(), e)
+        raise
     finally:
         lock.release()
 
