@@ -222,6 +222,12 @@ export default function DeployDiagnoseModal({ projectId, profile, onClose, onRet
           projectId={projectId}
           profile={profile}
           onClose={() => setWritingScript(false)}
+          // 재배포는 호출측(진행 팝업)의 재시도 경로를 그대로 쓴다 — 같은 창에서 새 배포의
+          // 진행이 이어지고, 진단 팝업은 닫는다(다 읽은 진단을 남겨 둘 이유가 없다).
+          onRedeploy={async () => {
+            await onRetry();
+            onClose();
+          }}
         />
       )}
     </Modal>

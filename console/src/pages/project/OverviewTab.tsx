@@ -192,6 +192,13 @@ export default function OverviewTab() {
           projectId={project.id}
           profile={scriptFor}
           onClose={() => setScriptFor(null)}
+          // 저장한 스크립트로 바로 배포한다 — 확인 대화를 한 번 더 띄우지 않는다(사람이
+          // 스크립트를 읽고 저장한 직후이고, 그 버튼 이름이 이미 '재배포'다).
+          onRedeploy={async () => {
+            const result = await api.deployQueued(project.id, scriptFor);
+            const records = Array.isArray(result) ? result : [result];
+            setDeployFor({ ids: records.map((r) => r.id), profile: scriptFor });
+          }}
         />
       )}
       {deployFor && (

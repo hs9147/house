@@ -23,9 +23,16 @@ interface Props {
   /** 어느 프로필의 스크립트인가 — 개요 화면의 프로필 행에서 그대로 넘어온다. */
   profile: BuildProfile;
   onClose: () => void;
+  /**
+   * 저장한 스크립트로 실제 배포를 건다. **저장만으로는 아무것도 바뀌지 않는다** — 다음
+   * 배포에서 쓰일 뿐이라, 저장하고 창을 닫으면 사람은 배포 화면을 다시 찾아가야 한다.
+   * 진행 표시는 호출측이 이미 가지고 있으므로(개요의 진행 팝업, 진단 팝업의 재시도)
+   * 여기서 만들지 않고 그 경로를 그대로 쓴다.
+   */
+  onRedeploy: () => Promise<void>;
 }
 
-export default function StartScriptModal({ projectId, profile, onClose }: Props) {
+export default function StartScriptModal({ projectId, profile, onClose, onRedeploy }: Props) {
   const [component, setComponent] = useState('');
   const [data, setData] = useState<StartScriptOut | null>(null);
   const [script, setScript] = useState('');
@@ -35,6 +42,8 @@ export default function StartScriptModal({ projectId, profile, onClose }: Props)
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // 이 창에서 저장(또는 되돌리기)을 한 번 했는가 — 했다면 다음 할 일은 저장이 아니라 배포다.
+  const [applied, setApplied] = useState(false);
 
   // 유닛을 바꾸면 그 유닛의 스크립트를 다시 읽는다 — 화면에 남은 본문을 그대로 두면
   // 다른 컴포넌트의 스크립트를 이 컴포넌트에 저장하게 된다.
@@ -42,6 +51,7 @@ export default function StartScriptModal({ projectId, profile, onClose }: Props)
     let alive = true;
     setError('');
     setNotice('');
+    setApplied(false);  // 유닛·프로필을 바꾸면 다른 스크립트다
     setBusy('불러오는 중…');
     api.startScript(projectId, profile, component).then(
       (res) => {
@@ -84,6 +94,9 @@ export default function StartScriptModal({ projectId, profile, onClose }: Props)
     setBusy(label);
     setError('');
     setNotice('');
+    // 무엇을 하든 "방금 저장한 상태"는 깨진다 — 새 제안을 받아 놓고 재배포 버튼을 누르면
+    // 저장되지 않은 본문으로 배포하게 된다(그러면 방금 쓴 것이 쓰이지 않는다).
+    setApplied(false);
     try {
       const res = await fn();
       setData(res);
@@ -115,18 +128,39 @@ export default function StartScriptModal({ projectId, profile, onClose }: Props)
   const save = async () => {
     const res = await run('저장 중…',
       () => api.setStartScript(projectId, script, profile, component));
-    if (res) setNotice('저장했습니다 — 다음 배포에서 이 스크립트가 쓰입니다.');
+    if (res) {
+      setApplied(true);
+      setNotice('저장했습니다 — 재배포하면 이 스크립트로 뜹니다.');
+    }
   };
   const reset = async () => {
     const res = await run('되돌리는 중…',
       () => api.resetStartScript(projectId, profile, component));
-    if (res) setNotice('템플릿으로 되돌렸습니다.');
+    if (res) {
+      // 되돌리기도 다음 배포가 실행할 것을 바꾼 것이다 — 그다음 할 일은 똑같이 배포다.
+      setApplied(true);
+      setNotice('템플릿으로 되돌렸습니다 — 재배포하면 템플릿으로 뜹니다.');
+    }
+  };
+  const redeploy = async () => {
+    setBusy('재배포를 요청하는 중…');
+    setError('');
+    try {
+      await onRedeploy();
+      onClose();  // 진행은 호출측 화면이 보여 준다 — 이 창이 그것을 가리면 안 된다
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy('');
+    }
   };
 
   // 저장은 검증을 통과해야만 한다. 화면의 본문이 서버가 검증한 것과 다르면(직접 고쳤으면)
   // 서버가 저장 시점에 다시 검증한다 — 여기서 막는 것은 "이미 문제라고 아는" 경우다.
   const unchecked = data !== null && script !== data.script;
   const blocked = !unchecked && (data?.problems.length ?? 0) > 0;
+  // 저장한 뒤 본문을 또 고쳤으면 저장이 다시 필요하다 — 그때는 재배포가 아니라 저장을
+  // 보여 준다(고친 것을 저장하지 않은 채 배포하면 방금 쓴 것이 쓰이지 않는다).
 
   return (
     <Modal title={`기동 스크립트 (start.cmd) — ${profile}`} onClose={onClose}>
@@ -204,9 +238,15 @@ export default function StartScriptModal({ projectId, profile, onClose }: Props)
       {notice && <p style={{ fontSize: 13, color: '#7ee787' }}>{notice}</p>}
 
       <div className="row" style={{ marginTop: 10 }}>
-        <button onClick={save} disabled={!!busy || !script.trim() || blocked}>
-          확인했습니다 — 저장
-        </button>
+        {applied && !unchecked ? (
+          <button onClick={redeploy} disabled={!!busy}>
+            재배포
+          </button>
+        ) : (
+          <button onClick={save} disabled={!!busy || !script.trim() || blocked}>
+            확인했습니다 — 저장
+          </button>
+        )}
         <button className="secondary" onClick={reset} disabled={!!busy}>
           템플릿으로 되돌리기
         </button>
