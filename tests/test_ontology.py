@@ -144,7 +144,9 @@ def test_graph_server_answers_across_stores(monkeypatch, tmp_path, fresh_setting
     assert tools == {"graph_schema", "find_nodes", "neighbors"}
 
     schema = json.loads(_text(_rpc(c, "graph_schema")))
-    assert schema["rules"]["table_schemas"][0]["columns"] == ["구분", "대상", "비고"]
+    assert schema["schema"]["rules"]["table_schemas"][0]["columns"] == ["구분", "대상", "비고"]
+    # 관계를 저장하는 도구는 없다 — 그러면 **어떻게 남기는지**를 응답이 말해야 한다.
+    assert "문서" in schema["note"] and "write_file" in schema["note"]
 
     hits = json.loads(_text(_rpc(c, "find_nodes", {"kind": "term", "q": "연차"})))
     assert hits[0]["source"] == "rules"

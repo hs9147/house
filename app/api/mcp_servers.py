@@ -528,12 +528,36 @@ def _code_call(project: Project, name: str, args: dict) -> str:
 # 이유는 services/docsearch.reindex와 같다 — MCP 클라이언트의 요청 타임아웃이 30초다.
 _DOCS_REINDEX_BUDGET = 20.0
 
+def _mcp_url(suffix: str) -> str:
+    """이 플랫폼 MCP 서버의 **전체 주소**. 기준은 서버 목록과 같은 곳에서 온다.
+
+    상대 경로를 돌려주면 그 값을 받는 기계(외주 빌더·에이전트)에는 기준이 없다 — 사람이
+    호스트를 추측하게 된다. 기준을 모르면 빈 문자열이 아니라 상대 경로라도 준다(그쪽이
+    아무 정보도 없는 것보다 낫다).
+    """
+    from ..services import mcp_search  # noqa: PLC0415 — 순환 import 회피
+
+    base = mcp_search.internal_base_url()
+    return f"{base}/api/v1/mcp/{suffix}" if base else f"/paas/api/v1/mcp/{suffix}"
+
+
+# 이 서버(가로지르는 읽기 표면)에는 쓰기 도구를 두지 않는다 — 계약 폴더처럼 읽기 전용
+# 맥락에서도 모델이 쓰기 도구를 보게 되기 때문이다(storage 서버 docstring 참고). 대신
+# **어디로 쓰면 되는지**를 알려 준다: 그 안내가 없으면 "등록 도구가 없다"로 멈춘다(실측).
+_DOCS_WRITE_NOTE = (
+    "이 서버는 읽기·검색 전용입니다. 문서를 등록·수정하려면 위 sources의 write_to 주소"
+    "(paas-storage-{저장소})에 붙어 write_file을 부르세요 — 저장하면 색인과 문서 그래프에"
+    " 즉시 반영됩니다. read_only인 저장소에는 쓸 수 없습니다(write_to가 비어 있습니다)."
+)
+
 _DOCS_TOOLS = [
     {
         "name": "list_sources",
         "description": (
             "검색 대상 문서 저장소 목록과 각 색인 상태. 저장소 이름을 몰라도 되지만,"
             " 범위를 좁히고 싶을 때 여기서 이름을 얻는다."
+            " **문서를 등록·수정하려면 여기서 write_to 주소를 얻는다** — 이 서버는 읽기"
+            " 전용이고, 쓰기는 저장소별 서버(paas-storage-{저장소})의 write_file이다."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -641,15 +665,23 @@ def _docs_call(db: Session, actor: str, name: str, args: dict) -> str:
     sources = [_doc_source(source_name)] if source_name else _all_stores()
 
     if name == "list_sources":
-        return _dump([
-            # root를 함께 준다 — "붙였는데 안 나온다"의 원인은 거의 언제나 경로이고,
-            # 경로를 감추면 그것을 확인할 방법이 없다(환경변수로 정하는 값이다).
-            {"source": store.name, "root": str(store.root),
-             "exists": store.root.is_dir(), "read_only": store.read_only,
-             "index": {k: v for k, v in docsearch.status(store.name).items()
-                       if k in ("total", "indexed", "failed")}}
-            for store in sources
-        ])
+        return _dump({
+            "sources": [
+                # root를 함께 준다 — "붙였는데 안 나온다"의 원인은 거의 언제나 경로이고,
+                # 경로를 감추면 그것을 확인할 방법이 없다(환경변수로 정하는 값이다).
+                {"source": store.name, "root": str(store.root),
+                 "exists": store.root.is_dir(), "read_only": store.read_only,
+                 # **문서를 등록할 주소**. 이 서버에는 쓰기 도구가 없다(아래 note) —
+                 # 어디로 가야 하는지를 여기서 알려 주지 않으면, 에이전트는 "등록 도구가
+                 # 없다"로 결론 내고 멈춘다(실측). 전체 URL로 준다: 이 값을 받는 쪽은
+                 # 남의 기계라 `/paas/...`의 기준이 없다.
+                 "write_to": "" if store.read_only else _mcp_url(f"storage/{store.name}"),
+                 "index": {k: v for k, v in docsearch.status(store.name).items()
+                           if k in ("total", "indexed", "failed")}}
+                for store in sources
+            ],
+            "note": _DOCS_WRITE_NOTE,
+        })
 
     if name == "index_status":
         return _dump({store.name: docsearch.status(store.name) for store in sources})
@@ -1283,6 +1315,19 @@ def _apis_call(db: Session, actor: str, name: str, args: dict) -> str:
 # 인용하는지. 그래프는 색인과 같은 추출에서 나오므로 따로 만들 것이 없다
 # (services/ontology.py, docsearch._write_graph).
 
+# 그래프에 관계를 **직접** 저장하는 도구는 없다. 그래프는 색인과 같은 추출의 파생물이라
+# (services/ontology.extract) 문서를 다시 읽으면 언제나 같은 그래프가 나온다 — 손으로 넣은
+# 관계가 섞이면 그 성질이 깨지고, 어느 관계가 문서 근거를 가진 것인지 알 수 없게 된다.
+# 그래서 "관계를 남긴다"는 곧 "그 관계가 적힌 문서를 등록한다"다. 그 길을 응답에 적어 준다 —
+# 적어 주지 않으면 에이전트는 "관계 저장 도구가 없다"로 멈춘다(실측).
+_GRAPH_WRITE_NOTE = (
+    "이 그래프는 등록된 문서에서 추출된 파생물입니다(직접 저장하는 도구는 없습니다)."
+    " 관계를 남기려면 그 관계가 적힌 문서를 저장소에 등록하세요 — 표의 머리글, 용어의"
+    " 정의문, 다른 문서 인용이 각각 노드와 관계가 됩니다. 등록은 paas-docs의"
+    " list_sources가 알려 주는 쓰기 가능한 저장소(write_to 주소)의 write_file이고,"
+    " 등록 즉시 색인과 이 그래프에 반영됩니다."
+)
+
 _GRAPH_TOOLS = [
     {
         "name": "graph_schema",
@@ -1290,6 +1335,8 @@ _GRAPH_TOOLS = [
             "그래프에 **무엇이 있는지** — 노드 종류별 개수, 관계 종류별 개수, 그리고"
             " 되풀이되는 표의 컬럼 이름 묶음(사내 문서의 점검표·대장·양식은 사실상"
             " 레코드 타입이고 그 머리글이 곧 스키마다). 찾기 전에 여기부터 본다."
+            " 응답의 note가 **관계를 남기는 방법**을 알려 준다 — 이 그래프는 등록된 문서의"
+            " 파생물이라 직접 저장하는 도구가 없다."
         ),
         "inputSchema": {
             "type": "object",
@@ -1369,7 +1416,9 @@ def _graph_call(name: str, args: dict) -> str:
             raise mcp_server.McpToolError(
                 "그래프가 비어 있습니다 — reindex_docs(/mcp/docs)를 먼저 실행하세요."
                 " 온톨로지는 색인과 같은 추출에서 만들어집니다.")
-        return _dump(out)
+        # 관계를 남기는 길을 함께 준다 — 이 서버에는 저장 도구가 없고, 없다는 사실만으로는
+        # 무엇을 해야 하는지 알 수 없다.
+        return _dump({"schema": out, "note": _GRAPH_WRITE_NOTE})
 
     if name == "find_nodes":
         limit = _int_arg(args, "limit", 20, _MAX_LIST)

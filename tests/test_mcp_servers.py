@@ -721,12 +721,16 @@ def test_docs_server_lists_sources_with_coverage(monkeypatch, fresh_settings, tm
 
     import json
 
-    sources = {row["source"]: row for row in
-               json.loads(_text(_call(c, "/mcp/docs", "list_sources")))}
-    assert sources["company-docs"] == {
-        "source": "company-docs", "root": str(tmp_path / "shared" / "company-docs"),
-        "exists": True, "read_only": False,
-        "index": {"total": 2, "indexed": 1, "failed": 1}}
+    listing = json.loads(_text(_call(c, "/mcp/docs", "list_sources")))
+    sources = {row["source"]: row for row in listing["sources"]}
+    row = sources["company-docs"]
+    assert row["root"] == str(tmp_path / "shared" / "company-docs")
+    assert row["exists"] is True and row["read_only"] is False
+    assert row["index"] == {"total": 2, "indexed": 1, "failed": 1}
+    # 이 서버에는 쓰기 도구가 없다 — **어디로 쓰면 되는지**를 알려 준다. 없으면 에이전트는
+    # "등록 도구가 없다"로 결론 내고 멈춘다(실측). 호스트는 설정이 정하므로 꼬리만 본다.
+    assert row["write_to"].endswith("/api/v1/mcp/storage/company-docs")
+    assert "write_file" in listing["note"]
     # 숨긴 저장소도 여기서는 나온다 — /mcp/docs는 "전체에서 찾아라"는 창구다
     assert sources["internal"]["read_only"] is False
     status = json.loads(_text(_call(c, "/mcp/docs", "index_status")))
