@@ -25,7 +25,7 @@ from ..schemas import (
 from ..security import require_api_key
 from ..services import deployer
 from ..services import ports as ports_service  # server_config의 지역변수 ports와 구분
-from ..services.build import COMPOSITE_COMPONENTS
+from ..services import structure
 from ..services.proxy import domain_for, get_proxy, path_prefix_for
 from ..services.proxy.base import site_name
 
@@ -128,11 +128,15 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
         for profile in BuildProfile:
             components = None
             if p.type == ProjectType.composite:
-                # composite는 {name}-backend/{name}-frontend로 따로 등록되므로(런타임
-                # 유닛 이름 규칙은 RuntimeSpec.unit_name과 동일), 컴포넌트별로 조회하고
-                # 전체 상태는 둘의 상태를 종합해 요약한다 — {name} 단독 유닛은 없다.
+                # composite는 {name}-{컴포넌트}로 따로 등록되므로(런타임 유닛 이름 규칙은
+                # RuntimeSpec.unit_name과 동일), 컴포넌트별로 조회하고 전체 상태는 그것들을
+                # 종합해 요약한다 — {name} 단독 유닛은 없다.
+                #
+                # 이름은 **감지된 구조**에서 온다. 예전에는 backend/frontend 고정 목록을 썼고,
+                # 그래서 `api`+`web`인 리포는 없는 유닛을 조회해 **떠 있는 앱을 stopped로**
+                # 보고했다(실측 negowith: 두 서비스가 running인데 화면은 stopped, 포트는 null).
                 components = []
-                for name in COMPOSITE_COMPONENTS:
+                for name in structure.unit_names(p.structure):
                     try:
                         comp_status = runtime.status(f"{p.name}-{name}", profile)
                     except Exception as e:  # noqa: BLE001

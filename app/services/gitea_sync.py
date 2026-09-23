@@ -31,7 +31,6 @@ from ..models import (
 )
 from . import gitea
 from . import structure as structure_service
-from .build import COMPOSITE_COMPONENTS
 from .git_auth import auth_args
 from .gitea import GiteaError
 
@@ -161,7 +160,10 @@ def _delete_project(db: Session, project: Project) -> None:
     for profile in BuildProfile:
         try:
             if project.type == ProjectType.composite:
-                for name in COMPOSITE_COMPONENTS:
+                # 이름은 감지된 구조에서 온다 — 고정 목록(backend/frontend)으로 내리면
+                # `api`+`web`인 리포에서는 없는 유닛을 멈추고 실제 서비스는 계속 돈다
+                # (삭제한 프로젝트의 서비스가 남는다).
+                for name in structure.unit_names(project.structure):
                     runtime.stop(f"{project.name}-{name}", profile)
             else:
                 runtime.stop(project.name, profile)

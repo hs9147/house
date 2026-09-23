@@ -64,8 +64,9 @@ from ..services import apisearch
 from ..services import codemap as codemap_service
 from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, workspace
 from ..services import modules as modules_service
+from ..services import structure
 from ..services import storage as storage_service
-from ..services.build import COMPOSITE_COMPONENTS, BuildError, checkout
+from ..services.build import BuildError, checkout
 from ..services.proxy import domain_for, path_prefix_for
 
 router = APIRouter(tags=["mcp"])
@@ -377,8 +378,10 @@ def _ops_call(db: Session, actor: str, name: str, args: dict) -> str:
     runtime = deployer.get_runtime()
     if project.type == ProjectType.composite:
         return _dump({
+            # 이름은 감지된 구조에서 온다 — 고정 목록(backend/frontend)은 `api`+`web`인
+            # 리포에서 없는 유닛의 로그를 읽어 늘 빈 문자열을 돌려줬다.
             component: runtime.logs(f"{project.name}-{component}", profile, tail)
-            for component in COMPOSITE_COMPONENTS
+            for component in structure.unit_names(project.structure)
         })
     return runtime.logs(project.name, profile, tail)
 
@@ -389,7 +392,7 @@ def _runtime_status(runtime, project: Project, profile: BuildProfile) -> str:
         if project.type == ProjectType.composite:
             statuses = {
                 runtime.status(f"{project.name}-{component}", profile)
-                for component in COMPOSITE_COMPONENTS
+                for component in structure.unit_names(project.structure)
             }
             return statuses.pop() if len(statuses) == 1 else "partial"
         return runtime.status(project.name, profile)
