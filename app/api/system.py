@@ -736,11 +736,18 @@ def _server_log_dir():
     return (get_settings().resolved_repo_root / "logs").resolve()
 
 
+# 서버 로그로 인정하는 확장자. **.log을 포함한다** — SW 업데이트가 남기는 sw-update.log가
+# 그 확장자이고, 그 로그는 "업데이트가 왜 적용되지 않았나"를 아는 유일한 창구다. 예전에는
+# .txt만 허용해서, sw_update의 설명("콘솔 서버 로그 탭에서 읽는다")과 실제가 어긋났다 —
+# pip 설치가 조용히 실패해도(실측: pypdf가 설치되지 않음) 확인할 방법이 없었다.
+SERVER_LOG_SUFFIXES = (".txt", ".log")
+
+
 @router.get("/system/server-logs")
 def list_server_log_files(
     _: ApiKey = Depends(require_admin),
 ):
-    """실행 경로 하위 logs/의 .txt 서버 로그 파일 목록을 최신순으로 반환한다."""
+    """실행 경로 하위 logs/의 서버 로그 파일 목록을 최신순으로 반환한다(.txt·.log)."""
     try:
         log_dir = _server_log_dir()
         if not log_dir.exists():
@@ -748,7 +755,9 @@ def list_server_log_files(
             return {"files": [], "log_dir": str(log_dir)}
 
         txt_files = []
-        for entry in log_dir.glob("**/*.txt"):
+        for entry in log_dir.rglob("*"):
+            if entry.suffix.lower() not in SERVER_LOG_SUFFIXES:
+                continue
             try:
                 if entry.is_file():
                     stat = entry.stat()
@@ -949,9 +958,11 @@ def get_server_log_content(
     # 문자열 startswith로 비교하면 형제 디렉터리(logs-old 등)가 통과한다 — 경로 단위로 본다.
     if not target_path.is_relative_to(log_dir):
         raise HTTPException(status_code=403, detail="Access denied: outside log directory")
-    # 목록이 .txt만 보여주므로 읽기도 같은 범위로 맞춘다.
-    if target_path.suffix.lower() != ".txt":
-        raise HTTPException(status_code=403, detail="Access denied: .txt only")
+    # 목록과 같은 범위로 맞춘다 — 목록에 보이는데 열리지 않으면 고장으로 보인다.
+    if target_path.suffix.lower() not in SERVER_LOG_SUFFIXES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access denied: {' · '.join(SERVER_LOG_SUFFIXES)} only")
 
     if not target_path.is_file():
         raise HTTPException(status_code=404, detail=f"Log file '{filename}' not found")
