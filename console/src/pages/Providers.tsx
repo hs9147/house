@@ -144,6 +144,7 @@ export default function Providers() {
                       ) : admin ? (
                         <button
                           className="small secondary"
+                          title="이 모델을 기본값으로 설정합니다(배포 점검·실패 원인 분석·레포 검토가 이 모델로 돕니다)"
                           onClick={async () => {
                             try {
                               await api.setDefaultProvider(p.id);
@@ -153,7 +154,7 @@ export default function Providers() {
                             }
                           }}
                         >
-                          기본값으로
+                          설정
                         </button>
                       ) : '-'}
                     </td>
