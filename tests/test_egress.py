@@ -231,9 +231,11 @@ def test_proxy_does_not_append_a_slash_when_the_path_is_empty(monkeypatch, fresh
         "config": {"url": "http://gpax.lge.com/paas/api/v1/mcp/docs"},
     }, headers=ADMIN)
 
-    # 경로 없이 부른다 — 모듈 주소 그대로여야 한다.
-    assert c.post(f"{API}/proxy/modules/docs-mcp", headers={
-        **ADMIN, "content-type": "application/json"}, json={}).status_code == 200
+    # 경로 없이 부른다 — 모듈 주소 그대로여야 하고, **리다이렉트 없이** 받아야 한다
+    # (POST 307을 따라가며 본문을 흘리는 클라이언트가 있다).
+    res = c.post(f"{API}/proxy/modules/docs-mcp", headers={
+        **ADMIN, "content-type": "application/json"}, json={}, follow_redirects=False)
+    assert res.status_code == 200, res.status_code
     assert sent["url"] == "http://gpax.lge.com/paas/api/v1/mcp/docs"
 
     # 경로가 있으면 하나의 슬래시로 이어 붙인다(중복 슬래시도 안 된다).
