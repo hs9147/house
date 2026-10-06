@@ -232,6 +232,10 @@ export default function Ontology() {
             {Object.keys(data.failure_reasons).length > 0 && (
               <div className="panel">
                 <h3 style={{ marginTop: 0 }}>추출 실패 이유</h3>
+                <p className="mutedtext" style={{ fontSize: 12 }}>
+                  **그때 색인한 시점의 이유**입니다 — 추출기를 그 뒤에 설치했다면 이 문서들은
+                  재색인하면 전환됩니다(이유 문구는 재색인할 때 갱신됩니다).
+                </p>
                 <table>
                   <thead><tr><th>이유</th><th>문서 수</th></tr></thead>
                   <tbody>

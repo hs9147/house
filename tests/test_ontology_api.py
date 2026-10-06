@@ -89,3 +89,20 @@ def test_endpoints_read_only_and_admin_reindex(monkeypatch, tmp_path, fresh_sett
 
     assert c.get(f"{API}/ontology/stores/없는저장소", headers=ADMIN).status_code == 404
     assert c.get(f"{API}/ontology/overview").status_code == 401
+
+
+def test_relations_are_counted_inside_documents_that_have_structure(monkeypatch, tmp_path,
+                                                                    fresh_settings):
+    """실측: 절이 없는 문서에서 인용만 발견되면 문서→문서 관계가 생긴다 — 구조는 없는데
+    관계는 있는 상태다. 그걸 그대로 세면 퍼널이 뒤집힌다(관계 3,039 > 구조 3,023)."""
+    root = _store(monkeypatch, tmp_path)
+    # 제목·표·정의문은 없고 인용만 있는 평문
+    (root / "인용만.md").write_text(
+        "별첨 「구매 지침」을 따른다.\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+
+    summary = ontology_status.store_summary("docs")
+    assert summary["with_nodes"] == 0           # 구조 노드가 없다
+    assert summary["with_edges"] == 0           # 그러니 관계도 세지 않는다
+    counts = [stage["count"] for stage in ontology_status.overview()["funnel"]]
+    assert counts == sorted(counts, reverse=True), counts

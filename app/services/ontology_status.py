@@ -61,9 +61,15 @@ def store_summary(store_name: str) -> dict:
         with_nodes = conn.execute(
             "SELECT COUNT(DISTINCT n.path) FROM nodes n JOIN docs d ON d.path = n.path"
             " AND d.body IS NOT NULL WHERE n.kind != 'document'").fetchone()[0]
+        # 관계도 **구조가 있는 문서** 안에서만 센다. 구조 없이 관계만 생기는 경우가 실제로
+        # 있다: 절이 없는 문서에서 인용이 발견되면 문서→(인용된)문서 관계가 생기는데, 그
+        # 문서에는 구조 노드가 없다. 그걸 그대로 세면 "관계 생성"이 "구조 추출"보다 커져
+        # 퍼널이 또 뒤집힌다(실측: 3,039 > 3,023).
         with_edges = conn.execute(
             "SELECT COUNT(DISTINCT e.path) FROM edges e JOIN docs d ON d.path = e.path"
-            " AND d.body IS NOT NULL").fetchone()[0]
+            " AND d.body IS NOT NULL"
+            " WHERE EXISTS (SELECT 1 FROM nodes n WHERE n.path = e.path"
+            "               AND n.kind != 'document')").fetchone()[0]
         stale_nodes = conn.execute(
             "SELECT COUNT(*) FROM nodes n LEFT JOIN docs d ON d.path = n.path"
             " WHERE d.path IS NULL OR d.body IS NULL").fetchone()[0]
