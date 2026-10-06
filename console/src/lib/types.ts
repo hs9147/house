@@ -393,6 +393,57 @@ export interface ProjectFilesOut {
   files: string[];
 }
 
+// 온톨로지 전환 현황 — 문서가 그래프로 얼마나 옮겨졌는지(app/services/ontology_status.py).
+// 퍼널의 각 단계는 직전 단계의 부분집합이다 — 그래야 "어디서 떨어졌나"가 읽힌다.
+export interface OntologyStore {
+  store: string;
+  indexed: number;        // 색인 DB에 행이 있는 문서
+  extracted: number;      // 본문을 읽어 낸 문서
+  extract_failed: number;
+  truncated: number;
+  with_nodes: number;     // 노드가 하나라도 생긴 문서(= 전환됨)
+  with_edges: number;
+  no_nodes: number;       // 본문은 읽혔는데 노드가 없다 — 가장 조용한 실패
+  nodes: number;
+  edges: number;
+  stale_nodes: number;    // 지금은 본문을 못 읽는 문서에 매달린 옛 노드
+  node_kinds: Record<string, number>;
+  edge_kinds: Record<string, number>;
+  node_buckets: Record<string, number>;
+  gap_paths: string[];
+  table_schemas: { columns: string[]; documents: number; store: string }[];
+  failure_reasons: Record<string, number>;
+  by_suffix: Record<string, { indexed: number; failed: number }>;
+  last_indexed_at: number | null;
+  daily: { date: string; documents: number }[];
+}
+
+export interface OntologyOverview {
+  stores: OntologyStore[];
+  errors: { store: string; error: string }[];
+  totals: {
+    stores: number;
+    indexed: number;
+    extracted: number;
+    extract_failed: number;
+    truncated: number;
+    with_nodes: number;
+    with_edges: number;
+    no_nodes: number;
+    nodes: number;
+    edges: number;
+    stale_nodes: number;
+    conversion_rate: number;
+    node_kinds: Record<string, number>;
+    edge_kinds: Record<string, number>;
+    node_buckets: Record<string, number>;
+  };
+  funnel: { stage: string; count: number; detail?: string }[];
+  table_schemas: { columns: string[]; documents: number; store: string }[];
+  failure_reasons: Record<string, number>;
+  daily: { date: string; documents: number }[];
+}
+
 // 배포 전 점검 — 걸기 전에 알 수 있는 것(의존성 선언·실행 폴더·기동 스크립트 검증 등).
 // 막지 않는다: 감지가 못 맞히는 구성이 있으므로 판단은 사람이 한다.
 export interface DeployCheckItem {

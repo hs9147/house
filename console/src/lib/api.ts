@@ -20,6 +20,8 @@ import type {
   McpDirectoryItem,
   ModuleOut,
   ModuleSummary,
+  OntologyOverview,
+  OntologyStore,
   OrgOut,
   PlanArtifactContent,
   PlanArtifactOut,
@@ -311,6 +313,16 @@ export const api = {
   resetStartScript: (id: number, profile: BuildProfile, component = '') =>
     request<StartScriptOut>('DELETE', `/projects/${id}/start-script`, undefined,
       { component, profile }),
+  // 온톨로지 관리 — 문서→그래프 전환 현황(읽기)과 재색인(전환을 진행시키는 유일한 수단).
+  ontologyOverview: () => request<OntologyOverview>('GET', '/ontology/overview'),
+  ontologyStore: (store: string) =>
+    request<OntologyStore & { index_bytes: number }>(
+      'GET', `/ontology/stores/${encodeURIComponent(store)}`),
+  reindexOntology: (store: string, force = false) =>
+    request<{ done: boolean; indexed?: number; remaining?: number }>(
+      'POST', `/ontology/stores/${encodeURIComponent(store)}/reindex`, undefined,
+      // query 값은 문자열·숫자만 받는다(boolean은 타입에서 걸린다) — 서버는 "true"를 읽는다.
+      { force: force ? 'true' : undefined }),
   listEnv: (id: number) => request<EnvVarRow[]>('GET', `/projects/${id}/env`),
   setEnv: (id: number, key: string, value: string, is_secret: boolean) =>
     request<void>('PUT', `/projects/${id}/env`, { key, value, is_secret }),

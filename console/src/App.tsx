@@ -15,6 +15,7 @@ import Projects from './pages/Projects';
 import PowerShellConsole from './pages/PowerShellConsole';
 import Providers from './pages/Providers';
 import ServerConfig from './pages/ServerConfig';
+import Ontology from './pages/Ontology';
 import Storage from './pages/Storage';
 import CodeTab from './pages/project/CodeTab';
 import DeploymentsTab from './pages/project/DeploymentsTab';
@@ -88,6 +89,15 @@ export default function App() {
           element={
             <AdminOnly>
               <Storage />
+            </AdminOnly>
+          }
+        />
+        {/* 파일 관리 다음 자리 — 문서가 그래프로 얼마나 옮겨졌는지 본다. */}
+        <Route
+          path="/ontology"
+          element={
+            <AdminOnly>
+              <Ontology />
             </AdminOnly>
           }
         />

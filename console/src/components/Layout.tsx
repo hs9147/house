@@ -60,6 +60,7 @@ export default function Layout() {
           {admin && has('workspace') && <NavLink to="/providers">LLM 관리</NavLink>}
           {admin && <NavLink to="/modules">모듈 관리</NavLink>}
           {admin && <NavLink to="/storage">파일 관리</NavLink>}
+          {admin && <NavLink to="/ontology">온톨로지 관리</NavLink>}
           {admin && has('deploy') && <NavLink to="/server-config">서버구성</NavLink>}
           {admin && <NavLink to="/powershell">서버연결</NavLink>}
           {admin && <NavLink to="/audit">작업 로그</NavLink>}

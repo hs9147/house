@@ -8,7 +8,7 @@ from starlette.staticfiles import StaticFiles
 from .api import (
     a2a_gateway, llm, mcp_servers,
     mcp_tokens, modules, oidc_provider, orgs, planning, previews, projects,
-    proxy_gateway, server, storage, system, webhooks,
+    ontology, proxy_gateway, server, storage, system, webhooks,
 )
 from .config import get_settings
 from .db import Base, engine
@@ -116,6 +116,8 @@ def create_app() -> FastAPI:
     app.include_router(proxy_gateway.router, prefix=API_PREFIX)
     app.include_router(a2a_gateway.router, prefix=API_PREFIX)
     app.include_router(storage.router, prefix=API_PREFIX)
+    # 온톨로지 관리 — 파일 관리 다음 자리(문서 → 그래프 전환 현황)
+    app.include_router(ontology.router, prefix=API_PREFIX)
     # 사내 MCP 서버 — 엔드포인트별로 필요한 기능만 게이트한다(ops=deploy, code=workspace).
     app.include_router(mcp_servers.router, prefix=API_PREFIX)
     # 개인 MCP 토큰 발급·폐기 — MCP 서버 자체와 달리 콘솔(로그인 세션)이 쓰는 경로다.
