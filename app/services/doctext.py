@@ -52,9 +52,46 @@ _SOFFICE_TIMEOUT = 120
 
 _OLE_MAGIC = b"\xd0\xcf\x11\xe0"
 
+# 추출 능력 지문은 **프로세스 단위로 한 번** 계산한다. 값이 달라지는 조건(pip 설치, soffice·
+# tesseract 설치)은 서비스 재시작을 동반하거나, 다음 재시작에서 반영되면 충분하다 — 문서마다
+# shutil.which를 도는 비용을 치를 이유가 없다(색인은 수만 건을 돈다).
+_CAPABILITY_FP: str | None = None
+
 
 class ExtractError(RuntimeError):
     """추출할 수 없는 파일 — 형식 미지원, 드라이버 없음, 손상."""
+
+
+def capability_fingerprint() -> str:
+    """**지금 이 서버가 무엇을 추출할 수 있는지**를 한 줄로 적은 값.
+
+    색인은 실패도 캐시한다(같은 파일을 매번 다시 열어 보면 97-2003 하나에 2초씩 쓴다).
+    그런데 실패의 원인이 파일이 아니라 환경인 경우가 많다 — pypdf를 설치하면 어제 실패한
+    PDF가 오늘은 읽힌다. 실측: pypdf 설치 뒤에도 PDF 6,600건이 "추출기가 없습니다"로 남아
+    있었고, 재색인 버튼은 아무 일도 하지 않았다(크기·시각이 같아 건너뛴다).
+
+    그래서 실패한 행에 이 값을 함께 적어 두고, 값이 **달라졌을 때만** 다시 시도한다.
+    환경이 그대로면 재시도하지 않으므로 실패 캐시의 이점은 그대로다.
+    """
+    global _CAPABILITY_FP
+    if _CAPABILITY_FP is not None:
+        return _CAPABILITY_FP
+
+    def has(module: str) -> str:
+        try:
+            __import__(module)
+            return "1"
+        except Exception:  # noqa: BLE001 — 설치 여부만 본다
+            return "0"
+
+    _CAPABILITY_FP = ";".join([
+        f"pypdf={has('pypdf')}",
+        f"pypdfium2={has('pypdfium2')}",
+        f"pillow={has('PIL')}",
+        f"soffice={'1' if _soffice() else '0'}",
+        f"tesseract={'1' if _tesseract() else '0'}",
+    ])
+    return _CAPABILITY_FP
 
 
 def extract(path: Path) -> tuple[str, str]:

@@ -75,7 +75,10 @@ CREATE TABLE IF NOT EXISTS docs (
   body       TEXT,           -- NULL이면 추출 실패
   truncated  INTEGER NOT NULL DEFAULT 0,
   error      TEXT,           -- 실패 이유(사용자에게 그대로 보여 준다)
-  indexed_at REAL NOT NULL
+  indexed_at REAL NOT NULL,
+  -- 색인 당시 이 서버의 추출 능력(doctext.capability_fingerprint). 실패한 행을 **환경이
+  -- 바뀌었을 때만** 다시 시도하는 근거다.
+  extractor_fp TEXT
 );
 CREATE TABLE IF NOT EXISTS nodes (
   path   TEXT NOT NULL,      -- 이 노드를 만든 문서 — 삭제·재색인의 단위다
@@ -108,7 +111,22 @@ def _connect(store_name: str, timeout: float = 5.0) -> sqlite3.Connection:
     conn = sqlite3.connect(index_path(store_name), timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _add_missing_columns(conn)
     return conn
+
+
+# 저장소마다 SQLite 파일이 따로라 alembic이 닿지 않는다 — 컬럼 추가는 여기서 맞춘다.
+# CREATE TABLE IF NOT EXISTS는 이미 있는 표에 컬럼을 넣어 주지 않는다(플랫폼 DB에서 겪은
+# 것과 같은 함정이다).
+_ADDED_COLUMNS = (("docs", "extractor_fp", "TEXT"),)
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    for table, column, decl in _ADDED_COLUMNS:
+        have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            conn.commit()
 
 
 def skip_dir(name: str) -> bool:
@@ -190,32 +208,52 @@ def _vanished(known: dict, candidates: list, root: Path,
 
 def reindex(store_name: str, root: Path, *, force: bool = False,
             budget_seconds: float = _DEFAULT_BUDGET) -> dict:
-    """바뀐 파일만 다시 추출해 색인을 갱신한다.
+    """바뀐 파일과 **지난번 실패한 파일**을 다시 추출해 색인을 갱신한다.
 
     예산을 넘기면 남은 개수를 `remaining`으로 돌려주고 멈춘다 — `done`이 false면 다시
     호출한다. 지워진 파일 정리는 예산과 무관하게 매번 한다: 목록 훑기(stat)는 싼 작업이라
     호출마다 전체를 보므로, 중간에 멈춰도 "디스크에 없는데 색인에 있는 것"은 정확히 알 수
     있다(비싼 것은 추출뿐이다).
+
+    **환경이 바뀌면 실패한 파일을 다시 본다.** 실패도 캐시한다(97-2003 하나를 LibreOffice로
+    열어 보는 데 2초, 수백 개면 색인마다 그 시간을 다시 쓴다) — 그 이점은 지킨다. 다만 실패의
+    원인이 파일이 아니라 환경인 경우가 많아서, 색인 당시의 추출 능력을 행에 함께 적어 두고
+    (doctext.capability_fingerprint) **그 값이 달라졌을 때만** 다시 시도한다. 실측: pypdf를
+    설치한 뒤에도 PDF 6,600건이 "추출기가 없습니다"로 남아 있었고 재색인 버튼은 아무 일도
+    하지 않았다 — 파일은 그대로지만 우리가 읽을 수 있는지가 달라졌는데 그것을 몰랐다.
+
+    순서는 **바뀐 파일이 먼저**다. 영구 실패(LibreOffice 없는 97-2003 등)가 예산을 차지해
+    새 파일이 밀리면, 방금 올린 문서가 검색에 안 나오는 쪽이 더 나쁘다.
     """
     started = time.monotonic()
     conn = _connect(store_name)
     try:
-        known = {
-            row["path"]: (row["size"], row["mtime"])
-            for row in conn.execute("SELECT path, size, mtime FROM docs")
-        }
+        fingerprint = doctext.capability_fingerprint()
+        rows = conn.execute(
+            "SELECT path, size, mtime, body IS NULL AS bad, extractor_fp FROM docs")
+        known: dict[str, tuple[int, float]] = {}
+        stale_failures: set[str] = set()
+        for row in rows:
+            known[row["path"]] = (row["size"], row["mtime"])
+            # 실패했고, 그때의 추출 능력이 지금과 다르면 다시 볼 값어치가 있다.
+            if row["bad"] and row["extractor_fp"] != fingerprint:
+                stale_failures.add(row["path"])
         candidates, unreadable = _candidates(root)
-        todo = [
-            item for item in candidates
-            if force or known.get(item[0]) != (item[1], item[2])
-        ]
+        changed = [item for item in candidates
+                   if force or known.get(item[0]) != (item[1], item[2])]
+        changed_paths = {item[0] for item in changed}
+        retry = [item for item in candidates
+                 if item[0] not in changed_paths and item[0] in stale_failures]
+        # 바뀐 파일이 먼저, 그다음 "환경이 바뀌어 다시 볼" 실패분 — 재시도가 예산을 먹어
+        # 새 파일이 밀리면, 방금 올린 문서가 검색에 안 나오는 쪽이 더 나쁘다.
+        todo = changed + retry
 
         indexed = failed = 0
         last_commit = time.monotonic()
         for rel, size, mtime in todo:
             if time.monotonic() - started > budget_seconds:
                 break
-            if _index_file(conn, store_name, root, rel, size, mtime):
+            if _index_file(conn, store_name, root, rel, size, mtime, fingerprint):
                 indexed += 1
             else:
                 failed += 1
@@ -235,6 +273,8 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
         result = {
             "files": len(candidates), "indexed": indexed, "failed": failed,
             "skipped": len(candidates) - len(todo), "removed": len(gone),
+            # 환경이 바뀌어 다시 시도한 실패분 — "재색인했는데 뭐가 달라졌나"의 답이다.
+            "retried_failed": len(retry),
             "remaining": remaining, "done": remaining == 0,
         }
         if unreadable:
@@ -247,7 +287,7 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
 
 
 def _index_file(conn: sqlite3.Connection, store_name: str, root: Path, rel: str,
-                size: int, mtime: float) -> bool:
+                size: int, mtime: float, fingerprint: str | None = None) -> bool:
     """파일 하나를 색인에 기록한다. 추출에 성공했으면 True.
 
     실패도 기록한다 — 실패를 기억하지 않으면 색인마다 같은 파일을 다시 열어 본다
@@ -268,13 +308,15 @@ def _index_file(conn: sqlite3.Connection, store_name: str, root: Path, rel: str,
         error = f"파일을 읽을 수 없습니다: {e}"
     truncated = bool(body and len(body) > MAX_INDEX_CHARS)
     conn.execute(
-        "INSERT INTO docs (path, size, mtime, body, truncated, error, indexed_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
+        "INSERT INTO docs (path, size, mtime, body, truncated, error, indexed_at,"
+        " extractor_fp) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
         "size=excluded.size, mtime=excluded.mtime, body=excluded.body, "
         "truncated=excluded.truncated, error=excluded.error, "
-        "indexed_at=excluded.indexed_at",
+        "indexed_at=excluded.indexed_at, extractor_fp=excluded.extractor_fp",
         (rel, size, mtime, body[:MAX_INDEX_CHARS] if body else None,
-         int(truncated), error, time.time()),
+         int(truncated), error, time.time(),
+         fingerprint if fingerprint is not None else doctext.capability_fingerprint()),
     )
     return error is None
 

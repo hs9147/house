@@ -113,21 +113,28 @@ def test_reindex_forgets_deleted_files(docs):
 
 def test_failed_extraction_is_not_retried_until_the_file_changes(docs, monkeypatch):
     """실패도 캐시해야 한다 — 97-2003 파일 하나를 LibreOffice로 열어 보는 데 2초쯤 걸리고,
-    그런 파일이 수백 개면 색인마다 그 시간을 다시 쓴다."""
+    그런 파일이 수백 개면 색인마다 그 시간을 다시 쓴다.
+
+    **환경이 그대로인 동안** 그렇다: 추출 능력이 달라지면 다시 본다(그때는 파일이 아니라
+    우리가 바뀐 것이다 — test_reindex_retries_failures_when_the_extractors_changed)."""
     (docs / "구버전.doc").write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 32)
     from app.services import doctext as dt
 
     calls = []
     monkeypatch.setattr(dt, "_soffice", lambda: calls.append(1) or None)
 
+    # **증분으로 센다.** 능력 지문도 _soffice를 한 번 들여다보므로(프로세스당 1회, 캐시됨)
+    # 절대 개수는 이 테스트가 그 캐시를 채운 첫 번째인지에 따라 달라진다 — 우리가 보려는
+    # 것은 "두 번째 색인이 파일을 다시 열지 않는다"이므로 증분이 그 질문에 정확히 답한다.
     first = docsearch.reindex("f1", docs)
-    assert first["failed"] == 1 and len(calls) == 1
+    opened = len(calls)
+    assert first["failed"] == 1 and opened >= 1
 
     second = docsearch.reindex("f1", docs)
-    assert second["skipped"] == 4 and len(calls) == 1  # 다시 열어 보지 않는다
+    assert second["skipped"] == 4 and len(calls) == opened  # 다시 열어 보지 않는다
 
     forced = docsearch.reindex("f1", docs, force=True)
-    assert forced["failed"] == 1 and len(calls) == 2   # force일 때만 다시 시도
+    assert forced["failed"] == 1 and len(calls) == opened + 1  # force일 때만 다시 시도
 
 
 def test_reindex_force_reextracts_everything(docs):
@@ -215,6 +222,8 @@ def test_missing_root_is_not_an_error(monkeypatch, tmp_path, fresh_settings):
     get_settings.cache_clear()
     result = docsearch.reindex("s5", tmp_path / "없는폴더")
     assert result == {"files": 0, "indexed": 0, "failed": 0, "skipped": 0,
+                      # 환경이 바뀌어 다시 본 실패분 — 볼 파일이 없으니 0이다
+                      "retried_failed": 0,
                       "removed": 0, "remaining": 0, "done": True,
                       # 빈 폴더와 "폴더가 안 보인다"는 다른 상황이다
                       "unreadable_dirs": 1}
@@ -464,3 +473,69 @@ def test_batch_reindex_does_not_hold_the_write_lock_for_its_whole_budget(tmp_pat
     monkeypatch.setattr(docsearch, "_index_file", counting)
     docsearch.reindex("s", docs)
     assert seen[-1] > 0, "배치 도중 커밋이 한 번도 보이지 않았다"
+
+
+def test_reindex_retries_failures_when_the_extractors_changed(monkeypatch, tmp_path):
+    """실패의 원인이 파일이 아니라 **환경**인 경우가 많다.
+
+    실측: pypdf를 설치한 뒤에도 PDF 6,600건이 "추출기가 없습니다" 상태로 남아 있었다 —
+    크기·시각이 같아 재색인이 건너뛰었고, 사람이 버튼을 눌러도 아무 일도 일어나지 않았다.
+    그래서 색인 당시의 추출 능력을 행에 적어 두고 **그 값이 달라졌을 때만** 다시 본다.
+    환경이 그대로면 재시도하지 않으므로 실패 캐시의 이점은 그대로다(2차 호출로 확인한다).
+    """
+    from app.services import doctext
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "보고서.pdf").write_bytes(b"%PDF-1.4 fake")
+
+    # 1차: 추출기가 없는 환경
+    monkeypatch.setattr(docsearch.doctext, "capability_fingerprint", lambda: "pypdf=0")
+    monkeypatch.setattr(
+        docsearch.doctext, "extract",
+        lambda path: (_ for _ in ()).throw(doctext.ExtractError("PDF 추출기가 없습니다")))
+    first = docsearch.reindex("retry-store", root)
+    assert first["failed"] == 1
+    assert docsearch.status("retry-store")["failed"] == 1
+
+    # 2차: 같은 파일, 같은 환경 — 다시 열어 보지 않는다(실패 캐시가 그대로 듣는다)
+    again = docsearch.reindex("retry-store", root)
+    assert again["retried_failed"] == 0 and again["failed"] == 0, again
+
+    # 3차: 추출기가 생긴 환경(지문이 달라진다) — 건너뛰지 않고 다시 읽는다
+    monkeypatch.setattr(docsearch.doctext, "capability_fingerprint", lambda: "pypdf=1")
+    monkeypatch.setattr(docsearch.doctext, "extract",
+                        lambda path: ("# 보고서\n## 제1조(목적)\n목적.\n", "본문"))
+    third = docsearch.reindex("retry-store", root)
+    assert third["retried_failed"] == 1, third
+    assert third["indexed"] == 1, third
+    assert docsearch.status("retry-store")["failed"] == 0
+
+
+def test_reindex_puts_changed_files_before_retries(monkeypatch, tmp_path):
+    """영구 실패(LibreOffice 없는 97-2003 등)가 예산을 먹어 새 파일을 밀어내면 안 된다 —
+    방금 올린 문서가 검색에 안 나오는 쪽이 더 나쁘다."""
+    from app.services import doctext
+
+    root = tmp_path / "docs2"
+    root.mkdir()
+    (root / "영구실패.doc").write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 32)
+    monkeypatch.setattr(docsearch.doctext, "capability_fingerprint", lambda: "soffice=0")
+    monkeypatch.setattr(docsearch.doctext, "extract",
+                        lambda path: (_ for _ in ()).throw(doctext.ExtractError("불가")))
+    docsearch.reindex("order-store", root)
+    # 환경이 바뀌어 실패분을 다시 보는 상황을 만든다(지문이 달라진다).
+    monkeypatch.setattr(docsearch.doctext, "capability_fingerprint", lambda: "soffice=1")
+
+    seen: list[str] = []
+
+    def record(path):
+        seen.append(path.name)
+        if path.suffix == ".doc":
+            raise doctext.ExtractError("불가")
+        return ("# 새 문서\n## 제1조(목적)\n목적.\n", "본문")
+
+    monkeypatch.setattr(docsearch.doctext, "extract", record)
+    (root / "새문서.md").write_text("# 새 문서\n## 제1조(목적)\n목적.\n", encoding="utf-8")
+    docsearch.reindex("order-store", root)
+    assert seen and seen[0] == "새문서.md", seen
