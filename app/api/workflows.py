@@ -16,6 +16,8 @@ from ..models import (
     ApiKey, Organization, Workflow, WorkflowMessage, WorkflowRun, WorkflowRunStatus,
 )
 from ..security import require_admin, require_api_key
+from ..services import bedrock
+from ..services import llm as llm_service
 from ..services import workflow as workflow_service
 from ..services import workflowchat
 
@@ -202,6 +204,12 @@ def chat(workflow_id: int, body: WorkflowChatIn, db: Session = Depends(get_db),
         result = workflowchat.propose(db, row, body.request, history)
     except workflow_service.WorkflowError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except (bedrock.BedrockError, llm_service.LlmTimeout, llm_service.LlmCallFailed,
+            llm_service.LlmTruncated) as e:
+        # 프로바이더 쪽 사유는 **그대로 올린다.** 실측: Bedrock SSO 토큰이 만료됐을 때
+        # 이걸 안 잡아서 화면에 "Internal Server Error"만 떴다 — 메시지에는 어느 프로필로
+        # 재로그인하면 되는지까지 적혀 있었는데 그게 로그에만 남았다.
+        raise HTTPException(status_code=502, detail=str(e))
     db.add(WorkflowMessage(workflow_id=row.id, role="user", content=body.request))
     db.add(WorkflowMessage(workflow_id=row.id, role="assistant",
                            content=result["summary"] or "(요약 없음)"))

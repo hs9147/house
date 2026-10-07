@@ -203,3 +203,30 @@ def test_running_an_invalid_spec_is_refused(client):
     refused = client.post(f"{API}/workflows/{wid}/runs", headers=ADMIN)
     assert refused.status_code == 400
     assert "nodes가 비어" in refused.json()["detail"]
+
+
+def test_provider_failure_is_reported_not_swallowed_as_500(client, monkeypatch):
+    """프로바이더 쪽 사유는 그대로 올린다.
+
+    실측: Bedrock SSO 토큰이 만료됐을 때 화면에 "Internal Server Error"만 떴다 — 메시지에는
+    어느 프로필로 재로그인하면 되는지까지 적혀 있었는데 그게 로그에만 남았다.
+    """
+    from app.services import bedrock
+
+    org = _org(client)
+    wid = client.post(f"{API}/workflows", headers=ADMIN,
+                      json={"organization_id": org, "name": "w"}).json()["id"]
+    created = client.post(f"{API}/llm/providers", headers=ADMIN, json={
+        "name": "p1", "kind": "openai", "base_url": "https://x/v1", "model": "m",
+        "api_key": "k",
+    }).json()
+    client.post(f"{API}/llm/providers/{created['id']}/default", headers=ADMIN)
+
+    def boom(*a, **kw):
+        raise bedrock.BedrockError("AWS SSO 토큰이 만료됐습니다 (프로필 'p') — 재로그인하세요.")
+
+    monkeypatch.setattr(workflowchat.llm, "chat_completion", boom)
+    answer = client.post(f"{API}/workflows/{wid}/chat", headers=ADMIN,
+                         json={"request": "만들어 주세요"})
+    assert answer.status_code == 502, answer.status_code
+    assert "재로그인" in answer.json()["detail"]
