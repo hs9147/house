@@ -784,3 +784,114 @@ export interface SchedulerSnapshot {
   never_run: number;
   jobs: ScheduledJobRow[];
 }
+
+// --- 워크플로 (조직 단위, LLM 대화로 구성, 플랫폼 자원을 엮어 실행) ---
+// 표현은 작은 JSON 스펙이다(app/services/workflow.py에 스키마와 검증기). 그림은 파생물 —
+// 스펙이 원천이고 화면이 dagre로 배치해 그린다.
+export interface WorkflowNode {
+  id: string;
+  type: string;
+  label?: string;
+  // 종류마다 쓰는 항목이 다르다(store·query·prompt·module·tool·when·title…).
+  [field: string]: unknown;
+}
+
+export interface WorkflowEdge {
+  from: string;
+  to: string;
+  // 분기에서 나가는 연결에만 있다.
+  case?: '참' | '거짓';
+}
+
+export interface WorkflowSpec {
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+}
+
+// 대화에서 LLM이 읽어 낸 업무 — 스펙과 **따로** 내놓게 해서 사람이 검토한다.
+// 그럴듯한 스펙이 내 업무가 아닌 경우를 스펙만 보고는 알아볼 수 없다.
+export interface WorkflowExtracted {
+  entities?: { name: string; note?: string }[];
+  states?: { entity: string; name: string; note?: string }[];
+  transitions?: { from: string; to: string; trigger?: string; node?: string }[];
+  constraints?: { text: string; origin?: string; node?: string }[];
+}
+
+export interface WorkflowOut {
+  id: number;
+  organization_id: number;
+  org_name: string;
+  name: string;
+  description: string;
+  spec: WorkflowSpec;
+  extracted: WorkflowExtracted;
+  version: number;
+  summary: { node_count: number; human_steps: number; types: string[] };
+  created_at: string;
+  updated_at: string;
+  // 상세 조회에만 있다 — 저장된 스펙이 **지금도** 유효한가(저장소·모듈이 사라질 수 있다).
+  problems?: string[];
+}
+
+export interface WorkflowNodeType {
+  type: string;
+  label: string;
+  help: string;
+  required: string[];
+  optional: string[];
+}
+
+export interface WorkflowResources {
+  organization: string;
+  stores: { name: string; read_only: boolean; exists: boolean }[];
+  modules: { name: string; type: string; category: string }[];
+  providers: { name: string; model: string; is_default: boolean }[];
+  default_provider: string;
+  node_types: WorkflowNodeType[];
+  branch_kinds: string[];
+  cases: string[];
+}
+
+export interface WorkflowProposal {
+  summary: string;
+  spec: WorkflowSpec;
+  extracted: WorkflowExtracted;
+  // 비어 있지 않으면 저장할 수 없다(검증 실패).
+  problems: string[];
+  // 읽어 낸 것과 스펙이 맞물리는지에 대한 **검토 메모** — 막지는 않는다.
+  review: string[];
+  attempts: number;
+  provider: string;
+  facts: string;
+}
+
+export type WorkflowRunStatus = 'running' | 'waiting' | 'succeeded' | 'failed' | 'canceled';
+
+export interface WorkflowStep {
+  id: string;
+  type: string;
+  status: 'ok' | 'skipped' | 'failed' | 'waiting' | 'rejected';
+  summary: string;
+  ms: number;
+}
+
+export interface WorkflowRunOut {
+  id: number;
+  workflow_id: number;
+  version: number;
+  status: WorkflowRunStatus;
+  actor: string;
+  steps: WorkflowStep[];
+  pending_node: string;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+  // 상세 조회에만 — 사람 단계의 판단 근거가 여기 있다.
+  outputs?: Record<string, { text: string; paths: string[]; case?: string }>;
+}
+
+export interface WorkflowMessageOut {
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string;
+}

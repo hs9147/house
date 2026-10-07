@@ -646,3 +646,105 @@ class AuditEvent(Base):
     target: Mapped[str] = mapped_column(String(255))
     detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class WorkflowRunStatus(str, enum.Enum):
+    running = "running"
+    # 사람 단계에서 멈춰 있다 — 실패가 아니다. 사람이 제출하면 그 자리에서 이어 돈다.
+    waiting = "waiting"
+    succeeded = "succeeded"
+    failed = "failed"
+    canceled = "canceled"
+
+
+class Workflow(Base):
+    """조직의 워크플로 한 개 — 플랫폼 자원을 엮은 실행 가능한 그래프.
+
+    **조직 단위다**(organization_id 필수). 한 조직이 여러 개를 갖고, 이름은 조직 안에서만
+    유일하다 — 다른 조직의 "계약 검토"와 이름이 겹쳐도 상관없어야 한다.
+
+    표현은 작은 JSON 스펙이다(services/workflow.py에 스키마와 검증기). BPMN이나 Petri net을
+    쓰지 않은 이유: 요소의 대부분이 쓰이지 않고(zur Muehlen & Recker 2008), LLM이 생성·수정
+    해야 하는데 XML은 검증·수선 비용이 크다. 코드/구조화 스펙이라야 LLM이 만들고 고칠 수
+    있다는 것은 워크플로 자동 생성 연구의 공통된 설계 근거다(AFlow 2024, ProMoAI 2024).
+
+    그림은 **파생물**이다 — 스펙이 원천이고 화면은 dagre로 배치해 그린다. C4와 반대인데
+    (거기선 문서가 원천) 이유는 실행이다: 실행에 필요한 정보(도구·인자·분기 조건)를 담을
+    자리가 있어야 한다.
+    """
+
+    __tablename__ = "workflows"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="uq_workflow_org_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    organization: Mapped["Organization"] = relationship()
+    name: Mapped[str] = mapped_column(String(64))
+    description: Mapped[str] = mapped_column(Text, default="")
+    # {"nodes": [...], "edges": [...]} — 검증을 통과한 것만 저장한다(저장 거부가 안내다).
+    spec: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 대화에서 LLM이 읽어 낸 것 — 개체(entity)·상태(state)·전이(transition)·제약(constraint).
+    # 스펙만 보면 "그럴듯한데 내 업무가 아닌" 워크플로를 알아볼 수 없다. 모델이 무엇을
+    # 업무로 이해했는지를 따로 내놓게 하고 사람이 그것을 검토한다 — 자연어에서 프로세스를
+    # 뽑는 연구가 중간 표현을 두는 이유와 같다(Friedrich 2011 이후, ProMoAI 2024).
+    extracted: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 저장마다 1 증가. 실행 기록이 "어느 판을 돌렸는지" 가리킬 수 있어야 한다.
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class WorkflowMessage(Base):
+    """구성 대화 한 줄. 대화식으로 고치려면 이전에 무엇을 요청했는지가 남아야 한다.
+
+    산출물(스펙)은 Workflow.spec에 있고 여기엔 대화만 둔다 — 같은 분리를 기획(plan) 쪽에서
+    쓰고 있고, 그래야 "대화는 길지만 스펙은 한 벌"이 유지된다.
+    """
+
+    __tablename__ = "workflow_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(
+        ForeignKey("workflows.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(16))  # user | assistant
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class WorkflowRun(Base):
+    """실행 한 번 — 단계별 결과와, 사람 단계에서 멈춘 자리까지.
+
+    outputs를 행에 두는 이유: 사람 단계에서 멈춘 실행은 **몇 시간 뒤에** 이어진다. 그때
+    앞 단계 출력이 없으면 처음부터 다시 돌려야 하고, LLM 단계가 있으면 그건 돈과 시간이다.
+    """
+
+    __tablename__ = "workflow_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(
+        ForeignKey("workflows.id", ondelete="CASCADE"), index=True
+    )
+    # 돌린 시점의 판(Workflow.version) — 스펙은 그 뒤에 바뀔 수 있다.
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[WorkflowRunStatus] = mapped_column(
+        Enum(WorkflowRunStatus), default=WorkflowRunStatus.running
+    )
+    actor: Mapped[str] = mapped_column(String(64), default="")
+    # [{"id","type","status","summary","ms"}] — 화면이 진행을 보여 주는 근거
+    steps: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 노드 id → {"text","paths"} (상한을 넘으면 잘라 표시한다)
+    outputs: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 사람 단계에서 멈춰 있을 때 그 노드 id. 비어 있으면 멈춘 자리가 없다.
+    pending_node: Mapped[str] = mapped_column(String(64), default="")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

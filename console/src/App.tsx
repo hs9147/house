@@ -17,6 +17,8 @@ import Providers from './pages/Providers';
 import ServerConfig from './pages/ServerConfig';
 import Ontology from './pages/Ontology';
 import OntologyConversionTab from './pages/ontology/ConversionTab';
+import WorkflowDetail from './pages/WorkflowDetail';
+import Workflows from './pages/Workflows';
 import OntologyExploreTab from './pages/ontology/ExploreTab';
 import Storage from './pages/Storage';
 import CodeTab from './pages/project/CodeTab';
@@ -107,6 +109,23 @@ export default function App() {
           <Route index element={<OntologyConversionTab />} />
           <Route path="explore" element={<OntologyExploreTab />} />
         </Route>
+        {/* 온톨로지 다음 자리 — 조직이 플랫폼 자원과 사람 작업을 엮어 돌리는 흐름. */}
+        <Route
+          path="/workflows"
+          element={
+            <AdminOnly>
+              <Workflows />
+            </AdminOnly>
+          }
+        />
+        <Route
+          path="/workflows/:id"
+          element={
+            <AdminOnly>
+              <WorkflowDetail />
+            </AdminOnly>
+          }
+        />
         <Route
           path="/server-config"
           element={

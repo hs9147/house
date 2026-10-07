@@ -8,7 +8,7 @@ from starlette.staticfiles import StaticFiles
 from .api import (
     a2a_gateway, llm, mcp_servers,
     mcp_tokens, modules, oidc_provider, orgs, planning, previews, projects,
-    ontology, proxy_gateway, server, storage, system, webhooks,
+    ontology, proxy_gateway, server, storage, system, webhooks, workflows,
 )
 from .config import get_settings
 from .db import Base, engine
@@ -173,6 +173,9 @@ def create_app() -> FastAPI:
     if "workspace" in features:
         app.include_router(llm.router, prefix=API_PREFIX)
         app.include_router(planning.router, prefix=API_PREFIX)
+        # 워크플로 관리 — 온톨로지 다음 자리. 구성이 LLM 대화이므로 workspace와 함께 켠다
+        # (LLM 프로바이더가 없는 설치에서는 구성 자체를 할 수 없다).
+        app.include_router(workflows.router, prefix=API_PREFIX)
 
     # 콘솔 UI(React 빌드 산출물) — dist가 있을 때만 마운트, 없어도 API는 동일 기동
     console_dist = Path(

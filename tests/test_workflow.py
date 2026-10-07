@@ -1,0 +1,353 @@
+"""워크플로 — 스펙 검증, 실행(사람 단계·분기 포함), 대화 구성의 검토.
+
+실행은 큐를 거치지만(배포와 같은 패턴) 여기서는 `_execute`를 직접 부른다 — 스레드가 끝나길
+기다리는 테스트는 느리고, 느려서 못 믿게 되면 아무도 안 돌린다. 큐 경계 자체는 창구 테스트가
+`_submit`을 인라인으로 바꿔 확인한다.
+"""
+import pytest
+
+from app.db import SessionLocal
+from app.main import create_app  # 표를 만든다(Base.metadata.create_all) — 다른 테스트와 같다
+from app.models import (
+    LlmProvider, LlmProviderKind, Organization, Workflow, WorkflowRun, WorkflowRunStatus,
+)
+from app.services import workflow as wf
+from app.services import workflowchat
+
+
+@pytest.fixture(autouse=True)
+def _tables(monkeypatch):
+    # conftest의 _clean_db가 테스트마다 test-paas.db를 지운다 — 표는 테스트마다 만든다.
+    create_app()
+    # 큐는 끈다. resume()이 큐에 넣고 우리가 _execute를 또 부르면 **같은 실행이 두 번**
+    # 돌아 서로의 커밋을 덮는다(처음엔 테스트가 운으로 통과했다).
+    monkeypatch.setattr(wf, "_submit", lambda run_id: None)
+
+
+@pytest.fixture
+def org():
+    with SessionLocal() as db:
+        row = Organization(name=f"wf-org-{id(db)}")
+        db.add(row)
+        db.commit()
+        yield row.id
+        db.query(Workflow).filter(Workflow.organization_id == row.id).delete()
+        db.delete(row)
+        db.commit()
+
+
+@pytest.fixture
+def docs_store(monkeypatch, tmp_path, fresh_settings):
+    """읽기 가능한 저장소 하나 — 워크플로가 실제로 만지는 자원이다."""
+    from app.config import get_settings
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "계약서.md").write_text("# 용역계약\n금액 1억 2천만원\n", encoding="utf-8")
+    monkeypatch.setenv("PAAS_DOC_ROOTS", f"docs={root}")
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
+    monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
+    get_settings.cache_clear()
+    return root
+
+
+def _make(db, org_id: int, spec: dict, name="w") -> Workflow:
+    row = Workflow(organization_id=org_id, name=name, spec=spec)
+    db.add(row)
+    db.commit()
+    return row
+
+
+# --- 검증: 저장을 막는 일 ---
+
+def test_empty_spec_is_rejected(org, docs_store):
+    with SessionLocal() as db:
+        assert wf.validate(db, org, {"nodes": [], "edges": []})[0].startswith("nodes가 비어")
+
+
+def test_unknown_type_lists_what_is_available(org, docs_store):
+    with SessionLocal() as db:
+        problems = wf.validate(db, org, {
+            "nodes": [{"id": "가", "type": "email.send", "to": "a@b"}], "edges": [],
+        })
+    assert any("모르는 종류" in p and "storage.list" in p for p in problems), problems
+
+
+def test_unknown_field_is_not_silently_ignored(org, docs_store):
+    """적었는데 안 듣는 설정이 가장 나쁘다 — 쓰이지 않는 항목은 문제로 말한다."""
+    with SessionLocal() as db:
+        problems = wf.validate(db, org, {
+            "nodes": [{"id": "목록", "type": "storage.list", "store": "docs", "매직": 1}],
+            "edges": [],
+        })
+    assert any("쓰이지 않는 항목 '매직'" in p for p in problems), problems
+
+
+def test_missing_store_and_readonly_write_are_caught(org, docs_store):
+    with SessionLocal() as db:
+        problems = wf.validate(db, org, {
+            "nodes": [
+                {"id": "목록", "type": "storage.list", "store": "없는저장소"},
+                {"id": "쓰기", "type": "storage.write", "store": "docs", "path": "out.md"},
+            ],
+            "edges": [{"from": "목록", "to": "쓰기"}],
+        })
+    assert any("'없는저장소'가 없습니다" in p for p in problems), problems
+
+
+def test_cycle_and_orphan_are_caught(org, docs_store):
+    with SessionLocal() as db:
+        problems = wf.validate(db, org, {
+            "nodes": [
+                {"id": "가", "type": "storage.list", "store": "docs"},
+                {"id": "나", "type": "doc.read"},
+                {"id": "외톨이", "type": "storage.list", "store": "docs"},
+            ],
+            "edges": [{"from": "가", "to": "나"}, {"from": "나", "to": "가"}],
+        })
+    assert any("고리를 이룹니다" in p for p in problems), problems
+    assert any("외톨이: 아무 단계와도" in p for p in problems), problems
+
+
+def test_branch_needs_a_true_or_false_edge(org, docs_store):
+    with SessionLocal() as db:
+        problems = wf.validate(db, org, {
+            "nodes": [
+                {"id": "목록", "type": "storage.list", "store": "docs"},
+                {"id": "판정", "type": "branch", "when": {"kind": "contains", "text": "1억"}},
+            ],
+            "edges": [{"from": "목록", "to": "판정"}],
+        })
+    assert any("참/거짓 연결이 없습니다" in p for p in problems), problems
+
+
+def test_case_only_on_branch_edges(org, docs_store):
+    with SessionLocal() as db:
+        problems = wf.validate(db, org, {
+            "nodes": [
+                {"id": "목록", "type": "storage.list", "store": "docs"},
+                {"id": "읽기", "type": "doc.read"},
+            ],
+            "edges": [{"from": "목록", "to": "읽기", "case": "참"}],
+        })
+    assert any("분기 단계에서 나가는 연결에만" in p for p in problems), problems
+
+
+def test_a_valid_spec_has_no_problems(org, docs_store):
+    with SessionLocal() as db:
+        assert wf.validate(db, org, {
+            "nodes": [
+                {"id": "목록", "type": "storage.list", "store": "docs", "suffix": ".md"},
+                {"id": "읽기", "type": "doc.read", "store": "docs"},
+                {"id": "검토", "type": "human", "title": "법무 검토", "role": "법무"},
+            ],
+            "edges": [{"from": "목록", "to": "읽기"}, {"from": "읽기", "to": "검토"}],
+        }) == []
+
+
+# --- 실행 ---
+
+def test_run_reads_files_and_stops_at_the_human_step(org, docs_store):
+    """사람 단계에서 멈추고 **앞 단계 출력을 남긴다** — 몇 시간 뒤에 이어지므로."""
+    with SessionLocal() as db:
+        row = _make(db, org, {
+            "nodes": [
+                {"id": "목록", "type": "storage.list", "store": "docs", "suffix": ".md"},
+                {"id": "읽기", "type": "doc.read", "store": "docs"},
+                {"id": "검토", "type": "human", "title": "법무 검토"},
+            ],
+            "edges": [{"from": "목록", "to": "읽기"}, {"from": "읽기", "to": "검토"}],
+        })
+        run = WorkflowRun(workflow_id=row.id, version=row.version,
+                          status=WorkflowRunStatus.running, steps=[], outputs={})
+        db.add(run)
+        db.commit()
+        wf._execute(db, run)
+
+        assert run.status == WorkflowRunStatus.waiting
+        assert run.pending_node == "검토"
+        assert run.outputs["목록"]["paths"] == ["계약서.md"]
+        assert "금액 1억 2천만원" in run.outputs["읽기"]["text"]
+
+        # 제출하면 그 자리에서 이어 돈다(남은 단계가 없으므로 성공으로 끝난다).
+        wf.resume(db, run, "승인합니다", approved=True)
+        wf._execute(db, run)
+        assert run.status == WorkflowRunStatus.succeeded
+        assert run.outputs["검토"]["text"] == "승인합니다"
+        assert [s["status"] for s in run.steps] == ["ok", "ok", "waiting", "ok"]
+
+
+def test_rejecting_a_human_step_ends_the_run_with_the_reason(org, docs_store):
+    with SessionLocal() as db:
+        row = _make(db, org, {
+            "nodes": [{"id": "검토", "type": "human", "title": "법무 검토"}], "edges": [],
+        })
+        run = WorkflowRun(workflow_id=row.id, version=1,
+                          status=WorkflowRunStatus.running, steps=[], outputs={})
+        db.add(run)
+        db.commit()
+        wf._execute(db, run)
+        assert run.status == WorkflowRunStatus.waiting
+
+        wf.resume(db, run, "금액 근거가 없습니다", approved=False)
+        assert run.status == WorkflowRunStatus.canceled
+        assert "금액 근거가 없습니다" in run.error
+        assert run.steps[-1]["status"] == "rejected"
+
+
+def test_branch_runs_one_side_and_skips_the_other(org, docs_store, monkeypatch):
+    with SessionLocal() as db:
+        row = _make(db, org, {
+            "nodes": [
+                {"id": "목록", "type": "storage.list", "store": "docs", "suffix": ".md"},
+                {"id": "읽기", "type": "doc.read", "store": "docs"},
+                {"id": "판정", "type": "branch", "when": {"kind": "contains", "text": "1억"}},
+                {"id": "승인", "type": "human", "title": "임원 승인"},
+                {"id": "자동", "type": "storage.write", "store": "docs", "path": "자동.md"},
+            ],
+            "edges": [
+                {"from": "목록", "to": "읽기"}, {"from": "읽기", "to": "판정"},
+                {"from": "판정", "to": "승인", "case": "참"},
+                {"from": "판정", "to": "자동", "case": "거짓"},
+            ],
+        })
+        run = WorkflowRun(workflow_id=row.id, version=1,
+                          status=WorkflowRunStatus.running, steps=[], outputs={})
+        db.add(run)
+        db.commit()
+        wf._execute(db, run)
+
+        assert run.outputs["판정"]["case"] == "참"      # 본문에 "1억"이 있다
+        assert run.status == WorkflowRunStatus.waiting   # 참 쪽의 사람 단계에서 멈춘다
+        assert run.pending_node == "승인"
+
+        # 사람 단계는 **흐름 전체**를 멈춘다(그 결정을 기다리는 것이 업무의 모양이다).
+        # 거짓 쪽이 건너뛰어졌다는 판정은 이어 돌 때 기록된다.
+        wf.resume(db, run, "승인", approved=True)
+        wf._execute(db, run)
+        steps = {s["id"]: s["status"] for s in run.steps}
+        assert steps["자동"] == "skipped"
+        assert run.status == WorkflowRunStatus.succeeded
+        assert not (docs_store / "자동.md").exists()     # 거짓 쪽은 파일을 쓰지 않았다
+
+
+def test_llm_step_uses_the_default_provider_and_the_previous_output(org, docs_store, monkeypatch):
+    seen: dict = {}
+
+    def fake_chat(provider, messages, db=None, **kw):
+        seen["provider"] = provider.name
+        seen["user"] = messages[-1]["content"]
+        return "검토 의견: 금액이 기준을 넘습니다."
+
+    monkeypatch.setattr(wf.llm, "chat_completion", fake_chat)
+    with SessionLocal() as db:
+        provider = LlmProvider(name=f"p-{id(db)}", kind=LlmProviderKind.external,
+                               base_url="https://x/v1", model="m", is_default=True)
+        db.add(provider)
+        db.commit()
+        try:
+            row = _make(db, org, {
+                "nodes": [
+                    {"id": "읽기", "type": "doc.read", "store": "docs", "path": "계약서.md"},
+                    {"id": "검토", "type": "llm", "prompt": "계약 금액을 확인하라"},
+                ],
+                "edges": [{"from": "읽기", "to": "검토"}],
+            })
+            run = WorkflowRun(workflow_id=row.id, version=1,
+                              status=WorkflowRunStatus.running, steps=[], outputs={})
+            db.add(run)
+            db.commit()
+            wf._execute(db, run)
+            assert run.status == WorkflowRunStatus.succeeded
+            assert "검토 의견" in run.outputs["검토"]["text"]
+            assert seen["provider"] == provider.name
+            # 앞 단계 본문이 프롬프트에 실린다 — 안 실리면 LLM은 아무것도 모른다.
+            assert "금액 1억 2천만원" in seen["user"]
+        finally:
+            db.delete(provider)
+            db.commit()
+
+
+def test_a_failed_step_fails_the_run_with_the_reason(org, docs_store):
+    with SessionLocal() as db:
+        row = _make(db, org, {
+            "nodes": [
+                {"id": "목록", "type": "storage.list", "store": "docs", "suffix": ".없음"},
+                {"id": "읽기", "type": "doc.read", "store": "docs"},
+            ],
+            "edges": [{"from": "목록", "to": "읽기"}],
+        })
+        run = WorkflowRun(workflow_id=row.id, version=1,
+                          status=WorkflowRunStatus.running, steps=[], outputs={})
+        db.add(run)
+        db.commit()
+        wf._execute(db, run)
+        assert run.status == WorkflowRunStatus.failed
+        assert "읽을 경로가 없습니다" in run.error
+
+
+# --- 대화 구성과 검토 ---
+
+def test_parse_survives_code_fences_and_prose():
+    data = workflowchat._parse(
+        '설명입니다\n```json\n{"summary": "s", "spec": {"nodes": []}}\n```\n끝')
+    assert data["summary"] == "s" and data["spec"] == {"nodes": []}
+
+
+def test_review_flags_constraints_that_no_step_enforces():
+    notes = workflowchat.review(
+        {"nodes": [{"id": "검토", "type": "human", "title": "법무"}]},
+        {"entities": [{"name": "계약서"}],
+         "states": [{"entity": "계약서", "name": "검토대기"}],
+         "transitions": [{"from": "검토대기", "to": "승인", "trigger": "법무 승인",
+                          "node": "검토"}],
+         "constraints": [{"text": "1억 초과는 임원 승인", "origin": "대화", "node": ""}]},
+        ["선급금 30% 초과는 법무팀 합의"],
+    )
+    assert any("지키는 단계가 없습니다" in n for n in notes), notes
+    # 등록해 둔 공통 제약사항을 아예 읽지 않았으면 그것도 검토 대상이다.
+    assert any("공통 제약사항이 읽히지 않았습니다" in n for n in notes), notes
+
+
+def test_review_flags_transitions_pointing_at_missing_steps():
+    notes = workflowchat.review(
+        {"nodes": [{"id": "검토", "type": "human", "title": "법무"}]},
+        {"transitions": [{"from": "a", "to": "b", "node": "없는단계"}]},
+        [],
+    )
+    assert any("없는 단계 '없는단계'" in n for n in notes), notes
+
+
+def test_propose_repairs_once_when_validation_rejects(org, docs_store, monkeypatch):
+    """LLM이 처음에 틀린 스펙을 주면 **문제 목록을 돌려주고 한 번 고치게 한다.**"""
+    calls: list[list[dict]] = []
+
+    def fake_chat(provider, messages, db=None, **kw):
+        calls.append(messages)
+        if len(calls) == 1:
+            return '{"summary": "1차", "spec": {"nodes": [{"id": "가", "type": "모름"}],' \
+                   ' "edges": []}}'
+        return ('{"summary": "고쳤다", "spec": {"nodes": [{"id": "목록",'
+                ' "type": "storage.list", "store": "docs"}], "edges": []},'
+                ' "extracted": {"entities": [{"name": "계약서"}]}}')
+
+    monkeypatch.setattr(workflowchat.llm, "chat_completion", fake_chat)
+    with SessionLocal() as db:
+        provider = LlmProvider(name=f"p2-{id(db)}", kind=LlmProviderKind.external,
+                               base_url="https://x/v1", model="m", is_default=True)
+        db.add(provider)
+        db.commit()
+        try:
+            row = _make(db, org, {"nodes": [], "edges": []}, name="w2")
+            result = workflowchat.propose(db, row, "계약서를 모아 검토한다", [])
+        finally:
+            db.delete(provider)
+            db.commit()
+    assert result["attempts"] == 2
+    assert result["problems"] == []
+    assert result["spec"]["nodes"][0]["id"] == "목록"
+    # 2차 요청에는 1차의 문제 목록이 실린다 — 그게 수선의 근거다.
+    assert "모르는 종류" in calls[1][-1]["content"]
+    # 제약사항과 자원 목록은 시스템 메시지에 실린다(하네싱).
+    assert "반드시 지켜야 하는 공통 제약사항" in calls[0][0]["content"]
+    assert "storage.list" in calls[0][0]["content"]

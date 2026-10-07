@@ -23,6 +23,13 @@ import type {
   OntologyNeighborhood,
   OntologyNode,
   OntologyOverview,
+  WorkflowExtracted,
+  WorkflowMessageOut,
+  WorkflowOut,
+  WorkflowProposal,
+  WorkflowResources,
+  WorkflowRunOut,
+  WorkflowSpec,
   OntologyStore,
   OrgOut,
   PlanArtifactContent,
@@ -315,6 +322,34 @@ export const api = {
   resetStartScript: (id: number, profile: BuildProfile, component = '') =>
     request<StartScriptOut>('DELETE', `/projects/${id}/start-script`, undefined,
       { component, profile }),
+  // 워크플로 관리 — 조직 단위. 구성은 대화로 하고 **저장은 사람이 누른다**(제안은 저장되지
+  // 않는다). 실행은 큐에서 돌고 사람 단계에서 멈춘다.
+  listWorkflows: (organization_id?: number) =>
+    request<WorkflowOut[]>('GET', '/workflows', undefined,
+      organization_id === undefined ? undefined : { organization_id }),
+  createWorkflow: (organization_id: number, name: string, description = '') =>
+    request<WorkflowOut>('POST', '/workflows', { organization_id, name, description }),
+  getWorkflow: (id: number) => request<WorkflowOut>('GET', `/workflows/${id}`),
+  saveWorkflow: (id: number, spec: WorkflowSpec, extracted?: WorkflowExtracted,
+                 name?: string, description?: string) =>
+    request<WorkflowOut>('PUT', `/workflows/${id}`, { spec, extracted, name, description }),
+  deleteWorkflow: (id: number) => request<void>('DELETE', `/workflows/${id}`),
+  workflowResources: (organization_id: number) =>
+    request<WorkflowResources>('GET', '/workflows/resources', undefined, { organization_id }),
+  workflowMessages: (id: number) =>
+    request<WorkflowMessageOut[]>('GET', `/workflows/${id}/messages`),
+  workflowChat: (id: number, text: string) =>
+    request<WorkflowProposal>('POST', `/workflows/${id}/chat`, { request: text }),
+  startWorkflowRun: (id: number) =>
+    request<WorkflowRunOut>('POST', `/workflows/${id}/runs`),
+  listWorkflowRuns: (id: number) =>
+    request<WorkflowRunOut[]>('GET', `/workflows/${id}/runs`),
+  getWorkflowRun: (runId: number) =>
+    request<WorkflowRunOut>('GET', `/workflows/runs/${runId}`),
+  submitWorkflowHumanStep: (runId: number, content: string, approved: boolean) =>
+    request<WorkflowRunOut>('POST', `/workflows/runs/${runId}/submit`, { content, approved }),
+  cancelWorkflowRun: (runId: number) =>
+    request<WorkflowRunOut>('POST', `/workflows/runs/${runId}/cancel`),
   // 온톨로지 관리 — 문서→그래프 전환 현황(읽기)과 재색인(전환을 진행시키는 유일한 수단).
   ontologyOverview: () => request<OntologyOverview>('GET', '/ontology/overview'),
   ontologyStore: (store: string) =>
