@@ -445,6 +445,77 @@ def find_nodes(store_name: str, kind: str = "", q: str = "", limit: int = 20) ->
         conn.close()
 
 
+def node_search(store_name: str, kind: str = "", q: str = "", limit: int = 20) -> list[dict]:
+    """이름으로 노드를 찾는다 — **문서를 넘어 같은 이름을 하나로 묶어서**.
+
+    find_nodes는 문서별 행을 그대로 준다(수치를 대조하는 용도). 탐색의 단위는 그게 아니라
+    "이 이름이 무엇과 이어져 있나"이고, 묶지 않으면 검색 결과가 한 이름으로 가득 찬다 —
+    실측: 견적서 양식 표 스키마 하나가 320개 문서에 있다.
+
+    문서 수가 많은 것을 먼저 준다. 되풀이되는 양식·용어가 이 조직의 데이터 모델이고,
+    한 문서에만 있는 이름보다 먼저 보여야 할 것이 그쪽이다.
+    """
+    sql = ("SELECT kind, name, COUNT(DISTINCT path) AS documents, MIN(detail) AS detail"
+           " FROM nodes WHERE 1=1")
+    args: list = []
+    if kind:
+        sql += " AND kind = ?"
+        args.append(kind)
+    if q:
+        sql += " AND name LIKE ? ESCAPE '\\'"
+        args.append(_like_pattern(q))
+    # detail은 문서마다 다를 수 있다(절 번호 등) — 대표값 하나만 보여 준다.
+    sql += " GROUP BY kind, name ORDER BY documents DESC, name LIMIT ?"
+    args.append(limit)
+    conn = _connect(store_name)
+    try:
+        return [dict(r) for r in conn.execute(sql, args)]
+    finally:
+        conn.close()
+
+
+def neighborhood(store_name: str, kind: str, name: str, limit: int = 40) -> dict:
+    """한 노드의 이웃 — 관계별·이름별로 묶어서. 탐색 화면의 **한 걸음**이다.
+
+    neighbors()와 달리 문서를 넘어 묶는다. 같은 용어를 정의한 절이 200개 문서에 있으면 한
+    걸음에 200개가 쏟아지는데, 그러면 그림이 곧 털뭉치가 된다 — 노드-링크가 실패하는 전형적인
+    경우다(Ghoniem 2004 이후 반복 확인된 결과). 묶어서 "문서 N건"으로 적고, 더 있으면
+    truncated로 알린다(없는 것처럼 보이게 하지 않는다).
+    """
+    key = f"{kind}:{name}"
+    conn = _connect(store_name)
+    try:
+        def side(column: str, other: str) -> tuple[list[dict], bool]:
+            rows = [
+                {"rel": r["rel"], "kind": r["kind"], "name": r["name"],
+                 "documents": r["documents"], "detail": r["detail"],
+                 "sample_path": r["sample_path"]}
+                for r in conn.execute(
+                    f"SELECT e.rel AS rel, n.kind AS kind, n.name AS name,"
+                    f" COUNT(DISTINCT e.path) AS documents, MIN(n.detail) AS detail,"
+                    f" MIN(e.path) AS sample_path"
+                    f" FROM edges e JOIN nodes n"
+                    f"   ON n.path = e.path AND n.key = e.{other}"
+                    f" WHERE e.{column} = ?"
+                    f" GROUP BY e.rel, n.kind, n.name"
+                    f" ORDER BY documents DESC, n.name LIMIT ?", (key, limit + 1))
+            ]
+            return rows[:limit], len(rows) > limit
+
+        out, out_more = side("src", "dst")
+        incoming, in_more = side("dst", "src")
+        paths = [r["path"] for r in conn.execute(
+            "SELECT DISTINCT path FROM nodes WHERE key = ? ORDER BY path LIMIT 5", (key,))]
+        documents = conn.execute(
+            "SELECT COUNT(DISTINCT path) FROM nodes WHERE key = ?", (key,)).fetchone()[0]
+        return {
+            "node": {"kind": kind, "name": name, "documents": documents, "paths": paths},
+            "out": out, "in": incoming, "truncated": out_more or in_more,
+        }
+    finally:
+        conn.close()
+
+
 def neighbors(store_name: str, kind: str, name: str, limit: int = 30) -> dict:
     """이 노드에 붙은 엣지 — 나가는 것과 들어오는 것. 문서 경로를 함께 준다."""
     key = f"{kind}:{name}"

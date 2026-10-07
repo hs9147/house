@@ -20,6 +20,8 @@ import type {
   McpDirectoryItem,
   ModuleOut,
   ModuleSummary,
+  OntologyNeighborhood,
+  OntologyNode,
   OntologyOverview,
   OntologyStore,
   OrgOut,
@@ -318,6 +320,15 @@ export const api = {
   ontologyStore: (store: string) =>
     request<OntologyStore & { index_bytes: number }>(
       'GET', `/ontology/stores/${encodeURIComponent(store)}`),
+  // 정보 조회 — 찾고(search) 이웃만 한 걸음씩 펼친다. 전체 그래프를 받는 창구는 없다.
+  searchOntologyNodes: (store: string, q: string, kind = '', limit = 20) =>
+    request<{ nodes: OntologyNode[] }>(
+      'GET', `/ontology/stores/${encodeURIComponent(store)}/graph`, undefined,
+      { q, kind, limit }),
+  ontologyNeighbors: (store: string, kind: string, name: string, limit = 40) =>
+    request<OntologyNeighborhood>(
+      'GET', `/ontology/stores/${encodeURIComponent(store)}/graph/neighbors`, undefined,
+      { kind, name, limit }),
   reindexOntology: (store: string, force = false) =>
     request<{ done: boolean; indexed?: number; remaining?: number; retried?: number }>(
       'POST', `/ontology/stores/${encodeURIComponent(store)}/reindex`, undefined,

@@ -106,3 +106,54 @@ def test_relations_are_counted_inside_documents_that_have_structure(monkeypatch,
     assert summary["with_edges"] == 0           # 그러니 관계도 세지 않는다
     counts = [stage["count"] for stage in ontology_status.overview()["funnel"]]
     assert counts == sorted(counts, reverse=True), counts
+
+
+def test_search_groups_the_same_name_across_documents(monkeypatch, tmp_path, fresh_settings):
+    """같은 양식이 여러 문서에 되풀이되는 것이 사내 문서의 기본 모양이다 — 묶지 않으면
+    검색 결과가 한 이름으로 가득 찬다(실측: 견적서 표 스키마 하나가 320개 문서)."""
+    root = _store(monkeypatch, tmp_path)
+    table = "| 구분 | 금액 |\n|---|---|\n| 자재 | 100 |\n"
+    for i in range(3):
+        (root / f"견적{i}.md").write_text(f"# 견적 {i}\n{table}", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    c = TestClient(create_app())
+
+    body = c.get(f"{API}/ontology/stores/docs/graph",
+                 params={"kind": "table"}, headers=ADMIN).json()
+    assert len(body["nodes"]) == 1, body
+    assert body["nodes"][0]["name"] == "구분 | 금액"
+    assert body["nodes"][0]["documents"] == 3
+
+
+def test_neighbors_expand_one_step_and_report_truncation(monkeypatch, tmp_path, fresh_settings):
+    """탐색은 한 걸음씩이다 — 상한을 넘으면 조용히 버리지 않고 알린다."""
+    root = _store(monkeypatch, tmp_path)
+    sections = "".join(f"## 제{i}조(항목{i})\n내용.\n" for i in range(1, 6))
+    (root / "규정.md").write_text(f"# 복무규정\n{sections}", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    c = TestClient(create_app())
+
+    body = c.get(f"{API}/ontology/stores/docs/graph/neighbors",
+                 params={"kind": "document", "name": "규정"}, headers=ADMIN).json()
+    assert body["node"]["documents"] == 1
+    assert body["node"]["paths"] == ["규정.md"]
+    # 문서가 바로 품는 것은 최상위 절 하나다 — 조문은 그 절 아래로 접힌다(계층이 남는다).
+    assert [(n["rel"], n["kind"], n["name"]) for n in body["out"]] \
+        == [("contains", "section", "복무규정")]
+    assert body["in"] == [] and body["truncated"] is False
+
+    step = c.get(f"{API}/ontology/stores/docs/graph/neighbors",
+                 params={"kind": "section", "name": "복무규정"}, headers=ADMIN).json()
+    assert [n["rel"] for n in step["out"]] == ["contains"] * 5
+    # 들어오는 쪽도 함께 준다 — 어디에서 왔는지가 보여야 길을 되짚을 수 있다.
+    assert [(n["rel"], n["kind"]) for n in step["in"]] == [("contains", "document")]
+
+    few = c.get(f"{API}/ontology/stores/docs/graph/neighbors",
+                params={"kind": "section", "name": "복무규정", "limit": 2}, headers=ADMIN).json()
+    assert len(few["out"]) == 2 and few["truncated"] is True
+
+    # 이름 없이는 부를 수 없고(422), 없는 저장소는 404다.
+    assert c.get(f"{API}/ontology/stores/docs/graph/neighbors",
+                 params={"kind": "document", "name": ""}, headers=ADMIN).status_code == 422
+    assert c.get(f"{API}/ontology/stores/x/graph/neighbors",
+                 params={"kind": "document", "name": "규정"}, headers=ADMIN).status_code == 404

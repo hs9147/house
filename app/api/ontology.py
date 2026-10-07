@@ -61,8 +61,29 @@ def ontology_store_graph(
     """
     if storage_service.store(store_name) is None:
         raise HTTPException(status_code=404, detail=f"storage '{store_name}' not found")
-    nodes = docsearch.find_nodes(store_name, kind, q, max(1, min(limit, 200)))
+    nodes = docsearch.node_search(store_name, kind, q, max(1, min(limit, 200)))
     return {"store": store_name, "kind": kind, "q": q, "nodes": nodes}
+
+
+@router.get("/ontology/stores/{store_name}/graph/neighbors")
+def ontology_store_neighbors(
+    store_name: str,
+    kind: str,
+    name: str,
+    limit: int = 40,
+    _: ApiKey = Depends(require_api_key),
+):
+    """이 노드에 붙은 것들 — 정보 조회 화면이 한 걸음 펼칠 때 부른다.
+
+    전체 그래프를 한 번에 주지 않는다. 수만 노드를 그리면 아무 질문에도 답하지 못하는
+    털뭉치가 되고, 그래서 탐색의 규약은 **찾고(검색) · 문맥을 보고(이웃) · 필요한 데서만
+    펼친다**(van Ham & Perer 2009). 서버가 주는 단위도 그 한 걸음이다.
+    """
+    if storage_service.store(store_name) is None:
+        raise HTTPException(status_code=404, detail=f"storage '{store_name}' not found")
+    if not name:
+        raise HTTPException(status_code=422, detail="name이 필요합니다")
+    return docsearch.neighborhood(store_name, kind, name, max(1, min(limit, 200)))
 
 
 @router.post("/ontology/stores/{store_name}/reindex")

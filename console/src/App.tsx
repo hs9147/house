@@ -16,6 +16,8 @@ import PowerShellConsole from './pages/PowerShellConsole';
 import Providers from './pages/Providers';
 import ServerConfig from './pages/ServerConfig';
 import Ontology from './pages/Ontology';
+import OntologyConversionTab from './pages/ontology/ConversionTab';
+import OntologyExploreTab from './pages/ontology/ExploreTab';
 import Storage from './pages/Storage';
 import CodeTab from './pages/project/CodeTab';
 import DeploymentsTab from './pages/project/DeploymentsTab';
@@ -92,7 +94,8 @@ export default function App() {
             </AdminOnly>
           }
         />
-        {/* 파일 관리 다음 자리 — 문서가 그래프로 얼마나 옮겨졌는지 본다. */}
+        {/* 파일 관리 다음 자리 — 문서가 그래프로 얼마나 옮겨졌는지 보고(전환 현황),
+            옮겨진 것을 들여다본다(정보 조회). */}
         <Route
           path="/ontology"
           element={
@@ -100,7 +103,10 @@ export default function App() {
               <Ontology />
             </AdminOnly>
           }
-        />
+        >
+          <Route index element={<OntologyConversionTab />} />
+          <Route path="explore" element={<OntologyExploreTab />} />
+        </Route>
         <Route
           path="/server-config"
           element={

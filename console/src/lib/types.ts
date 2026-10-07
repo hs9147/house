@@ -418,6 +418,32 @@ export interface OntologyStore {
   daily: { date: string; documents: number }[];
 }
 
+// 정보 조회(탐색) — 노드는 **문서를 넘어 이름으로 묶인** 단위다. 같은 표 양식이 320개
+// 문서에 있으면 하나로 보고 documents로 센다(app/services/docsearch.node_search).
+export interface OntologyNode {
+  kind: string;
+  name: string;
+  documents: number;
+  detail: string | null;
+}
+
+export interface OntologyNeighbor {
+  rel: string;
+  kind: string;
+  name: string;
+  documents: number;
+  detail: string | null;
+  sample_path: string | null;
+}
+
+export interface OntologyNeighborhood {
+  node: { kind: string; name: string; documents: number; paths: string[] };
+  out: OntologyNeighbor[];
+  in: OntologyNeighbor[];
+  // 상한을 넘은 이웃이 있다 — 없는 것처럼 보이게 하지 않는다.
+  truncated: boolean;
+}
+
 export interface OntologyOverview {
   stores: OntologyStore[];
   errors: { store: string; error: string }[];
