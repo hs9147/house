@@ -319,7 +319,7 @@ export const api = {
     request<OntologyStore & { index_bytes: number }>(
       'GET', `/ontology/stores/${encodeURIComponent(store)}`),
   reindexOntology: (store: string, force = false) =>
-    request<{ done: boolean; indexed?: number; remaining?: number }>(
+    request<{ done: boolean; indexed?: number; remaining?: number; retried?: number }>(
       'POST', `/ontology/stores/${encodeURIComponent(store)}/reindex`, undefined,
       // query 값은 문자열·숫자만 받는다(boolean은 타입에서 걸린다) — 서버는 "true"를 읽는다.
       { force: force ? 'true' : undefined }),

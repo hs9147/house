@@ -109,12 +109,38 @@ def _xlsx_named(path, sheet_name, rows):
 def _pdf(path, text: str | None):
     """최소 PDF. text=None이면 그리는 것이 없는(=스캔 이미지 같은) PDF."""
     content = f"BT /F1 12 Tf 20 100 Td ({text}) Tj ET\n".encode() if text else b"\n"
+    return _pdf_stream(path, content)
+
+
+def _pdf_table(path):
+    """괘선이 있는 2행 3열 표 + 표 위 제목 한 줄 + 표 아래 본문 한 줄.
+
+    괘선은 셀마다 `re S`(사각형 테두리)로 그린다 — 실제 PDF에서 표가 남는 모양이고,
+    pdfplumber의 기본 표 판정(lines)이 보는 것이 이 선이다. PDF 좌표는 아래에서 위로
+    올라가므로 y가 큰 것이 위다: 제목 175 > 표 120~160 > 본문 100.
+    """
+    cells = [
+        (20, 140, "item"), (80, 140, "amount"), (140, 140, "when"),
+        (20, 120, "steel"), (80, 120, "1,200"), (140, 120, "Q1"),
+    ]
+    draw = ["0.5 w\n"]
+    for x, y, _ in cells:
+        draw.append(f"{x} {y} 60 20 re S\n")
+    draw.append("BT /F1 9 Tf 20 175 Td (purchase table) Tj ET\n")
+    for x, y, label in cells:
+        draw.append(f"BT /F1 8 Tf {x + 3} {y + 7} Td ({label}) Tj ET\n")
+    draw.append("BT /F1 9 Tf 20 100 Td (applies from next quarter) Tj ET\n")
+    return _pdf_stream(path, "".join(draw).encode(), media=(0, 0, 220, 200))
+
+
+def _pdf_stream(path, content: bytes, media=(0, 0, 200, 200)):
+    box = " ".join(str(v) for v in media)
     objs = [
         b"<</Type/Catalog/Pages 2 0 R>>",
         b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
-        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R"
-        b"/Resources<</Font<</F1 5 0 R>>>>>>",
-        b"<</Length " + str(len(content)).encode() + b">>stream\n" + content + b"endstream",
+        f"<</Type/Page/Parent 2 0 R/MediaBox[{box}]/Contents 4 0 R"
+        "/Resources<</Font<</F1 5 0 R>>>>>>".encode(),
+        b"<</Length " + str(len(content)).encode() + b">>\nstream\n" + content + b"\nendstream",
         b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
     ]
     out = io.BytesIO()
@@ -122,13 +148,16 @@ def _pdf(path, text: str | None):
     offsets = []
     for i, body in enumerate(objs, start=1):
         offsets.append(out.tell())
-        out.write(f"{i} 0 obj".encode() + body + b"endobj\n")
+        # `obj`·`endobj`·`stream` 앞뒤의 줄바꿈은 멋이 아니다 — pypdf는 붙여 써도 읽지만
+        # pdfminer(pdfplumber)는 그 경우 본문 스트림을 빈 것으로 파싱한다. 표 복원 경로가
+        # 조용히 안 타는 픽스처는 테스트가 아니라 거짓 통과다.
+        out.write(f"{i} 0 obj\n".encode() + body + b"\nendobj\n")
     xref = out.tell()
     out.write(f"xref\n0 {len(objs) + 1}\n".encode())
     out.write(b"0000000000 65535 f \n")
     for off in offsets:
         out.write(f"{off:010d} 00000 n \n".encode())
-    out.write(b"trailer<</Root 1 0 R/Size " + str(len(objs) + 1).encode() + b">>\n")
+    out.write(b"trailer\n<</Root 1 0 R/Size " + str(len(objs) + 1).encode() + b">>\n")
     out.write(b"startxref\n" + str(xref).encode() + b"\n%%EOF\n")
     path.write_bytes(out.getvalue())
     return path
@@ -227,13 +256,70 @@ def test_pdf_without_text_points_at_ocr(tmp_path):
 
 
 def test_pdf_without_driver_says_what_to_install(tmp_path, monkeypatch):
-    """pypdf는 선택 의존성이다 — 없을 때 조용히 실패하면 원인을 못 찾는다."""
+    """추출기가 없을 때 조용히 실패하면 원인을 못 찾는다.
+
+    추출기가 둘이라 둘 다 없애야 이 경로가 나온다 — pdfplumber만 있어도 본문은 읽힌다.
+    """
     import sys
 
     monkeypatch.setitem(sys.modules, "pypdf", None)
+    monkeypatch.setitem(sys.modules, "pdfplumber", None)
     path = _pdf(tmp_path / "a.pdf", "export approval")
     with pytest.raises(doctext.ExtractError, match="pip install pypdf"):
         doctext.extract_text(path)
+
+
+# --- PDF 표 복원 ---
+
+def test_pdf_table_becomes_a_markdown_table(tmp_path):
+    """PDF의 괘선 있는 표가 행·열이 남는 마크다운 표로 나온다.
+
+    이것이 온톨로지 전환의 전제다 — 평문으로 무너지면 구조 추출기가 걸릴 자리가 없다
+    (실측: PDF 263건을 읽어 냈는데 구조가 생긴 문서는 7건이었다).
+    """
+    pytest.importorskip("pdfplumber")
+    markdown, plain = doctext.extract(_pdf_table(tmp_path / "매입표.pdf"))
+    assert "| item | amount | when |" in markdown
+    assert "| steel | 1,200 | Q1 |" in markdown
+    # 표 위·아래 본문은 읽기 순서대로 남는다(표만 뽑고 본문을 버리지 않는다).
+    assert markdown.index("purchase table") < markdown.index("| item")
+    assert markdown.index("| item") < markdown.index("applies from next quarter")
+    # 색인에는 표시 문자를 벗긴 평문이 들어간다 — 발췌에 파이프가 섞이면 값이 안 보인다.
+    assert "steel\t1,200\tQ1" in plain
+    assert "|" not in plain
+
+
+def test_pdf_table_values_are_not_indexed_twice(tmp_path):
+    """표 안의 값이 평문으로 한 번, 표로 또 한 번 들어가면 같은 문서가 두 번 걸린다."""
+    pytest.importorskip("pdfplumber")
+    _, plain = doctext.extract(_pdf_table(tmp_path / "매입표.pdf"))
+    assert plain.count("steel") == 1
+
+
+def test_pdf_without_pdfplumber_falls_back_to_plain_text(tmp_path, monkeypatch):
+    """표 복원은 **더하기만** 한다 — 없으면 지금까지처럼 pypdf 평문이 나온다."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pdfplumber", None)
+    markdown, plain = doctext.extract(_pdf_table(tmp_path / "매입표.pdf"))
+    assert markdown == plain and "|" not in markdown
+    assert "steel" in plain
+
+
+def test_pdf_table_failure_does_not_lose_the_document(tmp_path, monkeypatch):
+    """표 복원이 어떤 파일에서 깨져도 그 문서가 실패가 되면 안 된다 — pypdf로 떨어진다."""
+    monkeypatch.setattr(doctext, "_pdfplumber_blocks", lambda path: None)
+    assert "export approval" in doctext.extract_text(_pdf(tmp_path / "a.pdf", "export approval"))
+
+
+def test_page_border_is_not_a_table(tmp_path):
+    """쪽 테두리·머리말 상자는 표가 아니다 — 1열이거나 한 줄인 것은 스키마가 아니다."""
+    pytest.importorskip("pdfplumber")
+    content = ("0.5 w\n10 10 180 180 re S\n"
+               "BT /F1 10 Tf 20 100 Td (single box page) Tj ET\n")
+    markdown, _ = doctext.extract(_pdf_stream(tmp_path / "테두리.pdf", content.encode()))
+    assert "single box page" in markdown
+    assert "|" not in markdown
 
 
 # --- 97-2003 바이너리(OLE) ---
@@ -503,6 +589,9 @@ def test_garbled_pua_text_is_not_silently_indexed(tmp_path, monkeypatch):
     검색 불가능한 쓰레기다. 예전에는 그대로 색인됐다(읽었다고 착각하게 만드는 상태)."""
     garbage = "\ue0a1\ue0b2\ue0c3 \ue0d4\ue0e5\ue0f6" * 40
     monkeypatch.setattr(doctext, "_ocr_pdf", lambda path: "복구된 본문")
+    # 두 추출기가 모두 깨진 글자를 준다 — 실제 HWP 계열 PDF가 그렇다(사설영역 코드는
+    # 어느 추출기로 읽어도 그대로 나온다). 판정이 한쪽에만 있으면 새 경로로 쓰레기가 든다.
+    monkeypatch.setattr(doctext, "_pdfplumber_blocks", lambda path: [(garbage, False)])
     fake_pages = [type("P", (), {"extract_text": lambda self: garbage})()]
 
     import pypdf
@@ -520,6 +609,15 @@ def test_garbled_pua_text_is_not_silently_indexed(tmp_path, monkeypatch):
     monkeypatch.setattr(doctext, "_ocr_pdf", lambda path: None)
     with pytest.raises(doctext.ExtractError, match="깨져"):
         doctext.extract(_pdf(tmp_path / "깨짐.pdf", "x"))
+
+
+def test_garbled_text_from_the_table_path_is_not_indexed(tmp_path, monkeypatch):
+    """표 복원 쪽 본문이 깨지면 그 결과를 쓰지 않는다 — 판정이 기존 경로에만 있으면
+    새 경로로 쓰레기가 들어온다. 여기서는 pypdf가 멀쩡하게 읽으므로 그쪽 본문이 남는다."""
+    garbage = " " * 40
+    monkeypatch.setattr(doctext, "_pdfplumber_blocks", lambda path: [(garbage, False)])
+    markdown, plain = doctext.extract(_pdf(tmp_path / "깨짐.pdf", "export approval"))
+    assert plain == "export approval" and "" not in markdown
 
 
 def test_looks_garbled_spares_english_and_korean():

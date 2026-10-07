@@ -76,8 +76,8 @@ CREATE TABLE IF NOT EXISTS docs (
   truncated  INTEGER NOT NULL DEFAULT 0,
   error      TEXT,           -- 실패 이유(사용자에게 그대로 보여 준다)
   indexed_at REAL NOT NULL,
-  -- 색인 당시 이 서버의 추출 능력(doctext.capability_fingerprint). 실패한 행을 **환경이
-  -- 바뀌었을 때만** 다시 시도하는 근거다.
+  -- 색인 당시 이 서버의 추출 능력(doctext.capability_fingerprint). 이 값이 달라진 행만
+  -- **다시 추출하는** 근거다(실패분뿐 아니라 성공분도 — 뽑을 수 있는 것이 달라졌으므로).
   extractor_fp TEXT
 );
 CREATE TABLE IF NOT EXISTS nodes (
@@ -215,12 +215,18 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
     호출마다 전체를 보므로, 중간에 멈춰도 "디스크에 없는데 색인에 있는 것"은 정확히 알 수
     있다(비싼 것은 추출뿐이다).
 
-    **환경이 바뀌면 실패한 파일을 다시 본다.** 실패도 캐시한다(97-2003 하나를 LibreOffice로
-    열어 보는 데 2초, 수백 개면 색인마다 그 시간을 다시 쓴다) — 그 이점은 지킨다. 다만 실패의
-    원인이 파일이 아니라 환경인 경우가 많아서, 색인 당시의 추출 능력을 행에 함께 적어 두고
-    (doctext.capability_fingerprint) **그 값이 달라졌을 때만** 다시 시도한다. 실측: pypdf를
-    설치한 뒤에도 PDF 6,600건이 "추출기가 없습니다"로 남아 있었고 재색인 버튼은 아무 일도
-    하지 않았다 — 파일은 그대로지만 우리가 읽을 수 있는지가 달라졌는데 그것을 몰랐다.
+    **추출 능력이 바뀌면 그 문서를 다시 본다.** 색인은 결과를 캐시한다(97-2003 하나를
+    LibreOffice로 열어 보는 데 2초, 수백 개면 색인마다 그 시간을 다시 쓴다) — 그 이점은
+    지킨다. 다만 캐시의 전제("파일이 같으면 결과도 같다")는 **우리 쪽이 달라지면** 틀린다.
+    그래서 색인 당시의 추출 능력을 행에 적어 두고(doctext.capability_fingerprint) 그 값이
+    달라진 문서만 다시 본다.
+
+    실측 두 번: pypdf를 설치한 뒤에도 PDF 6,600건이 "추출기가 없습니다"로 남아 있었고,
+    pdfplumber로 표를 복원하게 된 뒤에도 이미 읽어 둔 PDF 263건은 표 없는 평문 그대로였다.
+    둘 다 재색인 버튼이 아무 일도 하지 않았다 — 파일은 그대로지만 우리가 무엇을 뽑을 수
+    있는지가 달라졌는데 그것을 몰랐다. 그래서 **실패분만이 아니라 성공분도** 다시 본다:
+    능력이 바뀌면 성공한 추출도 옛 결과다. 비싸지만(실측 PDF 하나 7초) 한 번씩이고,
+    예산이 쪼개 주며, 바뀐 파일이 늘 먼저다.
 
     순서는 **바뀐 파일이 먼저**다. 영구 실패(LibreOffice 없는 97-2003 등)가 예산을 차지해
     새 파일이 밀리면, 방금 올린 문서가 검색에 안 나오는 쪽이 더 나쁘다.
@@ -230,21 +236,21 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
     try:
         fingerprint = doctext.capability_fingerprint()
         rows = conn.execute(
-            "SELECT path, size, mtime, body IS NULL AS bad, extractor_fp FROM docs")
+            "SELECT path, size, mtime, extractor_fp FROM docs")
         known: dict[str, tuple[int, float]] = {}
-        stale_failures: set[str] = set()
+        stale: set[str] = set()
         for row in rows:
             known[row["path"]] = (row["size"], row["mtime"])
-            # 실패했고, 그때의 추출 능력이 지금과 다르면 다시 볼 값어치가 있다.
-            if row["bad"] and row["extractor_fp"] != fingerprint:
-                stale_failures.add(row["path"])
+            # 그때의 추출 능력이 지금과 다르면 — 성공했든 실패했든 — 다시 볼 값어치가 있다.
+            if row["extractor_fp"] != fingerprint:
+                stale.add(row["path"])
         candidates, unreadable = _candidates(root)
         changed = [item for item in candidates
                    if force or known.get(item[0]) != (item[1], item[2])]
         changed_paths = {item[0] for item in changed}
         retry = [item for item in candidates
-                 if item[0] not in changed_paths and item[0] in stale_failures]
-        # 바뀐 파일이 먼저, 그다음 "환경이 바뀌어 다시 볼" 실패분 — 재시도가 예산을 먹어
+                 if item[0] not in changed_paths and item[0] in stale]
+        # 바뀐 파일이 먼저, 그다음 "능력이 바뀌어 다시 볼" 문서 — 재추출이 예산을 먹어
         # 새 파일이 밀리면, 방금 올린 문서가 검색에 안 나오는 쪽이 더 나쁘다.
         todo = changed + retry
 
@@ -273,8 +279,9 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
         result = {
             "files": len(candidates), "indexed": indexed, "failed": failed,
             "skipped": len(candidates) - len(todo), "removed": len(gone),
-            # 환경이 바뀌어 다시 시도한 실패분 — "재색인했는데 뭐가 달라졌나"의 답이다.
-            "retried_failed": len(retry),
+            # 추출 능력이 바뀌어 다시 본 문서(실패분뿐 아니라 성공분도) — "재색인했는데
+            # 뭐가 달라졌나"의 답이다.
+            "retried": len(retry),
             "remaining": remaining, "done": remaining == 0,
         }
         if unreadable:

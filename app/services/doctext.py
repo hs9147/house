@@ -23,10 +23,13 @@
 
   zip(PK)        docx·xlsx·pptx·hwpx  표준 라이브러리만으로 된다(zipfile + ElementTree).
                                       이 형식들은 zip 안의 XML이다.
-  %PDF           pdf                  pypdf(선택 의존성). 텍스트가 없는 스캔 PDF와
-                                      깨진 텍스트(HWP 계열의 사설영역 인코딩)는
-                                      Tesseract OCR 폴백(선택, PAAS_TESSERACT_PATH) —
-                                      없으면 무엇을 설치하면 되는지 알린다.
+  %PDF           pdf                  pdfplumber로 **표를 복원**하고(괘선이 있는 표만),
+                                      나머지 본문은 읽기 순서대로 흘린다. pdfplumber가
+                                      없거나 본문을 못 뽑으면 pypdf 평문으로 떨어진다.
+                                      텍스트가 없는 스캔 PDF와 깨진 텍스트(HWP 계열의
+                                      사설영역 인코딩)는 Tesseract OCR 폴백(선택,
+                                      PAAS_TESSERACT_PATH) — 없으면 무엇을 설치하면
+                                      되는지 알린다.
   OLE(D0CF11E0)  97-2003 doc·xls·ppt  순수 파이썬으로 제대로 뽑을 수 없다 →
                                       LibreOffice(soffice) 변환 경유(선택).
   그 외           텍스트                utf-8 → cp949 순서로 디코드한다. 한국어 윈도우에서
@@ -86,6 +89,7 @@ def capability_fingerprint() -> str:
 
     _CAPABILITY_FP = ";".join([
         f"pypdf={has('pypdf')}",
+        f"pdfplumber={has('pdfplumber')}",
         f"pypdfium2={has('pypdfium2')}",
         f"pillow={has('PIL')}",
         f"soffice={'1' if _soffice() else '0'}",
@@ -112,13 +116,18 @@ def extract(path: Path) -> tuple[str, str]:
         return markdown, to_plain(markdown)
 
     if head[:4] == b"%PDF":
-        text, from_ocr = _pdf_text(path)
-        text = text[:MAX_TEXT_CHARS]
+        blocks, from_ocr = _pdf_blocks(path)
+        # 벗기기는 **우리가 만든 표 블록에만** 적용한다 — 본문 블록은 PDF 원문이라
+        # 파이프나 #으로 시작하는 줄이 있어도 건드리지 않는다(zip 계열과 같은 규칙).
+        markdown = "\n\n".join(text for text, _ in blocks)[:MAX_TEXT_CHARS]
+        plain = "\n\n".join(
+            to_plain(text) if is_table else text for text, is_table in blocks
+        )[:MAX_TEXT_CHARS]
         if from_ocr:
             # 출처는 마크다운 쪽에만 남긴다 — to_plain이 이 줄을 떨어뜨려 검색은
             # 오염되지 않고, read_doc으로 열어 본 사람은 왜 글자가 어색한지 알 수 있다.
-            return f"<!-- 이미지에서 OCR로 추출한 텍스트입니다 -->\n\n{text}", text
-        return text, text
+            return f"<!-- 이미지에서 OCR로 추출한 텍스트입니다 -->\n\n{markdown}", plain
+        return markdown, plain
 
     if head[:4] == _OLE_MAGIC:
         text = _legacy_office_text(path)
@@ -496,6 +505,109 @@ def _xml_text(data: bytes, text_tag: str, block_tag: str) -> str:
 
 
 # --- PDF ---
+
+# 띠(표 사이의 본문 구간)로 자를 최소 높이. 괘선 두께만큼 남는 틈에서 빈 텍스트를
+# 뽑으려고 크롭을 한 번 더 도는 것을 막는다.
+_MIN_BAND = 4.0
+
+
+def _pdf_blocks(path: Path) -> tuple[list[tuple[str, bool]], bool]:
+    """(블록 목록, OCR을 거쳤는가). 블록은 (텍스트, 이게 표인가).
+
+    **표를 복원하는 이유.** pypdf의 PDF 텍스트는 평문이라 표가 셀 나열로 무너진다 —
+    xlsx·docx에서 표를 살린 것과 같은 이유다. 실측: PDF 263건을 읽어 냈는데 구조가 생긴
+    문서는 7건이었다(전환율 13.1%). 구조 추출기가 걸리는 자리는 제목·조문·표인데, 평문
+    PDF에는 그 중 아무것도 글자로 남지 않는다.
+
+    **표만 복원하고 제목은 추정하지 않는다.** 괘선이 있는 표는 PDF 안에 선으로 그려져
+    있어서 판정이 결정론적이지만, 제목은 글자 크기·굵기로 **추측**해야 한다. 틀린 절
+    계층은 없는 것보다 나쁘다 — 엉뚱한 절에 매달린 표·용어가 그래프에 남는다.
+
+    pdfplumber가 없거나 이 파일에서 실패하면 기존 경로(pypdf + OCR 폴백)로 떨어진다.
+    즉 이 함수가 하는 일은 **더하기만**이다 — 지금 읽히는 PDF가 이것 때문에 실패하지 않는다.
+    """
+    blocks = _pdfplumber_blocks(path)
+    if blocks is not None:
+        joined = "\n".join(text for text, _ in blocks).strip()
+        # 비었거나(스캔) 깨졌으면(PUA) 판정과 안내는 기존 경로에 맡긴다 — 실패 문구가
+        # 무엇을 설치하면 되는지 말해 주는 자리가 거기 하나다.
+        if joined and not _looks_garbled(joined):
+            return blocks, False
+    text, from_ocr = _pdf_text(path)
+    return [(text, False)], from_ocr
+
+
+def _pdfplumber_blocks(path: Path) -> list[tuple[str, bool]] | None:
+    """읽기 순서대로 (본문 | 마크다운 표). 못 하면 None(호출자가 pypdf로 떨어진다)."""
+    try:
+        import pdfplumber  # noqa: PLC0415 — 선택 의존성
+    except ImportError:
+        return None
+
+    blocks: list[tuple[str, bool]] = []
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            for page in pdf.pages:
+                blocks.extend(_page_blocks(page))
+                # pdfplumber는 페이지마다 글자·선 객체를 캐시한다 — 수백 쪽 문서에서
+                # 그대로 쌓이면 색인 프로세스가 통째로 커진다.
+                page.flush_cache()
+    except Exception:  # noqa: BLE001 — 손상·암호·미지원은 pypdf 경로가 판정한다
+        return None
+    return blocks
+
+
+def _page_blocks(page) -> list[tuple[str, bool]]:
+    """한 쪽을 읽기 순서대로 쪼갠다 — 표 위 본문, 표, (표와 나란한 본문), 표 아래 본문.
+
+    표 안의 글자는 본문 쪽에서 빼낸다(filter) — 그러지 않으면 같은 값이 평문으로 한 번,
+    표로 또 한 번 색인돼 검색에 두 번 걸린다(hwpx에서 겪은 것과 같다). 반대로 표와 같은
+    높이에 있는 **옆 본문**은 띠를 통째로 버리면 조용히 사라지므로, 표 글자만 뺀 같은 띠를
+    한 번 더 읽어 뒤에 붙인다.
+    """
+    x0, top, x1, bottom = page.bbox
+    tables = sorted(page.find_tables(), key=lambda t: (t.bbox[1], t.bbox[0]))
+    if not tables:
+        text = (page.extract_text() or "").strip()
+        return [(text, False)] if text else []
+
+    boxes = [t.bbox for t in tables]
+
+    def outside(obj) -> bool:
+        cx = (obj["x0"] + obj["x1"]) / 2
+        cy = (obj["top"] + obj["bottom"]) / 2
+        return not any(bx0 <= cx <= bx1 and btop <= cy <= bbot
+                       for bx0, btop, bx1, bbot in boxes)
+
+    out: list[tuple[str, bool]] = []
+
+    def add_text(y0: float, y1: float) -> None:
+        if y1 - y0 < _MIN_BAND:
+            return
+        try:
+            band = page.crop((x0, y0, x1, y1)).filter(outside)
+        except Exception:  # noqa: BLE001 — 좌표가 쪽 밖이면 그 띠만 건너뛴다
+            return
+        text = (band.extract_text() or "").strip()
+        if text:
+            out.append((text, False))
+
+    y = top
+    for table in tables:
+        t_top, t_bottom = table.bbox[1], table.bbox[3]
+        if t_top > y:
+            add_text(y, t_top)
+        rows = [[(cell or "", 1) for cell in row] for row in table.extract()]
+        # 1열이거나 한 줄인 "표"는 쪽 테두리·머리말 상자다 — 스키마가 아니다.
+        if len(rows) >= 2 and max((len(r) for r in rows), default=0) >= 2:
+            markdown = _table_markdown(rows)
+            if markdown:
+                out.append((markdown, True))
+        add_text(t_top, t_bottom)
+        y = max(y, t_bottom)
+    add_text(y, bottom)
+    return out
+
 
 def _pdf_text(path: Path) -> tuple[str, bool]:
     """(본문, OCR을 거쳤는가). 텍스트 레이어가 멀쩡하면 그대로, 없거나 깨졌으면 OCR 폴백."""

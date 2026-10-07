@@ -223,7 +223,7 @@ def test_missing_root_is_not_an_error(monkeypatch, tmp_path, fresh_settings):
     result = docsearch.reindex("s5", tmp_path / "없는폴더")
     assert result == {"files": 0, "indexed": 0, "failed": 0, "skipped": 0,
                       # 환경이 바뀌어 다시 본 실패분 — 볼 파일이 없으니 0이다
-                      "retried_failed": 0,
+                      "retried": 0,
                       "removed": 0, "remaining": 0, "done": True,
                       # 빈 폴더와 "폴더가 안 보인다"는 다른 상황이다
                       "unreadable_dirs": 1}
@@ -500,16 +500,44 @@ def test_reindex_retries_failures_when_the_extractors_changed(monkeypatch, tmp_p
 
     # 2차: 같은 파일, 같은 환경 — 다시 열어 보지 않는다(실패 캐시가 그대로 듣는다)
     again = docsearch.reindex("retry-store", root)
-    assert again["retried_failed"] == 0 and again["failed"] == 0, again
+    assert again["retried"] == 0 and again["failed"] == 0, again
 
     # 3차: 추출기가 생긴 환경(지문이 달라진다) — 건너뛰지 않고 다시 읽는다
     monkeypatch.setattr(docsearch.doctext, "capability_fingerprint", lambda: "pypdf=1")
     monkeypatch.setattr(docsearch.doctext, "extract",
                         lambda path: ("# 보고서\n## 제1조(목적)\n목적.\n", "본문"))
     third = docsearch.reindex("retry-store", root)
-    assert third["retried_failed"] == 1, third
+    assert third["retried"] == 1, third
     assert third["indexed"] == 1, third
     assert docsearch.status("retry-store")["failed"] == 0
+
+
+def test_reindex_reextracts_successes_too_when_the_extractors_changed(monkeypatch, tmp_path):
+    """성공한 추출도 **능력이 바뀌면 옛 결과**다.
+
+    실측: pdfplumber로 PDF 표를 복원하게 된 뒤에도, 이미 pypdf로 읽어 둔 263건은 표 없는
+    평문 그대로였다 — 실패분만 다시 보면 "읽히긴 했지만 구조가 없는" 문서가 영구히 남는다.
+    """
+    root = tmp_path / "docs3"
+    root.mkdir()
+    (root / "계약서.pdf").write_bytes(b"%PDF-1.4 fake")
+
+    monkeypatch.setattr(docsearch.doctext, "capability_fingerprint", lambda: "pdfplumber=0")
+    monkeypatch.setattr(docsearch.doctext, "extract", lambda path: ("표 없는 평문", "표 없는 평문"))
+    assert docsearch.reindex("upgrade-store", root)["indexed"] == 1
+
+    # 같은 능력이면 다시 읽지 않는다 — 캐시의 이점은 그대로다.
+    assert docsearch.reindex("upgrade-store", root)["retried"] == 0
+
+    monkeypatch.setattr(docsearch.doctext, "capability_fingerprint", lambda: "pdfplumber=1")
+    monkeypatch.setattr(
+        docsearch.doctext, "extract",
+        lambda path: ("| 구분 | 금액 |\n|---|---|\n| 자재 | 100 |\n", "구분\t금액"))
+    after = docsearch.reindex("upgrade-store", root)
+    assert after["retried"] == 1 and after["indexed"] == 1, after
+    # 표가 그래프에 들어왔는지로 확인한다 — 다시 추출한 목적이 그것이다.
+    kinds = docsearch.graph_schema("upgrade-store")["node_kinds"]
+    assert kinds.get("table") == 1, kinds
 
 
 def test_reindex_puts_changed_files_before_retries(monkeypatch, tmp_path):

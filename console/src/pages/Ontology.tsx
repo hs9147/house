@@ -41,6 +41,8 @@ export default function Ontology() {
       setNote(
         `${store}: ${res.done ? '색인 완료' : '시간 예산까지 진행'} — `
         + `갱신 ${fmt(res.indexed ?? 0)} · 남음 ${fmt(res.remaining ?? 0)}`
+        // 추출 능력이 바뀌어 다시 보는 문서 — 파일은 그대로인데 왜 할 일이 있는지의 답이다.
+        + (res.retried ? ` · 다시 추출 ${fmt(res.retried)}` : '')
         + (res.done ? '' : ' (다시 누르면 이어서 진행합니다)'),
       );
       state.reload();
