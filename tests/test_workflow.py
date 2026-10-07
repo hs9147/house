@@ -351,3 +351,25 @@ def test_propose_repairs_once_when_validation_rejects(org, docs_store, monkeypat
     # 제약사항과 자원 목록은 시스템 메시지에 실린다(하네싱).
     assert "반드시 지켜야 하는 공통 제약사항" in calls[0][0]["content"]
     assert "storage.list" in calls[0][0]["content"]
+
+
+def test_review_accepts_a_paraphrased_common_constraint():
+    """모델은 문장을 풀어 쓴다 — 앞부분 문자열로 맞춰 보면 그대로 실은 규칙도 '빠뜨렸다'가
+    된다(실측에서 그랬다). 낱말 겹침으로 본다."""
+    notes = workflowchat.review(
+        {"nodes": [{"id": "체결", "type": "human", "title": "계약 체결"}]},
+        {"constraints": [{
+            "text": "해외 협력사 또는 비표준계약서는 오프라인 날인 신청을 진행한다.",
+            "origin": "공통", "node": "체결"}]},
+        ["해외 협력사/비표준계약서는 오프라인 날인 신청(체결진행품의)"],
+    )
+    assert notes == [], notes
+
+
+def test_review_still_flags_a_constraint_that_was_not_read():
+    notes = workflowchat.review(
+        {"nodes": [{"id": "체결", "type": "human", "title": "계약 체결"}]},
+        {"constraints": [{"text": "계약은 전자서명으로 체결한다", "node": "체결"}]},
+        ["선급금 30퍼센트 초과는 법무팀 합의가 필요하다"],
+    )
+    assert any("읽히지 않았습니다" in n for n in notes), notes

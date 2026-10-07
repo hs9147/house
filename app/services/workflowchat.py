@@ -173,10 +173,25 @@ def review(spec: dict, extracted: dict, constraints: list[str]) -> list[str]:
             notes.append(f"제약 '{text[:40]}'을 지키는 단계가 없습니다.")
     for common in constraints:
         # 공통 제약사항은 **빠뜨렸는지**가 중요하다 — 등록해 둔 규칙이 워크플로에 들어오지
-        # 않으면 그 규칙은 없는 것과 같다.
-        if not any(common[:20] in text for text in seen):
+        # 않으면 그 규칙은 없는 것과 같다. 다만 앞부분 문자열로 맞춰 보면 안 된다: 모델은
+        # 문장을 풀어 쓴다(실측: 같은 규칙을 그대로 실었는데도 "읽히지 않았다"가 떴다).
+        # 낱말이 얼마나 겹치는지로 본다.
+        if not any(_overlaps(common, text) for text in seen):
             notes.append(f"공통 제약사항이 읽히지 않았습니다: {common[:60]}")
     return notes
+
+
+# 제약 문장에서 뜻을 나르는 낱말만 — 조사·기호는 떼고 두 글자 이상만 센다.
+_WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+
+
+def _overlaps(common: str, candidate: str, ratio: float = 0.4) -> bool:
+    """같은 규칙을 말하고 있는가 — 낱말 겹침으로 본다(문장이 바뀌어도 붙는다)."""
+    words = set(_WORD_RE.findall(common))
+    if not words:
+        return False
+    hit = words & set(_WORD_RE.findall(candidate))
+    return len(hit) / len(words) >= ratio
 
 
 def _rows(extracted: dict, key: str) -> list[dict]:
