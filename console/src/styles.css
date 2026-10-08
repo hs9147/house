@@ -203,33 +203,54 @@ pre.logbox {
 .codemap .codemap-leaf { padding: 3px 6px 3px 22px; }
 .codemap-file > summary { font-weight: 700; }
 
-/* 서버구성 토폴로지 다이어그램 */
-.topo-wrap { overflow-x: auto; margin-top: 10px; }
-.topo-edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
-.topo-node { fill: var(--bg); stroke: var(--border); stroke-width: 1.5; }
-.topo-node.ok { stroke: var(--green); }
-.topo-node.warn { stroke: var(--yellow); }
-.topo-node.bad { stroke: var(--red); }
-.topo-node.dim { stroke: var(--muted); }
-.topo-node.info { stroke: var(--accent); fill: rgba(74, 108, 247, 0.12); }
-.topo-node-outer { fill: var(--panel); stroke: var(--border-soft); }
-.topo-label-title { fill: var(--text); font-size: 12px; font-weight: 600; font-family: inherit; }
-.topo-sublabel {
-  fill: var(--muted);
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+/* 서버구성 — 입구 한 줄 + 경로 목록(아래로 쌓이고 폭은 panel을 넘지 않는다).
+   예전 SVG 부채꼴은 사이트 수만큼 가로로 자랐다(10개에 1,900px) — 선이 전부 같아서
+   노드-링크가 아무것도 구별해 주지 않았고, 가로 스크롤만 남았다. */
+.topo-wrap { margin-top: 10px; }
+.topo-entry {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: 8px;
 }
-.topo-legend { margin-top: 10px; gap: 14px; }
+.topo-entry-box {
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px;
+  font-size: 12px; white-space: nowrap;
+}
+.topo-entry-box.info { border-color: var(--accent); background: rgba(74, 108, 247, 0.12); }
+.topo-entry-arrow { color: var(--muted); }
+
+/* 목록은 세로로 스크롤한다 — 경로가 수십 개가 되어도 화면 밖으로 번지지 않는다. */
+.topo-routes { margin-top: 10px; max-height: 58vh; overflow-y: auto; }
+.topo-domain { margin-bottom: 10px; }
+.topo-domain-head {
+  font-size: 12px; color: var(--muted); padding: 2px 0 4px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.topo-route { padding: 6px 0; border-bottom: 1px solid var(--border-soft); }
+.topo-route.unlinked { opacity: 0.6; }
+.topo-route-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.topo-path {
+  font-size: 12px; padding: 2px 6px; border-radius: 4px;
+  background: var(--bg); border: 1px solid var(--border-soft);
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topo-arrow { color: var(--muted); }
+.topo-project { font-size: 13px; }
+.topo-status { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
+.topo-upstream { font-size: 11px; color: var(--muted); margin-left: auto; }
+.topo-components { margin: 2px 0 0 18px; }
+.topo-component { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px; }
+.topo-branch { color: var(--muted); }
+.topo-badge {
+  display: inline-block; min-width: 18px; text-align: center;
+  padding: 1px 5px; border-radius: 9px; background: var(--accent);
+  color: #fff; font-size: 10px; font-weight: 600; cursor: default;
+}
+.topo-unlinked {
+  font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  border: 1px dashed var(--muted); color: var(--muted);
+}
+.topo-legend { margin-top: 10px; gap: 14px; flex-wrap: wrap; }
 .topo-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.topo-redirect-badge { fill: var(--accent); stroke: var(--bg); stroke-width: 1.5; cursor: default; }
-.topo-redirect-badge-text {
-  fill: #fff;
-  font-size: 10px;
-  font-weight: 600;
-  font-family: inherit;
-  pointer-events: none;
-  text-anchor: middle;
-}
 
 /* 게이지 바 */
 .gauge { background: rgba(255, 255, 255, 0.08); border-radius: 6px; height: 10px; overflow: hidden; }
