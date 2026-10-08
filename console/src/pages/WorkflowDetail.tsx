@@ -37,6 +37,8 @@ export default function WorkflowDetail() {
   const [selected, setSelected] = useState('');
   const [openRun, setOpenRun] = useState<number | null>(null);
   const [assessment, setAssessment] = useState<WorkflowAssessment | null>(null);
+  // 이름 수정 중일 때만 값이 있다(빈 문자열은 '수정 중이지만 비움'과 구분이 안 되므로 null).
+  const [newName, setNewName] = useState<string | null>(null);
 
   const ask = async () => {
     if (!request.trim()) return;
@@ -62,6 +64,21 @@ export default function WorkflowDetail() {
       await api.saveWorkflow(workflowId, spec, extracted);
       setProposal(null);
       setNotice('저장했습니다 — 이제 이 판으로 실행됩니다.');
+      state.reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const rename = async () => {
+    if (newName === null || !newName.trim()) return;
+    setBusy('rename');
+    setError('');
+    try {
+      await api.renameWorkflow(workflowId, newName.trim());
+      setNewName(null);
       state.reload();
     } catch (e) {
       setError((e as Error).message);
@@ -107,7 +124,35 @@ export default function WorkflowDetail() {
               <button className="small secondary" onClick={() => navigate('/workflows')}>
                 ← 목록
               </button>
-              <h2 style={{ margin: 0 }}>{workflow.name}</h2>
+              {newName === null ? (
+                <>
+                  <h2 style={{ margin: 0 }}>{workflow.name}</h2>
+                  <button className="small secondary" title="이름 수정"
+                          onClick={() => setNewName(workflow.name)}>
+                    이름 수정
+                  </button>
+                </>
+              ) : (
+                <>
+                  <input
+                    value={newName}
+                    autoFocus
+                    style={{ fontSize: 18, minWidth: 260 }}
+                    onChange={(e) => setNewName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') rename();
+                      if (e.key === 'Escape') setNewName(null);
+                    }}
+                  />
+                  <button className="small" disabled={!newName.trim() || busy !== ''}
+                          onClick={rename}>
+                    {busy === 'rename' ? '저장 중…' : '저장'}
+                  </button>
+                  <button className="small secondary" onClick={() => setNewName(null)}>
+                    취소
+                  </button>
+                </>
+              )}
               <span className="mutedtext mono">
                 {workflow.org_name} · v{workflow.version} · 단계 {workflow.summary.node_count}
                 {workflow.summary.human_steps > 0

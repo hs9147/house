@@ -334,6 +334,9 @@ export const api = {
   saveWorkflow: (id: number, spec: WorkflowSpec, extracted?: WorkflowExtracted,
                  name?: string, description?: string) =>
     request<WorkflowOut>('PUT', `/workflows/${id}`, { spec, extracted, name, description }),
+  // 이름·설명만 — 스펙을 다시 검증하지 않고 판(version)도 올리지 않는다.
+  renameWorkflow: (id: number, name: string, description?: string) =>
+    request<WorkflowOut>('PATCH', `/workflows/${id}`, { name, description }),
   deleteWorkflow: (id: number) => request<void>('DELETE', `/workflows/${id}`),
   workflowResources: (organization_id: number) =>
     request<WorkflowResources>('GET', '/workflows/resources', undefined, { organization_id }),

@@ -38,6 +38,11 @@ class WorkflowSave(BaseModel):
     extracted: dict | None = None
 
 
+class WorkflowRename(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    description: str | None = None
+
+
 class WorkflowChatIn(BaseModel):
     request: str = Field(min_length=1)
 
@@ -160,6 +165,32 @@ def save_workflow(workflow_id: int, body: WorkflowSave, db: Session = Depends(ge
     db.commit()
     audit.record(db, admin.name, "workflow.save", row.name,
                  {"version": row.version, **workflow_service.spec_summary(row.spec)})
+    return _out(row)
+
+
+@router.patch("/workflows/{workflow_id}")
+def rename_workflow(workflow_id: int, body: WorkflowRename, db: Session = Depends(get_db),
+                    admin: ApiKey = Depends(require_admin)):
+    """이름·설명만 바꾼다 — 스펙은 건드리지 않는다.
+
+    저장(PUT)으로 개명하지 않는 이유 둘: (1) 저장은 판을 올린다(version++) — 이름을 고친 것은
+    새 판이 아니다. (2) 저장은 스펙을 다시 검증한다 — 저장소가 사라져 스펙에 문제가 생긴
+    워크플로는 이름조차 못 고치게 된다. 이름을 고치는 일에 그 둘이 끼어들 이유가 없다.
+    """
+    row = _workflow_or_404(db, workflow_id)
+    before = row.name
+    if body.name is not None and body.name != row.name:
+        clash = db.execute(
+            select(Workflow).where(Workflow.organization_id == row.organization_id,
+                                   Workflow.name == body.name, Workflow.id != row.id)
+        ).scalar_one_or_none()
+        if clash is not None:
+            raise HTTPException(status_code=409, detail="같은 이름의 워크플로가 이미 있습니다")
+        row.name = body.name
+    if body.description is not None:
+        row.description = body.description
+    db.commit()
+    audit.record(db, admin.name, "workflow.rename", row.name, {"before": before})
     return _out(row)
 
 

@@ -271,3 +271,34 @@ def test_assessment_endpoint_reports_and_offers_a_change_request(client, monkeyp
     # 비관리자는 평가를 돌릴 수 없다(LLM 호출이고 감사 로그에 남는다).
     assert client.post(f"{API}/workflows/{wid}/assessment",
                        headers=_member(client)).status_code == 403
+
+
+def test_rename_does_not_bump_the_version_or_revalidate(client):
+    """이름을 고친 것은 새 판이 아니고, 스펙에 문제가 있어도 이름은 고칠 수 있어야 한다."""
+    org = _org(client)
+    wid = client.post(f"{API}/workflows", headers=ADMIN,
+                      json={"organization_id": org, "name": "구매요청"}).json()["id"]
+    client.put(f"{API}/workflows/{wid}", headers=ADMIN, json={"spec": {
+        "nodes": [{"id": "목록", "type": "storage.list", "store": "docs"},
+                  {"id": "검토", "type": "human", "title": "법무 검토"}],
+        "edges": [{"from": "목록", "to": "검토"}],
+    }})
+    assert client.get(f"{API}/workflows/{wid}", headers=ADMIN).json()["version"] == 2
+
+    renamed = client.patch(f"{API}/workflows/{wid}", headers=ADMIN,
+                           json={"name": "구매요청-사전검토"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "구매요청-사전검토"
+    assert renamed.json()["version"] == 2          # 판은 그대로다
+    assert len(renamed.json()["spec"]["nodes"]) == 2
+
+    # 같은 조직의 다른 워크플로 이름으로는 바꿀 수 없다.
+    client.post(f"{API}/workflows", headers=ADMIN,
+                json={"organization_id": org, "name": "신규업체등록"})
+    assert client.patch(f"{API}/workflows/{wid}", headers=ADMIN,
+                        json={"name": "신규업체등록"}).status_code == 409
+    # 비어 있는 이름은 받지 않고, 비관리자는 바꿀 수 없다.
+    assert client.patch(f"{API}/workflows/{wid}", headers=ADMIN,
+                        json={"name": ""}).status_code == 422
+    assert client.patch(f"{API}/workflows/{wid}", headers=_member(client),
+                        json={"name": "x"}).status_code == 403
