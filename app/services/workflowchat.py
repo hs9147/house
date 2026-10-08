@@ -175,8 +175,8 @@ def review(spec: dict, extracted: dict, constraints: list[str]) -> list[str]:
             notes.append(f"제약 '{text[:40]}'을 지키는 단계가 없습니다.")
     for common in constraints:
         # 전에 읽어 둔 제약을 다시 쓰면서 **빠뜨렸는지**가 중요하다 — 고치라고 한 것이
-        # 아닌데 규칙이 사라지면, 그 흐름은 조용히 다른 업무가 된다. — 등록해 둔 규칙이 워크플로에 들어오지
-        # 않으면 그 규칙은 없는 것과 같다. 다만 앞부분 문자열로 맞춰 보면 안 된다: 모델은
+        # 아닌데 규칙이 사라지면, 그 흐름은 조용히 다른 업무가 된다. 다만 앞부분 문자열로
+        # 맞춰 보면 안 된다: 모델은
         # 문장을 풀어 쓴다(실측: 같은 규칙을 그대로 실었는데도 "읽히지 않았다"가 떴다).
         # 낱말이 얼마나 겹치는지로 본다.
         if not any(_overlaps(common, text) for text in seen):

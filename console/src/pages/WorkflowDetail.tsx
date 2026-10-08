@@ -40,9 +40,6 @@ export default function WorkflowDetail() {
   const [assessment, setAssessment] = useState<WorkflowAssessment | null>(null);
   // 이름 수정 중일 때만 값이 있다(빈 문자열은 '수정 중이지만 비움'과 구분이 안 되므로 null).
   const [newName, setNewName] = useState<string | null>(null);
-  // 대화는 **왼쪽 칸에 펼친 채로 시작한다** — 이 화면에서 하는 일이 대화다. 접으면 그림이
-  // 전체 폭을 쓴다(크게 보려고 접는다).
-  const [chatOpen, setChatOpen] = useState(true);
 
   const ask = async () => {
     if (!request.trim()) return;
@@ -180,11 +177,9 @@ export default function WorkflowDetail() {
 
             {/* 좌: 사람이 말을 거는 자리(대화) · 우: 그 답(그림·표·기록).
                 내용이 한 화면을 넘는 화면에서만 2단으로 나눈다 — 이 화면은 흐름도와 평가
-                표까지 있어 늘 넘친다. 접으면 오른쪽이 전체 폭을 쓴다. */}
+                표까지 있어 늘 넘친다. 대화는 접지 않는다 — 이 화면에서 하는 일이 대화다. */}
             <Split
               leftLabel="구성 대화"
-              collapsed={!chatOpen}
-              onToggle={(c) => setChatOpen(!c)}
               left={(
                 <ChatPanel
                   constraints={workflow.constraints ?? []}
@@ -216,12 +211,23 @@ export default function WorkflowDetail() {
                           </button>
                         )}
                         {!isProposal && workflow.summary.node_count > 0 && (
-                          <button className="small" disabled={busy !== ''} onClick={run}>
+                          <button className="small" disabled={busy !== ''} onClick={run}
+                                  title="저장된 판을 처음부터 실제로 실행합니다">
                             {busy === 'run' ? '시작 중…' : '실행'}
                           </button>
                         )}
                       </div>
                     </div>
+                    {!isProposal && workflow.summary.node_count > 0 && (
+                      // 실행은 시험이 아니다 — 파일을 쓰고 모듈·LLM을 부른다. 누르기 전에 알게 한다.
+                      <p className="mutedtext" style={{ fontSize: 12 }}>
+                        「실행」은 <b>저장된 판(v{workflow.version})</b>을 다시 검증한 뒤 서버 작업
+                        큐에서 연결 순서대로 돌립니다 — 문서 조회·LLM·MCP 도구 호출, 저장소에 파일
+                        쓰기까지 <b>실제로</b> 합니다. 사람 단계를 만나면 멈추고 아래 「진행 보기」에서
+                        입력·승인을 기다리며(반려하면 거기서 끝), 분기에서 고르지 않은 쪽은
+                        건너뜁니다. 한 단계라도 실패하거나 15분을 넘기면 그 자리에서 멈춥니다.
+                      </p>
+                    )}
                     {isProposal && (
                       <p className="mutedtext" style={{ fontSize: 12 }}>
                         {proposal!.summary}
@@ -300,10 +306,7 @@ export default function WorkflowDetail() {
                     busy={busy === 'assess'}
                     disabled={workflow.summary.node_count === 0 || busy !== ''}
                     onAssess={assess}
-                    onApply={(text) => {
-                      setRequest(text);
-                      setChatOpen(true);
-                    }}
+                    onApply={(text) => setRequest(text)}
                   />
                 </>
               )}
@@ -377,7 +380,7 @@ function ExtractedPanel({ extracted, review, isProposal }: {
       ) : (
         <div className="row" style={{ gap: 18, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <div style={{ flex: '1 1 220px' }}>
-            <h4 style={{ margin: '0 0 4px' }}>개체 {entities.length}</h4>
+            <h4 style={{ margin: '0 0 4px' }}>개체 {entities.length}건</h4>
             <ul style={{ fontSize: 12, margin: 0, paddingLeft: 18 }}>
               {entities.map((e) => (
                 <li key={e.name}>
@@ -388,7 +391,7 @@ function ExtractedPanel({ extracted, review, isProposal }: {
             </ul>
           </div>
           <div style={{ flex: '1 1 220px' }}>
-            <h4 style={{ margin: '0 0 4px' }}>상태 {states.length}</h4>
+            <h4 style={{ margin: '0 0 4px' }}>상태 {states.length}건</h4>
             <ul style={{ fontSize: 12, margin: 0, paddingLeft: 18 }}>
               {states.map((s, i) => (
                 <li key={`${s.entity}-${s.name}-${i}`}>
@@ -398,7 +401,7 @@ function ExtractedPanel({ extracted, review, isProposal }: {
             </ul>
           </div>
           <div style={{ flex: '1 1 280px' }}>
-            <h4 style={{ margin: '0 0 4px' }}>전이 {transitions.length}</h4>
+            <h4 style={{ margin: '0 0 4px' }}>전이 {transitions.length}건</h4>
             <ul style={{ fontSize: 12, margin: 0, paddingLeft: 18 }}>
               {transitions.map((t, i) => (
                 <li key={i}>
@@ -410,7 +413,7 @@ function ExtractedPanel({ extracted, review, isProposal }: {
             </ul>
           </div>
           <div style={{ flex: '1 1 320px' }}>
-            <h4 style={{ margin: '0 0 4px' }}>제약 {constraints.length}</h4>
+            <h4 style={{ margin: '0 0 4px' }}>제약 {constraints.length}건</h4>
             <ul style={{ fontSize: 12, margin: 0, paddingLeft: 18 }}>
               {constraints.map((c, i) => (
                 <li key={i}>

@@ -84,9 +84,12 @@ main:has(.split), main:has(.plan-grid) { max-width: none; }
    사라지면 "쓰다가 보고 다시 쓰는" 흐름이 끊긴다. 넓은 쪽은 오른쪽이 받는다 — 흐름도·표가
    반 폭에 들어가면 글자를 읽을 수 없다(29단계에서 실제로 그랬다). */
 .viewtabs { gap: 6px; margin: 2px 0 8px; }
-.split { display: grid; grid-template-columns: var(--split-left, 420px) 1fr; gap: 12px;
+/* 칸은 minmax(0, …)다 — 그냥 1fr이면 최소 폭이 내용 폭이 되어, 폭을 재서 그리는 차트가 한 번
+   넓어지면 창을 줄여도 칸이 줄지 않는다(그린 폭이 다시 칸을 붙든다). */
+.split { display: grid; grid-template-columns: var(--split-left, 420px) minmax(0, 1fr); gap: 12px;
          align-items: start; }
-.split-left { position: sticky; top: 8px; max-height: calc(100vh - 96px); overflow-y: auto; }
+.split-left { min-width: 0; position: sticky; top: 8px; max-height: calc(100vh - 96px);
+              overflow-y: auto; }
 .split-left > .panel:last-child { margin-bottom: 0; }
 .split-right { min-width: 0; }   /* 그리드 칸이 내용 때문에 늘어나지 않게 — 넘치면 스크롤 */
 /* 에이전트 기획의 2단 — 패널을 **옮기지 않고** 자리만 적는다(className). JSX를 줄 단위로
@@ -103,9 +106,9 @@ main:has(.split), main:has(.plan-grid) { max-width: none; }
 
 @media (max-width: 1180px) {
   /* 좁은 화면에서는 한 단으로 쌓는다. 왼쪽이 먼저다 — 할 일이 먼저 보여야 한다. */
-  .split { grid-template-columns: 1fr; }
+  .split { grid-template-columns: minmax(0, 1fr); }
   .split-left { position: static; max-height: none; overflow: visible; }
-  .plan-grid { grid-template-columns: 1fr; }
+  .plan-grid { grid-template-columns: minmax(0, 1fr); }
   .plan-grid > * { grid-column: 1 !important; grid-row: auto !important; }
 }
 

@@ -19,11 +19,9 @@ import { VIZ, fmt } from '../../lib/viz';
  *  - **같은 이름은 문서를 넘어 하나로 묶는다.** 사내 문서는 같은 양식이 수백 번 되풀이된다
  *    (견적서 표 스키마 320건) — 묶지 않으면 한 걸음에 수백 노드가 쏟아진다. RDF 요약
  *    연구(ABSTAT·LODeX)와 Neo4j의 스키마 뷰가 쓰는 집계 아이디어를 노드 수준에 쓴 것이다.
- *  - **배치는 계층(dagre), 물리 시뮬레이션이 아니다.** 우리 그래프는 문서→절→절→표로
- *    내려가는 거의 트리다(관계의 대부분이 contains). force 레이아웃(vis-network·d3-force·
- *    Obsidian 그래프 뷰의 그 느낌)은 볼 때마다 모양이 달라져 같은 질문을 두 번 물을 수 없고,
- *    계층을 흐린다. "유동적"은 배치가 떨리는 것이 아니라 **사람이 끌어 옮기고 펼치는 것**으로
- *    낸다 — 끌기·확대·미니맵은 React Flow가 한다(C4·토폴로지 화면과 같은 부품).
+ *  - **배치는 힘기반이다(Obsidian·TheBrain의 그래프 뷰).** 처음에는 계층(dagre)으로 그렸다 —
+ *    "같은 질문에 같은 그림"을 원해서였다. 그러나 이 화면은 둘러보는 자리라, 가까운 것이
+ *    모여 군집이 보이고 손으로 끌면 따라오는 쪽이 더 빨리 답한다(components/ForceGraph).
  *  - 노드-링크는 이 크기(수십 개)에서만 읽힌다. 전체 분포는 옆 탭(전환 현황)의 집계가
  *    맡는다 — 밀도가 높아지면 행렬이 노드-링크를 이긴다는 것이 알려진 결과다(Ghoniem 2004).
  *
@@ -39,10 +37,15 @@ const KINDS: { key: string; label: string; color: string; mark: string }[] = [
 ];
 
 const REL_LABEL: Record<string, string> = {
-  contains: '포함', defines: '정의', references: '인용',
+  contains: '포함', defines: '정의', references: '인용', match: '찾음',
 };
 
-const kindOf = (kind: string) => KINDS.find((k) => k.key === kind);
+// 찾기를 하면 **검색어가 그래프의 가운데 노드**가 되고, 찾은 노드가 모두 그 둘레에 붙는다.
+// 목록에서 하나를 골라 그리게 하면 찾은 것들끼리의 관계(같은 문서에서 나오는가)가 보이지 않는다.
+const QUERY = { key: 'query', label: '검색어', color: VIZ.ink, mark: '◎' };
+
+const kindOf = (kind: string) =>
+  (kind === QUERY.key ? QUERY : KINDS.find((k) => k.key === kind));
 const idOf = (kind: string, name: string) => `${kind}:${name}`;
 
 interface Placed {
@@ -97,9 +100,28 @@ export default function ExploreTab() {
     setBusy(true);
     setError('');
     try {
-      const res = await api.searchOntologyNodes(store, query.trim(), kind, 25);
+      const q = query.trim();
+      const res = await api.searchOntologyNodes(store, q, kind, 25);
       setHits(res.nodes);
-      if (res.nodes.length === 0) setNotice('찾은 노드가 없습니다.');
+      // 찾은 것을 모두 그린다 — 검색어를 가운데에 두고.
+      const center = idOf(QUERY.key, q);
+      const next = new Map<string, Placed>();
+      next.set(center, {
+        kind: QUERY.key, name: q || '(검색어 없음 · 문서 수 상위)',
+        documents: 0, detail: null, expanded: true,
+      });
+      res.nodes.forEach((n) => next.set(idOf(n.kind, n.name), {
+        kind: n.kind, name: n.name, documents: n.documents, detail: null, expanded: false,
+      }));
+      setNodes(res.nodes.length > 0 ? next : new Map());
+      setLinks(res.nodes.map((n) => ({
+        source: center, target: idOf(n.kind, n.name), rel: 'match', documents: n.documents,
+      })));
+      setSelected(res.nodes.length > 0 ? center : '');
+      setPaths([]);
+      setNotice(res.nodes.length === 0
+        ? '찾은 노드가 없습니다.'
+        : `찾은 노드 ${res.nodes.length}개를 검색어 둘레에 그렸습니다 — 노드를 누르면 한 걸음 펼칩니다.`);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -108,13 +130,13 @@ export default function ExploreTab() {
   };
 
   /** 한 걸음 펼친다 — 이 노드의 이웃을 캔버스에 더한다(van Ham & Perer의 expand on demand). */
-  const expand = useCallback(async (kindOfNode: string, name: string, replace = false) => {
+  const expand = useCallback(async (kindOfNode: string, name: string) => {
     setBusy(true);
     setError('');
     try {
       const res = await api.ontologyNeighbors(store, kindOfNode, name, 30);
       const id = idOf(kindOfNode, name);
-      const next = new Map(replace ? [] : nodes);
+      const next = new Map(nodes);
       next.set(id, {
         kind: kindOfNode, name, documents: res.node.documents,
         detail: null, expanded: true,
@@ -141,7 +163,7 @@ export default function ExploreTab() {
       setNodes(next);
       setLinks((prev) => {
         const seen = new Set<string>();
-        return [...(replace ? [] : prev), ...fresh].filter((l) => {
+        return [...prev, ...fresh].filter((l) => {
           const key = `${l.source}|${l.rel}|${l.target}`;
           if (seen.has(key)) return false;
           seen.add(key);
@@ -166,8 +188,9 @@ export default function ExploreTab() {
       id,
       label: n.name,
       kind: n.kind,
-      weight: n.documents,
+      weight: n.kind === QUERY.key ? 30 : n.documents,
       unexpanded: !n.expanded,
+      fixed: n.kind === QUERY.key,
     })),
     [nodes]);
 
@@ -185,7 +208,7 @@ export default function ExploreTab() {
         <p className="mutedtext" style={{ fontSize: 12 }}>
           이름으로 찾고, 노드를 눌러 한 걸음씩 펼칩니다. 전체 그래프를 한 장에 그리지
           않습니다 — 수만 노드를 뿌리면 아무 질문에도 답하지 못합니다. 같은 이름은 문서를
-          넘어 하나로 묶여 있고(문서 N건), 노드를 끌어 옮기면 배치는 그대로 유지됩니다.
+          넘어 하나로 묶여 있고(문서 N건), 펼쳐도 이미 있던 노드는 제자리 근처에 남습니다.
         </p>
         <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <select value={store} onChange={(e) => { setStore(e.target.value); reset(); setHits(null); }}>
@@ -228,7 +251,7 @@ export default function ExploreTab() {
             문서 수가 많은 것부터입니다 — 되풀이되는 양식·용어가 이 조직의 데이터 모델입니다.
           </p>
           <table>
-            <thead><tr><th>종류</th><th>이름</th><th>문서</th><th></th></tr></thead>
+            <thead><tr><th>종류</th><th>이름</th><th>문서</th></tr></thead>
             <tbody>
               {hits.map((n) => (
                 <tr key={idOf(n.kind, n.name)}>
@@ -242,12 +265,6 @@ export default function ExploreTab() {
                     {n.name}
                   </td>
                   <td className="mono">{fmt(n.documents)}</td>
-                  <td>
-                    <button className="small secondary" disabled={busy}
-                            onClick={() => expand(n.kind, n.name, true)}>
-                      그래프로 보기
-                    </button>
-                  </td>
                 </tr>
               ))}
             </tbody>
@@ -282,6 +299,8 @@ export default function ExploreTab() {
               if (placed) setPaths([]);   // 상세는 펼칠 때 서버가 준다
             }}
             onExpand={(id) => {
+              // 펼치는 중에 또 누르면 두 응답이 같은 옛 캔버스에서 출발해 앞의 것이 지워진다.
+              if (busy) return;
               const placed = nodes.get(id);
               if (placed) expand(placed.kind, placed.name);
             }}
@@ -298,7 +317,9 @@ export default function ExploreTab() {
               <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
                 {kindOf(current.kind)?.label ?? current.kind}
                 {current.detail ? ` · ${current.detail}` : ''}
-                {` · 이 이름이 나오는 문서 ${fmt(current.documents)}건`}
+                {current.kind === QUERY.key
+                  ? ` · 찾은 노드 ${fmt(Math.max(0, nodes.size - 1))}개가 이어져 있습니다`
+                  : ` · 이 이름이 나오는 문서 ${fmt(current.documents)}건`}
               </p>
               {paths.length > 0 && (
                 <ul className="mono" style={{ fontSize: 12, margin: '4px 0 0 18px' }}>
@@ -316,7 +337,7 @@ export default function ExploreTab() {
   ) : (
     <div className="panel">
       <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
-        왼쪽에서 이름을 찾아 「그래프로 보기」를 누르면 여기에 그려집니다.
+        왼쪽에서 이름을 찾으면 검색어를 가운데 두고 찾은 노드를 모두 여기에 그립니다.
       </p>
     </div>
   );

@@ -177,7 +177,8 @@ export function StackedBars({ rows, legend }: {
   const [box, width] = useWidth(620);
   const plotW = Math.max(60, width - labelW - 80);
   return (
-    <>
+    // 잴 것은 바깥 칸이다 — SVG 자신을 재면 제 폭(처음 620)을 되읽어 영영 바뀌지 않는다.
+    <div ref={box}>
       <div className="row" style={{ gap: 14, flexWrap: 'wrap', marginBottom: 6 }}>
         {legend.map((l) => (
           <span key={l.key} style={{ fontSize: 12, color: VIZ.muted }}>
@@ -186,8 +187,7 @@ export function StackedBars({ rows, legend }: {
           </span>
         ))}
       </div>
-      <svg ref={box as unknown as React.RefObject<SVGSVGElement>}
-           width={width} height={rows.length * rowH} role="img">
+      <svg width={width} height={rows.length * rowH} role="img">
         {rows.map((r, i) => {
           const y = i * rowH + GAP;
           let x = labelW;
@@ -217,7 +217,7 @@ export function StackedBars({ rows, legend }: {
           );
         })}
       </svg>
-    </>
+    </div>
   );
 }
 

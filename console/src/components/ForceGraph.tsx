@@ -26,6 +26,8 @@ export interface GraphNode {
   weight?: number;
   /** 아직 이웃을 펼치지 않은 노드 — 테두리를 비워 "더 있다"를 표시한다. */
   unexpanded?: boolean;
+  /** 가운데에 못 박는다(검색어 노드) — 모든 것이 이 노드를 둘러싸고 자리 잡는다. */
+  fixed?: boolean;
 }
 
 export interface GraphLink {
@@ -68,7 +70,24 @@ export default function ForceGraph({
   const [, redraw] = useState(0);
   const [hover, setHover] = useState<string>('');
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
-  const drag = useRef<{ id: string | null; x: number; y: number } | null>(null);
+  const drag = useRef<{ id: string | null; x: number; y: number; x0: number; y0: number } | null>(null);
+  // 방금 놓은 것이 끌기였나 — 끌기 끝에도 click이 오는데, 그걸 누름으로 받으면 옮기려던
+  // 노드가 펼쳐진다.
+  const dragged = useRef(false);
+  const svg = useRef<SVGSVGElement>(null);
+
+  // 휠 확대. React의 onWheel은 passive로 붙어 preventDefault가 듣지 않는다 — 확대하는 동안
+  // 페이지가 함께 스크롤된다. 그래서 직접 붙인다.
+  useEffect(() => {
+    const target = svg.current;
+    if (!target) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      setView((v) => ({ ...v, k: Math.min(2.5, Math.max(0.35, v.k * (e.deltaY < 0 ? 1.1 : 0.9))) }));
+    };
+    target.addEventListener('wheel', onWheel, { passive: false });
+    return () => target.removeEventListener('wheel', onWheel);
+  }, []);
 
   useEffect(() => {
     const target = box.current;
@@ -94,8 +113,14 @@ export default function ForceGraph({
   useEffect(() => {
     const map = bodies.current;
     const anchor = selected ? map.get(selected) : undefined;
+    let changed = false;
     nodes.forEach((n, i) => {
       if (map.has(n.id)) return;
+      changed = true;
+      if (n.fixed) {
+        map.set(n.id, { x: size.w / 2, y: size.h / 2, vx: 0, vy: 0, pinned: true });
+        return;
+      }
       const angle = (i / Math.max(1, nodes.length)) * Math.PI * 2;
       const radius = 60 + Math.random() * 40;
       map.set(n.id, {
@@ -105,10 +130,18 @@ export default function ForceGraph({
       });
     });
     [...map.keys()].forEach((id) => {
-      if (!nodes.some((n) => n.id === id)) map.delete(id);
+      if (nodes.some((n) => n.id === id)) return;
+      map.delete(id);
+      changed = true;
     });
-    alpha.current = 1;              // 노드가 바뀌면 다시 깨운다
+    // 노드가 바뀌었을 때만 다시 깨운다 — 고르기만 했는데 전체가 흔들리면 보던 자리를 잃는다.
+    if (changed) alpha.current = 1;
   }, [nodes, selected, size.w, size.h]);
+
+  // 폭이 바뀌면 가운데가 옮겨 간다 — 살짝 깨워 새 가운데로 모이게 한다.
+  useEffect(() => {
+    alpha.current = Math.max(alpha.current, 0.3);
+  }, [size.w, size.h]);
 
   // 시뮬레이션 — 잦아들면 멈춘다.
   useEffect(() => {
@@ -193,7 +226,8 @@ export default function ForceGraph({
 
   const onPointerDown = (id: string | null) => (e: React.PointerEvent) => {
     (e.target as Element).setPointerCapture?.(e.pointerId);
-    drag.current = { id, x: e.clientX, y: e.clientY };
+    drag.current = { id, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY };
+    dragged.current = false;
     if (id) {
       const body = bodies.current.get(id);
       if (body) body.pinned = true;
@@ -207,6 +241,7 @@ export default function ForceGraph({
     const dy = (e.clientY - d.y) / view.k;
     d.x = e.clientX;
     d.y = e.clientY;
+    if (Math.hypot(e.clientX - d.x0, e.clientY - d.y0) > 4) dragged.current = true;
     if (d.id) {
       const body = bodies.current.get(d.id);
       if (body) {
@@ -224,8 +259,9 @@ export default function ForceGraph({
     const d = drag.current;
     if (d?.id) {
       // 놓으면 풀어 준다 — 끌어 둔 자리에 못 박히면 다음 확장이 그 노드를 비켜 간다.
+      // 가운데 노드(fixed)는 놓은 자리에 그대로 둔다.
       const body = bodies.current.get(d.id);
-      if (body) body.pinned = false;
+      if (body && !nodes.find((n) => n.id === d.id)?.fixed) body.pinned = false;
     }
     drag.current = null;
   };
@@ -233,6 +269,7 @@ export default function ForceGraph({
   return (
     <div ref={box}>
       <svg
+        ref={svg}
         width={size.w}
         height={size.h}
         style={{ touchAction: 'none', cursor: drag.current ? 'grabbing' : 'grab',
@@ -241,10 +278,6 @@ export default function ForceGraph({
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerLeave={() => { onPointerUp(); setHover(''); }}
-        onWheel={(e) => {
-          e.preventDefault();
-          setView((v) => ({ ...v, k: Math.min(2.5, Math.max(0.35, v.k * (e.deltaY < 0 ? 1.1 : 0.9))) }));
-        }}
         role="img"
         aria-label="지식 그래프"
       >
@@ -278,8 +311,10 @@ export default function ForceGraph({
               opacity={lit ? 1 : 0.18}
               onPointerDown={(e) => { e.stopPropagation(); onPointerDown(n.id)(e); }}
               onPointerEnter={() => setHover(n.id)}
+              onPointerLeave={() => setHover((h) => (h === n.id ? '' : h))}
               onClick={(e) => {
                 e.stopPropagation();
+                if (dragged.current) return;   // 끌어 옮긴 것이지 누른 것이 아니다
                 onSelect?.(n.id);
                 if (n.unexpanded) onExpand?.(n.id);
               }}

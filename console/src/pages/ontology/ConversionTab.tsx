@@ -188,7 +188,10 @@ export default function ConversionTab() {
               <div className="mutedtext" style={{ fontSize: 12, margin: '12px 0 4px' }}>
                 스키마 — 이 그래프가 **무엇을 어떻게** 잇는지(개수는 전체 합계)
               </div>
-              <SchemaDiagram nodeKinds={t.node_kinds} edgeKinds={t.edge_kinds} />
+              {/* 픽셀 고정(620)이라 좁은 칸에서는 넘친다 — 패널 밖으로 새지 않게 가로 스크롤. */}
+              <div style={{ overflowX: 'auto' }}>
+                <SchemaDiagram nodeKinds={t.node_kinds} edgeKinds={t.edge_kinds} />
+              </div>
             </div>
 
             <div className="panel">
