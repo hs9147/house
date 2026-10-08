@@ -134,7 +134,7 @@ function WorkflowNodeBox({ data }: NodeProps) {
     <div
       style={{
         width: NODE_W, height: NODE_H, boxSizing: 'border-box',
-        borderRadius: 6, padding: '5px 8px', background: VIZ.surface,
+        borderRadius: 6, padding: '6px 8px', background: VIZ.surface, overflow: 'hidden',
         border: `2px solid ${node.isSelected ? VIZ.ink : color}`,
         opacity: node.runStatus === 'skipped' ? 0.5 : 1,
         display: 'flex', flexDirection: 'column', justifyContent: 'center',
@@ -142,14 +142,21 @@ function WorkflowNodeBox({ data }: NodeProps) {
       title={`${LABEL[node.type] ?? node.type}: ${node.detail}`}
     >
       <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
-      <div style={{ fontSize: 11, color }}>
+      <div style={{ fontSize: 11, lineHeight: 1.3, color }}>
         {LABEL[node.type] ?? node.type}
         {mark && <span style={{ marginLeft: 6, color: VIZ.ink }}>{mark}</span>}
       </div>
-      <div style={{ fontSize: 12, color: VIZ.ink, fontWeight: 600 }}>{node.id}</div>
       <div style={{
-        fontSize: 11, color: VIZ.muted, whiteSpace: 'nowrap',
-        overflow: 'hidden', textOverflow: 'ellipsis',
+        fontSize: 12, lineHeight: 1.3, color: VIZ.ink, fontWeight: 600,
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      }}>
+        {node.id}
+      </div>
+      <div style={{
+        // 설명은 두 줄까지 — 한 줄로 자르면 "무엇을 하는 단계"가 거의 안 보인다.
+        fontSize: 11, lineHeight: 1.3, color: VIZ.muted,
+        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+        overflow: 'hidden', overflowWrap: 'anywhere',
       }}>
         {node.detail}
       </div>

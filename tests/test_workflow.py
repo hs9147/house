@@ -4,6 +4,8 @@
 기다리는 테스트는 느리고, 느려서 못 믿게 되면 아무도 안 돌린다. 큐 경계 자체는 창구 테스트가
 `_submit`을 인라인으로 바꿔 확인한다.
 """
+import json
+
 import pytest
 
 from app.db import SessionLocal
@@ -373,3 +375,104 @@ def test_review_still_flags_a_constraint_that_was_not_read():
         ["선급금 30퍼센트 초과는 법무팀 합의가 필요하다"],
     )
     assert any("읽히지 않았습니다" in n for n in notes), notes
+
+
+# --- 평가: 사람 단계를 에이전트로 옮길 수 있는가 ---
+
+def _assess_spec(db, org_id):
+    return _make(db, org_id, {
+        "nodes": [
+            {"id": "수집", "type": "human", "title": "신용평가서 수집"},
+            {"id": "검토", "type": "human", "title": "지표 검토"},
+            {"id": "승인", "type": "human", "title": "실장 승인", "role": "실장"},
+        ],
+        "edges": [{"from": "수집", "to": "검토"}, {"from": "검토", "to": "승인"}],
+    }, name="assess")
+
+
+def test_assessment_counts_are_recomputed_not_trusted(org, docs_store, monkeypatch):
+    """판정은 모델이 하고 **셈은 우리가 한다.** 모델이 적은 숫자와 목록이 어긋나는 경우가
+    있고, 그때 화면에 믿을 수 없는 비율이 뜨면 평가 자체를 아무도 안 본다."""
+    from app.services import workflowassess
+
+    def fake_chat(provider, messages, db=None, **kw):
+        return json.dumps({
+            "summary": "요약",
+            "steps": [
+                {"id": "수집", "verdict": "agent", "why": "파일만 모으면 된다",
+                 "becomes": ["storage.list", "doc.read"], "change": "자동 수집으로 바꾼다",
+                 "needs": []},
+                {"id": "검토", "verdict": "partial", "why": "초안은 자동, 판단은 사람",
+                 "becomes": ["llm"], "change": "LLM 초안을 앞에 둔다",
+                 "needs": ["신용평가 저장소 바인딩"]},
+                {"id": "승인", "verdict": "human", "why": "결재 권한", "becomes": [],
+                 "change": "", "needs": []},
+            ],
+            "missing": ["GPS 발주 시스템 MCP 모듈"],
+            "risks": ["오판 시 계약 지연"],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(workflowassess.llm, "chat_completion", fake_chat)
+    with SessionLocal() as db:
+        provider = LlmProvider(name=f"p3-{id(db)}", kind=LlmProviderKind.external,
+                               base_url="https://x/v1", model="m", is_default=True)
+        db.add(provider)
+        db.commit()
+        try:
+            out = workflowassess.assess(db, _assess_spec(db, org))
+        finally:
+            db.delete(provider)
+            db.commit()
+    m = out["metrics"]
+    # 사람 단계 수와 '사람 유지' 판정 수는 **다른 값**이다(한 키에 담으면 하나가 덮인다).
+    assert m["human"] == 3 and m["human_only"] == 1
+    assert (m["agent"], m["partial"], m["assessed"]) == (1, 1, 3)
+    assert m["shift_rate"] == round(2 / 3 * 100, 1)
+    # 자원이 더 필요한 항목은 '지금 가능'이 아니다.
+    assert m["ready_now"] == 1
+    assert [s["ready_now"] for s in out["steps"]] == [True, False, False]
+    assert out["notes"] == []
+
+
+def test_assessment_drops_made_up_steps_and_tools_and_says_so(org, docs_store, monkeypatch):
+    from app.services import workflowassess
+
+    def fake_chat(provider, messages, db=None, **kw):
+        return json.dumps({
+            "summary": "",
+            "steps": [
+                {"id": "없는단계", "verdict": "agent", "becomes": []},
+                {"id": "수집", "verdict": "agent", "becomes": ["email.send", "doc.read"]},
+            ],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(workflowassess.llm, "chat_completion", fake_chat)
+    with SessionLocal() as db:
+        provider = LlmProvider(name=f"p4-{id(db)}", kind=LlmProviderKind.external,
+                               base_url="https://x/v1", model="m", is_default=True)
+        db.add(provider)
+        db.commit()
+        try:
+            out = workflowassess.assess(db, _assess_spec(db, org))
+        finally:
+            db.delete(provider)
+            db.commit()
+    assert [s["id"] for s in out["steps"]] == ["수집"]
+    assert out["steps"][0]["becomes"] == ["doc.read"]          # 없는 도구는 버린다
+    assert any("스펙에 없는 단계" in n for n in out["notes"])
+    assert any("쓸 수 없는 노드 종류" in n for n in out["notes"])
+    # 평가되지 않은 사람 단계가 있으면 "평가했다"가 거짓이 된다 — 드러낸다.
+    assert any("평가되지 않은 사람 단계: 검토, 승인" in n for n in out["notes"])
+
+
+def test_change_request_only_carries_what_is_possible_now():
+    from app.services import workflowassess
+
+    text = workflowassess.change_request({"steps": [
+        {"id": "수집", "ready_now": True, "change": "자동 수집으로 바꾼다", "becomes": []},
+        {"id": "검토", "ready_now": False, "change": "저장소가 생기면 LLM 초안", "becomes": []},
+    ]})
+    assert "수집: 자동 수집으로 바꾼다" in text
+    assert "검토" not in text
+    # 당장 할 것이 없으면 빈 문자열 — 화면이 버튼을 감춘다.
+    assert workflowassess.change_request({"steps": []}) == ""

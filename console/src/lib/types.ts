@@ -895,3 +895,44 @@ export interface WorkflowMessageOut {
   content: string;
   created_at: string;
 }
+
+// 워크플로 평가 — 사람이 하는 일을 에이전트로 옮길 수 있는가, 옮기려면 무엇을 바꿔야 하는가.
+// 판정은 LLM이 하고 **셈은 서버가 다시 한다**(모델의 숫자를 믿지 않는다).
+export type AgentVerdict = 'agent' | 'partial' | 'human';
+
+export interface WorkflowStepAssessment {
+  id: string;
+  type: string;
+  verdict: AgentVerdict;
+  why: string;
+  // 바꿔 넣을 노드 종류 — 쓸 수 있는 종류만 남는다(없는 도구 제안은 걸러진다).
+  becomes: string[];
+  change: string;
+  // 그러려면 있어야 하는 것. 비어 있으면 지금 바로 가능하다.
+  needs: string[];
+  ready_now: boolean;
+}
+
+export interface WorkflowAssessment {
+  provider: string;
+  summary: string;
+  steps: WorkflowStepAssessment[];
+  metrics: {
+    total: number;
+    human: number;
+    assessed: number;
+    agent: number;
+    partial: number;
+    human_only: number;
+    ready_now: number;
+    // 사람 단계 중 손을 떠날 수 있다고 본 비율(%)
+    shift_rate: number;
+  };
+  missing: string[];
+  risks: string[];
+  // 서버가 붙이는 검토 메모(모델이 빠뜨린 사람 단계, 스펙에 없는 단계를 가리킨 항목 등)
+  notes: string[];
+  facts: string;
+  // 이 평가를 그대로 다음 구성 요청으로 쓸 수 있게 만든 문장. 비어 있으면 당장 할 것이 없다.
+  change_request: string;
+}

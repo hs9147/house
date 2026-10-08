@@ -23,6 +23,7 @@ import type {
   OntologyNeighborhood,
   OntologyNode,
   OntologyOverview,
+  WorkflowAssessment,
   WorkflowExtracted,
   WorkflowMessageOut,
   WorkflowOut,
@@ -340,6 +341,9 @@ export const api = {
     request<WorkflowMessageOut[]>('GET', `/workflows/${id}/messages`),
   workflowChat: (id: number, text: string) =>
     request<WorkflowProposal>('POST', `/workflows/${id}/chat`, { request: text }),
+  // 평가 — LLM 호출이므로 POST다. 저장하지 않는다(스펙이 바뀌면 평가도 옛것이다).
+  assessWorkflow: (id: number) =>
+    request<WorkflowAssessment>('POST', `/workflows/${id}/assessment`),
   startWorkflowRun: (id: number) =>
     request<WorkflowRunOut>('POST', `/workflows/${id}/runs`),
   listWorkflowRuns: (id: number) =>

@@ -5,8 +5,8 @@ import WorkflowGraph from '../components/WorkflowGraph';
 import { api } from '../lib/api';
 import { useApi, usePolling } from '../lib/hooks';
 import type {
-  WorkflowExtracted, WorkflowMessageOut, WorkflowOut, WorkflowProposal, WorkflowRunOut,
-  WorkflowSpec,
+  AgentVerdict, WorkflowAssessment, WorkflowExtracted, WorkflowMessageOut, WorkflowOut,
+  WorkflowProposal, WorkflowRunOut, WorkflowSpec,
 } from '../lib/types';
 import { VIZ } from '../lib/viz';
 
@@ -36,6 +36,7 @@ export default function WorkflowDetail() {
   const [notice, setNotice] = useState('');
   const [selected, setSelected] = useState('');
   const [openRun, setOpenRun] = useState<number | null>(null);
+  const [assessment, setAssessment] = useState<WorkflowAssessment | null>(null);
 
   const ask = async () => {
     if (!request.trim()) return;
@@ -62,6 +63,18 @@ export default function WorkflowDetail() {
       setProposal(null);
       setNotice('저장했습니다 — 이제 이 판으로 실행됩니다.');
       state.reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const assess = async () => {
+    setBusy('assess');
+    setError('');
+    try {
+      setAssessment(await api.assessWorkflow(workflowId));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -264,6 +277,17 @@ export default function WorkflowDetail() {
               <RunPanel runId={openRun} spec={workflow.spec}
                         onClose={() => { setOpenRun(null); runs.reload(); }} />
             )}
+
+            <AssessmentPanel
+              assessment={assessment}
+              busy={busy === 'assess'}
+              disabled={workflow.summary.node_count === 0 || busy !== ''}
+              onAssess={assess}
+              onApply={(text) => {
+                setRequest(text);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+            />
           </>
         );
       }}
@@ -503,6 +527,168 @@ function RunPanel({ runId, spec, onClose }: {
         </div>
       )}
       {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+const VERDICT: Record<AgentVerdict, { label: string; color: string; mark: string }> = {
+  agent: { label: '에이전트 전환 가능', color: VIZ.status.good, mark: '●' },
+  partial: { label: '부분 전환(결정은 사람)', color: VIZ.status.warning, mark: '◐' },
+  human: { label: '사람이 해야 함', color: VIZ.muted, mark: '○' },
+};
+
+/**
+ * 워크플로 평가 — 화면 **맨 아래**. 사람이 하는 일을 에이전트로 옮길 수 있는지, 옮기려면
+ * 무엇을 바꿔야 하는지.
+ *
+ * 구성 대화와 질문이 다르다: 거기서는 "이 업무를 흐름으로 적어 달라"였고, 여기서는 이미
+ * 적힌 흐름을 보고 "어디가 사람 손을 떠날 수 있나"를 묻는다. 실측에서 바로 필요해졌다 —
+ * GP구매 메모로 만든 워크플로는 29단계 중 24개가 사람 단계였다.
+ *
+ * 평가로 끝내지 않는다. **이 제안으로 다시 구성** 버튼이 결과를 그대로 구성 대화의 요청으로
+ * 올린다 — 읽고 끝나는 평가는 아무것도 바꾸지 않는다. 비율과 개수는 서버가 다시 센 값이고
+ * (모델의 숫자를 믿지 않는다), 모델이 빠뜨린 사람 단계는 검토 메모로 드러난다.
+ */
+function AssessmentPanel({ assessment, busy, disabled, onAssess, onApply }: {
+  assessment: WorkflowAssessment | null;
+  busy: boolean;
+  disabled: boolean;
+  onAssess: () => void;
+  onApply: (text: string) => void;
+}) {
+  const m = assessment?.metrics;
+  return (
+    <div className="panel">
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <h3 style={{ margin: 0 }}>워크플로 평가</h3>
+        <button className="small" disabled={disabled} onClick={onAssess}>
+          {busy ? '평가 중…' : assessment ? '다시 평가' : '평가하기'}
+        </button>
+      </div>
+      <p className="mutedtext" style={{ fontSize: 12 }}>
+        사람이 하는 단계를 하나씩 보고 <b>에이전트로 옮길 수 있는지</b>, 옮기려면 워크플로를
+        어떻게 바꿔야 하는지 판정합니다. 결재·승인처럼 권한과 책임이 걸린 자리는 사람으로
+        남기고, 자료 수집과 초안 작성을 앞 단계로 떼어 내는 쪽이 현실적인 답입니다.
+      </p>
+
+      {!assessment && !busy && (
+        <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+          아직 평가하지 않았습니다. 평가는 저장되지 않습니다 — 스펙이 바뀌면 평가도 옛것이
+          됩니다.
+        </p>
+      )}
+
+      {assessment && m && (
+        <>
+          <div className="row" style={{ gap: 10, flexWrap: 'wrap', margin: '6px 0 10px' }}>
+            <StatBox label="전체 단계" value={String(m.total)} />
+            <StatBox label="사람 단계" value={String(m.human)} />
+            <StatBox label="전환 가능" value={String(m.agent)}
+                     color={VIZ.status.good} sub="바로 옮길 수 있음" />
+            <StatBox label="부분 전환" value={String(m.partial)}
+                     color={VIZ.status.warning} sub="결정은 사람이 남음" />
+            <StatBox label="사람 유지" value={String(m.human_only)} sub="권한·책임" />
+            <StatBox label="손을 떠날 수 있는 비율" value={`${m.shift_rate}%`}
+                     sub={`지금 당장 가능 ${m.ready_now}건`} />
+          </div>
+          {assessment.summary && (
+            <p style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>{assessment.summary}</p>
+          )}
+
+          <table>
+            <thead>
+              <tr>
+                <th>단계</th><th>판정</th><th>바꿀 종류</th>
+                <th>무엇을 바꾸는가</th><th>있어야 하는 것</th>
+              </tr>
+            </thead>
+            <tbody>
+              {assessment.steps.map((s) => {
+                const look = VERDICT[s.verdict];
+                return (
+                  <tr key={s.id}>
+                    <td className="mono" style={{ whiteSpace: 'nowrap' }}>{s.id}</td>
+                    <td style={{ whiteSpace: 'nowrap' }}>
+                      <span aria-hidden style={{ color: look.color, marginRight: 4 }}>
+                        {look.mark}
+                      </span>
+                      {look.label}
+                      {s.ready_now && (
+                        <div style={{ fontSize: 10, color: VIZ.status.good }}>지금 가능</div>
+                      )}
+                    </td>
+                    <td className="mono" style={{ fontSize: 11 }}>
+                      {s.becomes.join(' + ') || '—'}
+                    </td>
+                    <td style={{ fontSize: 12, maxWidth: 420, overflowWrap: 'anywhere' }}>
+                      {s.change || s.why}
+                    </td>
+                    <td style={{ fontSize: 11, maxWidth: 240, overflowWrap: 'anywhere' }}>
+                      {s.needs.length === 0
+                        ? <span className="mutedtext">지금 다 있음</span>
+                        : s.needs.join(' · ')}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+
+          {assessment.change_request && (
+            <div className="row" style={{ gap: 8, marginTop: 10, alignItems: 'center' }}>
+              <button className="small" onClick={() => onApply(assessment.change_request)}>
+                이 제안으로 다시 구성
+              </button>
+              <span className="mutedtext" style={{ fontSize: 11 }}>
+                구성 대화의 요청란에 올려 놓습니다 — 보내기 전에 고칠 수 있습니다.
+              </span>
+            </div>
+          )}
+
+          {assessment.missing.length > 0 && (
+            <div style={{ marginTop: 10, fontSize: 12 }}>
+              <b>더 자동화하려면 플랫폼에 있어야 하는 것</b>
+              <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                {assessment.missing.map((x) => <li key={x}>{x}</li>)}
+              </ul>
+            </div>
+          )}
+          {assessment.risks.length > 0 && (
+            <div style={{ marginTop: 10, fontSize: 12 }}>
+              <b style={{ color: VIZ.status.warning }}>자동화하면 생기는 위험</b>
+              <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                {assessment.risks.map((x) => <li key={x}>{x}</li>)}
+              </ul>
+            </div>
+          )}
+          {assessment.notes.length > 0 && (
+            <div style={{ marginTop: 10, fontSize: 12 }}>
+              <b style={{ color: VIZ.status.warning }}>검토할 자리</b>
+              <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                {assessment.notes.map((x) => <li key={x}>{x}</li>)}
+              </ul>
+            </div>
+          )}
+          <p className="mutedtext" style={{ fontSize: 11, marginTop: 8 }}>
+            {assessment.provider} · 평가는 저장되지 않습니다
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StatBox({ label, value, sub, color }: {
+  label: string; value: string; sub?: string; color?: string;
+}) {
+  return (
+    <div style={{
+      border: '1px solid var(--border-soft)', borderRadius: 8, padding: '8px 12px',
+      minWidth: 118,
+    }}>
+      <div style={{ fontSize: 11, color: VIZ.muted }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 600, color: color ?? VIZ.ink }}>{value}</div>
+      {sub && <div style={{ fontSize: 10, color: VIZ.muted }}>{sub}</div>}
     </div>
   );
 }

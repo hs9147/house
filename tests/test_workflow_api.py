@@ -230,3 +230,44 @@ def test_provider_failure_is_reported_not_swallowed_as_500(client, monkeypatch):
                          json={"request": "만들어 주세요"})
     assert answer.status_code == 502, answer.status_code
     assert "재로그인" in answer.json()["detail"]
+
+
+def test_assessment_endpoint_reports_and_offers_a_change_request(client, monkeypatch):
+    """평가는 읽고 끝나지 않는다 — 그대로 다음 구성 요청이 되는 문장을 함께 준다."""
+    from app.services import workflowassess
+
+    org = _org(client)
+    wid = client.post(f"{API}/workflows", headers=ADMIN,
+                      json={"organization_id": org, "name": "계약검토"}).json()["id"]
+    client.put(f"{API}/workflows/{wid}", headers=ADMIN, json={"spec": {
+        "nodes": [{"id": "수집", "type": "human", "title": "계약서 수집"},
+                  {"id": "승인", "type": "human", "title": "실장 승인"}],
+        "edges": [{"from": "수집", "to": "승인"}],
+    }})
+    created = client.post(f"{API}/llm/providers", headers=ADMIN, json={
+        "name": "p1", "kind": "openai", "base_url": "https://x/v1", "model": "m",
+        "api_key": "k",
+    }).json()
+    client.post(f"{API}/llm/providers/{created['id']}/default", headers=ADMIN)
+
+    monkeypatch.setattr(workflowassess.llm, "chat_completion", lambda *a, **kw: (
+        '{"summary": "수집은 자동화할 수 있습니다.", "steps": ['
+        '{"id": "수집", "verdict": "agent", "why": "파일 수집", '
+        '"becomes": ["storage.list"], "change": "저장소 목록으로 바꾼다", "needs": []},'
+        '{"id": "승인", "verdict": "human", "why": "결재 권한", "becomes": [], '
+        '"change": "", "needs": []}], "missing": [], "risks": []}'))
+
+    out = client.post(f"{API}/workflows/{wid}/assessment", headers=ADMIN)
+    assert out.status_code == 200, out.text
+    body = out.json()
+    assert body["metrics"]["human"] == 2 and body["metrics"]["human_only"] == 1
+    assert body["metrics"]["agent"] == 1 and body["metrics"]["ready_now"] == 1
+    assert "수집: 저장소 목록으로 바꾼다" in body["change_request"]
+
+    # 단계가 없으면 평가할 것도 없다(400).
+    empty = client.post(f"{API}/workflows", headers=ADMIN,
+                        json={"organization_id": org, "name": "빈것"}).json()["id"]
+    assert client.post(f"{API}/workflows/{empty}/assessment", headers=ADMIN).status_code == 400
+    # 비관리자는 평가를 돌릴 수 없다(LLM 호출이고 감사 로그에 남는다).
+    assert client.post(f"{API}/workflows/{wid}/assessment",
+                       headers=_member(client)).status_code == 403

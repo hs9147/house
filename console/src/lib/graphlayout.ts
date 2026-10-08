@@ -15,7 +15,9 @@ import { graphlib, layout as dagreLayout } from '@dagrejs/dagre';
  * 위→아래로 쌓으면 한 랭크가 화면 밖으로 나간다.
  */
 export const NODE_W = 210;
-export const NODE_H = 54;
+// 박스 안은 세 줄이다(종류 11px · 이름 12px · 설명 11px). 54px으로 두면 한국어 줄높이에서
+// 마지막 줄 아래가 잘렸다 — 글자가 잘리는 그림은 틀린 그림이다.
+export const NODE_H = 72;
 
 export interface LaidOutNode {
   id: string;

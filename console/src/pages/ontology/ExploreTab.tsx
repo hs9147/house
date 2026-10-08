@@ -349,7 +349,7 @@ function OntoNode({ data }: NodeProps) {
       title={`${look?.label ?? node.kind}: ${node.name} (문서 ${node.documents}건)`}
     >
       <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
-      <div style={{ fontSize: 11, color: look?.color }}>
+      <div style={{ fontSize: 11, lineHeight: 1.3, color: look?.color }}>
         <span aria-hidden style={{ marginRight: 4 }}>{look?.mark ?? '●'}</span>
         {look?.label ?? node.kind}
         <span style={{ color: VIZ.muted }}>{` · 문서 ${node.documents}`}</span>

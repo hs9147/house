@@ -19,7 +19,7 @@ from ..security import require_admin, require_api_key
 from ..services import bedrock
 from ..services import llm as llm_service
 from ..services import workflow as workflow_service
-from ..services import workflowchat
+from ..services import workflowassess, workflowchat
 
 router = APIRouter(tags=["workflows"])
 
@@ -218,6 +218,28 @@ def chat(workflow_id: int, body: WorkflowChatIn, db: Session = Depends(get_db),
                  {"attempts": result["attempts"], "provider": result["provider"],
                   "problems": len(result["problems"])})
     return result
+
+
+@router.post("/workflows/{workflow_id}/assessment")
+def assess_workflow(workflow_id: int, db: Session = Depends(get_db),
+                    admin: ApiKey = Depends(require_admin)):
+    """평가 — 사람이 하는 일을 에이전트로 옮길 수 있는가, 옮기려면 무엇을 바꿔야 하는가.
+
+    저장하지 않는다(스펙이 바뀌면 평가도 옛것이다). 결과에 change_request를 함께 주므로
+    화면이 그걸 그대로 구성 대화에 넣어 **고치는 데까지** 이어갈 수 있다 — 읽고 끝나는
+    평가는 아무것도 바꾸지 않는다.
+    """
+    row = _workflow_or_404(db, workflow_id)
+    try:
+        result = workflowassess.assess(db, row)
+    except workflow_service.WorkflowError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (bedrock.BedrockError, llm_service.LlmTimeout, llm_service.LlmCallFailed,
+            llm_service.LlmTruncated) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    audit.record(db, admin.name, "workflow.assess", row.name,
+                 {"provider": result["provider"], **result["metrics"]})
+    return {**result, "change_request": workflowassess.change_request(result)}
 
 
 @router.post("/workflows/{workflow_id}/runs", status_code=201)
