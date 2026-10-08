@@ -243,6 +243,19 @@ class Settings(BaseSettings):
     # (services/docready.py) — 열어 보면 모델이 실제로 보는 것을 그대로 확인할 수 있다.
     doc_index_dir: Path = Path("./data/doc-index")
 
+    # --- 스마트워크 개인 업무 맥락 (services/personal.py) ---
+    # 사용자가 동의하고 올린 로컬 문서·메일을 두는 자리. 사용자별 하위 폴더로 갈리고,
+    # 사내 문서 폴더(PAAS_DOC_ROOTS)와 섞이지 않는다 — 전체 검색·온톨로지에 안 잡힌다.
+    personal_root: Path = Path("./data/personal")
+    # 아웃룩 메일(Microsoft Graph) — Entra ID 앱 등록의 애플리케이션(클라이언트) ID.
+    # 로그인과 메일 읽기는 사용자 브라우저가 한다(서버는 토큰을 받지 않는다). 그래서 앱에
+    # 위임 권한 Mail.Read·User.Read를 주고, 플랫폼 "단일 페이지 애플리케이션(SPA)"에
+    # 리디렉션 URI `https://<콘솔 주소>/console/ms-login.html`을 등록해야 한다(IIS
+    # 서브패스 뒤면 그 경로까지). 비우면 메일 연동이 "미설정"으로 꺼진다.
+    ms_graph_client_id: str = ""
+    # 테넌트 ID 또는 도메인. 기본 organizations = 회사 계정이면 어느 테넌트든.
+    ms_graph_tenant: str = "organizations"
+
     # 사내 도메인 접미사(쉼표 구분). 사설 IP·localhost·단일 라벨 이름은 자동으로 사내로
     # 보지만, 공개 도메인처럼 보이는 사내 주소(예: corp.example.com)는 여기 적어야
     # 아웃바운드 검증(services/egress.py)이 "망을 벗어나지 않는다"고 판정한다.

@@ -8,7 +8,7 @@ from starlette.staticfiles import StaticFiles
 from .api import (
     a2a_gateway, llm, mcp_servers,
     mcp_tokens, modules, oidc_provider, orgs, planning, previews, projects,
-    ontology, proxy_gateway, server, sources, storage, system, webhooks, workflows,
+    ontology, proxy_gateway, server, smartwork, sources, storage, system, webhooks, workflows,
 )
 from .config import get_settings
 from .db import Base, engine
@@ -110,6 +110,8 @@ def create_app() -> FastAPI:
     # core — 항상 켜짐 (projects 안의 배포 계열 엔드포인트는 require_feature("deploy")로 게이트)
     app.include_router(system.health_router, prefix=PAAS_PREFIX)  # /paas/health, /paas/status
     app.include_router(system.router, prefix=API_PREFIX)
+    # 스마트워크 — 모든 사용자에게 열린 메뉴(대화 + 대시보드·에이전트·보고서, 개인 업무 맥락)
+    app.include_router(smartwork.router, prefix=API_PREFIX)
     app.include_router(projects.router, prefix=API_PREFIX)
     app.include_router(orgs.router, prefix=API_PREFIX)
     app.include_router(modules.router, prefix=API_PREFIX)

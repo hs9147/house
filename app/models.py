@@ -780,3 +780,32 @@ class InfoSource(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     saved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PersonalContext(Base):
+    """스마트워크의 **개인** 업무 맥락 — 한 사람에 한 행(email).
+
+    행이 있다는 것이 곧 동의다. 동의 없이 개인 문서·메일을 받지 않고, 철회하면 행과 함께
+    변환한 문서·색인·그래프를 전부 지운다(services/personal.revoke). 문서 본문은 여기 두지
+    않는다 — 변환한 마크다운이 사용자별 숨은 저장소에 파일로 있고, 색인은 그 저장소 이름으로
+    갈린다. **원본은 서버 어디에도 남지 않는다**(변환하고 바로 지운다).
+
+    메일 토큰은 두지 않는다 — 로그인과 Graph 읽기는 사용자 브라우저가 하고, 여기에는
+    메일 내용(마크다운)만 온다.
+    """
+
+    __tablename__ = "personal_contexts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # [{"name": 폴더 이름, "files": 개수, "synced_at": ISO 시각}] — 다시 동기화할 대상
+    folders: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # {"폴더/상대경로": {"size", "mtime", "error"}} — PC 원본의 크기·수정 시각(내용 없음).
+    # 원본을 남기지 않으니 "바뀐 파일" 판정의 근거가 여기밖에 없다. error는 변환 실패 사유.
+    files: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 메일을 가져온 계정(화면 표시용) — 비밀이 아니다.
+    mail_account: Mapped[str] = mapped_column(String(255), default="")
+    mail_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

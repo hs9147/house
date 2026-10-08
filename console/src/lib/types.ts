@@ -1040,3 +1040,81 @@ export interface SourceSaveResult {
   files: string[];
   source: SourceOut;
 }
+
+// 스마트워크
+export interface SmartworkAgent {
+  name: string;
+  org: string | null;
+  type: string;
+  domain: string;
+  path: string;
+  reason?: string;
+}
+
+export interface DepartmentWorkflow {
+  org: string;
+  name: string;
+  description: string;
+  steps: string[];
+  constraints: string[];
+  waiting_runs: number;
+}
+
+export type ReportFormat = 'md' | 'html' | 'csv';
+
+export interface SmartworkReport {
+  title: string;
+  format: ReportFormat;
+  content: string;
+}
+
+export interface SmartworkSuggestion {
+  title: string;
+  prompt: string;
+  // 근거가 된 부서 워크플로 이름(부서에 없는 이름은 서버가 비운다)
+  workflow: string;
+  why: string;
+}
+
+export interface SmartworkMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface SmartworkChatResult {
+  reply: string;
+  agent: SmartworkAgent | null;
+  report: SmartworkReport | null;
+  suggestions: SmartworkSuggestion[];
+  tools: string[];
+  provider: string;
+}
+
+export interface PersonalFolder {
+  name: string;
+  files: number;
+  synced_at: string;
+}
+
+export interface PersonalStatus {
+  consented: boolean;
+  consented_at?: string;
+  folders: PersonalFolder[];
+  index: { total: number; indexed: number; failed: number } | null;
+  mail: {
+    configured: boolean;
+    // 브라우저 로그인(lib/msgraph.ts)에 쓰는 앱 등록 값 — 비밀이 아니다.
+    client_id: string;
+    tenant: string;
+    connected: boolean;
+    account: string;
+    synced_at: string | null;
+  };
+}
+
+export interface PersonalManifest {
+  folder: string;
+  files: number;
+  needed: string[];
+  removed: number;
+}

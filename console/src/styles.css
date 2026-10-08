@@ -339,6 +339,14 @@ pre.logbox {
 .chat-msg.user { align-self: flex-end; background: rgba(74, 108, 247, 0.2); }
 .chat-msg.assistant { align-self: flex-start; background: rgba(255, 255, 255, 0.06); }
 
+/* 스마트워크 오른쪽 화면 — 에이전트 앱·HTML 보고서를 창 높이만큼 띄운다. */
+.smartwork-frame { display: block; width: 100%; height: calc(100vh - 190px); min-height: 420px;
+                   border: 1px solid var(--border-soft); border-radius: 8px; }
+.report-md { line-height: 1.6; }
+.report-md pre { background: rgba(255, 255, 255, 0.06); padding: 10px; border-radius: 6px; overflow-x: auto; }
+.report-md blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--border-soft); color: var(--muted); }
+.report-md table { margin: 8px 0; }
+
 /* 로그인 */
 .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
 .login-box { width: 340px; }

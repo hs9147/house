@@ -15,6 +15,7 @@ import Projects from './pages/Projects';
 import PowerShellConsole from './pages/PowerShellConsole';
 import Providers from './pages/Providers';
 import ServerConfig from './pages/ServerConfig';
+import Smartwork from './pages/Smartwork';
 import Ontology from './pages/Ontology';
 import OntologyConversionTab from './pages/ontology/ConversionTab';
 import WorkflowDetail from './pages/WorkflowDetail';
@@ -61,6 +62,7 @@ export default function App() {
             </AdminOnly>
           }
         />
+        <Route path="/smartwork" element={<Smartwork />} />
         <Route path="/projects" element={<Projects />} />
         <Route path="/git" element={<Git />} />
         <Route path="/projects/:id" element={<ProjectDetail />}>

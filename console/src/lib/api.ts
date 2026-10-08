@@ -61,6 +61,12 @@ import type {
   SourceKind,
   SourceOut,
   SourceSaveResult,
+  PersonalManifest,
+  PersonalStatus,
+  DepartmentWorkflow,
+  SmartworkAgent,
+  SmartworkChatResult,
+  SmartworkMessage,
   StorageStore,
   UserAccountOut,
   UserOrgOut,
@@ -502,6 +508,36 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
     return URL.createObjectURL(await res.blob());
   },
+  // 스마트워크 — 빈 messages는 여는 턴(업무 맥락을 보고 할 일을 제안하며 시작한다).
+  smartworkAgents: () => request<SmartworkAgent[]>('GET', '/smartwork/agents'),
+  // 업무 제안의 근거 — 소속 조직(부서)의 워크플로
+  smartworkWorkflows: () => request<DepartmentWorkflow[]>('GET', '/smartwork/workflows'),
+  smartworkChat: (messages: SmartworkMessage[]) =>
+    request<SmartworkChatResult>('POST', '/smartwork/chat', { messages }),
+  // 개인 업무 맥락 — 로그인한 그 사람의 것만. 경로에 누구의 것인지 고르는 자리가 없다.
+  personalStatus: () => request<PersonalStatus>('GET', '/smartwork/personal'),
+  personalConsent: () => request<PersonalStatus>('POST', '/smartwork/personal/consent'),
+  personalRevoke: () => request<void>('DELETE', '/smartwork/personal'),
+  personalManifest: (folder: string, entries: { path: string; size: number; mtime: number }[]) =>
+    request<PersonalManifest>(
+      'POST', `/smartwork/personal/folders/${encodeURIComponent(folder)}/manifest`, { entries }),
+  // File.name에는 폴더 경로가 없다 — 상대경로·수정 시각을 files와 같은 순서로 따로 싣는다.
+  personalUpload: (folder: string, items: { file: File; path: string; mtime: number }[]) => {
+    const fd = new FormData();
+    for (const it of items) {
+      fd.append('files', it.file);
+      fd.append('paths', it.path);
+      fd.append('mtimes', String(it.mtime));
+    }
+    return requestMultipart<{ saved: number; skipped: string[]; failed: string[] }>(
+      `/smartwork/personal/folders/${encodeURIComponent(folder)}/files`, fd);
+  },
+  personalRemoveFolder: (folder: string) =>
+    request<void>('DELETE', `/smartwork/personal/folders/${encodeURIComponent(folder)}`),
+  // 메일은 브라우저가 Graph에서 읽어 온 것(lib/msgraph.ts)을 보낸다 — 토큰은 싣지 않는다.
+  mailSave: (account: string, messages: object[]) =>
+    request<{ fetched: number; new: number }>('POST', '/smartwork/personal/mail/messages', { account, messages }),
+  mailDisconnect: () => request<void>('DELETE', '/smartwork/personal/mail'),
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),
   // 바인딩 **생성**은 화면에서 하지 않는다 — 기획 "솔루션 구성" 단계가 문서와 함께 정한다

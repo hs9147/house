@@ -52,6 +52,7 @@ export default function Layout() {
         </div>
 
         <nav>
+          <NavLink to="/smartwork">스마트워크</NavLink>
           {admin && <NavLink to="/">대시보드</NavLink>}
           {admin && <NavLink to="/accounts">계정 관리</NavLink>}
           {admin && <NavLink to="/orgs">조직 관리</NavLink>}
