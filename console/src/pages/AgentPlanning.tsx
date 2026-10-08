@@ -691,9 +691,9 @@ export default function AgentPlanning() {
       </div>
 
       {session && (
-        <>
+        <div className="plan-grid">{/* 좌: 단계 대화·산출물 · 우: 그림·빌드 기록(콘솔 2단 규약) */}
           {/* 진행단계 표시 */}
-          <div className="panel">
+          <div className="panel plan-stages">
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {STAGES.map((s) => {
                 const confirmed = isConfirmed(s.key);
@@ -721,7 +721,7 @@ export default function AgentPlanning() {
               솔루션 구성이 같은 레벨을 다시 그리면 그것으로 구체화된다.
               **확정을 기다리지 않는다** — 편집 중인 초안을 함께 넘겨 바로 그린다.
               그림은 확정 여부를 검토하기 위한 도구이고, 확정은 그 검토의 결과다. */}
-          <div className="panel">
+          <div className="panel plan-aside">
             <h3 style={{ margin: 0 }}>🗺️ 단계별 시각화 (C4 모델)</h3>
             <C4Diagram
               // 세션을 바꾸면 보고 있던 레벨·선택 컴포넌트를 초기화한다 — 이전 세션의
@@ -738,7 +738,7 @@ export default function AgentPlanning() {
           </div>
 
           {/* 단계 작업 영역 — ①~④는 대화로, ⑤는 작업 지시 목록으로 산출물을 만든다 */}
-          <div className="panel">
+          <div className="panel plan-main">
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <h3 style={{ margin: 0 }}>
                 {STAGES.find((s) => s.key === activeStage)?.label} 단계
@@ -1023,7 +1023,7 @@ export default function AgentPlanning() {
               둘은 같은 질문의 두 면이다: 외주 빌더가 무엇을 했고(이벤트·커밋), 그것이
               제약을 지켰는지(LLM·모듈 사용). 패널을 갈라 두면 커밋이 올라온 것을 보고도
               검증은 다른 자리에서 따로 눌러야 해서 그냥 넘어가기 쉽다. */}
-          <div className="panel">
+          <div className="panel plan-aside">
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <h3 style={{ margin: 0 }}>🛠️ 외부 빌드 모니터링</h3>
               <div className="row" style={{ gap: 6 }}>
@@ -1077,7 +1077,7 @@ export default function AgentPlanning() {
               </>
             ))}
           </div>
-        </>
+        </div>
       )}
 
       {error && (

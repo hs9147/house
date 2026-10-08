@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import Async from '../../components/Async';
+import Split from '../../components/Split';
 import { api } from '../../lib/api';
 import { useApi } from '../../lib/hooks';
 import { isAdmin } from '../../lib/auth';
@@ -58,7 +59,7 @@ export default function ConversionTab() {
       {(data: OntologyOverview) => {
         const t = data.totals;
         const kinds = Object.keys(t.node_kinds);
-        return (
+        const summary = (
           <>
             <div className="panel">
               <h2>온톨로지 전환 현황</h2>
@@ -98,6 +99,10 @@ export default function ConversionTab() {
               <FunnelBars stages={data.funnel} />
             </div>
 
+          </>
+        );
+        const detail = (
+          <>
             <div className="panel">
               <h3 style={{ marginTop: 0 }}>저장소별 전환 상태</h3>
               <StackedBars
@@ -253,6 +258,9 @@ export default function ConversionTab() {
             )}
           </>
         );
+        // 좌: 전체 요약과 파이프라인(읽고 판단하는 것) · 우: 저장소별 분포·행렬·표
+        // (근거 자료). 그림이 아홉 개라 한 화면을 넘으므로 2단 규약을 쓴다.
+        return <Split leftLabel="요약" left={summary} right={detail} />;
       }}
     </Async>
   );

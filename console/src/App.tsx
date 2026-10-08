@@ -106,8 +106,11 @@ export default function App() {
             </AdminOnly>
           }
         >
-          <Route index element={<OntologyConversionTab />} />
-          <Route path="explore" element={<OntologyExploreTab />} />
+          {/* 기본은 정보 조회 — 평소에 쓰는 일이 그것이다. 전환 현황은 고칠 때 본다. */}
+          <Route index element={<OntologyExploreTab />} />
+          <Route path="conversion" element={<OntologyConversionTab />} />
+          {/* 옛 주소는 살려 둔다 — 북마크·공유 링크가 깨지면 "없어졌다"로 읽힌다. */}
+          <Route path="explore" element={<Navigate to="/ontology" replace />} />
         </Route>
         {/* 온톨로지 다음 자리 — 조직이 플랫폼 자원과 사람 작업을 엮어 돌리는 흐름. */}
         <Route
