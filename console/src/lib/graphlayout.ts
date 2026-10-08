@@ -56,3 +56,77 @@ export function layoutGraph(
   });
   return out;
 }
+
+/** 줄바꿈 배치의 간격. 칸 사이는 선 라벨(참/거짓)이 들어갈 만큼 둔다. */
+const GAP_X = 56;
+const GAP_Y = 24;
+
+/**
+ * 줄바꿈(뱀) 배치 — 흐름을 **글처럼** 왼쪽에서 오른쪽으로 놓고, 폭을 넘으면 다음 줄로 접는다.
+ *
+ * 세로 한 줄(TB)로 두면 29단계가 210px 폭의 리본이 되어 패널의 1,200px 중 6분의 1만 쓴다.
+ * 좌→우 한 줄(LR)로 두면 폭이 6,000px이 되어 가로 스크롤만 남는다. 접으면 둘 다 아니다 —
+ * 가로를 다 쓰고, 길어지는 쪽은 아래이고, 아래는 스크롤이 해결한다. 같은 처방을 code 레벨
+ * 다이어그램에서 썼다(c4layout.layoutFlow).
+ *
+ * 단계(rank)는 **가장 긴 경로 깊이**로 매긴다 — 앞 단계가 모두 끝난 자리에 놓이게 된다.
+ * 같은 단계의 노드(분기의 양쪽)는 한 칸 안에 위아래로 쌓는다.
+ */
+export function layoutWrapped(
+  nodes: { id: string }[],
+  edges: { source: string; target: string }[],
+  availableWidth: number,
+): { positions: Map<string, { x: number; y: number }>; width: number; height: number } {
+  const ids = new Set(nodes.map((n) => n.id));
+  const live = edges.filter((e) => ids.has(e.source) && ids.has(e.target)
+    && e.source !== e.target);
+  const incoming = new Map<string, string[]>();
+  nodes.forEach((n) => incoming.set(n.id, []));
+  live.forEach((e) => incoming.get(e.target)!.push(e.source));
+
+  // 가장 긴 경로 깊이. 고리가 있으면(검증이 막지만 화면이 터지지 않게) 방문 표시로 끊는다.
+  const depth = new Map<string, number>();
+  const visiting = new Set<string>();
+  const rankOf = (id: string): number => {
+    const known = depth.get(id);
+    if (known !== undefined) return known;
+    if (visiting.has(id)) return 0;
+    visiting.add(id);
+    const parents = incoming.get(id) ?? [];
+    const value = parents.length === 0
+      ? 0
+      : Math.max(...parents.map((p) => rankOf(p) + 1));
+    visiting.delete(id);
+    depth.set(id, value);
+    return value;
+  };
+  nodes.forEach((n) => rankOf(n.id));
+
+  const ranks = new Map<number, string[]>();
+  nodes.forEach((n) => {
+    const r = depth.get(n.id) ?? 0;
+    ranks.set(r, [...(ranks.get(r) ?? []), n.id]);
+  });
+
+  const positions = new Map<string, { x: number; y: number }>();
+  const columnW = NODE_W + GAP_X;
+  // 한 줄에 적어도 한 칸은 들어가야 한다(패널이 아무리 좁아도 배치는 나와야 한다).
+  const perRow = Math.max(1, Math.floor((availableWidth + GAP_X) / columnW));
+  let width = 0;
+  let y = 0;
+  let rowHeight = 0;
+  [...ranks.keys()].sort((a, b) => a - b).forEach((rank, index) => {
+    const column = index % perRow;
+    if (column === 0 && index > 0) {
+      y += rowHeight + GAP_Y * 2;
+      rowHeight = 0;
+    }
+    const members = ranks.get(rank)!;
+    members.forEach((id, slot) => {
+      positions.set(id, { x: column * columnW, y: y + slot * (NODE_H + GAP_Y) });
+    });
+    rowHeight = Math.max(rowHeight, members.length * (NODE_H + GAP_Y) - GAP_Y);
+    width = Math.max(width, column * columnW + NODE_W);
+  });
+  return { positions, width, height: y + rowHeight };
+}

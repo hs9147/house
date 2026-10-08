@@ -1,10 +1,10 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background, Handle, MarkerType, Position, ReactFlow,
   type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { NODE_H, NODE_W, layoutGraph } from '../lib/graphlayout';
+import { NODE_H, NODE_W, layoutWrapped } from '../lib/graphlayout';
 import type { WorkflowSpec } from '../lib/types';
 import { VIZ } from '../lib/viz';
 
@@ -68,12 +68,32 @@ interface Props {
 }
 
 export default function WorkflowGraph({ spec, height = 520, status, selected, onSelect }: Props) {
-  const nodes: Node[] = useMemo(() => {
+  // 배치에 쓸 폭은 **실제 패널 폭**이다 — 짐작해 두면 넓은 화면에서 가운데가 비고 좁은
+  // 화면에서는 넘친다. 창 크기가 바뀌면 다시 접는다.
+  const box = useRef<HTMLDivElement>(null);
+  const [room, setRoom] = useState(0);
+  useEffect(() => {
+    const target = box.current;
+    if (!target) return;
+    // ResizeObserver를 쓰는 이유: 창 크기만 보면 **대화창을 접었다 펼 때** 다시 재지 않는다
+    // (그때 본문 여백이 바뀌어 그림이 쓸 수 있는 폭이 달라진다). 자기 폭을 직접 본다.
+    const observer = new ResizeObserver(() => setRoom(target.clientWidth));
+    observer.observe(target);
+    setRoom(target.clientWidth);
+    return () => observer.disconnect();
+  }, []);
+
+  const laid = useMemo(() => {
     const list = (spec.nodes ?? []).map((n) => ({ id: String(n.id) }));
-    // 위→아래로 배치한다. 흐름은 "다음 단계"가 아래에 있는 것이 자연스럽고, 가로로 늘어나면
-    // 화면에 맞추려고 축소돼 글자를 읽을 수 없다(29단계에서 실제로 그랬다).
-    const placed = layoutGraph(list, (spec.edges ?? []).map(
-      (e) => ({ source: String(e.from), target: String(e.to) })), 'TB');
+    // 글처럼 왼쪽에서 오른쪽으로 놓고 폭을 넘으면 접는다 — 가로를 다 쓰고, 길어지는 쪽은
+    // 아래다(세로 한 줄은 폭의 6분의 1만 쓰고, 좌→우 한 줄은 6,000px이 된다).
+    return layoutWrapped(list, (spec.edges ?? []).map(
+      (e) => ({ source: String(e.from), target: String(e.to) })),
+      Math.max(room - 24, NODE_W));
+  }, [spec, room]);
+
+  const nodes: Node[] = useMemo(() => {
+    const placed = laid.positions;
     return (spec.nodes ?? []).map((n) => ({
       id: String(n.id),
       type: 'wf',
@@ -85,19 +105,12 @@ export default function WorkflowGraph({ spec, height = 520, status, selected, on
         isSelected: selected === String(n.id),
       } as unknown as Record<string, unknown>,
     }));
-  }, [spec, status, selected]);
+  }, [spec, laid, status, selected]);
 
   // 캔버스를 **내용 크기만큼** 잡는다 — 그러면 브라우저가 진짜 스크롤바를 준다.
   // fitView로 화면에 맞추면 단계가 늘어날수록 글자가 작아지고, 확대·끌기를 아는 사람만
   // 읽을 수 있다. 세로로 길어지는 것은 스크롤이 해결할 문제다.
-  const canvas = useMemo(() => {
-    const xs = nodes.map((n) => n.position.x);
-    const ys = nodes.map((n) => n.position.y);
-    return {
-      width: Math.max(...xs, 0) + NODE_W + 24,
-      height: Math.max(...ys, 0) + NODE_H + 24,
-    };
-  }, [nodes]);
+  const canvas = { width: laid.width + 24, height: laid.height + 24 };
 
   const edges: Edge[] = useMemo(() => (spec.edges ?? []).map((e, i) => ({
     id: `${e.from}->${e.to}-${i}`,
@@ -119,6 +132,7 @@ export default function WorkflowGraph({ spec, height = 520, status, selected, on
   }
   return (
     <div
+      ref={box}
       style={{
         maxHeight: height, overflow: 'auto',
         border: '1px solid var(--border-soft)', borderRadius: 8,
@@ -168,7 +182,7 @@ function WorkflowNodeBox({ data }: NodeProps) {
       }}
       title={`${LABEL[node.type] ?? node.type}: ${node.detail}`}
     >
-      <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
+      <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
       <div style={{ fontSize: 11, lineHeight: 1.3, color }}>
         {LABEL[node.type] ?? node.type}
         {mark && <span style={{ marginLeft: 6, color: VIZ.ink }}>{mark}</span>}
@@ -187,7 +201,7 @@ function WorkflowNodeBox({ data }: NodeProps) {
       }}>
         {node.detail}
       </div>
-      <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
+      <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
     </div>
   );
 }

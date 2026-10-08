@@ -39,9 +39,9 @@ export default function WorkflowDetail() {
   const [assessment, setAssessment] = useState<WorkflowAssessment | null>(null);
   // 이름 수정 중일 때만 값이 있다(빈 문자열은 '수정 중이지만 비움'과 구분이 안 되므로 null).
   const [newName, setNewName] = useState<string | null>(null);
-  // 플로팅 대화를 펼쳤는가. null = 아직 사람이 손대지 않음 → 스펙이 비어 있으면 열어 둔다
-  // (그때는 대화가 유일한 길이다). 한 번 접거나 펼치면 그 뜻을 따른다.
-  const [chatOpen, setChatOpen] = useState<boolean | null>(null);
+  // 플로팅 대화는 **열고 시작한다** — 이 화면에서 하는 일이 대화이고, 접혀 있으면 할 일이
+  // 보이지 않는다. 접으면 그 뜻을 따른다.
+  const [chatOpen, setChatOpen] = useState(true);
 
   const ask = async () => {
     if (!request.trim()) return;
@@ -122,7 +122,10 @@ export default function WorkflowDetail() {
         const shown = proposal?.spec ?? workflow.spec;
         const isProposal = proposal !== null;
         return (
-          <>
+          <div style={{
+            paddingRight: chatOpen && window.innerWidth > 1180 ? 452 : 0,
+            transition: 'padding-right 120ms',
+          }}>
             <div className="row" style={{ marginBottom: 12, alignItems: 'center' }}>
               <button className="small secondary" onClick={() => navigate('/workflows')}>
                 ← 목록
@@ -269,7 +272,7 @@ export default function WorkflowDetail() {
             )}
 
             <ChatDock
-              open={chatOpen ?? workflow.summary.node_count === 0}
+              open={chatOpen}
               onToggle={(v) => setChatOpen(v)}
               constraints={workflow.constraints ?? []}
               messages={messages}
@@ -293,7 +296,7 @@ export default function WorkflowDetail() {
                 setChatOpen(true);
               }}
             />
-          </>
+          </div>
         );
       }}
     </Async>
