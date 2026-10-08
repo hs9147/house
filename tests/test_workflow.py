@@ -307,8 +307,8 @@ def test_review_flags_constraints_that_no_step_enforces():
         ["선급금 30% 초과는 법무팀 합의"],
     )
     assert any("지키는 단계가 없습니다" in n for n in notes), notes
-    # 등록해 둔 업무 제약사항을 아예 읽지 않았으면 그것도 검토 대상이다.
-    assert any("업무 제약사항이 읽히지 않았습니다" in n for n in notes), notes
+    # 전에 있던 제약을 이번 결과에서 빠뜨렸으면 그것도 검토 대상이다.
+    assert any("전에 있던 제약이 이번 결과에서 빠졌습니다" in n for n in notes), notes
 
 
 def test_review_flags_transitions_pointing_at_missing_steps():
@@ -350,8 +350,8 @@ def test_propose_repairs_once_when_validation_rejects(org, docs_store, monkeypat
     assert result["spec"]["nodes"][0]["id"] == "목록"
     # 2차 요청에는 1차의 문제 목록이 실린다 — 그게 수선의 근거다.
     assert "모르는 종류" in calls[1][-1]["content"]
-    # 업무 제약사항과 자원 목록은 시스템 메시지에 실린다(하네싱).
-    assert "반드시 지켜야 하는 이 조직의 업무 제약사항" in calls[0][0]["content"]
+    # 제약사항과 자원 목록은 시스템 메시지에 실린다(하네싱).
+    assert "이 워크플로가 지켜야 하는 제약사항" in calls[0][0]["content"]
     assert "storage.list" in calls[0][0]["content"]
 
 
@@ -368,13 +368,13 @@ def test_review_accepts_a_paraphrased_common_constraint():
     assert notes == [], notes
 
 
-def test_review_still_flags_a_constraint_that_was_not_read():
+def test_review_still_flags_a_constraint_that_was_dropped():
     notes = workflowchat.review(
         {"nodes": [{"id": "체결", "type": "human", "title": "계약 체결"}]},
         {"constraints": [{"text": "계약은 전자서명으로 체결한다", "node": "체결"}]},
         ["선급금 30퍼센트 초과는 법무팀 합의가 필요하다"],
     )
-    assert any("읽히지 않았습니다" in n for n in notes), notes
+    assert any("빠졌습니다" in n for n in notes), notes
 
 
 # --- 평가: 사람 단계를 에이전트로 옮길 수 있는가 ---

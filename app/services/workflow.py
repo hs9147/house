@@ -27,8 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import (
-    LlmProvider, Module, Organization, Workflow, WorkflowConstraint, WorkflowRun,
-    WorkflowRunStatus,
+    LlmProvider, Module, Organization, Workflow, WorkflowRun, WorkflowRunStatus,
 )
 from ..models import utcnow
 from . import docready, docsearch, llm, mcp_client, storage
@@ -116,21 +115,22 @@ class WorkflowError(RuntimeError):
 
 # --- 자원 목록 (화면과 LLM 프롬프트가 같은 목록을 쓴다) ---
 
-def constraints(db: Session, organization_id: int) -> list[str]:
-    """이 조직의 **업무** 제약사항(등록 순).
+def constraints_of(workflow: Workflow) -> list[str]:
+    """**이 워크플로의** 제약사항 — 대화에서 읽어 내 함께 저장한 것(extracted.constraints).
 
-    기획의 공통 제약사항(planning.common_constraints)과 **섞지 않는다.** 그쪽은 에이전트를
-    개발할 때의 제한이고(프록시 구조·외부 솔루션 금지 — 코드를 쓰는 사람에게 하는 말), 여기는
-    업무 규칙이다(선급금 한도·평가 순서·결재선). 실측에서 섞인 결과가 바로 드러났다: 구매
-    업무 워크플로 평가에 개발 제약 2건이 실려 "이 규칙을 지키는 단계가 없습니다"가 떴다 —
-    맞는 말이지만 그 워크플로가 지킬 규칙이 아니었고, 그런 항목이 섞이면 사람이 검토 목록을
-    더는 읽지 않는다.
+    조직 단위 등록부를 뒀다가 걷었다. 업무 규칙은 흐름마다 다르다 — 계약 검토의 선급금 한도는
+    신규업체등록 워크플로가 지킬 규칙이 아니다. 조직에 묶어 두면 모든 워크플로가 남의 규칙을
+    받고, 평가 화면에 "이 규칙을 지키는 단계가 없습니다"가 엉뚱한 데서 뜬다(기획의 개발
+    제약을 섞었을 때 겪은 것과 같은 일이 한 단계 작은 규모로 되풀이된다).
+
+    기획의 공통 제약사항(planning.common_constraints)과도 섞지 않는다: 그쪽은 에이전트를
+    **개발**할 때의 제한이다.
     """
-    return [c.text for c in db.execute(
-        select(WorkflowConstraint)
-        .where(WorkflowConstraint.organization_id == organization_id)
-        .order_by(WorkflowConstraint.id)
-    ).scalars()]
+    rows = (workflow.extracted or {}).get("constraints")
+    if not isinstance(rows, list):
+        return []
+    return [str(r.get("text")).strip() for r in rows
+            if isinstance(r, dict) and str(r.get("text") or "").strip()]
 
 
 def resources(db: Session, organization_id: int) -> dict:

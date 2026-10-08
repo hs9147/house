@@ -13,8 +13,7 @@ from sqlalchemy.orm import Session
 from .. import audit
 from ..db import get_db
 from ..models import (
-    ApiKey, Organization, Workflow, WorkflowConstraint, WorkflowMessage, WorkflowRun,
-    WorkflowRunStatus,
+    ApiKey, Organization, Workflow, WorkflowMessage, WorkflowRun, WorkflowRunStatus,
 )
 from ..security import require_admin, require_api_key
 from ..services import bedrock
@@ -42,11 +41,6 @@ class WorkflowSave(BaseModel):
 class WorkflowRename(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     description: str | None = None
-
-
-class ConstraintIn(BaseModel):
-    organization_id: int
-    text: str = Field(min_length=1)
 
 
 class WorkflowChatIn(BaseModel):
@@ -105,51 +99,6 @@ def workflow_resources(organization_id: int, db: Session = Depends(get_db),
     return workflow_service.resources(db, organization_id)
 
 
-@router.get("/workflows/constraints")
-def list_workflow_constraints(organization_id: int, db: Session = Depends(get_db),
-                              _: ApiKey = Depends(require_api_key)):
-    """이 조직의 **업무** 제약사항 — 구성 대화와 평가에 그대로 실린다.
-
-    기획의 공통 제약사항(/plan/constraints)과 다른 목록이다. 그쪽은 에이전트를 **개발**할 때의
-    제한이고(프록시 구조·외부 솔루션 금지), 여기는 업무 규칙이다(선급금 한도·평가 순서·결재선).
-    섞으면 "이 규칙을 지키는 단계가 없습니다"가 엉뚱한 데서 뜬다 — 실측에서 그랬다.
-    """
-    if db.get(Organization, organization_id) is None:
-        raise HTTPException(status_code=404, detail="조직을 찾을 수 없습니다")
-    rows = db.execute(
-        select(WorkflowConstraint)
-        .where(WorkflowConstraint.organization_id == organization_id)
-        .order_by(WorkflowConstraint.id)
-    ).scalars()
-    return [{"id": r.id, "organization_id": r.organization_id, "text": r.text,
-             "created_at": r.created_at} for r in rows]
-
-
-@router.post("/workflows/constraints", status_code=201)
-def add_workflow_constraint(body: ConstraintIn, db: Session = Depends(get_db),
-                            admin: ApiKey = Depends(require_admin)):
-    if db.get(Organization, body.organization_id) is None:
-        raise HTTPException(status_code=404, detail="조직을 찾을 수 없습니다")
-    row = WorkflowConstraint(organization_id=body.organization_id, text=body.text.strip())
-    db.add(row)
-    db.commit()
-    audit.record(db, admin.name, "workflow.constraint.add", str(row.id),
-                 {"organization_id": row.organization_id, "text": row.text[:200]})
-    return {"id": row.id, "organization_id": row.organization_id, "text": row.text,
-            "created_at": row.created_at}
-
-
-@router.delete("/workflows/constraints/{constraint_id}", status_code=204)
-def delete_workflow_constraint(constraint_id: int, db: Session = Depends(get_db),
-                               admin: ApiKey = Depends(require_admin)):
-    row = db.get(WorkflowConstraint, constraint_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="제약사항을 찾을 수 없습니다")
-    db.delete(row)
-    db.commit()
-    audit.record(db, admin.name, "workflow.constraint.delete", str(constraint_id), None)
-
-
 @router.get("/workflows")
 def list_workflows(organization_id: int | None = None, db: Session = Depends(get_db),
                    _: ApiKey = Depends(require_api_key)):
@@ -188,8 +137,9 @@ def get_workflow(workflow_id: int, db: Session = Depends(get_db),
         **_out(row),
         # 지금 저장된 스펙이 여전히 유효한가 — 저장 뒤에 저장소·모듈이 사라질 수 있다.
         "problems": workflow_service.validate(db, row.organization_id, row.spec or {}),
-        # 이 워크플로를 하네싱하는 업무 제약 — 화면이 "무엇에 묶여 있나"를 보여 준다.
-        "constraints": workflow_service.constraints(db, row.organization_id),
+        # 이 워크플로가 지켜야 하는 제약(스스로 읽어 둔 것) — 화면이 "무엇에 묶여 있나"를
+        # 보여 준다. 조직 단위 등록부는 걷었다: 업무 규칙은 흐름마다 다르다.
+        "constraints": workflow_service.constraints_of(row),
     }
 
 

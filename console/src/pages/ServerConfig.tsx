@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import Async from '../components/Async';
+import Split from '../components/Split';
 import DeployProgressModal from '../components/DeployProgressModal';
 import Modal from '../components/Modal';
 import AutoDeployMark from '../components/AutoDeployMark';
@@ -18,6 +19,9 @@ export default function ServerConfig() {
   const [busyKey, setBusyKey] = useState('');
   const [error, setError] = useState('');
   const [showTopology, setShowTopology] = useState(true);
+  // 우측 현황에서 고른 경로. 동작은 좌측 한 자리에서만 한다 — 표에 버튼을 심어 두면
+  // 열이 넓어져 정작 봐야 할 주소·상태가 밀린다(동작 열 하나가 280px이었다).
+  const [picked, setPicked] = useState<string>('');
 
   // 배포는 큐(비블로킹)로 한 번만 요청하고, 받은 레코드 id를 진행 로그 모달에 넘겨
   // 폴링으로 진행 상황을 보여준다.
@@ -51,7 +55,57 @@ export default function ServerConfig() {
     }
   };
 
-  return (
+  const site = state.data?.sites.find((x) => `${x.project_id}-${x.profile}` === picked);
+
+  // 좌: 동작(고른 경로에 대해 실제로 누르는 것) · 우: 현황(경로 목록·표).
+  // 표 안에 버튼을 심지 않는 이유는 폭이다 — 동작 열 하나가 280px을 먹어 주소와 상태가
+  // 밀렸다. 동작을 한 자리에 모으면 "무엇에 대해 무엇을 하는지"도 한 번에 읽힌다.
+  const actions = (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>동작</h3>
+      {!site ? (
+        <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+          오른쪽 표에서 경로를 고르면 그 배포에 대한 동작이 여기 나옵니다.
+        </p>
+      ) : (
+        <>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>{site.project_name}</div>
+          <div className="mutedtext mono" style={{ fontSize: 12, marginBottom: 8 }}>
+            {site.profile} · {site.path_prefix || '/'}
+            <br />
+            {site.internal_port
+              ? `→ ${site.internal_host ?? '127.0.0.1'}:${site.internal_port}`
+              : '→ 떠 있지 않음(포트 없음)'}
+          </div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <button className="small"
+                    disabled={busyKey === `${site.project_id}-${site.profile}-deploy`}
+                    onClick={() => startDeploy(site.project_id, site.project_name, site.profile)}>
+              배포
+            </button>
+            <button className="small danger"
+                    disabled={busyKey === `${site.project_id}-${site.profile}-stop`}
+                    onClick={() => stopProject(site.project_id, site.profile)}>
+              중지
+            </button>
+            <button className="small secondary"
+                    onClick={() => setRulesFor({ id: site.project_id,
+                                                 name: site.project_name })}>
+              리다이렉트 규칙 ({site.redirect_count})
+            </button>
+          </div>
+          {site.in_proxy === false && (
+            <p className="mutedtext" style={{ fontSize: 12, marginTop: 8 }}>
+              프록시 설정(web.config)에 이 경로가 없습니다 — 배포하면 함께 구성됩니다.
+            </p>
+          )}
+        </>
+      )}
+      {error && <p className="error" style={{ fontSize: 12 }}>{error}</p>}
+    </div>
+  );
+
+  const status = (
     <div className="panel">
       <div className="row" style={{ marginBottom: 10 }}>
         <h2 style={{ margin: 0 }}>서버구성</h2>
@@ -80,7 +134,6 @@ export default function ServerConfig() {
         (백엔드)·나머지(프론트엔드)로 자동 라우팅됩니다 — 아래 다이어그램에서
         컴포넌트별 상태를 볼 수 있습니다.
       </p>
-      {error && <p className="error">{error}</p>}
       {showTopology && state.data && <TopologyDiagram cfg={state.data} />}
       <Async state={state} empty="등록된 프로젝트가 없습니다.">
         {(cfg) => (
@@ -91,17 +144,20 @@ export default function ServerConfig() {
                 <th>프로필</th>
                 <th>내부 URL</th>
                 <th>상태</th>
-                <th style={{ width: 280 }}>동작</th>
                 <th>자동배포</th>
                 <th>리다이렉트</th>
               </tr>
             </thead>
             <tbody>
               {cfg.sites.map((s) => {
-                const deployKey = `${s.project_id}-${s.profile}-deploy`;
-                const stopKey = `${s.project_id}-${s.profile}-stop`;
                 return (
-                  <tr key={`${s.project_id}-${s.profile}`}>
+                  <tr key={`${s.project_id}-${s.profile}`}
+                      onClick={() => setPicked(`${s.project_id}-${s.profile}`)}
+                      style={{
+                        cursor: 'pointer',
+                        background: picked === `${s.project_id}-${s.profile}`
+                          ? 'rgba(56, 189, 248, 0.10)' : undefined,
+                      }}>
                     <td>{s.project_name}</td>
                     <td><StatusPill value={s.profile} /></td>
                     {/* 공개 주소가 아니라 프록시가 실제로 전달하는 곳을 보여준다 —
@@ -113,30 +169,6 @@ export default function ServerConfig() {
                         : '-'}
                     </td>
                     <td><StatusPill value={s.status} /></td>
-                    <td>
-                      <div className="row">
-                        <button
-                          className="small"
-                          disabled={busyKey === deployKey}
-                          onClick={() => startDeploy(s.project_id, s.project_name, s.profile)}
-                        >
-                          배포
-                        </button>
-                        <button
-                          className="small danger"
-                          disabled={busyKey === stopKey}
-                          onClick={() => stopProject(s.project_id, s.profile)}
-                        >
-                          중지
-                        </button>
-                        <button
-                          className="small secondary"
-                          onClick={() => setRulesFor({ id: s.project_id, name: s.project_name })}
-                        >
-                          리다이렉트 규칙
-                        </button>
-                      </div>
-                    </td>
                     <td><AutoDeployMark status={s.status} /></td>
                     <td>{s.redirect_count}</td>
                   </tr>
@@ -210,27 +242,33 @@ export default function ServerConfig() {
           </table>
         </Section>
       )}
-      {rulesFor && (
-        <RedirectRulesModal
-          projectId={rulesFor.id}
-          projectName={rulesFor.name}
-          onClose={() => setRulesFor(null)}
-          onChanged={() => state.reload()}
-        />
-      )}
-      {deployFor && (
-        <DeployProgressModal
-          projectId={deployFor.projectId}
-          projectName={deployFor.name}
-          profile={deployFor.profile}
-          deploymentIds={deployFor.ids}
-          onClose={() => {
-            setDeployFor(null);
-            state.reload();
-          }}
-        />
-      )}
     </div>
+  );
+
+  return (
+    <>
+      <Split leftLabel="동작" left={actions} right={status} leftWidth={360} />
+          {rulesFor && (
+            <RedirectRulesModal
+              projectId={rulesFor.id}
+              projectName={rulesFor.name}
+              onClose={() => setRulesFor(null)}
+              onChanged={() => state.reload()}
+            />
+          )}
+          {deployFor && (
+            <DeployProgressModal
+              projectId={deployFor.projectId}
+              projectName={deployFor.name}
+              profile={deployFor.profile}
+              deploymentIds={deployFor.ids}
+              onClose={() => {
+                setDeployFor(null);
+                state.reload();
+              }}
+            />
+          )}
+    </>
   );
 }
 

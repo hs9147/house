@@ -55,7 +55,7 @@ PROMPT = """당신은 사내 PaaS의 워크플로를 보고 **자동화 가능�
 이 조직이 쓸 수 있는 자원:
 {resources}
 
-반드시 지켜야 하는 이 조직의 업무 제약사항:
+이 워크플로가 지켜야 하는 제약사항:
 {constraints}
 
 평가할 워크플로({name}):
@@ -86,11 +86,10 @@ def assess(db: Session, workflow: Workflow) -> dict:
             "stores": resources["stores"], "modules": resources["modules"],
             "providers": resources["providers"],
         }, ensure_ascii=False, indent=2),
-        # 조직의 **업무** 제약만 싣는다 — 기획의 공통 제약사항(에이전트 개발 제한)을 섞으면
-        # "이 규칙을 지키는 단계가 없습니다"가 뜨는데, 그 워크플로가 지킬 규칙이 아니다.
-        constraints="\n".join(
-            f"- {c}" for c in workflow_service.constraints(db, workflow.organization_id))
-        or "- (등록된 제약사항 없음)",
+        # **이 워크플로의** 제약만 싣는다(extracted.constraints) — 조직이나 기획의 제약을
+        # 섞으면 "이 규칙을 지키는 단계가 없습니다"가 엉뚱한 데서 뜬다.
+        constraints="\n".join(f"- {c}" for c in workflow_service.constraints_of(workflow))
+        or "- (이 워크플로에 적힌 제약 없음)",
         name=workflow.name,
         spec=workflow_service.spec_as_text(spec),
     )

@@ -6,12 +6,11 @@ builder도 LLM이 노드와 연결을 만들고 사람이 캔버스에서 고친
 "프롬프트를 잘 쓰는 것"이 아니라 **되돌려 고치게 하는 것**이다 — 기동 스크립트 작성과 같은
 한 번의 수선(startscript.propose)을 쓴다.
 
-**제약사항이 이 생성을 하네싱한다.** 그 제약은 **조직의 업무 규칙**이다
-(workflow_constraints) — 선급금 한도, 평가 순서, 결재선 같은 것. 기획의 공통 제약사항은
-싣지 않는다: 그쪽은 에이전트를 **개발**할 때의 제한이고(프록시 구조·외부 솔루션 금지),
-구매 업무 워크플로가 지킬 규칙이 아니다. 실측에서 섞어 본 결과가 그랬다 — 평가에 개발 제약이
-실려 "이 규칙을 지키는 단계가 없습니다"가 떴고, 맞는 말이지만 쓸모가 없었다.
-지키지 못할 요청이면 스펙을 만들지 말고 무엇이 걸리는지 말하게 한다.
+**제약사항이 이 생성을 하네싱한다.** 그 제약은 **이 워크플로의 것**이다 — 대화에서 읽어 내
+함께 저장한 규칙(extracted.constraints)을 다시 쓸 때 그대로 싣는다. 업무 규칙은 흐름마다
+다르고(계약 검토의 선급금 한도는 신규업체등록이 지킬 규칙이 아니다), 기획의 공통 제약사항은
+에이전트를 **개발**할 때의 제한이라 여기 싣지 않는다. 지키지 못할 요청이면 스펙을 만들지
+말고 무엇이 걸리는지 말하게 한다.
 
 제안은 **저장하지 않는다.** 화면이 캔버스에 올려 사람이 보고 저장을 누른다 — LLM이 쓴 것이
 조용히 운영 자원을 건드리는 흐름이 되면 안 된다(기동 스크립트와 같은 자리다).
@@ -36,7 +35,7 @@ PROMPT = """당신은 사내 PaaS의 워크플로를 설계한다. 출력은 **J
     "states":      [{{"entity": "대상 이름", "name": "그 대상이 거치는 상태", "note": ""}}],
     "transitions": [{{"from": "상태", "to": "상태", "trigger": "무엇이 일어나면",
                      "node": "그 일을 하는 단계 id(없으면 \\"\\")"}}],
-    "constraints": [{{"text": "지켜야 하는 규칙", "origin": "대화 또는 조직",
+    "constraints": [{{"text": "지켜야 하는 규칙", "origin": "대화 또는 기존",
                      "node": "그 규칙을 지키는 단계 id(반영 못 했으면 \\"\\")"}}]
   }}}}
 
@@ -63,7 +62,7 @@ extracted는 **대화에서 읽어 낸 업무**다 — 스펙과 별개로 내�
 이 조직이 쓸 수 있는 자원:
 {resources}
 
-반드시 지켜야 하는 이 조직의 업무 제약사항:
+이 워크플로가 지켜야 하는 제약사항:
 {constraints}
 
 현재 스펙:
@@ -93,7 +92,8 @@ def propose(db: Session, workflow: Workflow, request: str, history: list[dict]) 
             "기본 LLM 프로바이더가 없습니다 — LLM 관리에서 「설정」을 누르세요.")
 
     resources = workflow_service.resources(db, workflow.organization_id)
-    constraints = workflow_service.constraints(db, workflow.organization_id)
+    # 이 워크플로가 지금까지 읽어 둔 제약 — 다시 쓸 때 빠뜨리지 않게 함께 싣는다.
+    constraints = workflow_service.constraints_of(workflow)
     facts = PROMPT.format(
         node_types="\n".join(
             f"- {t['type']}({t['label']}): {t['help']}"
@@ -174,12 +174,13 @@ def review(spec: dict, extracted: dict, constraints: list[str]) -> list[str]:
         elif not node:
             notes.append(f"제약 '{text[:40]}'을 지키는 단계가 없습니다.")
     for common in constraints:
-        # 등록된 업무 제약은 **빠뜨렸는지**가 중요하다 — 등록해 둔 규칙이 워크플로에 들어오지
+        # 전에 읽어 둔 제약을 다시 쓰면서 **빠뜨렸는지**가 중요하다 — 고치라고 한 것이
+        # 아닌데 규칙이 사라지면, 그 흐름은 조용히 다른 업무가 된다. — 등록해 둔 규칙이 워크플로에 들어오지
         # 않으면 그 규칙은 없는 것과 같다. 다만 앞부분 문자열로 맞춰 보면 안 된다: 모델은
         # 문장을 풀어 쓴다(실측: 같은 규칙을 그대로 실었는데도 "읽히지 않았다"가 떴다).
         # 낱말이 얼마나 겹치는지로 본다.
         if not any(_overlaps(common, text) for text in seen):
-            notes.append(f"업무 제약사항이 읽히지 않았습니다: {common[:60]}")
+            notes.append(f"전에 있던 제약이 이번 결과에서 빠졌습니다: {common[:60]}")
     return notes
 
 
