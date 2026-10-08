@@ -57,7 +57,16 @@ a { color: var(--accent); text-decoration: none; }
   border-top: 1px solid var(--border-soft);
 }
 
-main { flex: 1; min-width: 0; max-width: 1100px; margin: 24px auto; padding: 0 20px; }
+/* 본문 폭 — 창을 쓴다. 1100px로 못 박아 두었더니 2,560px 화면에서 43%만 쓰고 양옆이
+   비었다(표는 줄바꿈으로 뭉개지고 흐름도는 축소됐다). 상한을 두는 이유는 글줄이다:
+   한 줄이 너무 길면 눈이 다음 줄을 못 찾는다. 그래서 상한은 **글에만** 두고(아래
+   .panel p의 max-width), 본문 자체는 넓게 쓴다.
+   2단을 쓰는 화면은 상한도 풀어 창을 끝까지 쓴다 — 왼쪽은 고정 폭이고 넓어지는 쪽은
+   오른쪽(표·그림)이다. :has()는 콘솔이 쓰는 Edge/Chrome에서 지원된다. */
+main { flex: 1; min-width: 0; max-width: 1600px; margin: 24px auto; padding: 0 20px; }
+main:has(.split) { max-width: none; }
+/* 설명문은 글줄 길이를 지킨다(약 95자) — 표·그림이 넓어지는 것과 별개다. */
+.panel > p, .panel > details > p { max-width: 95ch; }
 
 .panel {
   background: var(--panel);
