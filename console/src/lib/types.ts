@@ -990,6 +990,7 @@ export interface SourceScan {
   skipped?: { url: string; reason: string }[];
   sitemap?: number;
   browser?: boolean;
+  via?: 'browser';
   // api
   openapi?: string;
   title?: string;

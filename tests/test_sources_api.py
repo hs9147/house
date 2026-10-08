@@ -195,6 +195,82 @@ def test_rejects_secret_in_url_and_bad_scheme(client):
         assert res.status_code == 400, url
 
 
+def test_sso_cookie_is_refused(client):
+    res = client.post(f"{API}/sources", headers=ADMIN, json={
+        "name": "gps", "kind": "web", "url": "https://intra.test/",
+        "headers": "Cookie: SESSION=a; SMSESSION=sso-value"})
+    assert res.status_code == 400 and "SSO" in res.json()["detail"]
+    assert "sso-value" not in res.text
+
+
+def _browser_file(**over):
+    payload = {
+        "agent": "gpax-scan/1", "origin": "https://intra.test", "url": "https://intra.test/main",
+        "menu": [{"label": "인사", "url": "", "children": [
+            {"label": "휴가 조회", "url": "https://intra.test/leave", "children": []},
+            {"label": "외부", "url": "https://other.test/x", "children": []}]}],
+        "pages": [
+            {"url": "https://intra.test/main", "title": "메인", "fields": ["사번"],
+             "tables": [["일자", "종류"], "깨진 값"], "links": [
+                 {"url": "https://intra.test/leave", "text": "휴가", "nav": True},
+                 {"url": "https://other.test/x", "text": "외부"}]},
+            {"url": "https://intra.test/main#휴가", "title": "휴가 탭", "tables": {"x": 1}},
+            {"url": "https://other.test/x", "title": "남의 화면"},
+        ],
+        **over,
+    }
+    return {"file": ("gpax-scan-intra.test.json", json.dumps(payload).encode("utf-8"), "application/json")}
+
+
+def test_browser_scan_result_is_checked_then_finished(client, monkeypatch):
+    monkeypatch.setattr(infosource, "_submit_result", infosource._result_job)
+    made = _create(client, headers="")
+    url = f"{API}/sources/{made['id']}/browser-result"
+
+    assert client.post(url, headers=ADMIN, files=_browser_file(agent="x")).status_code == 400
+    res = client.post(url, headers=ADMIN, files=_browser_file(origin="https://other.test"))
+    assert res.status_code == 400 and "다른 사이트" in res.json()["detail"]
+    bad = {"file": ("a.json", b"not json", "application/json")}
+    assert client.post(url, headers=ADMIN, files=bad).status_code == 400
+
+    res = client.post(url, headers=ADMIN, files=_browser_file())
+    assert res.status_code == 202, res.text
+    detail = client.get(f"{API}/sources/{made['id']}", headers=ADMIN).json()
+    assert detail["status"] == "scanned", detail["error"]
+    scan = detail["scan"]
+    assert scan["via"] == "browser"
+    # 다른 출처의 화면·메뉴 주소는 버리고, 탭마다 붙인 #이름은 다른 화면으로 남는다.
+    assert [p["url"] for p in scan["pages"]] == ["https://intra.test/main", "https://intra.test/main#휴가"]
+    assert scan["pages"][0]["tables"] == [["일자", "종류"]]
+    assert scan["pages"][1]["tables"] == []
+    # 메뉴는 사용자 화면에 그려진 트리 그대로(LLM 없음).
+    children = scan["menu"][0]["children"]
+    assert [(m["label"], m["url"]) for m in children] == [
+        ("휴가 조회", "https://intra.test/leave"), ("외부", "")]
+    assert detail["proposal"]
+
+    from app.db import SessionLocal
+    from app.models import AuditEvent
+
+    with SessionLocal() as s:
+        assert s.query(AuditEvent).filter(AuditEvent.action == "source.browser_scan").count() == 1
+
+
+def test_browser_scan_drops_cross_origin_links():
+    from app.models import InfoSource
+
+    payload = json.loads(_browser_file()["file"][1])
+    result = infosource.from_browser(InfoSource(kind="web", url="https://intra.test/"), payload)
+    assert [link["url"] for link in result["pages"][0]["links"]] == ["https://intra.test/leave"]
+
+
+def test_browser_scan_only_for_web(client):
+    made = _create(client, name="api", kind="api", url="https://intra.test/api", headers="")
+    res = client.post(f"{API}/sources/{made['id']}/browser-result", headers=ADMIN,
+                      files=_browser_file())
+    assert res.status_code == 400
+
+
 def test_api_source_reads_openapi(client, monkeypatch):
     spec = {"openapi": "3.0.0", "info": {"title": "재고 API"}, "paths": {
         "/items": {"get": {"summary": "품목 목록", "parameters": [{"name": "q"}],

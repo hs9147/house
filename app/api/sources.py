@@ -7,7 +7,9 @@
 저장은 사람이 결정한다. 스캔이 제안(기존 저장소 / 새 저장소와 폴더)을 내고, admin이 그대로
 받거나 고쳐서 저장을 누른다. 새 저장소면 폴더를 만들고 .env를 고쳐 재시작 없이 반영한다.
 """
-from fastapi import APIRouter, Depends, HTTPException
+import json
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -171,6 +173,30 @@ def scan_source(source_id: int, db: Session = Depends(get_db),
     audit.record(db, admin.name, "source.scan", row.name,
                  {"kind": row.kind, "origin": _host(row.url),
                   "browser": infosource.browser_available() and row.kind == "web"})
+    db.refresh(row)
+    return _out(row, full=True)
+
+
+@router.post("/sources/{source_id}/browser-result", status_code=202)
+def browser_result(source_id: int, file: UploadFile = File(...), db: Session = Depends(get_db),
+                   admin: ApiKey = Depends(require_admin)):
+    """북마크릿이 사용자 브라우저에서 만든 JSON 파일을 받는다(services/infosource.from_browser)."""
+    row = _row_or_404(db, source_id)
+    raw = file.file.read(infosource.MAX_UPLOAD_BYTES + 1)
+    if len(raw) > infosource.MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="파일이 너무 큽니다(5MB 이하).")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="JSON 파일이 아닙니다.")
+    try:
+        counts = infosource.accept_browser_result(db, row, payload)
+    except infosource.ScanBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    audit.record(db, admin.name, "source.browser_scan", row.name,
+                 {"origin": _host(row.url), "bytes": len(raw), **counts})
     db.refresh(row)
     return _out(row, full=True)
 

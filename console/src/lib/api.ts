@@ -490,6 +490,12 @@ export const api = {
   scanSource: (id: number) => request<SourceOut>('POST', `/sources/${id}/scan`),
   saveSource: (id: number, body: { mode: 'existing' | 'new'; store: string; path?: string }) =>
     request<SourceSaveResult>('POST', `/sources/${id}/save`, body),
+  // 북마크릿이 사용자 브라우저에서 내려받은 JSON 파일
+  uploadBrowserScan: (id: number, file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return requestMultipart<SourceOut>(`/sources/${id}/browser-result`, fd);
+  },
   // 캡처는 <img src>로 바로 걸 수 없다(키가 헤더로 가야 한다) — 받아서 object URL로 만든다.
   sourceShotUrl: async (id: number, n: number): Promise<string> => {
     const res = await fetch(apiUrl(`/sources/${id}/shots/${n}`), { headers: { 'x-api-key': getKey() } });

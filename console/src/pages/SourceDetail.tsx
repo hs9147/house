@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import Async from '../components/Async';
 import Split from '../components/Split';
 import Tabs from '../components/Tabs';
 import { api } from '../lib/api';
 import { useApi, usePolling } from '../lib/hooks';
+import scanAgent from '../lib/scanAgent.js?raw';
 import type {
   SourceCapabilities, SourceMenuItem, SourceOut, SourcePage, SourceSaveResult, StorageStore,
 } from '../lib/types';
@@ -68,6 +69,7 @@ export default function SourceDetail() {
         {row.status === 'failed' && row.error && <p className="error">{row.error}</p>}
         {error && <p className="error">{error}</p>}
       </div>
+      {row.kind === 'web' && <BrowserScanPanel row={row} onChange={setRow} />}
       <HeadersPanel row={row} onChange={setRow} />
       {row.scan && row.proposal && row.status !== 'scanning' && (
         <SavePanel row={row} onSaved={(r) => setRow(r.source)} />
@@ -96,6 +98,85 @@ function Means({ caps, kind }: { caps: SourceCapabilities | null; kind: SourceOu
     <ul className="mutedtext" style={{ fontSize: 11, margin: '4px 0', paddingLeft: 18 }}>
       {parts.map((p) => <li key={p}>{p}</li>)}
     </ul>
+  );
+}
+
+// 북마크에 통째로 들어간다 — 주석과 들여쓰기만 덜어 낸다(코드에 줄 주석 //는 쓰지 않았다).
+const SCAN_CODE = scanAgent.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\n\s+/g, '\n').trim();
+const BOOKMARKLET = `javascript:${encodeURIComponent(SCAN_CODE)}`;
+
+/**
+ * SSO 뒤의 사이트 — 서버는 로그인할 수 없으니 사용자가 로그인한 탭에서 북마크릿이 읽는다.
+ * 결과는 파일로 오간다: 운영 콘솔은 http라 https 사이트의 페이지가 이쪽을 부를 수 없다.
+ */
+function BrowserScanPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut) => void }) {
+  const link = useRef<HTMLAnchorElement>(null);
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  // React는 javascript: href를 경고한다 — DOM에 직접 넣는다.
+  useEffect(() => { link.current?.setAttribute('href', BOOKMARKLET); }, []);
+
+  const copy = () => {
+    // http에서는 navigator.clipboard가 없다 — 고른 글을 복사하는 옛 방식으로.
+    const area = document.createElement('textarea');
+    area.value = SCAN_CODE;
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    setCopied(ok);
+    if (!ok) setError('복사하지 못했습니다 — 북마크로 끌어다 놓아 쓰세요.');
+  };
+
+  const upload = async (file: File | undefined) => {
+    if (!file) return;
+    setBusy(true);
+    setError('');
+    try {
+      onChange(await api.uploadBrowserScan(row.id, file));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>브라우저에서 스캔</h3>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        사내 SSO로 로그인하는 사이트는 서버가 들어갈 수 없습니다. 로그인한 내 브라우저에서 읽어 옵니다 —
+        세션은 브라우저 밖으로 나가지 않고, 입력값·쿠키는 읽지 않습니다.
+      </p>
+      <ol style={{ fontSize: 12, paddingLeft: 18, margin: '6px 0' }}>
+        <li>
+          <a ref={link} className="mono" onClick={(e) => e.preventDefault()}
+             style={{ padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 4, cursor: 'grab' }}>
+            GPAX 스캔
+          </a>
+          {' '}을 북마크바로 끌어다 놓습니다(또는{' '}
+          <button className="small secondary" onClick={copy}>{copied ? '복사됨' : '코드 복사'}</button>
+          {' '}후 개발자 도구 Console에 붙여 넣기).
+        </li>
+        <li>
+          <span className="mono">{row.url}</span>에 로그인하고, 읽힐 화면(메뉴를 펼친 상태, 보고 싶은 탭)을 엽니다.
+        </li>
+        <li>북마크를 누르면 메뉴와 열린 화면을 읽어 <span className="mono">gpax-scan-*.json</span>을 내려받습니다.</li>
+        <li>
+          그 파일을 올립니다:{' '}
+          <input type="file" accept=".json,application/json" disabled={busy || row.status === 'scanning'}
+                 onChange={(e) => { upload(e.target.files?.[0]); e.target.value = ''; }} />
+        </li>
+      </ol>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        메뉴의 GET 링크는 최대 25곳까지 더 열어 보고(로그아웃·삭제는 건너뜀), 스크립트로만 여는 메뉴는
+        지금 열려 있는 화면만 읽습니다. 화면 캡처는 없습니다.
+      </p>
+      {busy && <p className="mutedtext" style={{ fontSize: 12 }}>올리는 중…</p>}
+      {error && <p className="error">{error}</p>}
+    </div>
   );
 }
 
@@ -439,7 +520,9 @@ function Notes({ row }: { row: SourceOut }) {
       )}
       {row.kind === 'web' && (
         <p className="mutedtext">
-          사이트맵 {scan.sitemap ?? 0}건 · 브라우저 {scan.browser ? '사용' : '미사용'}
+          {scan.via === 'browser'
+            ? '사용자 브라우저에서 읽음(북마크릿)'
+            : `사이트맵 ${scan.sitemap ?? 0}건 · 브라우저 ${scan.browser ? '사용' : '미사용'}`}
         </p>
       )}
       {(scan.skipped ?? []).length > 0 && (

@@ -67,9 +67,15 @@ _OPENAPI_PATHS = ("/openapi.json", "/swagger.json", "/v3/api-docs", "/v2/api-doc
 _SECRET_PARAMS = ("key", "token", "secret", "password", "passwd", "pwd", "apikey", "access_token")
 _HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
 _FORBIDDEN_HEADERS = {"host", "content-length", "transfer-encoding", "connection"}
+# 상위 도메인(.lge.com) 전체에 걸리는 SSO 쿠키 — EP 3.0은 CA SiteMinder다(SM*).
+_SSO_COOKIE = re.compile(r"(^|;\s*)(SMSESSION|SMIDENTITY|SMSAVEDSESSION|SMCHALLENGE)\s*=", re.I)
 
 
 class SourceError(ValueError):
+    pass
+
+
+class ScanBusy(SourceError):
     pass
 
 
@@ -101,6 +107,10 @@ def parse_headers(text: str) -> dict[str, str]:
             raise SourceError(f"헤더는 `이름: 값` 형식이어야 합니다: {name[:40]!r}")
         if name.lower() in _FORBIDDEN_HEADERS:
             raise SourceError(f"이 헤더는 지정할 수 없습니다: {name}")
+        if name.lower() == "cookie" and (sso := _SSO_COOKIE.search(value)):
+            raise SourceError(
+                f"SSO 쿠키({sso.group(2)})는 넣을 수 없습니다 — 그 사용자로 사내 시스템 전부에 "
+                "들어갈 수 있는 값입니다. 이 사이트의 세션 쿠키만 넣거나 브라우저 스캔을 쓰세요.")
         found[name] = value.strip()
     return found
 
@@ -585,6 +595,10 @@ def _facts(kind: str, scan: dict) -> str:
             "requires_login": p["requires_login"], "text": p["text"][:500],
             **({"aria": p["aria"][:2000]} if p.get("aria") else {}),
         } for p in scan.get("pages", [])]
+        if scan.get("menu_dom"):
+            # 화면에 그려진 메뉴 트리(브라우저 스캔) — 메뉴 구성의 1차 근거다.
+            return json.dumps({"menu_tree": scan["menu_dom"], "pages": pages},
+                              ensure_ascii=False)[:60000]
         return json.dumps(pages, ensure_ascii=False)[:60000]
     return json.dumps(scan, ensure_ascii=False)[:60000]
 
@@ -660,12 +674,18 @@ def _clean_menu(items, known: set[str], dropped: list[str], depth: int = 0) -> l
     return out[:60]
 
 
+def _menu_urls(items: list[dict]) -> set[str]:
+    return {u for m in items for u in ({m["url"]} | _menu_urls(m["children"])) if u}
+
+
 def _web_result(scan: dict, data: dict) -> tuple[dict, list[str]]:
     pages = scan["pages"]
     crawled = {p["url"] for p in pages}
-    linked = crawled | {link["url"] for p in pages for link in p["links"]}
+    dom_menu = scan.get("menu_dom") or []
+    linked = crawled | {link["url"] for p in pages for link in p["links"]} | _menu_urls(dom_menu)
     dropped: list[str] = []
-    menu = _clean_menu(data.get("menu"), linked, dropped) or _menu_fallback(pages)
+    # 브라우저 스캔은 화면에 그려진 메뉴 트리를 그대로 가져온다 — 링크로 짐작한 것보다 낫다.
+    menu = _clean_menu(data.get("menu"), linked, dropped) or dom_menu or _menu_fallback(pages)
     by_url = {str(p.get("url")): p for p in data.get("pages") or [] if isinstance(p, dict)}
     dropped += [u for u in by_url if u not in crawled]
     out_pages = []
@@ -792,7 +812,11 @@ def scan(db: Session, row: InfoSource) -> None:
             raise SourceError("OpenAPI 문서도, JSON 응답도 찾지 못했습니다.")
     else:
         result = _scan_mcp(row.url, headers)
+    _finish(db, row, result, notes)
 
+
+def _finish(db: Session, row: InfoSource, result: dict, notes: list[str]) -> None:
+    """수집한 것을 정리·제안해 행에 쓴다 — 서버 스캔과 브라우저 스캔이 같은 길로 끝난다."""
     visible = storage.visible_stores()
     data, llm_notes = _ask_llm(db, row, result, [s.name for s in visible])
     notes += llm_notes
@@ -831,15 +855,122 @@ def _scan_job(source_id: int) -> None:
             session.commit()
 
 
-def start_scan(db: Session, row: InfoSource) -> None:
+def _refuse_if_running(row: InfoSource) -> None:
     if row.status == "scanning" and row.scanned_at:
         started = row.scanned_at if row.scanned_at.tzinfo else row.scanned_at.replace(tzinfo=timezone.utc)
         if (datetime.now(timezone.utc) - started).total_seconds() < STALE_SCAN_SECONDS:
-            raise SourceError("이미 스캔 중입니다.")
+            raise ScanBusy("이미 스캔 중입니다.")
+
+
+def start_scan(db: Session, row: InfoSource) -> None:
+    _refuse_if_running(row)
     row.status, row.error = "scanning", None
     row.scanned_at = datetime.now(timezone.utc)   # 스캔 중에는 시작 시각이다
     db.commit()
     _submit(row.id)
+
+
+# ---------------------------------------------------------------- 브라우저 스캔(북마크릿)
+#
+# SSO(EP·SiteMinder) 뒤의 사이트는 서버가 로그인할 수 없다(다중 인증). 사용자가 로그인한 탭에서
+# 북마크릿이 화면을 읽어 **JSON 파일로 내려받고**, 그 파일을 콘솔이 올린다. 세션은 브라우저
+# 밖으로 나가지 않는다. 파일로 오가는 이유: 운영 콘솔은 http라 https 페이지가 직접 부를 수 없다
+# (혼합 콘텐츠). 올라온 것은 **남이 만든 입력**으로 다룬다 — 출처가 같은지 보고, 모양·길이를 자른다.
+
+BROWSER_AGENT = "gpax-scan/1"
+MAX_UPLOAD_BYTES = 5_000_000
+
+
+def _s(value, cap: int) -> str:
+    return str(value or "").strip()[:cap]
+
+
+def _strs(values, count: int, cap: int) -> list[str]:
+    return [_s(v, cap) for v in (values if isinstance(values, list) else [])[:count] if _s(v, cap)]
+
+
+def _same(url, origin: str) -> str:
+    url = _s(url, 1024)
+    return url if url and _origin(url) == origin else ""
+
+
+def _menu_in(items, origin: str, budget: list[int], depth: int = 0) -> list[dict]:
+    out = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or depth > 4 or budget[0] <= 0:
+            continue
+        budget[0] -= 1
+        label = _s(item.get("label"), 80)
+        children = _menu_in(item.get("children"), origin, budget, depth + 1)
+        if label or children:
+            out.append({"label": label or "(이름 없음)", "url": _same(item.get("url"), origin),
+                        "children": children})
+    return out
+
+
+def from_browser(row: InfoSource, payload) -> dict:
+    """북마크릿 결과 → _crawl과 같은 모양. 다른 사이트의 결과·모르는 파일은 받지 않는다."""
+    if row.kind != "web":
+        raise SourceError("브라우저 스캔은 웹사이트 출처에만 씁니다.")
+    if not isinstance(payload, dict) or payload.get("agent") != BROWSER_AGENT:
+        raise SourceError("브라우저 스캔 결과 파일이 아닙니다(콘솔의 북마크릿으로 만든 파일을 올리세요).")
+    origin = _origin(row.url)
+    if _origin(_s(payload.get("origin"), 300)) != origin:
+        raise SourceError(f"다른 사이트에서 만든 파일입니다: {_s(payload.get('origin'), 100)} "
+                          f"(이 출처는 {origin})")
+    pages, seen = [], set()
+    for p in (payload.get("pages") if isinstance(payload.get("pages"), list) else [])[:MAX_PAGES * 2]:
+        url = _same(p.get("url"), origin) if isinstance(p, dict) else ""
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        links = [{"url": u, "text": _s(link.get("text"), 120), "nav": bool(link.get("nav"))}
+                 for link in (p.get("links") if isinstance(p.get("links"), list) else [])[:200]
+                 if isinstance(link, dict) and (u := _same(link.get("url"), origin))]
+        tables = p.get("tables") if isinstance(p.get("tables"), list) else []
+        pages.append({
+            "url": url, "title": _s(p.get("title"), 200), "headings": _strs(p.get("headings"), 30, 200),
+            "tables": [t for t in (_strs(t, 40, 80) for t in tables[:10]) if t],
+            "fields": _strs(p.get("fields"), 30, 80), "requires_login": bool(p.get("requires_login")),
+            "links": links, "text": _s(p.get("text"), TEXT_CAP), "depth": 0,
+        })
+    if not pages:
+        raise SourceError("파일에 이 출처의 화면이 없습니다.")
+    return {"origin": origin, "pages": pages, "skipped": [], "sitemap": 0, "browser": False,
+            "via": "browser", "menu_dom": _menu_in(payload.get("menu"), origin, [400])}
+
+
+def _submit_result(source_id: int, result: dict) -> None:
+    """테스트에서 인라인으로 바꾸는 큐 경계(브라우저 스캔)."""
+    jobs.submit(_result_job, source_id, result)
+
+
+def _result_job(source_id: int, result: dict) -> None:
+    from ..db import SessionLocal  # noqa: PLC0415
+
+    with SessionLocal() as session:
+        row = session.get(InfoSource, source_id)
+        if row is None:
+            return
+        try:
+            _finish(session, row, result, [
+                "사용자 브라우저에서 읽은 결과입니다(로그인한 세션, 화면 캡처 없음)."])
+        except Exception as e:  # noqa: BLE001
+            session.rollback()
+            row = session.get(InfoSource, source_id)
+            row.status, row.error = "failed", str(e)[:2000]
+            session.commit()
+
+
+def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
+    """검사는 지금(틀리면 바로 400), 정리(LLM)는 큐에서 — 정리는 수십 초 걸린다."""
+    _refuse_if_running(row)
+    result = from_browser(row, payload)
+    row.status, row.error = "scanning", None
+    row.scanned_at = datetime.now(timezone.utc)
+    db.commit()
+    _submit_result(row.id, result)
+    return {"pages": len(result["pages"]), "menu": len(result["menu_dom"])}
 
 
 # ---------------------------------------------------------------- 저장(admin 결정)
