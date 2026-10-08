@@ -68,8 +68,11 @@ import type {
   PersonalStatus,
   DepartmentWorkflow,
   SmartworkAgent,
-  SmartworkChatResult,
-  SmartworkMessage,
+  SmartworkContext,
+  SmartworkOrgChoice,
+  SmartworkSession,
+  SmartworkSessionSummary,
+  SmartworkTurn,
   StorageStore,
   UserAccountOut,
   UserOrgOut,
@@ -165,9 +168,10 @@ async function request<T>(
     method,
     headers: {
       'x-api-key': getKey(),
-      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+      ...(body !== undefined && !(body instanceof Blob) ? { 'content-type': 'application/json' } : {}),
     },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    // Blob(File)은 그대로 — JSON으로 감싸지 않고 본문 자체로 보낸다(personalUpload)
+    body: body === undefined ? undefined : body instanceof Blob ? body : JSON.stringify(body),
     signal,
   });
   if (res.status === 401) {
@@ -528,12 +532,31 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
     return URL.createObjectURL(await res.blob());
   },
-  // 스마트워크 — 빈 messages는 여는 턴(업무 맥락을 보고 할 일을 제안하며 시작한다).
+  // 스마트워크
   smartworkAgents: () => request<SmartworkAgent[]>('GET', '/smartwork/agents'),
   // 업무 제안의 근거 — 소속 조직(부서)의 워크플로
   smartworkWorkflows: () => request<DepartmentWorkflow[]>('GET', '/smartwork/workflows'),
-  smartworkChat: (messages: SmartworkMessage[]) =>
-    request<SmartworkChatResult>('POST', '/smartwork/chat', { messages }),
+  // 세션 = 업무 하나. 맥락·참여자·삭제는 소유자만, 대화는 참여자 누구나.
+  smartworkOrgs: () => request<SmartworkOrgChoice[]>('GET', '/smartwork/orgs'),
+  listSessions: () => request<SmartworkSessionSummary[]>('GET', '/smartwork/sessions'),
+  createSession: (body: { title?: string; organization_id?: number | null; workflow_id?: number | null }) =>
+    request<SmartworkSession>('POST', '/smartwork/sessions', body),
+  // after를 주면 그 뒤의 메시지만 온다 — 공유 세션을 주기적으로 다시 읽을 때
+  getSession: (id: number, after = 0) =>
+    request<SmartworkSession>('GET', `/smartwork/sessions/${id}`, undefined, { after: after || undefined }),
+  // 보낸 필드만 바뀐다 — null은 '고르지 않음'
+  updateSession: (id: number, changes: { title?: string; organization_id?: number | null; workflow_id?: number | null }) =>
+    request<SmartworkSession>('PATCH', `/smartwork/sessions/${id}`, changes),
+  deleteSession: (id: number) => request<void>('DELETE', `/smartwork/sessions/${id}`),
+  addSessionMember: (id: number, email: string) =>
+    request<void>('POST', `/smartwork/sessions/${id}/members`, { email }),
+  removeSessionMember: (id: number, email: string) =>
+    request<void>('DELETE', `/smartwork/sessions/${id}/members/${encodeURIComponent(email)}`),
+  setSessionContext: (id: number, context: SmartworkContext) =>
+    request<SmartworkContext>('PUT', `/smartwork/sessions/${id}/context`, context),
+  // 빈 content는 여는 턴(업무 맥락을 보고 할 일을 제안하며 시작한다) — 대화가 없을 때만
+  sendSessionMessage: (id: number, content: string) =>
+    request<SmartworkTurn>('POST', `/smartwork/sessions/${id}/messages`, { content }),
   // 개인 업무 맥락 — 로그인한 그 사람의 것만. 경로에 누구의 것인지 고르는 자리가 없다.
   personalStatus: () => request<PersonalStatus>('GET', '/smartwork/personal'),
   personalConsent: () => request<PersonalStatus>('POST', '/smartwork/personal/consent'),
@@ -541,17 +564,12 @@ export const api = {
   personalManifest: (folder: string, entries: { path: string; size: number; mtime: number }[]) =>
     request<PersonalManifest>(
       'POST', `/smartwork/personal/folders/${encodeURIComponent(folder)}/manifest`, { entries }),
-  // File.name에는 폴더 경로가 없다 — 상대경로·수정 시각을 files와 같은 순서로 따로 싣는다.
-  personalUpload: (folder: string, items: { file: File; path: string; mtime: number }[]) => {
-    const fd = new FormData();
-    for (const it of items) {
-      fd.append('files', it.file);
-      fd.append('paths', it.path);
-      fd.append('mtimes', String(it.mtime));
-    }
-    return requestMultipart<{ saved: number; skipped: string[]; failed: string[] }>(
-      `/smartwork/personal/folders/${encodeURIComponent(folder)}/files`, fd);
-  },
+  // 파일 하나를 본문 그대로 PUT한다 — File을 body로 주면 브라우저가 디스크에서 흘려 보내고,
+  // 서버도 임시 파일로 흘려 받는다(한 요청에 여러 파일·통째 메모리 적재가 없다).
+  personalUpload: (folder: string, item: { file: File; path: string; mtime: number }) =>
+    request<{ path: string; status: 'saved' | 'skipped' | 'failed'; error?: string }>(
+      'PUT', `/smartwork/personal/folders/${encodeURIComponent(folder)}/file`, item.file,
+      { path: item.path, mtime: item.mtime }),
   personalRemoveFolder: (folder: string) =>
     request<void>('DELETE', `/smartwork/personal/folders/${encodeURIComponent(folder)}`),
   // 메일은 브라우저가 Graph에서 읽어 온 것(lib/msgraph.ts)을 보낸다 — 토큰은 싣지 않는다.

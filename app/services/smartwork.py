@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from .. import audit
 from ..models import (
-    ApiKey, BuildProfile, Deployment, DeploymentStatus, Project, Workflow, WorkflowRun,
+    ApiKey, BuildProfile, Deployment, DeploymentStatus, Organization, Project, Workflow, WorkflowRun,
     WorkflowRunStatus,
 )
 from ..security import viewer_org_ids
@@ -80,14 +80,17 @@ def agents(db: Session, key: ApiKey) -> list[dict]:
 
 # --- 부서 워크플로 ---
 
-def department_workflows(db: Session, key: ApiKey) -> list[dict]:
+def department_workflows(db: Session, key: ApiKey, org_id: int | None = None) -> list[dict]:
     """이 사람의 **부서**(소속 조직) 워크플로 — 업무 제안의 근거.
 
     제안을 모델의 짐작에 맡기면 "그럴듯한데 우리 부서 일이 아닌" 일이 나온다. 부서가 실제로
     하는 일의 목록은 워크플로가 이미 갖고 있다(단계·사람 작업·제약). 관리자라도 소속이 없으면
     부서가 없다 — 모든 조직의 워크플로를 섞으면 남의 부서 일을 제안한다.
+
+    org_id는 세션의 조직이다 — 그 업무의 부서는 세션 소유자가 정했고, 다른 부서에서 공유받아
+    말하는 사람에게도 같은 업무 맥락이 보여야 한다(소유자가 고른 조직인지는 api가 확인했다).
     """
-    org_ids = viewer_org_ids(db, key)
+    org_ids = {org_id} if org_id is not None else viewer_org_ids(db, key)
     if not org_ids:
         return []
     rows = db.execute(
@@ -199,24 +202,50 @@ def _limit(args: dict, default: int, cap: int) -> int:
         return default
 
 
-def personal_toolset(db: Session, email: str) -> Toolset | None:
-    """동의한 사람에게만 붙는다. 저장소는 여기서 이메일로 정해지고 인자로 바뀌지 않는다."""
+# 세션에 고른 범위로 거른 뒤 개수를 맞추려고 색인에서는 넉넉히 받아 온다.
+_SCOPE_FETCH = 200
+
+
+def personal_toolset(db: Session, email: str, folders: list[str] | None = None,
+                     mail: bool = False) -> Toolset | None:
+    """동의한 사람에게만 붙는다. 저장소는 여기서 이메일로 정해지고 인자로 바뀌지 않는다.
+
+    **세션에 고른 것만 본다** — folders(폴더 이름들)와 mail(outlook/). 하나도 고르지 않았으면
+    도구를 붙이지 않는다. 업무 하나에 내 문서 전체를 열어 두면 공유 세션의 답변에 그 업무와
+    무관한 내 메일이 인용될 수 있다.
+    """
     if personal.get(db, email) is None:
+        return None
+    scope = tuple(f"{f}/" for f in folders or []) + ((f"{personal.MAIL_DIR}/",) if mail else ())
+    if not scope:
         return None
     store = personal.store_for(email)
 
+    def allowed(path: str) -> bool:
+        return path.startswith(scope)
+
     def call(name: str, args: dict) -> str:
         if name == "sources":
-            return json.dumps(personal.status(db, email), ensure_ascii=False, default=str)
+            status = personal.status(db, email)
+            status["folders"] = [f for f in status["folders"] if f.get("name") in (folders or [])]
+            if not mail:
+                status["mail"] = {"connected": False, "note": "이 세션에는 메일을 고르지 않았다"}
+            status.pop("index", None)  # 저장소 전체의 수치라 이 세션 범위와 맞지 않는다
+            return json.dumps(status, ensure_ascii=False, default=str)
         if name == "recent":
-            return json.dumps(_recent(store.root, _limit(args, 20, 50)), ensure_ascii=False)
+            return json.dumps(_recent(store.root, _limit(args, 20, 50), allowed), ensure_ascii=False)
         if name == "search":
-            found = docsearch.search(store.name, str(args.get("query", "")), _limit(args, 10, 30))
+            found = docsearch.search(store.name, str(args.get("query", "")), _SCOPE_FETCH)
+            hits = [h for h in found["hits"] if allowed(h["path"])]
+            limit = _limit(args, 10, 30)
+            found.update(hits=hits[:limit], truncated=len(hits) > limit or found["truncated"])
             return json.dumps(found, ensure_ascii=False)
         if name == "read":
             try:
                 target = storage_service.resolve(store.root, str(args.get("path", "")))
                 rel = target.relative_to(store.root).as_posix()
+                if not allowed(rel):
+                    raise mcp_server.McpToolError(f"이 세션에 고른 폴더·메일이 아닙니다: {rel}")
                 if not target.is_file():
                     raise mcp_server.McpToolError(f"파일이 없습니다: {rel}")
                 text = docready.read(store.name, rel, target)
@@ -226,19 +255,23 @@ def personal_toolset(db: Session, email: str) -> Toolset | None:
                 text = text[:_MAX_READ_CHARS] + f"\n\n… (앞 {_MAX_READ_CHARS}자만 보냈습니다)"
             return text
         if name == "find_nodes":
-            return json.dumps(docsearch.find_nodes(
-                store.name, str(args.get("kind") or ""), str(args.get("q") or ""),
-                _limit(args, 20, 50)), ensure_ascii=False)
+            nodes = docsearch.find_nodes(
+                store.name, str(args.get("kind") or ""), str(args.get("q") or ""), _SCOPE_FETCH)
+            return json.dumps([n for n in nodes if allowed(n["path"])][:_limit(args, 20, 50)],
+                              ensure_ascii=False)
         if name == "neighbors":
-            return json.dumps(docsearch.neighbors(
-                store.name, str(args.get("kind", "")), str(args.get("name", ""))),
-                ensure_ascii=False)
+            found = docsearch.neighbors(
+                store.name, str(args.get("kind", "")), str(args.get("name", "")), _SCOPE_FETCH)
+            for side in ("out", "in"):
+                if isinstance(found.get(side), list):
+                    found[side] = [e for e in found[side] if allowed(e["path"])]
+            return json.dumps(found, ensure_ascii=False)
         raise mcp_server.McpToolError(f"알 수 없는 도구: {name}")
 
     return ("my", _PERSONAL_TOOLS, call)
 
 
-def _recent(root, limit: int) -> list[dict]:
+def _recent(root, limit: int, allowed: Callable[[str], bool]) -> list[dict]:
     """새것부터. 메일은 받은 날짜가 파일 이름 앞이라 이름으로, 문서는 수정 시각으로 줄 세운다
     — 메일 파일의 수정 시각은 받은 때가 아니라 동기화한 때다."""
     items = []
@@ -246,6 +279,8 @@ def _recent(root, limit: int) -> list[dict]:
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
+        if not allowed(rel):
+            continue
         if rel.startswith(f"{personal.MAIL_DIR}/"):
             key, title = path.name[:10], _first_heading(path)
         else:
@@ -330,10 +365,28 @@ def _view_tools(agent_names: list[str]) -> list[dict]:
 
 
 def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
-                   workflow_names: list[str]) -> str:
+                   workflow_names: list[str], task: dict | None = None,
+                   participants: list[str] | None = None) -> str:
     lines = [
         "당신은 사내 업무 도우미 '스마트워크'다. 한국어로 답한다.",
-        f"대화 상대: {email}",
+        f"지금 말하는 사람: {email}",
+    ]
+    if participants and len(participants) > 1:
+        lines.append(
+            f"이 대화는 여러 사람이 함께 쓴다({', '.join(participants)}). 사용자 메시지 앞의"
+            " [이메일]이 말한 사람이다. 답변은 참여자 모두에게 보인다.")
+    if task:
+        # 세션 = 업무 하나. 소유자가 고른 조직·워크플로가 이 대화의 주제다.
+        lines += ["", f"이 대화의 업무: 조직 {task['org']}"
+                  + (f" / 워크플로 {task['workflow']['name']}" if task.get("workflow") else "")]
+        if task.get("workflow"):
+            wf = task["workflow"]
+            if wf.get("description"):
+                lines.append(f"설명: {wf['description']}")
+            lines += [f"- 단계: {step}" for step in wf.get("steps", [])]
+            lines += [f"- 규칙: {rule}" for rule in wf.get("constraints", [])]
+            lines.append("제안·답변은 이 워크플로의 업무 안에서 한다.")
+    lines += [
         "",
         "도구 사용 규칙:",
         "- 사내 문서·온톨로지·API·코드에 근거해 답한다. 추측하지 말고 도구로 확인한 뒤,"
@@ -347,10 +400,11 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
     ]
     if has_personal:
         lines.append(
-            "- my__ 도구는 이 사람만의 문서·메일이다. 개인 업무 맥락이 필요한 질문(내 일정,"
-            " 내가 받은 메일, 내 문서)에 쓴다. 사내 문서와 섞어 인용할 때는 어느 쪽인지 밝힌다.")
+            "- my__ 도구는 지금 말하는 사람만의 문서·메일 중 이 업무에 고른 것이다. 개인 업무"
+            " 맥락이 필요한 질문(내 일정, 내가 받은 메일, 내 문서)에 쓴다. 사내 문서와 섞어"
+            " 인용할 때는 어느 쪽인지 밝힌다.")
     else:
-        lines.append("- 이 사람은 개인 업무 맥락(로컬 문서·메일)을 연결하지 않았다.")
+        lines.append("- 지금 말하는 사람은 이 업무에 개인 업무 맥락(로컬 문서·메일)을 고르지 않았다.")
     lines += ["", "부서 워크플로:"]
     lines += [f"- {name}" for name in workflow_names] or ["(없음 — 소속 조직에 워크플로가 없다)"]
     lines += ["", "에이전트 목록:"]
@@ -359,11 +413,13 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
     return "\n".join(lines)
 
 
-def _clean_history(history: list[dict]) -> list[dict]:
+def _clean_history(history: list[dict], shared: bool = False) -> list[dict]:
     out = []
     for msg in history[-MAX_HISTORY:]:
         role = msg.get("role")
         content = str(msg.get("content") or "")[:MAX_MESSAGE_CHARS]
+        if shared and role == "user" and msg.get("author"):
+            content = f"[{msg['author']}] {content}"
         if role in ("user", "assistant") and content:
             out.append({"role": role, "content": content})
     # 첫 턴(빈 대화)은 여는 지시로, 그 뒤로도 대화가 제안(assistant)으로 시작하면 그 지시를
@@ -375,16 +431,26 @@ def _clean_history(history: list[dict]) -> list[dict]:
 
 
 def chat(db: Session, key: ApiKey, provider, history: list[dict],
-         toolsets: list[Toolset]) -> dict:
+         toolsets: list[Toolset], *, org_id: int | None = None, workflow: str = "",
+         participants: list[str] | None = None, folders: list[str] | None = None,
+         mail: bool = False) -> dict:
     """대화 한 턴. history의 마지막이 이번 사용자 메시지다 — 비어 있으면 여는 턴이다.
+
+    세션 맥락: org_id·workflow(이름)는 소유자가 고른 업무, participants는 공유 참여자,
+    folders·mail은 **지금 말하는 사람이** 이 세션에 고른 개인 맥락이다.
 
     돌려주는 것: 답변, 제안 업무, 오른쪽 화면에 띄울 에이전트·보고서(없을 수 있다 —
     그러면 화면은 대시보드를 그대로 둔다), 쓴 도구 이름.
     """
     agent_list = agents(db, key)
     by_name = {a["name"]: a for a in agent_list}
-    mine = personal_toolset(db, key.name)
-    dept = department_workflows(db, key)
+    mine = personal_toolset(db, key.name, folders, mail)
+    dept = department_workflows(db, key, org_id)
+    task = None
+    if org_id is not None:
+        org = db.get(Organization, org_id)
+        task = {"org": org.name if org else "",
+                "workflow": next((w for w in dept if w["name"] == workflow), None)}
     dept_set: Toolset = ("dept", _DEPT_TOOLS,
                          lambda n, a: json.dumps(dept, ensure_ascii=False))
     sets = [("view", _view_tools(list(by_name)), None), dept_set, *toolsets,
@@ -443,9 +509,11 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
         except Exception as e:  # noqa: BLE001 — 도구 하나가 실패해도 대화는 이어진다
             return f"tool call failed: {e}"
 
-    messages = [{"role": "system", "content": _system_prompt(key.name, agent_list, mine is not None,
-                                                         [w["name"] for w in dept])},
-                *_clean_history(history)]
+    shared = len(participants or []) > 1
+    messages = [{"role": "system", "content": _system_prompt(
+                    key.name, agent_list, mine is not None, [w["name"] for w in dept],
+                    task, participants)},
+                *_clean_history(history, shared)]
     reply = llm_service.chat_completion(provider, messages, db, tools, execute)
     # 무엇을 물었는지는 남기지 않는다 — 개인 메일·문서 내용이 감사 기록으로 새면 안 된다.
     audit.record(db, key.name, "smartwork.chat", "-", {"tools": used})

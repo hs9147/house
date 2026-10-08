@@ -48,6 +48,33 @@ def _provider_out(p: LlmProvider) -> LlmProviderOut:
     )
 
 
+def provider_error(db: Session, actor: str, e: Exception, message: str = "") -> HTTPException:
+    """LLM 호출 실패를 502로 올린다. **SSO 만료면 그 자리에서 서버 로그인을 시작한다.**
+
+    만료는 사람이 브라우저에서 '허용'을 눌러야만 풀린다(start_sso_login). 그 앞 단계 —
+    관리자 화면으로 가서 프로필을 고르고 로그인 버튼을 누르는 일 — 은 사람이 할 필요가
+    없다: 실패한 요청을 낸 사람의 화면에 승인 주소를 바로 띄우고(콘솔 SsoLoginNotice),
+    승인이 끝났는지도 그 브라우저가 확인한다(/llm/aws/login/status).
+    승인한 사람의 SSO 계정으로 서버 토큰이 발급된다 — 그 프로필의 역할이 없는 사람은
+    승인해도 토큰을 받지 못한다(AWS가 거른다).
+    """
+    message = message or str(e)
+    if not isinstance(e, bedrock.SsoExpired):
+        return HTTPException(status_code=502, detail=message)
+    try:
+        login = bedrock.start_sso_login(e.profile, get_settings().resolved_repo_root / "logs")
+    except bedrock.BedrockError as failed:
+        return HTTPException(status_code=502, detail=f"{message} (자동 로그인 시작 실패: {failed})")
+    audit.record(db, actor, "aws.sso.login.auto", e.profile,
+                 {"url_found": bool(login["verification_url"])})
+    if not login["verification_url"]:
+        return HTTPException(status_code=502, detail=f"{message} (자동 로그인 주소를 읽지 못했습니다)")
+    return HTTPException(status_code=502, detail={
+        "message": message,
+        "sso_login": {k: login[k] for k in ("profile", "verification_url", "code_autofilled", "user_code")},
+    })
+
+
 @router.post("/llm/providers", response_model=LlmProviderOut, status_code=201)
 def create_provider(
     body: LlmProviderCreate,
@@ -125,6 +152,17 @@ def aws_sso_login(
     audit.record(db, admin.name, "aws.sso.login", profile,
                  {"url_found": bool(result["verification_url"])})
     return result
+
+
+@router.get("/llm/aws/login/status")
+def aws_sso_login_status(profile: str, _: ApiKey = Depends(require_api_key)):
+    """자동 로그인(provider_error)을 승인한 브라우저가 끝났는지 묻는 자리 — 누구나 부른다.
+
+    승인 주소는 실패한 요청을 낸 사람(관리자가 아닐 수 있다)에게 가므로 확인도 그 사람이
+    해야 한다. /llm/aws/profiles는 서버 계정 구성을 드러내 admin 전용이라 여기서는 쓸 수
+    있는지만 답한다.
+    """
+    return {"profile": profile, "ok": bool(bedrock.profile_status(profile).get("ok"))}
 
 
 @router.get("/llm/aws/models")
@@ -283,7 +321,7 @@ async def review_project(
     try:
         findings = await asyncio.to_thread(llm_service.review_diff, provider, diff, db)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"llm review call failed: {e}")
+        raise provider_error(db, key.name, e, f"llm review call failed: {e}")
 
     severity = llm_service.max_severity(findings)
     audit.record(db, key.name, "code.review", project.name,

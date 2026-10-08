@@ -70,6 +70,7 @@ from ..services import planning as planning_service
 from ..services import taskmatch
 from ..services import workspace
 from ..services.build import checkout
+from .llm import provider_error
 
 router = APIRouter(tags=["planning"])
 
@@ -366,7 +367,7 @@ async def post_plan_message(
     except llm_service.LlmTruncated as cut:
         reply, truncated = cut.partial, True
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"llm call failed: {e}")
+        raise provider_error(db, key.name, e, f"llm call failed: {e}")
 
     if not reply.strip():
         # 빈 응답은 대개 컨텍스트가 모델 한도를 넘었다는 신호다. 아직 압축하지 않았다면

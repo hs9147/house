@@ -5,7 +5,6 @@ LLM은 chat_completion을 대본으로 바꿔 끼워 **도구 호출을 실제�
 읽어 보내므로 서버 쪽 시험에는 Graph가 없다.
 """
 import json
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -61,14 +60,10 @@ def _upload(c, headers, folder, files: dict[str, bytes], mtime=1_700_000_000.0):
     plan = c.post(f"{API}/smartwork/personal/folders/{folder}/manifest",
                   json={"entries": entries}, headers=headers)
     assert plan.status_code == 200, plan.text
-    needed = plan.json()["needed"]
-    if needed:
-        r = c.post(
-            f"{API}/smartwork/personal/folders/{folder}/files",
-            files=[("files", (Path(p).name, files[p])) for p in needed],
-            data={"paths": needed, "mtimes": [str(mtime)] * len(needed)},
-            headers=headers,
-        )
+    # 브라우저처럼 needed를 하나씩, 본문 그대로 올린다
+    for p in plan.json()["needed"]:
+        r = c.put(f"{API}/smartwork/personal/folders/{folder}/file",
+                  params={"path": p, "mtime": mtime}, content=files[p], headers=headers)
         assert r.status_code == 200, r.text
     return plan.json()
 
@@ -90,11 +85,22 @@ class Script:
         return self.reply
 
 
-def _chat(c, headers, monkeypatch, calls, text="질문", messages=None):
+def _session(c, headers, **body) -> int:
+    r = c.post(f"{API}/smartwork/sessions", json=body, headers=headers)
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def _chat(c, headers, monkeypatch, calls, text="질문", sid=None, folders=None, mail=False):
+    """세션 하나에 한 턴. sid가 없으면 새 세션, folders·mail을 주면 내 맥락으로 고른다."""
     script = Script(calls)
     monkeypatch.setattr(llm, "chat_completion", script)
-    body = {"messages": messages if messages is not None else [{"role": "user", "content": text}]}
-    r = c.post(f"{API}/smartwork/chat", json=body, headers=headers)
+    sid = sid or _session(c, headers)
+    if folders is not None or mail:
+        r = c.put(f"{API}/smartwork/sessions/{sid}/context",
+                  json={"folders": folders or [], "mail": mail}, headers=headers)
+        assert r.status_code == 200, r.text
+    r = c.post(f"{API}/smartwork/sessions/{sid}/messages", json={"content": text}, headers=headers)
     assert r.status_code == 200, r.text
     return r.json(), script
 
@@ -153,18 +159,28 @@ def test_personal_context_is_visible_only_to_its_owner(client, monkeypatch):
     for who in (alice, bob):
         client.post(f"{API}/smartwork/personal/consent", headers=who)
     _upload(client, alice, "work", {"memo.md": "# 메모\n\n비밀코드 zebra-42".encode()})
+    _upload(client, bob, "work", {"note.md": b"# note\n\nbob only"})
 
-    out, script = _chat(client, alice, monkeypatch, [("my__search", {"query": "zebra-42"})])
+    sid = _session(client, alice)
+    out, script = _chat(client, alice, monkeypatch, [("my__search", {"query": "zebra-42"})],
+                        sid=sid, folders=["work"])
     assert "work/memo.md" in script.results["my__search"]
 
-    # bob의 개인 도구는 bob의 저장소에 묶여 있다 — 고를 인자가 없다
+    # 같은 세션을 공유받아도 bob이 말하면 개인 도구는 bob의 저장소에 묶인다 — 고를 인자가 없다
+    assert client.post(f"{API}/smartwork/sessions/{sid}/members",
+                       json={"email": "bob@corp.com"}, headers=alice).status_code == 204
     _, script = _chat(client, bob, monkeypatch, [("my__search", {"query": "zebra-42"}),
-                                                 ("my__read", {"path": "work/memo.md"})])
+                                                 ("my__read", {"path": "work/memo.md"})],
+                      sid=sid, folders=["work"])
     assert json.loads(script.results["my__search"])["hits"] == []
     assert "파일이 없습니다" in script.results["my__read"]
     # 경로로 빠져나가지도 못한다
-    _, script = _chat(client, bob, monkeypatch, [("my__read", {"path": "../"})])
+    _, script = _chat(client, bob, monkeypatch, [("my__read", {"path": "../"})], sid=sid)
     assert "도구 오류" in script.results["my__read"]
+    # 남의 폴더 선택은 bob에게 보이지 않는다
+    seen = client.get(f"{API}/smartwork/sessions/{sid}", headers=bob).json()
+    assert seen["my_context"] == {"folders": ["work"], "mail": False}
+    assert all(set(m) == {"email", "is_owner"} for m in seen["members"])
 
     # 사내 문서 검색(/mcp/docs)에는 개인 저장소가 없다
     r = client.post(f"{API}/mcp/docs", json={
@@ -269,9 +285,10 @@ def test_chat_opens_with_task_suggestions_from_department_workflows(client, monk
         # 다른 부서의 워크플로 이름은 근거로 남지 않는다
         {"title": "견적", "prompt": "견적 보내 줘", "workflow": "견적 발송", "why": ""},
     ]
+    sid = _session(client, alice)
     out, script = _chat(client, alice, monkeypatch,
                         [("dept__workflows", {}), ("my__recent", {}),
-                         ("suggest_tasks", {"tasks": tasks})], messages=[])
+                         ("suggest_tasks", {"tasks": tasks})], text="", sid=sid, folders=["work"])
     assert script.messages[1] == {"role": "user", "content": smartwork.OPENING_PROMPT}
     assert "- 예산 집행" in script.messages[0]["content"]  # 시스템 프롬프트에 부서 워크플로
     dept = json.loads(script.results["dept__workflows"])
@@ -286,15 +303,19 @@ def test_chat_opens_with_task_suggestions_from_department_workflows(client, monk
     assert out["suggestions"][1]["workflow"] == ""
 
     # 제안(assistant)으로 시작하는 대화에도 여는 지시가 앞에 되살아난다
-    _, script = _chat(client, alice, monkeypatch, [], messages=[
-        {"role": "assistant", "content": "안녕하세요"},
-        {"role": "user", "content": "첫 번째로 할게"},
-    ])
+    _, script = _chat(client, alice, monkeypatch, [], text="첫 번째로 할게", sid=sid)
     assert [m["role"] for m in script.messages] == ["system", "user", "assistant", "user"]
+    assert script.messages[1]["content"] == smartwork.OPENING_PROMPT
+    # 여는 턴은 대화가 없을 때만이다
+    r = client.post(f"{API}/smartwork/sessions/{sid}/messages", json={"content": ""}, headers=alice)
+    assert r.status_code == 422
+    # 첫 요청이 제목이 된다
+    assert client.get(f"{API}/smartwork/sessions/{sid}", headers=alice).json()["title"] \
+        == "첫 번째로 할게"
 
     # 소속이 없으면 부서 워크플로도 없다
     loner = _user(client, "loner@corp.com")
-    _, script = _chat(client, loner, monkeypatch, [("dept__workflows", {})], messages=[])
+    _, script = _chat(client, loner, monkeypatch, [("dept__workflows", {})], text="")
     assert json.loads(script.results["dept__workflows"]) == []
 
 
@@ -335,3 +356,169 @@ def test_outlook_mail_comes_from_the_browser(client, monkeypatch):
     assert not (store.root / "outlook").exists()
     assert docsearch.search(store.name, "펠리컨")["hits"] == []
     assert client.get(f"{API}/smartwork/personal", headers=alice).json()["mail"]["connected"] is False
+
+
+def test_expired_sso_starts_the_login_and_hands_the_url_to_the_user(client, monkeypatch):
+    """SSO 만료는 사람이 '허용'을 눌러야 풀린다 — 그 앞의 로그인 시작은 서버가 바로 한다.
+    승인 주소는 실패한 요청을 낸 사람(일반 사용자)의 화면으로 간다."""
+    from app.services import bedrock
+
+    alice = _user(client, "alice@corp.com")
+    started: list[str] = []
+
+    def expired(*args, **kwargs):
+        raise bedrock.SsoExpired("bedrock-dev")
+
+    def start(profile, log_dir):
+        started.append(profile)
+        return {"profile": profile, "code_autofilled": True, "user_code": "AAAA-BBBB",
+                "verification_url": "https://d-1.awsapps.com/start/#/device?user_code=AAAA-BBBB",
+                "log_path": "", "log_tail": "server log"}
+
+    monkeypatch.setattr(llm, "chat_completion", expired)
+    monkeypatch.setattr(bedrock, "start_sso_login", start)
+    sid = _session(client, alice)
+    r = client.post(f"{API}/smartwork/sessions/{sid}/messages", json={"content": "질문"},
+                    headers=alice)
+    assert r.status_code == 502
+    detail = r.json()["detail"]
+    assert started == ["bedrock-dev"]
+    assert "만료" in detail["message"]
+    assert detail["sso_login"]["verification_url"].endswith("user_code=AAAA-BBBB")
+    assert "log_tail" not in detail["sso_login"]  # 서버 로그는 일반 사용자에게 내보내지 않는다
+    assert client.get(f"{API}/smartwork/sessions/{sid}", headers=alice).json()["messages"] == []
+
+
+def test_session_is_shared_for_talking_but_managed_by_its_owner(client, monkeypatch):
+    """공유받은 사람(다른 부서여도)은 읽고 말한다. 맥락·참여자·삭제는 소유자만 한다."""
+    finance = client.post(f"{API}/orgs", json={"name": "finance"}, headers=ADMIN).json()["id"]
+    sales = client.post(f"{API}/orgs", json={"name": "sales"}, headers=ADMIN).json()["id"]
+    alice = _user(client, "alice@corp.com", finance)
+    bob = _user(client, "bob@corp.com", sales)
+    carol = _user(client, "carol@corp.com")
+    sid = _session(client, alice, organization_id=finance)
+    base = f"{API}/smartwork/sessions/{sid}"
+
+    # 공유 전에는 있는지도 모른다
+    assert client.get(base, headers=bob).status_code == 404
+    assert client.post(f"{base}/members", json={"email": "nobody@corp.com"},
+                       headers=alice).status_code == 404  # 승인된 계정만
+    assert client.post(f"{base}/members", json={"email": "bob@corp.com"},
+                       headers=alice).status_code == 204
+
+    _chat(client, alice, monkeypatch, [], text="예산안 정리하자", sid=sid)
+    seen = client.get(base, headers=bob).json()
+    assert seen["is_owner"] is False and seen["organization"] == "finance"
+    assert [m["email"] for m in seen["members"]] == ["alice@corp.com", "bob@corp.com"]
+    last = seen["messages"][-1]["id"]
+
+    # bob도 말한다 — 모델은 누가 말했는지 안다
+    out, script = _chat(client, bob, monkeypatch, [], text="자료는 내가 찾을게", sid=sid)
+    assert script.messages[-1]["content"] == "[bob@corp.com] 자료는 내가 찾을게"
+    assert "지금 말하는 사람: bob@corp.com" in script.messages[0]["content"]
+    assert "alice@corp.com, bob@corp.com" in script.messages[0]["content"]
+    assert out["message"]["role"] == "assistant"
+    # after로 새 메시지만 다시 읽는다
+    fresh = client.get(base, params={"after": last}, headers=alice).json()["messages"]
+    assert [(m["role"], m["author"]) for m in fresh] == [("user", "bob@corp.com"),
+                                                          ("assistant", "bob@corp.com")]
+    assert [s["members"] for s in client.get(f"{API}/smartwork/sessions", headers=bob).json()] == [2]
+
+    # 소유자만 할 수 있는 일
+    assert client.patch(base, json={"title": "x"}, headers=bob).status_code == 403
+    assert client.post(f"{base}/members", json={"email": "carol@corp.com"},
+                       headers=bob).status_code == 403
+    assert client.delete(base, headers=bob).status_code == 403
+    assert client.delete(f"{base}/members/alice@corp.com", headers=alice).status_code == 422
+    assert client.get(base, headers=carol).status_code == 404
+    assert client.post(f"{base}/messages", json={"content": "끼어들기"},
+                       headers=carol).status_code == 404
+
+    # 참여자는 스스로 나간다
+    assert client.delete(f"{base}/members/bob@corp.com", headers=bob).status_code == 204
+    assert client.get(base, headers=bob).status_code == 404
+    assert client.delete(base, headers=alice).status_code == 204
+    assert client.get(base, headers=alice).status_code == 404
+
+
+def test_session_task_is_an_own_organization_and_its_workflow(client, monkeypatch):
+    finance = client.post(f"{API}/orgs", json={"name": "finance"}, headers=ADMIN).json()["id"]
+    sales = client.post(f"{API}/orgs", json={"name": "sales"}, headers=ADMIN).json()["id"]
+    _workflow(finance, "예산 집행", [{"id": "approve", "type": "human", "title": "집행 승인"}])
+    _workflow(sales, "견적 발송", [{"id": "q", "type": "human", "title": "견적 작성"}])
+    alice = _user(client, "alice@corp.com", finance)
+
+    orgs = client.get(f"{API}/smartwork/orgs", headers=alice).json()
+    assert [(o["name"], [w["name"] for w in o["workflows"]]) for o in orgs] \
+        == [("finance", ["예산 집행"])]
+    budget = orgs[0]["workflows"][0]["id"]
+    with SessionLocal() as db:
+        quote = next(w.id for w in db.query(Workflow).all() if w.name == "견적 발송")
+
+    def create(**body):
+        return client.post(f"{API}/smartwork/sessions", json=body, headers=alice).status_code
+
+    assert create(organization_id=sales) == 403  # 소속이 아닌 조직
+    assert create(organization_id=finance, workflow_id=quote) == 422  # 남의 조직 워크플로
+    assert create(workflow_id=budget) == 422  # 조직 없이 워크플로만
+
+    sid = _session(client, alice, organization_id=finance, workflow_id=budget)
+    _, script = _chat(client, alice, monkeypatch, [], sid=sid)
+    system = script.messages[0]["content"]
+    assert "이 대화의 업무: 조직 finance / 워크플로 예산 집행" in system
+    assert "- 단계: 사람 작업: 집행 승인" in system
+    assert "- 규칙: 500만원 넘으면 팀장 승인" in system
+
+    # 조직을 비우면 그 조직의 워크플로도 빠진다
+    r = client.patch(f"{API}/smartwork/sessions/{sid}", json={"organization_id": None},
+                     headers=alice)
+    assert r.status_code == 200 and r.json()["workflow_id"] is None
+    _, script = _chat(client, alice, monkeypatch, [], sid=sid)
+    assert "이 대화의 업무" not in script.messages[0]["content"]
+
+
+def test_session_sees_only_the_folders_chosen_for_it(client, monkeypatch):
+    alice = _user(client, "alice@corp.com")
+    client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    _upload(client, alice, "work", {"plan.md": "# 계획\n\n오로라 일정".encode()})
+    _upload(client, alice, "home", {"diary.md": "# 일기\n\n펭귄 여행".encode()})
+    sid = _session(client, alice)
+
+    # 고르지 않으면 개인 도구가 없다
+    _, script = _chat(client, alice, monkeypatch, [], sid=sid)
+    assert not any(n.startswith("my__") for n in script.tool_names)
+
+    # 없는 폴더, 받지 않은 메일은 고를 수 없다
+    r = client.put(f"{API}/smartwork/sessions/{sid}/context",
+                   json={"folders": ["work", "ghost"], "mail": True}, headers=alice)
+    assert r.json() == {"folders": ["work"], "mail": False}
+    _, script = _chat(client, alice, monkeypatch, [
+        ("my__search", {"query": "펭귄"}), ("my__read", {"path": "home/diary.md.md"}),
+        ("my__sources", {}), ("my__recent", {}),
+    ], sid=sid)
+    assert json.loads(script.results["my__search"])["hits"] == []
+    assert "고른 폴더" in script.results["my__read"]
+    assert [f["name"] for f in json.loads(script.results["my__sources"])["folders"]] == ["work"]
+    assert [d["path"] for d in json.loads(script.results["my__recent"])] == ["work/plan.md.md"]
+
+
+def test_file_upload_streams_one_file_and_stops_at_the_cap(client, monkeypatch):
+    alice = _user(client, "alice@corp.com")
+    client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    monkeypatch.setattr(personal, "MAX_FILE_BYTES", 16)
+    url = f"{API}/smartwork/personal/folders/work/file"
+
+    # 길이를 미리 밝히면 받기 전에 끊는다
+    r = client.put(url, params={"path": "big.md"}, content=b"x" * 17, headers=alice)
+    assert r.status_code == 413
+    # 길이 없이(조각으로) 흘려 보내도 상한에서 끊는다
+    r = client.put(url, params={"path": "big.md"}, content=iter([b"x" * 10, b"x" * 10]),
+                   headers=alice)
+    assert r.status_code == 413
+    store = personal.store_for("alice@corp.com")
+    assert not store.root.exists() or not any(p.is_file() for p in store.root.rglob("*"))
+
+    r = client.put(url, params={"path": "ok.md", "mtime": 1_700_000_000}, content=b"# ok\n\nfine",
+                   headers=alice)
+    assert r.json() == {"path": "ok.md", "status": "saved"}
+    assert (store.root / "work/ok.md.md").is_file()

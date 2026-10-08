@@ -16,7 +16,6 @@
 import hashlib
 import os
 import shutil
-import tempfile
 from pathlib import Path
 
 from sqlalchemy import select
@@ -185,59 +184,49 @@ def manifest(db: Session, email: str, folder: str, entries: list[dict]) -> dict:
     return {"folder": folder, "files": len(wanted), "needed": sorted(needed), "removed": removed}
 
 
-def save_files(db: Session, email: str, folder: str,
-               files: list[tuple[str, bytes, float]]) -> dict:
-    """올라온 파일을 마크다운으로 바꿔 남기고 바로 색인한다. files = [(폴더 안 상대경로, 내용, mtime)].
+def save_file(db: Session, email: str, folder: str, rel: str, source: Path, mtime: float) -> dict:
+    """올라온 파일 하나를 마크다운으로 바꿔 남기고 바로 색인한다.
 
-    변환은 요청 안에서 끝낸다 — 원본을 두지 않으니 큰 파일을 주기 색인에 미뤄 둘 수 없다.
+    source는 요청 본문을 흘려 받은 임시 파일이다(api가 받고 api가 지운다) — 파일을 통째로
+    메모리에 올리지 않으려고 바이트가 아니라 경로로 받는다. 변환은 요청 안에서 끝낸다 —
+    원본을 두지 않으니 큰 파일을 주기 색인에 미뤄 둘 수 없다.
+    돌려주는 status: saved | skipped(대상이 아님) | failed(변환 실패, error에 사유).
     """
     row = require(db, email)
     folder = _folder_name(folder)
     store = store_for(email)
+    rel = rel.replace("\\", "/").strip("/")
+    key = f"{folder}/{rel}"
+    size = source.stat().st_size
+    if not accepts(rel, size):
+        return {"path": rel, "status": "skipped"}
+    try:
+        target = storage_service.resolve(store.root, key + CONVERTED_SUFFIX)
+    except storage_service.StorageError:
+        return {"path": rel, "status": "skipped"}
     known = dict(row.files or {})
-    saved, skipped, failed, deferred = [], [], [], 0
-    for rel, data, mtime in files:
-        rel = rel.replace("\\", "/").strip("/")
-        key = f"{folder}/{rel}"
-        if not accepts(rel, len(data)):
-            skipped.append(rel)
-            continue
-        try:
-            target = storage_service.resolve(store.root, key + CONVERTED_SUFFIX)
-        except storage_service.StorageError:
-            skipped.append(rel)
-            continue
-        meta = {"size": len(data), "mtime": int(mtime), "error": None}
-        try:
-            markdown = _convert(rel, data)
-        except doctext.ExtractError as e:
-            # 옛 변환본은 지운다 — 바뀐 원본과 맞지 않는 내용이 검색되면 안 된다.
-            _forget_converted(store, key)
-            known[key] = {**meta, "error": str(e)[:300]}
-            failed.append(rel)
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(markdown, encoding="utf-8")
-        if mtime > 0:
-            # 원본의 수정 시각을 변환본에 옮긴다 — "최근 문서"(smartwork._recent)가 이 값으로 줄 세운다.
-            os.utime(target, (mtime, mtime))
-        result = docsearch.index_one(store.name, store.root, key + CONVERTED_SUFFIX)
-        deferred += result["status"] == "deferred"
-        known[key] = meta
-        saved.append(rel)
+    meta = {"size": size, "mtime": int(mtime), "error": None}
+    try:
+        markdown = doctext.extract(source)[0]
+    except doctext.ExtractError as e:
+        # 옛 변환본은 지운다 — 바뀐 원본과 맞지 않는 내용이 검색되면 안 된다.
+        _forget_converted(store, key)
+        known[key] = {**meta, "error": str(e)[:300]}
+        row.files = known
+        db.commit()
+        return {"path": rel, "status": "failed", "error": str(e)[:300]}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(markdown, encoding="utf-8")
+    if mtime > 0:
+        # 원본의 수정 시각을 변환본에 옮긴다 — "최근 문서"(smartwork._recent)가 이 값으로 줄 세운다.
+        os.utime(target, (mtime, mtime))
+    result = docsearch.index_one(store.name, store.root, key + CONVERTED_SUFFIX)
+    known[key] = meta
     row.files = known
     db.commit()
-    if deferred:
+    if result["status"] == "deferred":
         docsearch.reindex(store.name, store.root, budget_seconds=_REINDEX_BUDGET)
-    return {"saved": len(saved), "skipped": skipped, "failed": failed}
-
-
-def _convert(rel: str, data: bytes) -> str:
-    """원본을 임시 폴더에 잠깐 두고 마크다운으로 바꾼다. 폴더는 성공·실패와 무관하게 지워진다."""
-    with tempfile.TemporaryDirectory(prefix="paas-personal-") as tmp:
-        path = Path(tmp) / Path(rel).name
-        path.write_bytes(data)
-        return doctext.extract(path)[0]
+    return {"path": rel, "status": "saved"}
 
 
 def _forget_converted(store: storage_service.Store, key: str) -> None:

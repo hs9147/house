@@ -428,15 +428,20 @@ https://d-9b67717466.awsapps.com/start/#/device?user_code=GZHT-DLVD
 
 def _fake_cli(monkeypatch, output: str, wait: int = 2) -> dict:
     """CLI를 흉내내고 실행 인자를 잡아 둔다."""
-    seen: dict = {}
+    seen: dict = {"starts": 0}
     monkeypatch.setattr(bedrock, "aws_cli_path", lambda: "aws.exe")
     monkeypatch.setattr(bedrock, "LOGIN_WAIT_SECONDS", wait)
+    monkeypatch.setattr(bedrock, "_logins", {})
 
     class _Popen:
         def __init__(self, argv, **kw):
             seen["argv"] = argv
+            seen["starts"] += 1
             kw["stdout"].write(output)
             kw["stdout"].flush()
+
+        def poll(self):
+            return seen.get("exit")  # None = 승인을 기다리는 중
 
     monkeypatch.setattr(bedrock.subprocess, "Popen", _Popen)
     return seen
@@ -487,6 +492,7 @@ def test_sso_login_shows_the_log_when_it_cannot_parse(monkeypatch, tmp_path):
     """CLI 문구가 바뀌거나 오류면 주소를 못 뽑는다 — 판정 불가를 감추면 볼 것이 없다."""
     monkeypatch.setattr(bedrock, "aws_cli_path", lambda: "aws.exe")
     monkeypatch.setattr(bedrock, "LOGIN_WAIT_SECONDS", 1)
+    monkeypatch.setattr(bedrock, "_logins", {})
 
     class _Popen:
         def __init__(self, argv, **kw):
@@ -497,6 +503,42 @@ def test_sso_login_shows_the_log_when_it_cannot_parse(monkeypatch, tmp_path):
     out = bedrock.start_sso_login("nope", tmp_path / "logs")
     assert out["verification_url"] == ""
     assert "profile not found" in out["log_tail"]
+
+
+def test_pending_sso_login_is_reused(monkeypatch, tmp_path):
+    """만료되면 그 프로바이더를 쓰는 요청마다 실패한다 — 그때마다 로그인을 띄우면 승인할
+    주소가 여러 개 생긴다. 승인을 기다리는 동안은 같은 주소를 돌려주고, 끝나면 새로 띄운다."""
+    seen = _fake_cli(monkeypatch, _DEVICE_OUTPUT)
+    first = bedrock.start_sso_login("bedrock-dev", tmp_path / "logs")
+    again = bedrock.start_sso_login("bedrock-dev", tmp_path / "logs")
+    assert seen["starts"] == 1 and again == first
+    seen["exit"] = 0  # 승인돼서(또는 실패해서) CLI가 끝났다
+    bedrock.start_sso_login("bedrock-dev", tmp_path / "logs")
+    assert seen["starts"] == 2
+
+
+def test_expired_token_is_its_own_error():
+    """호출부가 '재로그인으로 풀리는 실패'를 알아봐야 로그인을 자동으로 시작할 수 있다."""
+    exc = pytest.importorskip("botocore.exceptions")
+
+    class _Creds:
+        def get_frozen_credentials(self):
+            raise exc.UnauthorizedSSOTokenError()
+
+    with pytest.raises(bedrock.SsoExpired) as caught:
+        bedrock._freeze(_Creds(), "bedrock-dev")
+    assert caught.value.profile == "bedrock-dev"
+    assert "aws sso login --profile bedrock-dev" in str(caught.value)
+
+
+def test_login_status_is_open_to_users_but_says_only_ok(aws_config, monkeypatch):
+    """자동 로그인 주소는 실패한 요청을 낸 사람에게 간다 — 그 브라우저가 끝났는지 확인한다."""
+    monkeypatch.setattr(bedrock, "profile_status", lambda profile: {
+        "profile": profile, "ok": True, "reason": "", "expires_at": "2026-10-08T10:00:00Z"})
+    c = TestClient(create_app())
+    r = c.get("/paas/api/v1/llm/aws/login/status?profile=bedrock-dev", headers=ADMIN)
+    assert r.json() == {"profile": "bedrock-dev", "ok": True}
+    assert c.get("/paas/api/v1/llm/aws/login/status?profile=bedrock-dev").status_code == 401
 
 
 def test_login_endpoint_is_admin_only(aws_config, monkeypatch):

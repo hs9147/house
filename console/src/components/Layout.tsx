@@ -2,6 +2,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { getEmail, isAdmin, logout } from '../lib/auth';
 import { useApi } from '../lib/hooks';
+import SsoLoginNotice from './SsoLoginNotice';
 
 export default function Layout() {
   const navigate = useNavigate();
@@ -110,6 +111,7 @@ export default function Layout() {
             </div>
           </div>
         )}
+        <SsoLoginNotice />
         <Outlet />
       </main>
     </div>

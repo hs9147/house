@@ -1121,18 +1121,59 @@ export interface SmartworkSuggestion {
   why: string;
 }
 
-export interface SmartworkMessage {
-  role: 'user' | 'assistant';
-  content: string;
+// 세션 = 업무 하나(app/services/worksession.py). 맥락(조직·워크플로)은 소유자가 고르고,
+// 공유받은 참여자는 대화만 한다. 개인 맥락(폴더·메일)은 참여자마다 자기 것만 고른다.
+export interface SmartworkSessionSummary {
+  id: number;
+  title: string;
+  owner: string;
+  organization_id: number | null;
+  organization: string | null;
+  workflow_id: number | null;
+  workflow: string | null;
+  updated_at: string;
+  members: number;
 }
 
-export interface SmartworkChatResult {
+export interface SmartworkSessionMessage {
+  id: number;
+  role: 'user' | 'assistant';
+  // 말한 사람(assistant는 그 턴을 보낸 사람)
+  author: string;
+  content: string;
+  agent?: SmartworkAgent | null;
+  report?: SmartworkReport | null;
+  suggestions?: SmartworkSuggestion[];
+  tools?: string[];
+  created_at: string;
+}
+
+export interface SmartworkSession extends Omit<SmartworkSessionSummary, 'members'> {
+  is_owner: boolean;
+  members: { email: string; is_owner: boolean }[];
+  my_context: SmartworkContext;
+  messages: SmartworkSessionMessage[];
+}
+
+export interface SmartworkContext {
+  folders: string[];
+  mail: boolean;
+}
+
+export interface SmartworkOrgChoice {
+  id: number;
+  name: string;
+  workflows: { id: number; name: string; description: string }[];
+}
+
+export interface SmartworkTurn {
   reply: string;
   agent: SmartworkAgent | null;
   report: SmartworkReport | null;
   suggestions: SmartworkSuggestion[];
   tools: string[];
   provider: string;
+  message: SmartworkSessionMessage;
 }
 
 export interface PersonalFolder {

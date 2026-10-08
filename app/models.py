@@ -840,3 +840,73 @@ class PersonalContext(Base):
     mail_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class SmartworkSession(Base):
+    """스마트워크 세션 = **업무 하나**. 그 업무의 맥락(조직·워크플로)과 대화를 묶는다.
+
+    맥락은 소유자가 정한다 — 공유받은 사람이 바꾸면 다른 참여자가 보던 업무가 바뀐다.
+    누가 쓰는지는 SmartworkSessionMember에, 대화는 SmartworkSessionMessage에 있다.
+    """
+
+    __tablename__ = "smartwork_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner: Mapped[str] = mapped_column(String(255), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    organization_id: Mapped[int | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True
+    )
+    organization: Mapped["Organization | None"] = relationship()
+    workflow_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
+    )
+    workflow: Mapped["Workflow | None"] = relationship()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class SmartworkSessionMember(Base):
+    """세션 참여자 한 명(소유자 포함)과 **그 사람이 이 세션에 쓰는** 개인 맥락.
+
+    개인 맥락은 사람마다 고른다 — 공유 세션에서 개인 도구는 말한 사람 자신의 저장소만,
+    그중에서도 여기 고른 폴더·메일만 본다(services/smartwork.personal_toolset). 남의
+    선택은 남의 것이라 소유자도 바꾸지 못한다.
+    """
+
+    __tablename__ = "smartwork_session_members"
+    __table_args__ = (
+        UniqueConstraint("session_id", "email", name="uq_smartwork_session_member"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("smartwork_sessions.id", ondelete="CASCADE"), index=True
+    )
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    # 이 세션에 쓸 내 폴더 이름들(PersonalContext.folders의 name)
+    folders: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    mail: Mapped[bool] = mapped_column(Boolean, default=False)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SmartworkSessionMessage(Base):
+    """세션 대화 한 줄. 공유 세션이라 **누가** 말했는지(author)를 남긴다.
+
+    view는 답변이 오른쪽 화면에 띄운 것(에이전트·보고서·제안·쓴 도구) — 나중에 들어온
+    참여자도 그 답변이 무엇을 보여 줬는지 다시 볼 수 있어야 한다.
+    """
+
+    __tablename__ = "smartwork_session_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("smartwork_sessions.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(16))  # user | assistant
+    author: Mapped[str] = mapped_column(String(255), default="")
+    content: Mapped[str] = mapped_column(Text)
+    view: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

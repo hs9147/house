@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -35,6 +36,18 @@ _REGION_IN_HOST = re.compile(r"bedrock[a-z-]*\.([a-z]{2}-[a-z]+-\d+)\.", re.IGNO
 
 class BedrockError(RuntimeError):
     """자격증명·서명 단계의 실패. 메시지는 화면에 그대로 뜨는 것을 전제로 쓴다."""
+
+
+class SsoExpired(BedrockError):
+    """SSO 토큰 만료 — 다른 실패와 달리 재로그인으로 풀린다. 호출부가 로그인을 바로 시작할
+    수 있게 어느 프로필인지 들고 간다(api/llm.py provider_error)."""
+
+    def __init__(self, profile: str):
+        super().__init__(
+            f"AWS SSO 토큰이 만료됐습니다 (프로필 '{profile}'). "
+            f"서버에서 `{login_command(profile)}`로 재로그인하세요."
+        )
+        self.profile = profile
 
 
 def config_path() -> Path:
@@ -179,10 +192,7 @@ def _credentials(profile: str):
     except exc.ProfileNotFound:
         raise BedrockError(f"AWS 프로필 '{profile}'을 찾을 수 없습니다 (~/.aws/config 확인)")
     except (exc.UnauthorizedSSOTokenError, exc.TokenRetrievalError, exc.SSOTokenLoadError):
-        raise BedrockError(
-            f"AWS SSO 토큰이 만료됐습니다 (프로필 '{profile}'). "
-            f"서버에서 `{login_command(profile)}`로 재로그인하세요."
-        )
+        raise SsoExpired(profile)
     except exc.BotoCoreError as e:
         raise BedrockError(f"AWS 자격증명을 읽지 못했습니다 (프로필 '{profile}'): {e}")
     if creds is None:
@@ -205,10 +215,7 @@ def _freeze(creds, profile: str):
     try:
         return creds.get_frozen_credentials()
     except (exc.UnauthorizedSSOTokenError, exc.TokenRetrievalError, exc.SSOTokenLoadError):
-        raise BedrockError(
-            f"AWS SSO 토큰이 만료됐습니다 (프로필 '{profile}'). "
-            f"서버에서 `{login_command(profile)}`로 재로그인하세요."
-        )
+        raise SsoExpired(profile)
     except exc.BotoCoreError as e:
         raise BedrockError(f"AWS 자격증명 갱신에 실패했습니다 (프로필 '{profile}'): {e}")
 
@@ -221,6 +228,12 @@ _LOGIN_AUTOFILL_RE = re.compile(r"https://\S*user_code=\S+")
 _LOGIN_URL_RE = re.compile(r"https://\S+")
 _LOGIN_CODE_RE = re.compile(r"\b([A-Z]{4}-[A-Z]{4})\b")
 LOGIN_WAIT_SECONDS = 20
+# 승인을 기다리는 로그인은 다시 띄우지 않고 그 주소를 돌려준다. 만료되면 그 프로바이더를
+# 쓰는 요청마다 실패하므로(스마트워크 대화 여러 개가 동시에) 매번 띄우면 승인할 주소가
+# 여러 개 생기고 앞의 것들은 쓸모없어진다. device code는 10분이면 만료되므로 그 전까지만 쓴다.
+LOGIN_REUSE_SECONDS = 540
+_logins: dict[str, tuple] = {}
+_logins_lock = threading.Lock()
 
 
 def aws_cli_path() -> str:
@@ -248,6 +261,17 @@ def start_sso_login(profile: str, log_dir: Path) -> dict:
     호출부가 profile_status를 다시 물어 확인한다. 주소를 못 읽어도 로그 꼬리를 함께 돌려준다 —
     판정 불가를 감추면 사람이 볼 것이 아무것도 없다.
     """
+    with _logins_lock:
+        running = _logins.get(profile)
+        if running and running[0].poll() is None and time.monotonic() - running[1] < LOGIN_REUSE_SECONDS:
+            return running[2]
+        result, proc = _start_sso_login(profile, log_dir)
+        if result["verification_url"]:
+            _logins[profile] = (proc, time.monotonic(), result)
+        return result
+
+
+def _start_sso_login(profile: str, log_dir: Path) -> tuple[dict, subprocess.Popen]:
     exe = aws_cli_path()
     if not exe:
         raise BedrockError(
@@ -263,7 +287,7 @@ def start_sso_login(profile: str, log_dir: Path) -> dict:
         # 콘솔 창을 띄우지 않는다. DETACHED_PROCESS는 쓰지 않는다 — 실측에서 그 플래그를
         # 주면 자식이 조용히 죽었다(services/powershell_daemon.py에 같은 기록이 있다).
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.Popen(
+        proc = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
             creationflags=flags,
         )
@@ -293,7 +317,7 @@ def start_sso_login(profile: str, log_dir: Path) -> dict:
         "log_path": str(log_path),
         # 주소를 못 뽑았을 때 사람이 볼 것 — 문구가 바뀌었는지, 오류인지 여기서 드러난다.
         "log_tail": log_path.read_text(encoding="utf-8", errors="replace")[-1500:],
-    }
+    }, proc
 
 
 def region_from_url(base_url: str, profile: str = "") -> str:

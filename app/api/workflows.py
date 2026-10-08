@@ -20,6 +20,7 @@ from ..services import bedrock
 from ..services import llm as llm_service
 from ..services import workflow as workflow_service
 from ..services import workflowassess, workflowchat
+from .llm import provider_error
 
 router = APIRouter(tags=["workflows"])
 
@@ -243,7 +244,7 @@ def chat(workflow_id: int, body: WorkflowChatIn, db: Session = Depends(get_db),
         # 프로바이더 쪽 사유는 **그대로 올린다.** 실측: Bedrock SSO 토큰이 만료됐을 때
         # 이걸 안 잡아서 화면에 "Internal Server Error"만 떴다 — 메시지에는 어느 프로필로
         # 재로그인하면 되는지까지 적혀 있었는데 그게 로그에만 남았다.
-        raise HTTPException(status_code=502, detail=str(e))
+        raise provider_error(db, admin.name, e)
     db.add(WorkflowMessage(workflow_id=row.id, role="user", content=body.request))
     db.add(WorkflowMessage(workflow_id=row.id, role="assistant",
                            content=result["summary"] or "(요약 없음)"))
@@ -270,7 +271,7 @@ def assess_workflow(workflow_id: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail=str(e))
     except (bedrock.BedrockError, llm_service.LlmTimeout, llm_service.LlmCallFailed,
             llm_service.LlmTruncated) as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        raise provider_error(db, admin.name, e)
     audit.record(db, admin.name, "workflow.assess", row.name,
                  {"provider": result["provider"], **result["metrics"]})
     return {**result, "change_request": workflowassess.change_request(result)}

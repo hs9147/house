@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../lib/api';
+import { api, SSO_LOGIN_EVENT } from '../lib/api';
 import { loginWithAccount } from '../lib/auth';
 
 // api.ts는 요청 시점에 sessionStorage에서 키를 읽는다 — node 환경이라 최소 스텁을 심는다.
@@ -108,5 +108,38 @@ describe('로그인은 서버 승인 없이 세션을 만들지 않는다', () =
     await loginWithAccount('u@x.com', 'my-password');
     expect(sent[0]).toBe('my-password');
     expect(store.get('paas_console_key')).toBe('paass_random-token');
+  });
+});
+
+describe('SSO 만료 응답은 승인 주소를 화면 전체에 알린다', () => {
+  // 서버(app/api/llm.py provider_error)가 로그인을 이미 시작해 두었다 — 어느 화면의 요청이
+  // 실패했든 같은 안내(SsoLoginNotice)가 그 주소를 연다. 메시지는 사람이 읽을 문장으로 남긴다.
+  it('detail.sso_login을 이벤트로 내보내고 message만 오류로 던진다', async () => {
+    const target = new EventTarget();
+    vi.stubGlobal('window', target);
+    const seen: unknown[] = [];
+    target.addEventListener(SSO_LOGIN_EVENT, (e) => seen.push((e as CustomEvent).detail));
+    const login = { profile: 'bedrock-dev', verification_url: 'https://d-1/#/device?user_code=A',
+      code_autofilled: true, user_code: 'A' };
+    vi.stubGlobal('fetch', async () => new Response(
+      JSON.stringify({ detail: { message: 'AWS SSO 토큰이 만료됐습니다', sso_login: login } }),
+      { status: 502, headers: { 'content-type': 'application/json' } }));
+
+    await expect(api.sendSessionMessage(1, '')).rejects.toThrow('AWS SSO 토큰이 만료됐습니다');
+    expect(seen).toEqual([login]);
+  });
+});
+
+describe('개인 폴더 파일은 하나씩 본문 그대로 올린다', () => {
+  // 여러 파일을 multipart 한 요청에 싣지 않는다 — File을 그대로 body로 주면 브라우저가 흘려 보낸다.
+  it('File을 JSON으로 감싸지 않고 PUT 본문으로 보낸다', async () => {
+    const calls = captureFetch();
+    const file = new Blob(['# 메모']) as File;
+    await api.personalUpload('work', { file, path: 'plan/q3.md', mtime: 1700000000 });
+    const { url, init } = calls[0];
+    expect(init.method).toBe('PUT');
+    expect(url).toContain('/smartwork/personal/folders/work/file?path=plan%2Fq3.md&mtime=1700000000');
+    expect(init.body).toBe(file);
+    expect((init.headers as Record<string, string>)['content-type']).toBeUndefined();
   });
 });

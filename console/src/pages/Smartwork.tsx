@@ -2,53 +2,119 @@ import { useEffect, useRef, useState } from 'react';
 import Async from '../components/Async';
 import Split from '../components/Split';
 import { api } from '../lib/api';
-import { useApi } from '../lib/hooks';
+import { getEmail } from '../lib/auth';
+import { type AsyncState, useApi, usePolling } from '../lib/hooks';
 import { parseCsv, renderMarkdown } from '../lib/markdown';
 import { fetchInbox, redirectUri } from '../lib/msgraph';
 import type {
   HealthInfo,
+  PersonalStatus,
   SmartworkAgent,
-  SmartworkMessage,
+  SmartworkContext,
+  SmartworkOrgChoice,
   SmartworkReport,
-  SmartworkSuggestion,
+  SmartworkSession,
+  SmartworkSessionMessage,
+  SmartworkSessionSummary,
 } from '../lib/types';
 
 /**
  * 스마트워크 — 왼쪽 대화, 오른쪽 화면(대시보드·에이전트·보고서).
  *
+ * 대화는 세션 단위다 — **세션 하나 = 업무 하나.** 소유자가 그 업무의 조직·워크플로를
+ * 대화창에서 고르고, 필요하면 다른 사람(다른 부서여도)과 공유한다. 공유받은 사람은 읽고
+ * 말할 수 있고, 개인 맥락(폴더·메일)은 각자 자기 것만 이 업무에 고른다.
+ *
  * 오른쪽에 무엇을 띄울지는 서버가 정한다(모델이 show_agent·show_report 도구로 고른다).
  * 화면은 그 결과만 따른다 — 에이전트가 오면 보고서보다 **먼저** 에이전트를 연다.
- * 대화는 빈 화면이 아니라 **제안으로 시작한다**: 들어오자마자 빈 대화로 한 턴을 돌려,
+ * 새 업무는 빈 화면이 아니라 **제안으로 시작한다**: 만들자마자 빈 내용으로 한 턴을 돌려,
  * 부서 워크플로와 개인 업무 맥락을 본 모델이 할 일을 버튼으로 띄운다.
  */
 
 type View = 'dashboard' | 'agent' | 'report';
-type Shown = SmartworkMessage & { tools?: string[] };
+// 공유 세션은 다른 참여자가 보낸 말을 이 간격으로 다시 읽는다.
+const SHARED_POLL_MS = 5000;
+
+function sessionLabel(s: SmartworkSessionSummary): string {
+  const task = s.workflow ?? s.organization;
+  return `${s.title || '(새 업무)'}${task ? ` · ${task}` : ''}${s.members > 1 ? ` · 공유 ${s.members}명` : ''}`;
+}
 
 export default function Smartwork() {
   const health = useApi(() => api.health());
   const agents = useApi(() => api.smartworkAgents());
   const workflows = useApi(() => api.smartworkWorkflows());
-  const [messages, setMessages] = useState<Shown[]>([]);
-  const [suggestions, setSuggestions] = useState<SmartworkSuggestion[]>([]);
+  const personal = useApi(() => api.personalStatus());
+  const orgs = useApi(() => api.smartworkOrgs());
+  const sessions = useApi(() => api.listSessions());
+  const [session, setSession] = useState<SmartworkSession | null>(null);
+  const [creating, setCreating] = useState(false);
+  // 보냈는데 아직 답이 없는 말('' = 여는 턴). 서버는 답이 나온 뒤에 둘을 함께 남기므로
+  // 실패하면 여기 남은 것을 그대로 다시 보낸다.
+  const [pending, setPending] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sharing, setSharing] = useState(false);
   const [agent, setAgent] = useState<SmartworkAgent | null>(null);
   const [report, setReport] = useState<SmartworkReport | null>(null);
   const [view, setView] = useState<View>('dashboard');
   const [collapsed, setCollapsed] = useState(false);
   const opened = useRef(false);
+  // 폴링(usePolling)은 처음 받은 함수를 계속 부른다 — 지금 세션은 ref로 읽는다.
+  const current = useRef<SmartworkSession | null>(null);
+  current.current = session;
 
-  const send = async (history: Shown[]) => {
-    setMessages(history);
-    setSuggestions([]);
+  const open = async (id: number) => {
+    setError(null);
+    setPending(null);
+    setCreating(false);
+    setSharing(false);
+    try {
+      const s = await api.getSession(id);
+      setSession(s);
+      // 연 업무의 화면은 그 대화가 마지막으로 띄운 에이전트·보고서다.
+      const last = [...s.messages].reverse().find((m) => m.agent || m.report);
+      setAgent(last?.agent ?? null);
+      setReport(last?.report ?? null);
+      setView(last?.agent ? 'agent' : last?.report ? 'report' : 'dashboard');
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  useEffect(() => {
+    // 처음 들어오면 가장 최근 업무를 연다. 없으면 새 업무를 고르는 화면부터.
+    // StrictMode가 개발 모드에서 effect를 두 번 부른다 — ref로 한 번만.
+    if (opened.current || !sessions.data) return;
+    opened.current = true;
+    if (sessions.data.length > 0) void open(sessions.data[0].id);
+    else setCreating(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions.data]);
+
+  // 마지막으로 받은 메시지 뒤의 것만 읽어 붙인다 — 공유 세션 폴링과 내 턴 뒤에 쓴다.
+  const catchUp = async () => {
+    const s = current.current;
+    if (!s) return;
+    const after = s.messages.length > 0 ? s.messages[s.messages.length - 1].id : 0;
+    const fresh = await api.getSession(s.id, after);
+    setSession((cur) => {
+      if (!cur || cur.id !== fresh.id) return cur;
+      const seen = new Set(cur.messages.map((m) => m.id));
+      return { ...fresh, messages: [...cur.messages, ...fresh.messages.filter((m) => !seen.has(m.id))] };
+    });
+  };
+  usePolling(catchUp, SHARED_POLL_MS, !!session && session.members.length > 1 && !busy);
+
+  const send = async (s: SmartworkSession, content: string) => {
+    setPending(content);
     setBusy(true);
     setError(null);
     try {
-      const out = await api.smartworkChat(history.map(({ role, content }) => ({ role, content })));
-      setMessages([...history, { role: 'assistant', content: out.reply, tools: out.tools }]);
-      setSuggestions(out.suggestions);
+      const out = await api.sendSessionMessage(s.id, content);
+      await catchUp();
+      setPending(null);
       if (out.report) {
         setReport(out.report);
         setView('report');
@@ -57,6 +123,7 @@ export default function Smartwork() {
         setAgent(out.agent);
         setView('agent');
       }
+      sessions.reload();  // 첫 요청이 제목이 된다
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -64,100 +131,189 @@ export default function Smartwork() {
     }
   };
 
-  useEffect(() => {
-    // StrictMode가 개발 모드에서 effect를 두 번 부른다 — 여는 턴이 두 번 돌면 LLM을 두 번 부른다.
-    if (opened.current) return;
-    opened.current = true;
-    void send([]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const start = async (orgId: number | null, workflowId: number | null) => {
+    setBusy(true);
+    setError(null);
+    let s: SmartworkSession;
+    try {
+      s = await api.createSession({ organization_id: orgId, workflow_id: workflowId });
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+      return;
+    }
+    current.current = s;
+    setSession(s);
+    setCreating(false);
+    setSharing(false);
+    setAgent(null);
+    setReport(null);
+    setView('dashboard');
+    sessions.reload();
+    await send(s, '');
+  };
+
+  const patch = async (changes: { organization_id: number | null; workflow_id: number | null }) => {
+    if (!session) return;
+    setError(null);
+    try {
+      setSession(await api.updateSession(session.id, changes));
+      sessions.reload();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const reloadSession = async () => {
+    if (session) setSession(await api.getSession(session.id));
+  };
+
+  const leave = () => {
+    setSession(null);
+    setCreating(true);
+    setAgent(null);
+    setReport(null);
+    setView('dashboard');
+    sessions.reload();
+  };
+
+  const remove = async () => {
+    if (!session || !window.confirm('이 업무(대화 전체)를 지울까요? 공유한 사람에게서도 사라집니다.')) return;
+    try {
+      await api.deleteSession(session.id);
+      leave();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
 
   const submit = () => {
     const text = input.trim();
-    if (!text || busy) return;
+    if (!text || busy || !session) return;
     setInput('');
-    void send([...messages, { role: 'user', content: text }]);
+    void send(session, text);
   };
 
-  // 실패한 턴은 보낸 메시지까지 남겨 두었으니 같은 대화로 다시 보내면 된다.
-  const canRetry = !busy && error && (messages.length === 0 || messages[messages.length - 1].role === 'user');
+  const me = getEmail();
+  const shared = (session?.members.length ?? 0) > 1;
+  const messages = session?.messages ?? [];
+  const last = messages.length > 0 ? messages[messages.length - 1] : null;
+  const suggestions = !busy && pending === null && last?.role === 'assistant' ? last.suggestions ?? [] : [];
 
   const left = (
     <div className="panel">
       <h2>대화</h2>
-      <div className="chat-thread">
-        {messages.length === 0 && busy && (
-          <p className="mutedtext">부서 워크플로와 업무 맥락을 살펴보고 진행할 업무를 고르는 중...</p>
-        )}
-        {messages.map((m, i) => (
-          <div key={i} className={`chat-msg ${m.role}`}>
-            {m.content}
-            {m.tools && m.tools.length > 0 && (
-              <div className="mutedtext mono" style={{ fontSize: 11, marginTop: 6 }}>
-                도구: {m.tools.join(', ')}
-              </div>
+      <div className="row" style={{ marginBottom: 8 }}>
+        <select
+          style={{ flex: 1, minWidth: 0 }}
+          value={session?.id ?? ''}
+          disabled={busy}
+          onChange={(e) => e.target.value && void open(Number(e.target.value))}
+        >
+          {!session && <option value="">업무 선택</option>}
+          {(sessions.data ?? []).map((s) => <option key={s.id} value={s.id}>{sessionLabel(s)}</option>)}
+        </select>
+        <button className="small" disabled={busy} onClick={() => {
+          setSession(null);
+          setCreating(true);
+          setError(null);
+          setPending(null);
+        }}>새 업무</button>
+      </div>
+
+      {creating && !session && (
+        <NewSession orgs={orgs.data ?? []} busy={busy} onStart={(o, w) => void start(o, w)} />
+      )}
+
+      {session && (
+        <>
+          <div className="row" style={{ flexWrap: 'wrap', marginBottom: 6 }}>
+            {session.is_owner ? (
+              <TaskPicker orgs={orgs.data ?? []} orgId={session.organization_id}
+                workflowId={session.workflow_id} disabled={busy}
+                onChange={(o, w) => void patch({ organization_id: o, workflow_id: w })} />
+            ) : (
+              <span className="mutedtext" style={{ fontSize: 12 }}>
+                업무: {session.organization ?? '조직 없음'} / {session.workflow ?? '워크플로 없음'} ·
+                소유자 {session.owner}
+              </span>
+            )}
+            <span className="spacer" />
+            <button className="small secondary" onClick={() => setSharing(!sharing)}>
+              공유{shared ? ` (${session.members.length})` : ''}
+            </button>
+            {session.is_owner && (
+              <button className="small secondary" disabled={busy} onClick={() => void remove()}>삭제</button>
             )}
           </div>
-        ))}
-        {messages.length > 0 && busy && <p className="mutedtext">답변을 만드는 중...</p>}
-      </div>
-      {suggestions.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
-          {suggestions.map((s, i) => (
-            <button
-              key={i}
-              className="secondary"
-              style={{ textAlign: 'left' }}
-              title={s.prompt}
-              disabled={busy}
-              onClick={() => void send([...messages, { role: 'user', content: s.prompt }])}
-            >
-              {s.title}
-              {(s.workflow || s.why) && (
-                <div className="mutedtext" style={{ fontSize: 12 }}>
-                  {[s.workflow && `워크플로: ${s.workflow}`, s.why].filter(Boolean).join(' · ')}
-                </div>
-              )}
-            </button>
-          ))}
-        </div>
+          {sharing && (
+            <SharePanel session={session} me={me}
+              onChanged={() => void reloadSession().then(() => sessions.reload())} onLeft={leave} />
+          )}
+          <ContextPicker session={session} status={personal.data}
+            onSaved={(ctx) => setSession((cur) => cur && { ...cur, my_context: ctx })}
+            onError={setError} />
+
+          <div className="chat-thread">
+            {messages.map((m) => <Message key={m.id} message={m} showAuthor={shared} />)}
+            {pending && <div className="chat-msg user">{pending}</div>}
+            {busy && pending !== null && (
+              <p className="mutedtext">
+                {pending === ''
+                  ? '부서 워크플로와 업무 맥락을 살펴보고 진행할 업무를 고르는 중...'
+                  : '답변을 만드는 중...'}
+              </p>
+            )}
+          </div>
+          {suggestions.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
+              {suggestions.map((s, i) => (
+                <button
+                  key={i}
+                  className="secondary"
+                  style={{ textAlign: 'left' }}
+                  title={s.prompt}
+                  onClick={() => void send(session, s.prompt)}
+                >
+                  {s.title}
+                  {(s.workflow || s.why) && (
+                    <div className="mutedtext" style={{ fontSize: 12 }}>
+                      {[s.workflow && `워크플로: ${s.workflow}`, s.why].filter(Boolean).join(' · ')}
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </>
       )}
       {error && (
         <div className="row" style={{ marginBottom: 10 }}>
           <p className="error" style={{ margin: 0 }}>{error}</p>
-          {canRetry && (
-            <button className="small secondary" onClick={() => void send(messages)}>다시 시도</button>
+          {!busy && session && pending !== null && (
+            <button className="small secondary" onClick={() => void send(session, pending)}>다시 시도</button>
           )}
         </div>
       )}
-      <textarea
-        rows={3}
-        value={input}
-        placeholder="무엇을 할까요? (Enter 보내기, Shift+Enter 줄바꿈)"
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-      />
-      <div className="row" style={{ marginTop: 8 }}>
-        <button onClick={submit} disabled={busy || !input.trim()}>보내기</button>
-        <span className="spacer" />
-        <button
-          className="small secondary"
-          disabled={busy}
-          onClick={() => {
-            setAgent(null);
-            setReport(null);
-            setView('dashboard');
-            void send([]);
-          }}
-        >
-          새 대화
-        </button>
-      </div>
+      {session && (
+        <>
+          <textarea
+            rows={3}
+            value={input}
+            placeholder="무엇을 할까요? (Enter 보내기, Shift+Enter 줄바꿈)"
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+          />
+          <div className="row" style={{ marginTop: 8 }}>
+            <button onClick={submit} disabled={busy || !input.trim()}>보내기</button>
+          </div>
+        </>
+      )}
     </div>
   );
 
@@ -240,7 +396,7 @@ export default function Smartwork() {
               )}
             </Async>
           </div>
-          <PersonalPanel />
+          <PersonalPanel status={personal} />
         </>
       )}
     </>
@@ -249,6 +405,172 @@ export default function Smartwork() {
   return (
     <Split left={left} right={right} leftLabel="대화" leftWidth={440}
       collapsed={collapsed} onToggle={setCollapsed} />
+  );
+}
+
+// --- 세션 ---
+
+function Message({ message: m, showAuthor }: { message: SmartworkSessionMessage; showAuthor: boolean }) {
+  return (
+    <div className={`chat-msg ${m.role}`}>
+      {showAuthor && m.role === 'user' && (
+        <div className="mutedtext" style={{ fontSize: 11, marginBottom: 4 }}>{m.author}</div>
+      )}
+      {m.content}
+      {m.tools && m.tools.length > 0 && (
+        <div className="mutedtext mono" style={{ fontSize: 11, marginTop: 6 }}>
+          도구: {m.tools.join(', ')}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 고를 수 있는 조직은 내 소속 조직, 워크플로는 그 조직의 것(서버도 같은 규칙으로 거른다).
+function TaskPicker({ orgs, orgId, workflowId, disabled, onChange }: {
+  orgs: SmartworkOrgChoice[];
+  orgId: number | null;
+  workflowId: number | null;
+  disabled?: boolean;
+  onChange: (orgId: number | null, workflowId: number | null) => void;
+}) {
+  const flows = orgs.find((o) => o.id === orgId)?.workflows ?? [];
+  return (
+    <div className="row">
+      <select value={orgId ?? ''} disabled={disabled}
+        onChange={(e) => onChange(e.target.value ? Number(e.target.value) : null, null)}>
+        <option value="">조직 선택 안 함</option>
+        {orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+      </select>
+      <select value={workflowId ?? ''} disabled={disabled || orgId === null}
+        onChange={(e) => onChange(orgId, e.target.value ? Number(e.target.value) : null)}>
+        <option value="">워크플로 선택 안 함</option>
+        {flows.map((w) => <option key={w.id} value={w.id} title={w.description}>{w.name}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function NewSession({ orgs, busy, onStart }: {
+  orgs: SmartworkOrgChoice[];
+  busy: boolean;
+  onStart: (orgId: number | null, workflowId: number | null) => void;
+}) {
+  const [orgId, setOrgId] = useState<number | null>(null);
+  const [workflowId, setWorkflowId] = useState<number | null>(null);
+  return (
+    <div className="chat-thread">
+      <p className="mutedtext">
+        새 업무 — 조직과 워크플로를 고르면 그 업무 안에서 제안하고 답합니다. 고르지 않으면
+        소속 부서의 워크플로 전체를 보고 할 일을 제안합니다.
+      </p>
+      <TaskPicker orgs={orgs} orgId={orgId} workflowId={workflowId} disabled={busy}
+        onChange={(o, w) => {
+          setOrgId(o);
+          setWorkflowId(w);
+        }} />
+      <div className="row" style={{ marginTop: 8 }}>
+        <button disabled={busy} onClick={() => onStart(orgId, workflowId)}>시작</button>
+      </div>
+    </div>
+  );
+}
+
+function SharePanel({ session, me, onChanged, onLeft }: {
+  session: SmartworkSession;
+  me: string;
+  onChanged: () => void;
+  onLeft: () => void;
+}) {
+  const [email, setEmail] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const act = async (fn: () => Promise<void>) => {
+    setError(null);
+    try {
+      await fn();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  return (
+    <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', padding: '8px 0', marginBottom: 8 }}>
+      <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
+        참여자는 이 업무의 대화를 <b>지금까지의 질문·답변까지</b> 읽고 말할 수 있습니다.
+        조직·워크플로와 참여자는 소유자만 바꿉니다. 개인 맥락(폴더·메일)은 각자 자기 것만 씁니다.
+      </p>
+      <table style={{ marginBottom: 8 }}>
+        <tbody>
+          {session.members.map((m) => (
+            <tr key={m.email}>
+              <td>{m.email}{m.is_owner && <span className="status dim" style={{ marginLeft: 6 }}>소유자</span>}</td>
+              <td>
+                {!m.is_owner && (session.is_owner || m.email === me) && (
+                  <button className="small secondary" onClick={() => void act(async () => {
+                    await api.removeSessionMember(session.id, m.email);
+                    if (m.email === me) onLeft();
+                    else onChanged();
+                  })}>{m.email === me ? '나가기' : '빼기'}</button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {session.is_owner && (
+        <div className="row">
+          <input style={{ flex: 1, minWidth: 0 }} value={email} placeholder="공유할 사람 이메일(다른 부서도 됩니다)"
+            onChange={(e) => setEmail(e.target.value)} />
+          <button className="small" disabled={!email.trim()} onClick={() => void act(async () => {
+            const target = email.trim();
+            if (!window.confirm(`${target}에게 이 업무를 공유할까요? 지금까지의 대화와 답변이 보입니다.`)) return;
+            await api.addSessionMember(session.id, target);
+            setEmail('');
+            onChanged();
+          })}>공유</button>
+        </div>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+// 내 개인 맥락 중 이 업무에 쓸 것 — 참여자마다 따로이고, 남의 선택은 보이지 않는다.
+function ContextPicker({ session, status, onSaved, onError }: {
+  session: SmartworkSession;
+  status: PersonalStatus | null;
+  onSaved: (ctx: SmartworkContext) => void;
+  onError: (message: string) => void;
+}) {
+  if (!status?.consented) return null;
+  const mailReady = status.mail.connected;
+  if (status.folders.length === 0 && !mailReady) {
+    return (
+      <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 8px' }}>
+        오른쪽 '내 업무 맥락'에서 폴더·메일을 올리면 이 업무에 고를 수 있습니다.
+      </p>
+    );
+  }
+  const ctx = session.my_context;
+  const save = (next: SmartworkContext) => {
+    api.setSessionContext(session.id, next).then(onSaved, (e: Error) => onError(e.message));
+  };
+  return (
+    <div className="row" style={{ flexWrap: 'wrap', fontSize: 12, marginBottom: 8 }}>
+      <span className="mutedtext">이 업무에 쓸 내 맥락(나만 씀):</span>
+      {status.folders.map((f) => (
+        <label key={f.name}>
+          <input type="checkbox" checked={ctx.folders.includes(f.name)} onChange={(e) => save({
+            ...ctx,
+            folders: e.target.checked ? [...ctx.folders, f.name] : ctx.folders.filter((x) => x !== f.name),
+          })} /> {f.name}
+        </label>
+      ))}
+      {mailReady && (
+        <label>
+          <input type="checkbox" checked={ctx.mail} onChange={(e) => save({ ...ctx, mail: e.target.checked })} /> 메일
+        </label>
+      )}
+    </div>
   );
 }
 
@@ -318,11 +640,6 @@ function ReportView({ report }: { report: SmartworkReport }) {
 // 파일까지 목록에 실어 보낼 까닭이 없다.
 const DOC_SUFFIXES = ['.pdf', '.docx', '.xlsx', '.pptx', '.hwpx', '.doc', '.xls', '.ppt', '.hwp',
   '.txt', '.md', '.csv', '.html', '.htm', '.json'];
-// 한 번에 올리는 묶음. 서버가 요청 안에서 변환을 끝내므로(원본을 남기지 않는다) 묶음이
-// 크면 OCR·구형 Office 변환 시간이 쌓여 프록시 시간 제한에 걸린다.
-const UPLOAD_BATCH_FILES = 5;
-const UPLOAD_BATCH_BYTES = 10 * 1024 * 1024;
-
 function isDocument(name: string): boolean {
   const lower = name.toLowerCase();
   return DOC_SUFFIXES.some((s) => lower.endsWith(s));
@@ -332,8 +649,8 @@ function when(iso: string | null | undefined): string {
   return iso ? new Date(iso).toLocaleString() : '-';
 }
 
-function PersonalPanel() {
-  const status = useApi(() => api.personalStatus());
+// 상태는 대화 쪽(이 업무에 쓸 내 맥락 고르기)과 같은 것을 본다 — 폴더를 올리면 거기에도 바로 보인다.
+function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -369,22 +686,15 @@ function PersonalPanel() {
       folder, items.map((it) => ({ path: it.path, size: it.file.size, mtime: it.mtime })));
     const needed = new Set(plan.needed);
     const todo = items.filter((it) => needed.has(it.path));
-    let done = 0;
+    // 하나씩, 앞 파일이 끝난 뒤에 다음 파일 — 서버가 요청 안에서 변환을 끝내므로(원본을
+    // 남기지 않는다) 여러 개를 한꺼번에 보내면 OCR·구형 Office 변환이 몰려 시간 제한에 걸린다.
     let skipped = 0;
     let failed = 0;
-    while (done < todo.length) {
-      const batch: typeof todo = [];
-      let bytes = 0;
-      for (const it of todo.slice(done)) {
-        if (batch.length >= UPLOAD_BATCH_FILES || (batch.length > 0 && bytes + it.file.size > UPLOAD_BATCH_BYTES)) break;
-        batch.push(it);
-        bytes += it.file.size;
-      }
-      setProgress(`${folder}: ${done}/${todo.length} 변환 중...`);
-      const out = await api.personalUpload(folder, batch);
-      skipped += out.skipped.length;
-      failed += out.failed.length;
-      done += batch.length;
+    for (let i = 0; i < todo.length; i += 1) {
+      setProgress(`${folder}: ${i}/${todo.length} 변환 중... (${todo[i].path})`);
+      const out = await api.personalUpload(folder, todo[i]);
+      if (out.status === 'skipped') skipped += 1;
+      if (out.status === 'failed') failed += 1;
     }
     setProgress(
       `${folder}: 문서 ${plan.files}개 — 새로 변환 ${todo.length - skipped - failed}, 그대로 ${plan.files - todo.length}` +
