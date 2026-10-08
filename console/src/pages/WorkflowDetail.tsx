@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import Async from '../components/Async';
+import Split from '../components/Split';
 import WorkflowGraph from '../components/WorkflowGraph';
 import { api } from '../lib/api';
 import { useApi, usePolling } from '../lib/hooks';
@@ -39,8 +40,8 @@ export default function WorkflowDetail() {
   const [assessment, setAssessment] = useState<WorkflowAssessment | null>(null);
   // 이름 수정 중일 때만 값이 있다(빈 문자열은 '수정 중이지만 비움'과 구분이 안 되므로 null).
   const [newName, setNewName] = useState<string | null>(null);
-  // 플로팅 대화는 **열고 시작한다** — 이 화면에서 하는 일이 대화이고, 접혀 있으면 할 일이
-  // 보이지 않는다. 접으면 그 뜻을 따른다.
+  // 대화는 **왼쪽 칸에 펼친 채로 시작한다** — 이 화면에서 하는 일이 대화다. 접으면 그림이
+  // 전체 폭을 쓴다(크게 보려고 접는다).
   const [chatOpen, setChatOpen] = useState(true);
 
   const ask = async () => {
@@ -122,10 +123,7 @@ export default function WorkflowDetail() {
         const shown = proposal?.spec ?? workflow.spec;
         const isProposal = proposal !== null;
         return (
-          <div style={{
-            paddingRight: chatOpen && window.innerWidth > 1180 ? 452 : 0,
-            transition: 'padding-right 120ms',
-          }}>
+          <>
             <div className="row" style={{ marginBottom: 12, alignItems: 'center' }}>
               <button className="small secondary" onClick={() => navigate('/workflows')}>
                 ← 목록
@@ -179,124 +177,138 @@ export default function WorkflowDetail() {
               </div>
             )}
 
-            <div className="panel">
-                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                  <h3 style={{ margin: 0 }}>
-                    {isProposal ? '제안 (저장 전)' : '저장된 흐름'}
-                  </h3>
-                  <div className="row" style={{ gap: 8 }}>
+
+            {/* 좌: 사람이 말을 거는 자리(대화) · 우: 그 답(그림·표·기록).
+                내용이 한 화면을 넘는 화면에서만 2단으로 나눈다 — 이 화면은 흐름도와 평가
+                표까지 있어 늘 넘친다. 접으면 오른쪽이 전체 폭을 쓴다. */}
+            <Split
+              leftLabel="구성 대화"
+              collapsed={!chatOpen}
+              onToggle={(c) => setChatOpen(!c)}
+              left={(
+                <ChatPanel
+                  constraints={workflow.constraints ?? []}
+                  messages={messages}
+                  request={request}
+                  setRequest={setRequest}
+                  onSend={ask}
+                  busy={busy}
+                  isProposal={isProposal}
+                  onDiscard={() => setProposal(null)}
+                  error={error}
+                  notice={notice}
+                />
+              )}
+              right={(
+                <>
+                  <div className="panel">
+                    <div className="row"
+                         style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                      <h3 style={{ margin: 0 }}>
+                        {isProposal ? '제안 (저장 전)' : '저장된 흐름'}
+                      </h3>
+                      <div className="row" style={{ gap: 8 }}>
+                        {isProposal && (
+                          <button className="small"
+                                  disabled={proposal!.problems.length > 0 || busy !== ''}
+                                  onClick={() => save(proposal!.spec, proposal!.extracted)}>
+                            {busy === 'save' ? '저장 중…' : '이 제안 저장'}
+                          </button>
+                        )}
+                        {!isProposal && workflow.summary.node_count > 0 && (
+                          <button className="small" disabled={busy !== ''} onClick={run}>
+                            {busy === 'run' ? '시작 중…' : '실행'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
                     {isProposal && (
-                      <button className="small"
-                              disabled={proposal!.problems.length > 0 || busy !== ''}
-                              onClick={() => save(proposal!.spec, proposal!.extracted)}>
-                        {busy === 'save' ? '저장 중…' : '이 제안 저장'}
-                      </button>
+                      <p className="mutedtext" style={{ fontSize: 12 }}>
+                        {proposal!.summary}
+                        <br />
+                        {`${proposal!.provider}`}
+                        {proposal!.attempts > 1
+                          && ' · 검증에서 한 번 거부돼 LLM이 고친 결과입니다'}
+                      </p>
                     )}
-                    {!isProposal && workflow.summary.node_count > 0 && (
-                      <button className="small" disabled={busy !== ''} onClick={run}>
-                        {busy === 'run' ? '시작 중…' : '실행'}
-                      </button>
+                    {isProposal && proposal!.problems.length > 0 && (
+                      <div style={{ fontSize: 12, color: VIZ.status.critical }}>
+                        <b>검증을 통과하지 못해 저장할 수 없습니다</b>
+                        <ul style={{ margin: '4px 0' }}>
+                          {proposal!.problems.map((p) => <li key={p}>{p}</li>)}
+                        </ul>
+                      </div>
                     )}
+                    <WorkflowGraph spec={shown} selected={selected} onSelect={setSelected} />
+                    {selected && <NodeDetail spec={shown} id={selected} />}
                   </div>
-                </div>
-                {isProposal && (
-                  <p className="mutedtext" style={{ fontSize: 12 }}>
-                    {proposal!.summary}
-                    <br />
-                    {`${proposal!.provider}`}
-                    {proposal!.attempts > 1
-                      && ' · 검증에서 한 번 거부돼 LLM이 고친 결과입니다'}
-                  </p>
-                )}
-                {isProposal && proposal!.problems.length > 0 && (
-                  <div style={{ fontSize: 12, color: VIZ.status.critical }}>
-                    <b>검증을 통과하지 못해 저장할 수 없습니다</b>
-                    <ul style={{ margin: '4px 0' }}>
-                      {proposal!.problems.map((p) => <li key={p}>{p}</li>)}
-                    </ul>
-                  </div>
-                )}
-                <WorkflowGraph spec={shown} selected={selected} onSelect={setSelected} />
-              {selected && (
-                <NodeDetail spec={shown} id={selected} />
-              )}
-            </div>
 
-            <ExtractedPanel
-              extracted={proposal?.extracted ?? workflow.extracted}
-              review={proposal?.review ?? []}
-              isProposal={isProposal}
-            />
+                  <ExtractedPanel
+                    extracted={proposal?.extracted ?? workflow.extracted}
+                    review={proposal?.review ?? []}
+                    isProposal={isProposal}
+                  />
 
-            <Async state={runs}>
-              {(rows: WorkflowRunOut[]) => (
-                <div className="panel">
-                  <h3 style={{ marginTop: 0 }}>실행</h3>
-                  {rows.length === 0 ? (
-                    <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
-                      아직 실행한 적이 없습니다.
-                    </p>
-                  ) : (
-                    <table>
-                      <thead>
-                        <tr><th>#</th><th>상태</th><th>판</th><th>실행자</th><th>시작</th><th></th></tr>
-                      </thead>
-                      <tbody>
-                        {rows.map((r) => (
-                          <tr key={r.id}>
-                            <td className="mono">{r.id}</td>
-                            <td>{RUN_LABEL[r.status] ?? r.status}</td>
-                            <td className="mono">v{r.version}</td>
-                            <td>{r.actor}</td>
-                            <td className="mutedtext" style={{ fontSize: 11 }}>
-                              {new Date(r.created_at).toLocaleString('ko-KR')}
-                            </td>
-                            <td>
-                              <button className="small secondary"
-                                      onClick={() => setOpenRun(r.id)}>
-                                진행 보기
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <Async state={runs}>
+                    {(rows: WorkflowRunOut[]) => (
+                      <div className="panel">
+                        <h3 style={{ marginTop: 0 }}>실행</h3>
+                        {rows.length === 0 ? (
+                          <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+                            아직 실행한 적이 없습니다.
+                          </p>
+                        ) : (
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>#</th><th>상태</th><th>판</th><th>실행자</th>
+                                <th>시작</th><th></th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rows.map((r) => (
+                                <tr key={r.id}>
+                                  <td className="mono">{r.id}</td>
+                                  <td>{RUN_LABEL[r.status] ?? r.status}</td>
+                                  <td className="mono">v{r.version}</td>
+                                  <td>{r.actor}</td>
+                                  <td className="mutedtext" style={{ fontSize: 11 }}>
+                                    {new Date(r.created_at).toLocaleString('ko-KR')}
+                                  </td>
+                                  <td>
+                                    <button className="small secondary"
+                                            onClick={() => setOpenRun(r.id)}>
+                                      진행 보기
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                    )}
+                  </Async>
+
+                  {openRun !== null && (
+                    <RunPanel runId={openRun} spec={workflow.spec}
+                              onClose={() => { setOpenRun(null); runs.reload(); }} />
                   )}
-                </div>
+
+                  <AssessmentPanel
+                    assessment={assessment}
+                    busy={busy === 'assess'}
+                    disabled={workflow.summary.node_count === 0 || busy !== ''}
+                    onAssess={assess}
+                    onApply={(text) => {
+                      setRequest(text);
+                      setChatOpen(true);
+                    }}
+                  />
+                </>
               )}
-            </Async>
-
-            {openRun !== null && (
-              <RunPanel runId={openRun} spec={workflow.spec}
-                        onClose={() => { setOpenRun(null); runs.reload(); }} />
-            )}
-
-            <ChatDock
-              open={chatOpen}
-              onToggle={(v) => setChatOpen(v)}
-              constraints={workflow.constraints ?? []}
-              messages={messages}
-              request={request}
-              setRequest={setRequest}
-              onSend={ask}
-              busy={busy}
-              isProposal={isProposal}
-              onDiscard={() => setProposal(null)}
-              error={error}
-              notice={notice}
             />
-
-            <AssessmentPanel
-              assessment={assessment}
-              busy={busy === 'assess'}
-              disabled={workflow.summary.node_count === 0 || busy !== ''}
-              onAssess={assess}
-              onApply={(text) => {
-                setRequest(text);
-                setChatOpen(true);
-              }}
-            />
-          </div>
+          </>
         );
       }}
     </Async>
@@ -702,21 +714,18 @@ function StatBox({ label, value, sub, color }: {
 }
 
 /**
- * 구성 대화 — 화면 오른쪽 아래에 **떠 있는** 창. 흐름 그림이 전체 폭을 쓰게 하려고 옮겼다.
+ * 구성 대화 — 2단의 **왼쪽 칸**. 콘솔 규약대로 사람이 말을 거는 것은 왼쪽, 그 답(그림·표)은
+ * 오른쪽이다(components/Split).
  *
- * 29단계 워크플로를 두 칸으로 나눠 놓으니 그림이 받는 폭이 절반이었고, 세로 배치로 바꾼 뒤에도
- * 가로로 분기가 벌어지면 바로 좁았다. 대화는 **쓸 때만** 필요하고 그림은 늘 보고 있어야 한다 —
- * 그래서 늘 자리를 차지하는 쪽은 그림이다.
- *
- * 처음 열림 여부는 스펙이 비었는지로 정한다: 빈 워크플로에서는 대화가 유일한 길이므로 열어
- * 두고, 이미 단계가 있으면 접어 둔다. 사람이 한 번 손대면 그 뜻을 따른다(상위 상태).
+ * 떠 있는 창으로도 해 봤는데 두 가지가 걸렸다: 기본으로 열면 그림의 오른쪽을 덮어 본문 여백을
+ * 따로 보정해야 했고, 그 보정이 그림 폭 계산과 맞물려 화면 폭에 따라 어긋났다. 왼쪽 칸은
+ * 자기 자리를 가지므로 그런 보정이 없다 — 대신 **자기 칸 안에서만 스크롤**해서, 오른쪽을
+ * 훑는 동안에도 입력창이 화면에 남는다.
  */
-function ChatDock({
-  open, onToggle, constraints, messages, request, setRequest, onSend, busy,
+function ChatPanel({
+  constraints, messages, request, setRequest, onSend, busy,
   isProposal, onDiscard, error, notice,
 }: {
-  open: boolean;
-  onToggle: (open: boolean) => void;
   constraints: string[];
   messages: ReturnType<typeof useApi<WorkflowMessageOut[]>>;
   request: string;
@@ -728,33 +737,9 @@ function ChatDock({
   error: string;
   notice: string;
 }) {
-  if (!open) {
-    return (
-      <button
-        className="small"
-        style={{ position: 'fixed', right: 20, bottom: 20, zIndex: 60 }}
-        onClick={() => onToggle(true)}
-      >
-        구성 대화 열기
-      </button>
-    );
-  }
   return (
-    <div
-      className="panel"
-      style={{
-        position: 'fixed', right: 20, bottom: 20, zIndex: 60,
-        width: 420, maxWidth: 'calc(100vw - 40px)', maxHeight: '76vh',
-        display: 'flex', flexDirection: 'column',
-        // 떠 있는 창이므로 뒤의 그림과 구분되게 — 배경과 테두리를 분명히 둔다.
-        background: 'var(--panel)', boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
-        marginBottom: 0, overflow: 'hidden',
-      }}
-    >
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-        <h3 style={{ margin: 0 }}>구성 대화</h3>
-        <button className="small secondary" onClick={() => onToggle(false)}>접기</button>
-      </div>
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>구성 대화</h3>
       <p className="mutedtext" style={{ fontSize: 12 }}>
         하고 싶은 일을 업무 말로 적으세요. 이 조직의 <b>업무 제약사항</b>과 쓸 수 있는 자원이
         함께 전달되고, 만들어진 스펙은 검증을 거칩니다.
@@ -769,7 +754,7 @@ function ChatDock({
           </ul>
         </details>
       )}
-      <div style={{ flex: 1, overflowY: 'auto', minHeight: 80 }}>
+      <div style={{ maxHeight: '42vh', overflowY: 'auto' }}>
         <Async state={messages}>
           {(rows: WorkflowMessageOut[]) => (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>

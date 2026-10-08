@@ -4,6 +4,7 @@ import {
   type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import Split from '../../components/Split';
 import { api } from '../../lib/api';
 import { NODE_H, NODE_W, layoutGraph } from '../../lib/graphlayout';
 import { useApi } from '../../lib/hooks';
@@ -190,7 +191,7 @@ export default function ExploreTab() {
 
   const current = selected ? nodes.get(selected) : undefined;
 
-  return (
+  const searchPanel = (
     <>
       <div className="panel">
         <h3 style={{ marginTop: 0 }}>정보 조회</h3>
@@ -267,7 +268,10 @@ export default function ExploreTab() {
         </div>
       )}
 
-      {nodes.size > 0 && (
+    </>
+  );
+
+  const graphPanel = nodes.size > 0 ? (
         <div className="panel">
           <div className="row" style={{ gap: 14, flexWrap: 'wrap', marginBottom: 6 }}>
             {KINDS.map((k) => (
@@ -328,9 +332,16 @@ export default function ExploreTab() {
             </div>
           )}
         </div>
-      )}
-    </>
+  ) : (
+    <div className="panel">
+      <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+        왼쪽에서 이름을 찾아 「그래프로 보기」를 누르면 여기에 그려집니다.
+      </p>
+    </div>
   );
+
+  // 좌: 찾고 고르는 자리(사람) · 우: 그려진 그래프(기계가 낸 것). 콘솔 2단 규약과 같다.
+  return <Split leftLabel="검색" left={searchPanel} right={graphPanel} />;
 }
 
 /** 노드 하나 — 종류는 색과 기호로, 이름은 두 줄까지. 펼치지 않았으면 "+"를 보인다. */

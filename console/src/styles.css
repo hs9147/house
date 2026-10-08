@@ -70,6 +70,21 @@ main { flex: 1; min-width: 0; max-width: 1100px; margin: 24px auto; padding: 0 2
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .spacer { flex: 1; }
 
+/* 좌우 2단 — 왼쪽은 사람이 읽고 쓰는 것(대화·폼·검색), 오른쪽은 기계가 낸 것(표·그림).
+   왼쪽은 고정 폭이고 자기 칸 안에서만 스크롤한다: 오른쪽을 훑는 동안 입력창이 화면에서
+   사라지면 "쓰다가 보고 다시 쓰는" 흐름이 끊긴다. 넓은 쪽은 오른쪽이 받는다 — 흐름도·표가
+   반 폭에 들어가면 글자를 읽을 수 없다(29단계에서 실제로 그랬다). */
+.split { display: grid; grid-template-columns: var(--split-left, 420px) 1fr; gap: 12px;
+         align-items: start; }
+.split-left { position: sticky; top: 8px; max-height: calc(100vh - 96px); overflow-y: auto; }
+.split-left > .panel:last-child { margin-bottom: 0; }
+.split-right { min-width: 0; }   /* 그리드 칸이 내용 때문에 늘어나지 않게 — 넘치면 스크롤 */
+@media (max-width: 1180px) {
+  /* 좁은 화면에서는 한 단으로 쌓는다. 왼쪽이 먼저다 — 할 일이 먼저 보여야 한다. */
+  .split { grid-template-columns: 1fr; }
+  .split-left { position: static; max-height: none; overflow: visible; }
+}
+
 table { width: 100%; border-collapse: collapse; }
 th {
   text-align: left;
