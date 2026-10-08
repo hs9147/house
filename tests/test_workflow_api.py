@@ -123,9 +123,13 @@ def test_chat_proposes_a_spec_and_keeps_the_conversation(client, monkeypatch):
     org = _org(client)
     wid = client.post(f"{API}/workflows", headers=ADMIN,
                       json={"organization_id": org, "name": "계약검토"}).json()["id"]
-    # 공통 제약사항을 하나 등록해 둔다 — 생성이 그것에 하네싱되는지 본다.
+    # **업무** 제약사항을 하나 등록해 둔다 — 생성이 그것에 하네싱되는지 본다. 기획의
+    # 공통 제약사항(에이전트 개발 제한)은 여기 실리지 않는다(아래에서 확인).
+    client.post(f"{API}/workflows/constraints", headers=ADMIN,
+                json={"organization_id": org,
+                      "text": "선급금 30% 초과는 법무팀 합의가 필요하다"})
     client.post(f"{API}/plan/constraints", headers=ADMIN,
-                json={"text": "선급금 30% 초과는 법무팀 합의가 필요하다"})
+                json={"text": "서버는 80포트만 쓰고 IIS에서 URL rewrite한다"})
     created = client.post(f"{API}/llm/providers", headers=ADMIN, json={
         "name": "p1", "kind": "openai", "base_url": "https://x/v1",
         "model": "m", "api_key": "k",
@@ -159,8 +163,11 @@ def test_chat_proposes_a_spec_and_keeps_the_conversation(client, monkeypatch):
     assert body["attempts"] == 1
     assert body["extracted"]["entities"][0]["name"] == "계약서"
     assert body["review"] == []            # 제약이 단계에 걸려 있으면 검토할 것이 없다
-    # 등록된 공통 제약사항이 프롬프트에 실린다(하네싱).
+    # 등록된 **업무** 제약사항이 프롬프트에 실린다(하네싱).
     assert "선급금 30% 초과" in prompts[0]
+    # 기획의 개발 제약은 실리지 않는다 — 섞으면 "이 규칙을 지키는 단계가 없습니다"가
+    # 엉뚱한 데서 뜬다(실측에서 그랬다).
+    assert "80포트" not in prompts[0]
 
     # 제안은 저장되지 않는다 — 사람이 저장을 눌러야 한다.
     assert client.get(f"{API}/workflows/{wid}", headers=ADMIN).json()["spec"]["nodes"] == []

@@ -39,6 +39,9 @@ export default function WorkflowDetail() {
   const [assessment, setAssessment] = useState<WorkflowAssessment | null>(null);
   // 이름 수정 중일 때만 값이 있다(빈 문자열은 '수정 중이지만 비움'과 구분이 안 되므로 null).
   const [newName, setNewName] = useState<string | null>(null);
+  // 플로팅 대화를 펼쳤는가. null = 아직 사람이 손대지 않음 → 스펙이 비어 있으면 열어 둔다
+  // (그때는 대화가 유일한 길이다). 한 번 접거나 펼치면 그 뜻을 따른다.
+  const [chatOpen, setChatOpen] = useState<boolean | null>(null);
 
   const ask = async () => {
     if (!request.trim()) return;
@@ -173,64 +176,7 @@ export default function WorkflowDetail() {
               </div>
             )}
 
-            <div className="row" style={{ gap: 12, alignItems: 'stretch', flexWrap: 'wrap' }}>
-              <div className="panel" style={{ flex: '1 1 380px', minWidth: 340 }}>
-                <h3 style={{ marginTop: 0 }}>구성 대화</h3>
-                <p className="mutedtext" style={{ fontSize: 12 }}>
-                  하고 싶은 일을 업무 말로 적으세요. 등록된 공통 제약사항과 이 조직이 쓸 수 있는
-                  자원이 함께 전달되고, 만들어진 스펙은 검증을 거칩니다.
-                </p>
-                <Async state={messages}>
-                  {(rows: WorkflowMessageOut[]) => (
-                    <div style={{
-                      maxHeight: 260, overflowY: 'auto', display: 'flex',
-                      flexDirection: 'column', gap: 6, marginBottom: 8,
-                    }}>
-                      {rows.length === 0 && (
-                        <span className="mutedtext" style={{ fontSize: 12 }}>
-                          아직 대화가 없습니다.
-                        </span>
-                      )}
-                      {rows.map((m, i) => (
-                        <div key={i} style={{
-                          fontSize: 12, padding: '6px 8px', borderRadius: 6,
-                          background: m.role === 'user' ? 'var(--panel-2, #20212f)' : 'transparent',
-                          border: m.role === 'assistant'
-                            ? '1px solid var(--border-soft)' : 'none',
-                          whiteSpace: 'pre-wrap',
-                        }}>
-                          <div className="mutedtext" style={{ fontSize: 10, marginBottom: 2 }}>
-                            {m.role === 'user' ? '요청' : 'LLM'}
-                          </div>
-                          {m.content}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </Async>
-                <textarea
-                  rows={5}
-                  placeholder={'예: 계약 검토 건을 모아 금액이 1억을 넘으면 법무 승인을 받고, '
-                    + '결과를 파일로 남겨 주세요.'}
-                  value={request}
-                  style={{ width: '100%' }}
-                  onChange={(e) => setRequest(e.target.value)}
-                />
-                <div className="row" style={{ gap: 8, marginTop: 6 }}>
-                  <button className="small" disabled={!request.trim() || busy !== ''} onClick={ask}>
-                    {busy === 'chat' ? 'LLM 작성 중…' : '보내기'}
-                  </button>
-                  {isProposal && (
-                    <button className="small secondary" onClick={() => setProposal(null)}>
-                      제안 버리기
-                    </button>
-                  )}
-                </div>
-                {error && <p className="error">{error}</p>}
-                {notice && <p style={{ fontSize: 12, color: 'var(--green)' }}>{notice}</p>}
-              </div>
-
-              <div className="panel" style={{ flex: '2 1 520px', minWidth: 420 }}>
+            <div className="panel">
                 <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
                   <h3 style={{ margin: 0 }}>
                     {isProposal ? '제안 (저장 전)' : '저장된 흐름'}
@@ -268,10 +214,9 @@ export default function WorkflowDetail() {
                   </div>
                 )}
                 <WorkflowGraph spec={shown} selected={selected} onSelect={setSelected} />
-                {selected && (
-                  <NodeDetail spec={shown} id={selected} />
-                )}
-              </div>
+              {selected && (
+                <NodeDetail spec={shown} id={selected} />
+              )}
             </div>
 
             <ExtractedPanel
@@ -323,6 +268,21 @@ export default function WorkflowDetail() {
                         onClose={() => { setOpenRun(null); runs.reload(); }} />
             )}
 
+            <ChatDock
+              open={chatOpen ?? workflow.summary.node_count === 0}
+              onToggle={(v) => setChatOpen(v)}
+              constraints={workflow.constraints ?? []}
+              messages={messages}
+              request={request}
+              setRequest={setRequest}
+              onSend={ask}
+              busy={busy}
+              isProposal={isProposal}
+              onDiscard={() => setProposal(null)}
+              error={error}
+              notice={notice}
+            />
+
             <AssessmentPanel
               assessment={assessment}
               busy={busy === 'assess'}
@@ -330,7 +290,7 @@ export default function WorkflowDetail() {
               onAssess={assess}
               onApply={(text) => {
                 setRequest(text);
-                window.scrollTo({ top: 0, behavior: 'smooth' });
+                setChatOpen(true);
               }}
             />
           </>
@@ -734,6 +694,120 @@ function StatBox({ label, value, sub, color }: {
       <div style={{ fontSize: 11, color: VIZ.muted }}>{label}</div>
       <div style={{ fontSize: 22, fontWeight: 600, color: color ?? VIZ.ink }}>{value}</div>
       {sub && <div style={{ fontSize: 10, color: VIZ.muted }}>{sub}</div>}
+    </div>
+  );
+}
+
+/**
+ * 구성 대화 — 화면 오른쪽 아래에 **떠 있는** 창. 흐름 그림이 전체 폭을 쓰게 하려고 옮겼다.
+ *
+ * 29단계 워크플로를 두 칸으로 나눠 놓으니 그림이 받는 폭이 절반이었고, 세로 배치로 바꾼 뒤에도
+ * 가로로 분기가 벌어지면 바로 좁았다. 대화는 **쓸 때만** 필요하고 그림은 늘 보고 있어야 한다 —
+ * 그래서 늘 자리를 차지하는 쪽은 그림이다.
+ *
+ * 처음 열림 여부는 스펙이 비었는지로 정한다: 빈 워크플로에서는 대화가 유일한 길이므로 열어
+ * 두고, 이미 단계가 있으면 접어 둔다. 사람이 한 번 손대면 그 뜻을 따른다(상위 상태).
+ */
+function ChatDock({
+  open, onToggle, constraints, messages, request, setRequest, onSend, busy,
+  isProposal, onDiscard, error, notice,
+}: {
+  open: boolean;
+  onToggle: (open: boolean) => void;
+  constraints: string[];
+  messages: ReturnType<typeof useApi<WorkflowMessageOut[]>>;
+  request: string;
+  setRequest: (v: string) => void;
+  onSend: () => void;
+  busy: string;
+  isProposal: boolean;
+  onDiscard: () => void;
+  error: string;
+  notice: string;
+}) {
+  if (!open) {
+    return (
+      <button
+        className="small"
+        style={{ position: 'fixed', right: 20, bottom: 20, zIndex: 60 }}
+        onClick={() => onToggle(true)}
+      >
+        구성 대화 열기
+      </button>
+    );
+  }
+  return (
+    <div
+      className="panel"
+      style={{
+        position: 'fixed', right: 20, bottom: 20, zIndex: 60,
+        width: 420, maxWidth: 'calc(100vw - 40px)', maxHeight: '76vh',
+        display: 'flex', flexDirection: 'column',
+        // 떠 있는 창이므로 뒤의 그림과 구분되게 — 배경과 테두리를 분명히 둔다.
+        background: 'var(--panel)', boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
+        marginBottom: 0, overflow: 'hidden',
+      }}
+    >
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <h3 style={{ margin: 0 }}>구성 대화</h3>
+        <button className="small secondary" onClick={() => onToggle(false)}>접기</button>
+      </div>
+      <p className="mutedtext" style={{ fontSize: 12 }}>
+        하고 싶은 일을 업무 말로 적으세요. 이 조직의 <b>업무 제약사항</b>과 쓸 수 있는 자원이
+        함께 전달되고, 만들어진 스펙은 검증을 거칩니다.
+      </p>
+      {constraints.length > 0 && (
+        <details style={{ marginBottom: 8 }}>
+          <summary style={{ fontSize: 12, cursor: 'pointer' }}>
+            이 워크플로를 묶는 업무 제약 {constraints.length}건
+          </summary>
+          <ul style={{ fontSize: 12, margin: '4px 0 0', paddingLeft: 18 }}>
+            {constraints.map((c) => <li key={c}>{c}</li>)}
+          </ul>
+        </details>
+      )}
+      <div style={{ flex: 1, overflowY: 'auto', minHeight: 80 }}>
+        <Async state={messages}>
+          {(rows: WorkflowMessageOut[]) => (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
+              {rows.length === 0 && (
+                <span className="mutedtext" style={{ fontSize: 12 }}>아직 대화가 없습니다.</span>
+              )}
+              {rows.map((m, i) => (
+                <div key={i} style={{
+                  fontSize: 12, padding: '6px 8px', borderRadius: 6,
+                  background: m.role === 'user' ? 'var(--panel-2, #20212f)' : 'transparent',
+                  border: m.role === 'assistant' ? '1px solid var(--border-soft)' : 'none',
+                  whiteSpace: 'pre-wrap',
+                }}>
+                  <div className="mutedtext" style={{ fontSize: 10, marginBottom: 2 }}>
+                    {m.role === 'user' ? '요청' : 'LLM'}
+                  </div>
+                  {m.content}
+                </div>
+              ))}
+            </div>
+          )}
+        </Async>
+      </div>
+      <textarea
+        rows={4}
+        placeholder={'예: 계약 검토 건을 모아 금액이 1억을 넘으면 법무 승인을 받고, '
+          + '결과를 파일로 남겨 주세요.'}
+        value={request}
+        style={{ width: '100%' }}
+        onChange={(e) => setRequest(e.target.value)}
+      />
+      <div className="row" style={{ gap: 8, marginTop: 6 }}>
+        <button className="small" disabled={!request.trim() || busy !== ''} onClick={onSend}>
+          {busy === 'chat' ? 'LLM 작성 중…' : '보내기'}
+        </button>
+        {isProposal && (
+          <button className="small secondary" onClick={onDiscard}>제안 버리기</button>
+        )}
+      </div>
+      {error && <p className="error" style={{ fontSize: 12 }}>{error}</p>}
+      {notice && <p style={{ fontSize: 12, color: 'var(--green)' }}>{notice}</p>}
     </div>
   );
 }

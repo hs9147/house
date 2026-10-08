@@ -537,7 +537,7 @@ export default function AgentPlanning() {
       {me.data?.is_admin && (
         <div className="panel">
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-            <h3 style={{ margin: 0 }}>📌 공통 제약사항 (모든 프로젝트 적용)</h3>
+            <h3 style={{ margin: 0 }}>📌 공통 제약사항 (에이전트 개발 제한 · 모든 프로젝트 적용)</h3>
             <div className="row" style={{ gap: 6 }}>
               {/* 무엇이 반복되는 실수인지는 등록된 레포에 이미 남아 있다 — 사람이 매번
                   발견해 문구를 손으로 고치는 대신 근거와 함께 제안받는다. */}

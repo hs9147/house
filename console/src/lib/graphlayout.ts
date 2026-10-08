@@ -11,8 +11,10 @@ import { graphlib, layout as dagreLayout } from '@dagrejs/dagre';
  * 포함하나"를 위치로 말한다. 노드를 끌어 옮기는 건 React Flow가 그대로 해 준다 —
  * 움직임이 필요한 건 배치 알고리즘이 아니라 사람의 손이다.
  *
- * 방향은 좌→우(LR)다. 노드 이름이 한국어 문장(절 제목·표 머리글)이라 가로로 길고,
- * 위→아래로 쌓으면 한 랭크가 화면 밖으로 나간다.
+ * 방향은 쓰는 쪽이 고른다. 온톨로지 탐색은 좌→우(LR)다 — 이름이 한국어 문장(절 제목·표
+ * 머리글)이라 가로로 길고, 한 걸음 펼치면 이웃이 옆으로 퍼지는 편이 읽힌다. 워크플로는
+ * 위→아래(TB)다: 흐름은 "다음 단계"가 아래에 있는 것이 자연스럽고, 29단계가 가로로 늘어나면
+ * 화면에 맞추려고 축소되어 글자를 읽을 수 없다. 세로로 길어지는 것은 스크롤이 해결한다.
  */
 export const NODE_W = 210;
 // 박스 안은 세 줄이다(종류 11px · 이름 12px · 설명 11px). 54px으로 두면 한국어 줄높이에서
@@ -28,9 +30,13 @@ export interface LaidOutNode {
 export function layoutGraph(
   nodes: { id: string }[],
   edges: { source: string; target: string }[],
+  direction: 'LR' | 'TB' = 'LR',
 ): Map<string, { x: number; y: number }> {
   const g = new graphlib.Graph();
-  g.setGraph({ rankdir: 'LR', nodesep: 18, ranksep: 90, marginx: 12, marginy: 12 });
+  g.setGraph(direction === 'TB'
+    // 세로 흐름: 같은 랭크(분기의 양쪽)는 옆으로 벌리고, 단계 사이는 선 라벨이 들어갈 만큼.
+    ? { rankdir: 'TB', nodesep: 40, ranksep: 56, marginx: 12, marginy: 12 }
+    : { rankdir: 'LR', nodesep: 18, ranksep: 90, marginx: 12, marginy: 12 });
   g.setDefaultEdgeLabel(() => ({}));
   const ids = new Set(nodes.map((n) => n.id));
   nodes.forEach((n) => g.setNode(n.id, { width: NODE_W, height: NODE_H }));

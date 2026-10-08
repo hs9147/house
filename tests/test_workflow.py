@@ -307,8 +307,8 @@ def test_review_flags_constraints_that_no_step_enforces():
         ["선급금 30% 초과는 법무팀 합의"],
     )
     assert any("지키는 단계가 없습니다" in n for n in notes), notes
-    # 등록해 둔 공통 제약사항을 아예 읽지 않았으면 그것도 검토 대상이다.
-    assert any("공통 제약사항이 읽히지 않았습니다" in n for n in notes), notes
+    # 등록해 둔 업무 제약사항을 아예 읽지 않았으면 그것도 검토 대상이다.
+    assert any("업무 제약사항이 읽히지 않았습니다" in n for n in notes), notes
 
 
 def test_review_flags_transitions_pointing_at_missing_steps():
@@ -350,8 +350,8 @@ def test_propose_repairs_once_when_validation_rejects(org, docs_store, monkeypat
     assert result["spec"]["nodes"][0]["id"] == "목록"
     # 2차 요청에는 1차의 문제 목록이 실린다 — 그게 수선의 근거다.
     assert "모르는 종류" in calls[1][-1]["content"]
-    # 제약사항과 자원 목록은 시스템 메시지에 실린다(하네싱).
-    assert "반드시 지켜야 하는 공통 제약사항" in calls[0][0]["content"]
+    # 업무 제약사항과 자원 목록은 시스템 메시지에 실린다(하네싱).
+    assert "반드시 지켜야 하는 이 조직의 업무 제약사항" in calls[0][0]["content"]
     assert "storage.list" in calls[0][0]["content"]
 
 
@@ -496,3 +496,61 @@ def test_decorated_node_types_are_accepted_not_flagged():
     assert workflowassess._node_type(" doc.read ", allowed) == "doc.read"
     assert workflowassess._node_type("파일 목록", allowed) == "storage.list"   # 라벨만 적은 경우
     assert workflowassess._node_type("email.send", allowed) == ""            # 없는 것은 없다
+
+
+# --- 온톨로지와 .ready를 실제로 쓰는가 ---
+
+def test_graph_find_reads_the_ontology_and_hands_paths_to_doc_read(org, monkeypatch,
+                                                                   tmp_path, fresh_settings):
+    """색인이 뽑아 둔 그래프를 워크플로가 **쓴다.**
+
+    전까지는 노드 종류 8개 중 어느 것도 그래프를 보지 않았다 — 문서에서 뽑은 노드 28,301개가
+    워크플로에는 없는 것과 같았다. 경로를 함께 내는 것이 요점이다: 출력 규약이 하나라서
+    다음 단계의 doc.read가 "그 표가 있는 문서를 전부 읽어"가 된다.
+    """
+    from app.config import get_settings
+    from app.services import docsearch
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "견적서.md").write_text(
+        "# 견적 요청\n\n| 구분 | 금액 |\n|---|---|\n| 자재 | 100 |\n", encoding="utf-8")
+    (root / "메모.md").write_text("# 메모\n표도 용어도 없다.\n", encoding="utf-8")
+    monkeypatch.setenv("PAAS_DOC_ROOTS", f"docs={root}")
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
+    monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("PAAS_DOC_READY_DIR", str(tmp_path / "ready"))
+    get_settings.cache_clear()
+    docsearch.reindex("docs", root)   # 색인이 돌면 그래프와 .ready가 함께 만들어진다
+
+    with SessionLocal() as db:
+        row = _make(db, org, {
+            "nodes": [
+                {"id": "표찾기", "type": "graph.find", "store": "docs", "kind": "table"},
+                {"id": "읽기", "type": "doc.read", "store": "docs"},
+            ],
+            "edges": [{"from": "표찾기", "to": "읽기"}],
+        }, name="graph")
+        assert wf.validate(db, org, row.spec) == []
+        run = WorkflowRun(workflow_id=row.id, version=1,
+                          status=WorkflowRunStatus.running, steps=[], outputs={})
+        db.add(run)
+        db.commit()
+        wf._execute(db, run)
+
+        assert run.status == WorkflowRunStatus.succeeded, run.error
+        # 표 노드가 있는 문서만 찾아야 한다(메모.md에는 표가 없다).
+        assert run.outputs["표찾기"]["paths"] == ["견적서.md"]
+        assert "구분 | 금액" in run.outputs["표찾기"]["text"]
+        # 경로가 다음 단계로 흘러 **본문**(.ready 마크다운)이 읽힌다.
+        assert "| 구분 | 금액 |" in run.outputs["읽기"]["text"]
+
+
+def test_unknown_graph_kind_is_rejected_not_silently_empty(org, docs_store):
+    """없는 kind를 적으면 0건이 나온다 — 0건과 "그런 종류가 없다"는 다른 사실이다."""
+    with SessionLocal() as db:
+        problems = wf.validate(db, org, {
+            "nodes": [{"id": "찾기", "type": "graph.find", "store": "docs", "kind": "표"}],
+            "edges": [],
+        })
+    assert any("모르는 노드 종류 '표'" in p for p in problems), problems

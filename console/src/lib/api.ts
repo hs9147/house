@@ -24,6 +24,7 @@ import type {
   OntologyNode,
   OntologyOverview,
   WorkflowAssessment,
+  WorkflowConstraintOut,
   WorkflowExtracted,
   WorkflowMessageOut,
   WorkflowOut,
@@ -338,6 +339,15 @@ export const api = {
   renameWorkflow: (id: number, name: string, description?: string) =>
     request<WorkflowOut>('PATCH', `/workflows/${id}`, { name, description }),
   deleteWorkflow: (id: number) => request<void>('DELETE', `/workflows/${id}`),
+  // 업무 제약사항(조직 단위) — 기획의 /plan/constraints와 **다른 목록**이다.
+  listWorkflowConstraints: (organization_id: number) =>
+    request<WorkflowConstraintOut[]>('GET', '/workflows/constraints', undefined,
+      { organization_id }),
+  addWorkflowConstraint: (organization_id: number, text: string) =>
+    request<WorkflowConstraintOut>('POST', '/workflows/constraints',
+      { organization_id, text }),
+  deleteWorkflowConstraint: (id: number) =>
+    request<void>('DELETE', `/workflows/constraints/${id}`),
   workflowResources: (organization_id: number) =>
     request<WorkflowResources>('GET', '/workflows/resources', undefined, { organization_id }),
   workflowMessages: (id: number) =>

@@ -748,3 +748,27 @@ class WorkflowRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class WorkflowConstraint(Base):
+    """조직의 **업무** 제약사항 — 워크플로 구성·평가에 실린다.
+
+    기획(plan_constraints)과 **섞지 않는다.** 그쪽은 에이전트를 개발할 때의 제한이다
+    (리버스 프록시 구조, 외부 솔루션 금지 등 — 코드를 쓰는 사람에게 하는 말). 워크플로의
+    제약은 업무 규칙이다("선급금 30% 초과는 법무팀 합의", "1차 품질평가 Pass 업체만 가격평가").
+    실측에서 섞인 결과가 바로 드러났다: 구매 업무 워크플로 평가에 개발 제약 2건이 실려
+    "이 규칙을 지키는 단계가 없습니다"가 떴다 — 맞는 말이지만 그 워크플로가 지킬 규칙이
+    아니었고, 검토 목록에 그런 항목이 섞이면 사람이 목록을 더는 읽지 않는다.
+
+    조직 단위다 — 같은 조직의 워크플로 전부에 적용된다(워크플로는 조직 단위로 만든다).
+    """
+
+    __tablename__ = "workflow_constraints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    organization: Mapped["Organization"] = relationship()
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

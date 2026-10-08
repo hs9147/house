@@ -817,6 +817,15 @@ export interface WorkflowExtracted {
   constraints?: { text: string; origin?: string; node?: string }[];
 }
 
+// 조직의 **업무** 제약사항. 기획(PlanConstraintOut)과 다른 목록이다 — 그쪽은 에이전트를
+// 개발할 때의 제한이고, 이쪽은 업무 규칙이다(선급금 한도·평가 순서·결재선).
+export interface WorkflowConstraintOut {
+  id: number;
+  organization_id: number;
+  text: string;
+  created_at: string;
+}
+
 export interface WorkflowOut {
   id: number;
   organization_id: number;
@@ -831,6 +840,8 @@ export interface WorkflowOut {
   updated_at: string;
   // 상세 조회에만 있다 — 저장된 스펙이 **지금도** 유효한가(저장소·모듈이 사라질 수 있다).
   problems?: string[];
+  // 상세 조회에만 — 이 워크플로를 하네싱하는 업무 제약(조직 단위).
+  constraints?: string[];
 }
 
 export interface WorkflowNodeType {

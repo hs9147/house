@@ -27,7 +27,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import (
-    LlmProvider, Module, Organization, Workflow, WorkflowRun, WorkflowRunStatus,
+    LlmProvider, Module, Organization, Workflow, WorkflowConstraint, WorkflowRun,
+    WorkflowRunStatus,
 )
 from ..models import utcnow
 from . import docready, docsearch, llm, mcp_client, storage
@@ -54,6 +55,13 @@ NODE_TYPES: dict[str, dict] = {
         "required": ("store", "query"),
         "optional": ("limit",),
         "help": "색인에서 낱말을 모두 포함하는 문서를 찾아 발췌와 경로를 낸다.",
+    },
+    "graph.find": {
+        "label": "온톨로지 찾기",
+        "required": ("store",),
+        "optional": ("kind", "q", "limit"),
+        "help": "색인이 뽑아 둔 그래프에서 노드를 찾는다(kind=document·section·term·table)."
+                " 찾은 노드가 있는 **문서 경로**를 함께 내므로 다음 단계에서 바로 읽을 수 있다.",
     },
     "doc.read": {
         "label": "문서 읽기",
@@ -94,6 +102,9 @@ NODE_TYPES: dict[str, dict] = {
 }
 
 BRANCH_KINDS = ("contains", "empty", "llm")
+# 온톨로지 노드 종류(services/ontology.py가 만드는 것) — 여기 없는 kind를 적으면 조용히
+# 0건이 나온다. 0건과 "그런 종류가 없다"는 다른 사실이므로 검증에서 가른다.
+GRAPH_KINDS = ("document", "section", "term", "table")
 CASES = ("참", "거짓")
 
 _ID_RE = re.compile(r"^[^\s/\\]{1,64}$")
@@ -104,6 +115,23 @@ class WorkflowError(RuntimeError):
 
 
 # --- 자원 목록 (화면과 LLM 프롬프트가 같은 목록을 쓴다) ---
+
+def constraints(db: Session, organization_id: int) -> list[str]:
+    """이 조직의 **업무** 제약사항(등록 순).
+
+    기획의 공통 제약사항(planning.common_constraints)과 **섞지 않는다.** 그쪽은 에이전트를
+    개발할 때의 제한이고(프록시 구조·외부 솔루션 금지 — 코드를 쓰는 사람에게 하는 말), 여기는
+    업무 규칙이다(선급금 한도·평가 순서·결재선). 실측에서 섞인 결과가 바로 드러났다: 구매
+    업무 워크플로 평가에 개발 제약 2건이 실려 "이 규칙을 지키는 단계가 없습니다"가 떴다 —
+    맞는 말이지만 그 워크플로가 지킬 규칙이 아니었고, 그런 항목이 섞이면 사람이 검토 목록을
+    더는 읽지 않는다.
+    """
+    return [c.text for c in db.execute(
+        select(WorkflowConstraint)
+        .where(WorkflowConstraint.organization_id == organization_id)
+        .order_by(WorkflowConstraint.id)
+    ).scalars()]
+
 
 def resources(db: Session, organization_id: int) -> dict:
     """이 조직이 워크플로에서 **쓸 수 있는 것** 전부.
@@ -217,6 +245,11 @@ def validate(db: Session, organization_id: int, spec: dict) -> list[str]:
                     f"{', '.join(store_by_name) or '등록된 저장소가 없습니다'}")
             elif kind == "storage.write" and target["read_only"]:
                 problems.append(f"{node_id}: '{store_name}'는 읽기 전용 저장소입니다.")
+        if kind == "graph.find" and node.get("kind"):
+            if str(node["kind"]) not in GRAPH_KINDS:
+                problems.append(
+                    f"{node_id}: 모르는 노드 종류 '{node['kind']}' — "
+                    f"{', '.join(GRAPH_KINDS)} 중 하나입니다.")
         if kind == "mcp.tool":
             if node.get("module") and str(node["module"]) not in module_names:
                 problems.append(
@@ -508,6 +541,8 @@ def _run_node(db: Session, workflow: Workflow, node: dict, data: dict) -> dict:
         return _node_storage_list(node)
     if kind == "docs.search":
         return _node_docs_search(node)
+    if kind == "graph.find":
+        return _node_graph_find(node)
     if kind == "doc.read":
         return _node_doc_read(node, data)
     if kind == "llm":
@@ -550,6 +585,30 @@ def _node_docs_search(node: dict) -> dict:
         paths.append(hit["path"])
         lines.append(f"## {hit['path']}\n" + "\n".join(hit.get("snippets") or []))
     return {"text": "\n\n".join(lines)[:MAX_TEXT], "paths": paths}
+
+
+def _node_graph_find(node: dict) -> dict:
+    """온톨로지에서 노드를 찾고 **그 노드가 있는 문서 경로**를 함께 낸다.
+
+    색인이 이미 뽑아 둔 구조(절·용어·표 머리글)를 워크플로가 쓸 수 있게 하는 자리다. 전까지는
+    그래프를 아무 단계도 보지 않았다 — 문서 28,301개에서 뽑은 노드가 워크플로에는 없는 것과
+    같았다. 경로를 함께 내는 것이 요점이다: 출력 규약이 하나라서(text·paths) 다음 단계에
+    doc.read를 두면 "이 표 양식이 있는 문서를 전부 읽어" 가 바로 된다.
+
+    문서별 행을 쓰는 이유(node_search가 아니라 find_nodes): 여기서 필요한 것은 이름이 아니라
+    **어느 문서에 있나**다.
+    """
+    target = _store_or_fail(node["store"])
+    rows = docsearch.find_nodes(target.name, str(node.get("kind") or ""),
+                                str(node.get("q") or ""),
+                                _as_int(node.get("limit"), 30))
+    lines = [f"{r['kind']} · {r['name']}" + (f" ({r['detail']})" if r.get("detail") else "")
+             + f" — {r['path']}" for r in rows]
+    paths: list[str] = []
+    for row in rows:
+        if row["path"] not in paths:
+            paths.append(row["path"])
+    return {"text": "\n".join(lines)[:MAX_TEXT], "paths": paths[:MAX_PATHS]}
 
 
 def _node_doc_read(node: dict, data: dict) -> dict:
