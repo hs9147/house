@@ -5,8 +5,9 @@
  * 하지 않는 일: gpax로 보내기(운영 콘솔이 http라 https 페이지가 부를 수 없다), 쿠키 읽기,
  * 입력값 읽기(이름·라벨만), POST, 로그아웃·삭제 링크 열기.
  * 바깥 파일을 불러오지 않는다 — 북마크에 이 코드가 통째로 들어간다(외부 의존 금지).
+ * 북마크는 출처마다 하나다 — 콘솔이 __GPAX_SOURCE__ 자리에 {id, name, origin}을 넣는다.
  */
-(function () {
+(function (SOURCE) {
   var AGENT = 'gpax-scan/1';
   var MAX_FETCH = 25;
   var DANGER = /log-?out|sign-?out|logoff|로그아웃|delete|remove|삭제/i;
@@ -18,7 +19,10 @@
   box.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;background:#1f2937;' +
     'color:#fff;padding:10px 14px;border-radius:6px;font:13px sans-serif;box-shadow:0 2px 8px #0006';
   /* 열린 화면을 다 읽은 뒤에 붙인다 — 먼저 붙이면 이 안내문이 화면 글에 섞인다. */
-  function say(t) { box.textContent = 'GPAX 스캔 — ' + t; if (!box.parentNode) document.body.appendChild(box); }
+  function say(t) {
+    box.textContent = 'GPAX 스캔 · ' + SOURCE.name + ' — ' + t;
+    if (!box.parentNode) document.body.appendChild(box);
+  }
 
   function clean(s, cap) { return String(s || '').replace(/\s+/g, ' ').trim().slice(0, cap || 200); }
   function textOf(el) { return clean(el ? (el.innerText || el.textContent) : '', 200); }
@@ -229,19 +233,28 @@
         pages.push(readDoc(doc, same(res.url) || t.url, null));
       } catch (e) { /* 열리지 않는 화면은 건너뛴다 */ }
     }
-    var out = { agent: AGENT, origin: origin, url: location.href.split('#')[0],
-                at: new Date().toISOString(), menu: menu, pages: pages };
+    var out = { agent: AGENT, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
+                url: location.href.split('#')[0], at: new Date().toISOString(), menu: menu, pages: pages };
     var a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(out)], { type: 'application/json' }));
-    a.download = 'gpax-scan-' + location.hostname + '.json';
+    a.download = 'gpax-scan-' + SOURCE.id + '-' + String(SOURCE.name).replace(/[\\/:*?"<>|\s]+/g, '_') + '.json';
     document.body.appendChild(a);
     a.click();
     a.remove();
     say('끝 — 메뉴 ' + menuN + '개 · 화면 ' + pages.length + '장. 내려받은 파일을 GPAX 콘솔 ' +
-        '정보 업데이트 → 이 출처 → "브라우저 스캔 결과 올리기"로 올리세요.');
+        '정보 업데이트 → ' + SOURCE.name + ' → 브라우저에서 스캔에 올리세요.');
+    dismiss();
+  }
+  function dismiss() {
     box.onclick = function () { box.remove(); };
     setTimeout(function () { box.remove(); }, 20000);
   }
 
+  /* 다른 사이트에서 누른 북마크는 아무것도 읽지 않는다 — 북마크가 여러 개면 헷갈리기 쉽다. */
+  if (origin !== SOURCE.origin) {
+    say('이 북마크는 ' + SOURCE.origin + '용입니다. 지금 사이트(' + origin + ')에서는 읽지 않습니다.');
+    dismiss();
+    return;
+  }
   run().catch(function (e) { say('실패 — ' + (e && e.message)); });
-})();
+})(__GPAX_SOURCE__);

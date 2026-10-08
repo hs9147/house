@@ -203,9 +203,10 @@ def test_sso_cookie_is_refused(client):
     assert "sso-value" not in res.text
 
 
-def _browser_file(**over):
+def _browser_file(source_id=1, **over):
     payload = {
-        "agent": "gpax-scan/1", "origin": "https://intra.test", "url": "https://intra.test/main",
+        "agent": "gpax-scan/1", "source": {"id": source_id, "name": "인사 포털"},
+        "origin": "https://intra.test", "url": "https://intra.test/main",
         "menu": [{"label": "인사", "url": "", "children": [
             {"label": "휴가 조회", "url": "https://intra.test/leave", "children": []},
             {"label": "외부", "url": "https://other.test/x", "children": []}]}],
@@ -225,15 +226,21 @@ def _browser_file(**over):
 def test_browser_scan_result_is_checked_then_finished(client, monkeypatch):
     monkeypatch.setattr(infosource, "_submit_result", infosource._result_job)
     made = _create(client, headers="")
-    url = f"{API}/sources/{made['id']}/browser-result"
+    sid = made["id"]
+    url = f"{API}/sources/{sid}/browser-result"
 
-    assert client.post(url, headers=ADMIN, files=_browser_file(agent="x")).status_code == 400
-    res = client.post(url, headers=ADMIN, files=_browser_file(origin="https://other.test"))
+    assert client.post(url, headers=ADMIN, files=_browser_file(sid, agent="x")).status_code == 400
+    res = client.post(url, headers=ADMIN, files=_browser_file(sid, origin="https://other.test"))
     assert res.status_code == 400 and "다른 사이트" in res.json()["detail"]
     bad = {"file": ("a.json", b"not json", "application/json")}
     assert client.post(url, headers=ADMIN, files=bad).status_code == 400
+    # 같은 사이트의 다른 출처 — 북마크가 여럿이면 잘못 올리기 쉽다.
+    other = _create(client, name="인사 포털 2", headers="")
+    res = client.post(f"{API}/sources/{other['id']}/browser-result", headers=ADMIN,
+                      files=_browser_file(sid))
+    assert res.status_code == 400 and "다른 출처의 북마크" in res.json()["detail"]
 
-    res = client.post(url, headers=ADMIN, files=_browser_file())
+    res = client.post(url, headers=ADMIN, files=_browser_file(sid))
     assert res.status_code == 202, res.text
     detail = client.get(f"{API}/sources/{made['id']}", headers=ADMIN).json()
     assert detail["status"] == "scanned", detail["error"]
@@ -260,14 +267,14 @@ def test_browser_scan_drops_cross_origin_links():
     from app.models import InfoSource
 
     payload = json.loads(_browser_file()["file"][1])
-    result = infosource.from_browser(InfoSource(kind="web", url="https://intra.test/"), payload)
+    result = infosource.from_browser(InfoSource(id=1, kind="web", url="https://intra.test/"), payload)
     assert [link["url"] for link in result["pages"][0]["links"]] == ["https://intra.test/leave"]
 
 
 def test_browser_scan_only_for_web(client):
     made = _create(client, name="api", kind="api", url="https://intra.test/api", headers="")
     res = client.post(f"{API}/sources/{made['id']}/browser-result", headers=ADMIN,
-                      files=_browser_file())
+                      files=_browser_file(made["id"]))
     assert res.status_code == 400
 
 

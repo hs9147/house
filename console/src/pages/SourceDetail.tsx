@@ -103,7 +103,12 @@ function Means({ caps, kind }: { caps: SourceCapabilities | null; kind: SourceOu
 
 // 북마크에 통째로 들어간다 — 주석과 들여쓰기만 덜어 낸다(코드에 줄 주석 //는 쓰지 않았다).
 const SCAN_CODE = scanAgent.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\n\s+/g, '\n').trim();
-const BOOKMARKLET = `javascript:${encodeURIComponent(SCAN_CODE)}`;
+
+// 북마크는 출처마다 하나 — 이름으로 구분하고, 다른 사이트에서 누르면 읽지 않는다.
+function scanCode(row: SourceOut): string {
+  const source = { id: row.id, name: row.name, origin: new URL(row.url).origin };
+  return SCAN_CODE.replace('__GPAX_SOURCE__', JSON.stringify(source));
+}
 
 /**
  * SSO 뒤의 사이트 — 서버는 로그인할 수 없으니 사용자가 로그인한 탭에서 북마크릿이 읽는다.
@@ -115,13 +120,15 @@ function BrowserScanPanel({ row, onChange }: { row: SourceOut; onChange: (r: Sou
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  const code = scanCode(row);
+
   // React는 javascript: href를 경고한다 — DOM에 직접 넣는다.
-  useEffect(() => { link.current?.setAttribute('href', BOOKMARKLET); }, []);
+  useEffect(() => { link.current?.setAttribute('href', `javascript:${encodeURIComponent(code)}`); }, [code]);
 
   const copy = () => {
     // http에서는 navigator.clipboard가 없다 — 고른 글을 복사하는 옛 방식으로.
     const area = document.createElement('textarea');
-    area.value = SCAN_CODE;
+    area.value = code;
     document.body.appendChild(area);
     area.select();
     const ok = document.execCommand('copy');
@@ -154,16 +161,19 @@ function BrowserScanPanel({ row, onChange }: { row: SourceOut; onChange: (r: Sou
         <li>
           <a ref={link} className="mono" onClick={(e) => e.preventDefault()}
              style={{ padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 4, cursor: 'grab' }}>
-            GPAX 스캔
+            GPAX 스캔 · {row.name}
           </a>
-          {' '}을 북마크바로 끌어다 놓습니다(또는{' '}
+          {' '}을 북마크바로 끌어다 놓습니다. 이 출처 전용입니다 — 다른 사이트에서 누르면 읽지 않습니다(또는{' '}
           <button className="small secondary" onClick={copy}>{copied ? '복사됨' : '코드 복사'}</button>
           {' '}후 개발자 도구 Console에 붙여 넣기).
         </li>
         <li>
           <span className="mono">{row.url}</span>에 로그인하고, 읽힐 화면(메뉴를 펼친 상태, 보고 싶은 탭)을 엽니다.
         </li>
-        <li>북마크를 누르면 메뉴와 열린 화면을 읽어 <span className="mono">gpax-scan-*.json</span>을 내려받습니다.</li>
+        <li>
+          북마크를 누르면 메뉴와 열린 화면을 읽어{' '}
+          <span className="mono">gpax-scan-{row.id}-*.json</span>을 내려받습니다.
+        </li>
         <li>
           그 파일을 올립니다:{' '}
           <input type="file" accept=".json,application/json" disabled={busy || row.status === 'scanning'}

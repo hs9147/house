@@ -914,6 +914,11 @@ def from_browser(row: InfoSource, payload) -> dict:
         raise SourceError("브라우저 스캔은 웹사이트 출처에만 씁니다.")
     if not isinstance(payload, dict) or payload.get("agent") != BROWSER_AGENT:
         raise SourceError("브라우저 스캔 결과 파일이 아닙니다(콘솔의 북마크릿으로 만든 파일을 올리세요).")
+    # 북마크는 출처마다 하나다 — 같은 사이트에 출처가 여럿이어도 다른 출처의 파일은 받지 않는다.
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    if source.get("id") != row.id:
+        raise SourceError(f"다른 출처의 북마크로 만든 파일입니다: {_s(source.get('name'), 64) or '알 수 없음'} "
+                          f"(이 출처는 {row.name}) — 이 화면의 북마크로 다시 스캔하세요.")
     origin = _origin(row.url)
     if _origin(_s(payload.get("origin"), 300)) != origin:
         raise SourceError(f"다른 사이트에서 만든 파일입니다: {_s(payload.get('origin'), 100)} "
