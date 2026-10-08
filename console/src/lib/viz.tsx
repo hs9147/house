@@ -227,18 +227,24 @@ export function StackedBars({ rows, legend }: {
  *
  * 셀에는 숫자를 모두 적지 않는다 — 마우스를 올리면 값을 말하고, 아래 표가 전부를 담는다.
  */
-export function Heatmap({ rows, columns, value, unit = '건' }: {
+export function Heatmap({ rows, columns, value, unit = '건', cellSize, columnHeader = 'text' }: {
   rows: string[];
   columns: string[];
   value: (row: string, col: string) => number;
   unit?: string;
+  /** 칸 크기를 못 박는다 — 열이 많으면 작게 두고 가로로 스크롤하는 편이 읽힌다. */
+  cellSize?: number;
+  /** 열 이름을 글자로 쓸지, **원**으로만 찍고 마우스를 올렸을 때 이름을 보일지.
+      저장소가 열로 오면 이름이 길어 글자로는 겹친다 — 그때 원을 쓴다. */
+  columnHeader?: 'text' | 'dot';
 }) {
   const [hover, setHover] = useState<{ row: string; col: string; n: number } | null>(null);
   const [box, width] = useWidth(620);
   const labelW = 150;
-  const headH = 22;
-  // 칸은 폭에 따라 늘어나도 좋다(크기를 나타내는 사각형이다) — 글자는 늘어나면 안 된다.
-  const cell = Math.max(28, Math.min(56,
+  const headH = columnHeader === 'dot' ? 26 : 22;
+  // 칸 크기를 받으면 그대로 쓴다(열이 많을 때). 안 받으면 폭에 맞춰 늘린다 — 칸은 크기를
+  // 나타내는 사각형이니 늘어나도 되고, 글자는 늘어나면 안 된다.
+  const cell = cellSize ?? Math.max(28, Math.min(56,
     Math.floor((width - labelW) / Math.max(1, columns.length))));
   const max = Math.max(1, ...rows.flatMap((r) => columns.map((c) => value(r, c))));
   const color = (n: number) => {
@@ -248,12 +254,27 @@ export function Heatmap({ rows, columns, value, unit = '건' }: {
   };
   return (
     <div ref={box} style={{ position: 'relative' }}>
+      <div style={{ overflowX: 'auto' }}>
       <svg width={labelW + columns.length * cell} height={headH + rows.length * cell}
            role="img">
-        {columns.map((c, j) => (
+        {columns.map((c, j) => (columnHeader === 'dot' ? (
+          // 원만 찍는다 — 이름은 마우스를 올렸을 때 아래 범례 줄에 뜬다(툴팁도 함께).
+          <circle
+            key={c}
+            cx={labelW + j * cell + cell / 2}
+            cy={headH - 10}
+            r={Math.min(6, cell / 2 - 1)}
+            fill={hover?.col === c ? VIZ.ink : VIZ.axis}
+            onMouseEnter={() => setHover({ row: '', col: c, n: -1 })}
+            onMouseLeave={() => setHover(null)}
+            style={{ cursor: 'default' }}
+          >
+            <title>{c}</title>
+          </circle>
+        ) : (
           <text key={c} x={labelW + j * cell + cell / 2} y={headH - 8}
                 textAnchor="middle" fill={VIZ.muted} fontSize="11">{c}</text>
-        ))}
+        )))}
         {rows.map((r, i) => (
           <g key={r}>
             <text x={labelW - 8} y={headH + i * cell + cell / 2 + 4} textAnchor="end"
@@ -279,6 +300,7 @@ export function Heatmap({ rows, columns, value, unit = '건' }: {
           </g>
         ))}
       </svg>
+      </div>
       <div className="row" style={{ gap: 6, alignItems: 'center', marginTop: 4 }}>
         <span style={{ fontSize: 11, color: VIZ.muted }}>0</span>
         {VIZ.heat.map((c) => (
@@ -289,7 +311,9 @@ export function Heatmap({ rows, columns, value, unit = '건' }: {
         <span style={{ fontSize: 11, color: VIZ.muted }}>{fmt(max)}</span>
         {hover && (
           <span style={{ fontSize: 12, marginLeft: 10 }}>
-            {hover.row} · {hover.col}: <b>{fmt(hover.n)}</b>{unit}
+            {hover.n < 0
+              ? hover.col
+              : <>{hover.row} · {hover.col}: <b>{fmt(hover.n)}</b>{unit}</>}
           </span>
         )}
       </div>

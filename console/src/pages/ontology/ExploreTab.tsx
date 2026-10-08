@@ -1,12 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  Background, Controls, Handle, MiniMap, Position, ReactFlow,
-  type Edge, type Node, type NodeProps,
-} from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
+import ForceGraph, { type GraphLink, type GraphNode } from '../../components/ForceGraph';
 import Split from '../../components/Split';
 import { api } from '../../lib/api';
-import { NODE_H, NODE_W, layoutGraph } from '../../lib/graphlayout';
 import { useApi } from '../../lib/hooks';
 import type { OntologyNeighbor, OntologyNode, OntologyOverview } from '../../lib/types';
 import { VIZ, fmt } from '../../lib/viz';
@@ -165,29 +160,21 @@ export default function ExploreTab() {
     }
   }, [store, nodes]);
 
-  const flowNodes: Node[] = useMemo(() => {
-    const list = [...nodes.entries()].map(([id]) => ({ id }));
-    const placed = layoutGraph(list, links);
-    return list.map(({ id }) => {
-      const node = nodes.get(id)!;
-      return {
-        id,
-        type: 'onto',
-        position: placed.get(id) ?? { x: 0, y: 0 },
-        data: { ...node, selected: id === selected } as unknown as Record<string, unknown>,
-      };
-    });
-  }, [nodes, links, selected]);
+  // Obsidian·TheBrain 그래프 뷰 스타일 — 힘기반 배치(components/ForceGraph).
+  const graphNodes: GraphNode[] = useMemo(
+    () => [...nodes.entries()].map(([id, n]) => ({
+      id,
+      label: n.name,
+      kind: n.kind,
+      weight: n.documents,
+      unexpanded: !n.expanded,
+    })),
+    [nodes]);
 
-  const flowEdges: Edge[] = useMemo(() => links.map((l) => ({
-    id: `${l.source}|${l.rel}|${l.target}`,
-    source: l.source,
-    target: l.target,
-    label: REL_LABEL[l.rel] ?? l.rel,
-    labelStyle: { fill: VIZ.muted, fontSize: 11 },
-    labelBgStyle: { fill: VIZ.surface },
-    style: { stroke: VIZ.axis, strokeWidth: 2 },
-  })), [links]);
+  const graphLinks: GraphLink[] = useMemo(
+    () => links.map((l) => ({ source: l.source, target: l.target,
+                              label: REL_LABEL[l.rel] ?? l.rel })),
+    [links]);
 
   const current = selected ? nodes.get(selected) : undefined;
 
@@ -284,27 +271,21 @@ export default function ExploreTab() {
               노드 {fmt(nodes.size)} · 선 {fmt(links.length)} — 노드를 누르면 한 걸음 펼칩니다
             </span>
           </div>
-          <div style={{ height: 520, border: '1px solid var(--border-soft)', borderRadius: 8 }}>
-            <ReactFlow
-              nodes={flowNodes}
-              edges={flowEdges}
-              nodeTypes={NODE_TYPES}
-              onNodeClick={(_, node) => {
-                const placed = nodes.get(node.id);
-                if (!placed) return;
-                setSelected(node.id);
-                if (!placed.expanded) expand(placed.kind, placed.name);
-              }}
-              fitView
-              proOptions={{ hideAttribution: true }}
-            >
-              <Background color={VIZ.grid} gap={18} />
-              <Controls showInteractive={false} />
-              <MiniMap pannable zoomable
-                       nodeColor={(n) => kindOf((n.data as { kind?: string }).kind ?? '')?.color
-                         ?? VIZ.series} />
-            </ReactFlow>
-          </div>
+          <ForceGraph
+            nodes={graphNodes}
+            links={graphLinks}
+            selected={selected}
+            colorOf={(kind) => kindOf(kind)?.color ?? VIZ.series}
+            onSelect={(id) => {
+              setSelected(id);
+              const placed = nodes.get(id);
+              if (placed) setPaths([]);   // 상세는 펼칠 때 서버가 준다
+            }}
+            onExpand={(id) => {
+              const placed = nodes.get(id);
+              if (placed) expand(placed.kind, placed.name);
+            }}
+          />
           {notice && <p className="mutedtext" style={{ fontSize: 12 }}>{notice}</p>}
           {current && (
             <div style={{ marginTop: 8 }}>
@@ -343,39 +324,3 @@ export default function ExploreTab() {
   // 좌: 찾고 고르는 자리(사람) · 우: 그려진 그래프(기계가 낸 것). 콘솔 2단 규약과 같다.
   return <Split leftLabel="검색" left={searchPanel} right={graphPanel} />;
 }
-
-/** 노드 하나 — 종류는 색과 기호로, 이름은 두 줄까지. 펼치지 않았으면 "+"를 보인다. */
-function OntoNode({ data }: NodeProps) {
-  const node = data as unknown as Placed & { selected: boolean };
-  const look = kindOf(node.kind);
-  return (
-    <div
-      style={{
-        width: NODE_W, height: NODE_H, boxSizing: 'border-box',
-        borderRadius: 6, padding: '6px 8px',
-        background: VIZ.surface,
-        border: `2px solid ${node.selected ? VIZ.ink : look?.color ?? VIZ.series}`,
-        display: 'flex', flexDirection: 'column', justifyContent: 'center',
-      }}
-      title={`${look?.label ?? node.kind}: ${node.name} (문서 ${node.documents}건)`}
-    >
-      <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
-      <div style={{ fontSize: 11, lineHeight: 1.3, color: look?.color }}>
-        <span aria-hidden style={{ marginRight: 4 }}>{look?.mark ?? '●'}</span>
-        {look?.label ?? node.kind}
-        <span style={{ color: VIZ.muted }}>{` · 문서 ${node.documents}`}</span>
-        {!node.expanded && <span style={{ color: VIZ.muted }}> · +</span>}
-      </div>
-      <div style={{
-        fontSize: 12, color: VIZ.ink, lineHeight: 1.25,
-        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
-        overflow: 'hidden', overflowWrap: 'anywhere',
-      }}>
-        {node.name}
-      </div>
-      <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
-    </div>
-  );
-}
-
-const NODE_TYPES = { onto: OntoNode };

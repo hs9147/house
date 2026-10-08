@@ -192,16 +192,21 @@ export default function ConversionTab() {
             </div>
 
             <div className="panel">
-              <h3 style={{ marginTop: 0 }}>저장소 × 노드 종류</h3>
+              <h3 style={{ marginTop: 0 }}>노드 종류 × 저장소</h3>
               <p className="mutedtext" style={{ fontSize: 12 }}>
                 어느 저장소가 어떤 구조를 많이 담고 있는지 — 표가 많은 저장소(대장·점검표)와
-                용어가 많은 저장소(규정)는 쓰는 방법이 다릅니다.
+                용어가 많은 저장소(규정)는 쓰는 방법이 다릅니다. 저장소는 <b>원</b>으로
+                찍혀 있고, 마우스를 올리면 이름이 아래에 뜹니다(저장소가 늘면 이름을 글자로
+                적을 자리가 없어 겹칩니다 — 그래서 축을 돌려 저장소를 가로로 두고 넘치면
+                오른쪽으로 스크롤합니다).
               </p>
               <Heatmap
-                rows={data.stores.map((s) => s.store)}
-                columns={kinds}
+                rows={kinds}
+                columns={data.stores.map((s) => s.store)}
+                cellSize={22}
+                columnHeader="dot"
                 value={(row, col) =>
-                  data.stores.find((s) => s.store === row)?.node_kinds[col] ?? 0}
+                  data.stores.find((s) => s.store === col)?.node_kinds[row] ?? 0}
               />
             </div>
 
@@ -314,8 +319,8 @@ function SchemaDiagram({ nodeKinds, edgeKinds }: {
       </g>
     );
   };
+  // 폭을 100%로 늘리면 글자까지 커진다(viz.useWidth 주석 참고) — 픽셀 크기로 그린다.
   return (
-    {/* 폭을 100%로 늘리면 글자까지 커진다(viz.useWidth 주석 참고) — 픽셀 크기로 그린다. */}
     <svg width={W} height={H} role="img"
          aria-label="온톨로지 스키마: 문서·절·용어·표와 포함·정의·인용 관계">
       {edge('document', 'section', '포함', rel('contains'))}
