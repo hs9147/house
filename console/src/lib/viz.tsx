@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 /**
  * 차트 기본요소 — 의존성 없이 인라인 SVG로.
@@ -45,6 +45,32 @@ function barPath(x: number, y: number, w: number, h: number): string {
     + `a${r},${r} 0 0 1 ${-r},${r}h${-(w - r)}z`;
 }
 
+/**
+ * 그릴 **실제 픽셀 폭**을 잰다.
+ *
+ * 처음에는 `viewBox` + `width="100%"`로 그렸다. 그러면 SVG가 칸에 맞춰 늘어나는데 **글자도
+ * 함께 늘어난다** — 같은 fontSize 12가 폭 400px에서 8.5px, 900px에서 19px로 보였다(전환
+ * 현황에서 바로 드러났다). 좌표를 픽셀로 쓰고 폭을 직접 재면 글자는 늘 12px이다.
+ *
+ * 폭을 모르는 첫 렌더에는 기준값으로 그린다(0으로 그리면 한 프레임 깜빡인다).
+ */
+function useWidth(fallback: number): [React.RefObject<HTMLDivElement>, number] {
+  const box = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(fallback);
+  useEffect(() => {
+    const target = box.current;
+    if (!target) return;
+    const observer = new ResizeObserver(() => {
+      // 패널 여백 안쪽만 쓴다. 1px 미만 변화는 무시한다(소수점 떨림으로 다시 그리지 않게).
+      const next = Math.max(240, Math.round(target.clientWidth));
+      setWidth((prev) => (Math.abs(prev - next) > 1 ? next : prev));
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, []);
+  return [box, width];
+}
+
 export function fmt(n: number): string {
   return n.toLocaleString('ko-KR');
 }
@@ -65,10 +91,11 @@ export function BarList({ rows, max, unit = '건', height = BAR }: {
   const labelW = 150;
   const valueW = 72;
   const rowH = height + GAP * 3;
-  const width = 560;
-  const plotW = width - labelW - valueW;
+  const [box, width] = useWidth(560);
+  const plotW = Math.max(60, width - labelW - valueW);
   return (
-    <svg width="100%" viewBox={`0 0 ${width} ${rows.length * rowH}`} role="img">
+    <div ref={box}>
+    <svg width={width} height={rows.length * rowH} role="img">
       {rows.map((r, i) => {
         const y = i * rowH + GAP;
         const w = Math.max(1, Math.round((r.value / top) * plotW));
@@ -87,6 +114,7 @@ export function BarList({ rows, max, unit = '건', height = BAR }: {
         );
       })}
     </svg>
+    </div>
   );
 }
 
@@ -100,10 +128,11 @@ export function FunnelBars({ stages }: {
   const top = Math.max(1, ...stages.map((s) => s.count));
   const labelW = 130;
   const rowH = 34;
-  const width = 620;
-  const plotW = width - labelW - 150;
+  const [box, width] = useWidth(620);
+  const plotW = Math.max(60, width - labelW - 150);
   return (
-    <svg width="100%" viewBox={`0 0 ${width} ${stages.length * rowH}`} role="img">
+    <div ref={box}>
+    <svg width={width} height={stages.length * rowH} role="img">
       {stages.map((s, i) => {
         const prev = i === 0 ? s.count : stages[i - 1].count;
         const drop = prev > 0 ? Math.round((1 - s.count / prev) * 100) : 0;
@@ -127,6 +156,7 @@ export function FunnelBars({ stages }: {
         );
       })}
     </svg>
+    </div>
   );
 }
 
@@ -144,8 +174,8 @@ export function StackedBars({ rows, legend }: {
   const top = Math.max(1, ...totals);
   const labelW = 150;
   const rowH = BAR + GAP * 3;
-  const width = 620;
-  const plotW = width - labelW - 80;
+  const [box, width] = useWidth(620);
+  const plotW = Math.max(60, width - labelW - 80);
   return (
     <>
       <div className="row" style={{ gap: 14, flexWrap: 'wrap', marginBottom: 6 }}>
@@ -156,7 +186,8 @@ export function StackedBars({ rows, legend }: {
           </span>
         ))}
       </div>
-      <svg width="100%" viewBox={`0 0 ${width} ${rows.length * rowH}`} role="img">
+      <svg ref={box as unknown as React.RefObject<SVGSVGElement>}
+           width={width} height={rows.length * rowH} role="img">
         {rows.map((r, i) => {
           const y = i * rowH + GAP;
           let x = labelW;
@@ -203,9 +234,12 @@ export function Heatmap({ rows, columns, value, unit = '건' }: {
   unit?: string;
 }) {
   const [hover, setHover] = useState<{ row: string; col: string; n: number } | null>(null);
-  const cell = 34;
+  const [box, width] = useWidth(620);
   const labelW = 150;
   const headH = 22;
+  // 칸은 폭에 따라 늘어나도 좋다(크기를 나타내는 사각형이다) — 글자는 늘어나면 안 된다.
+  const cell = Math.max(28, Math.min(56,
+    Math.floor((width - labelW) / Math.max(1, columns.length))));
   const max = Math.max(1, ...rows.flatMap((r) => columns.map((c) => value(r, c))));
   const color = (n: number) => {
     if (n <= 0) return VIZ.heat[0];
@@ -213,9 +247,8 @@ export function Heatmap({ rows, columns, value, unit = '건' }: {
     return VIZ.heat[Math.min(idx, VIZ.heat.length - 1)];
   };
   return (
-    <div style={{ position: 'relative' }}>
-      <svg width="100%"
-           viewBox={`0 0 ${labelW + columns.length * cell} ${headH + rows.length * cell}`}
+    <div ref={box} style={{ position: 'relative' }}>
+      <svg width={labelW + columns.length * cell} height={headH + rows.length * cell}
            role="img">
         {columns.map((c, j) => (
           <text key={c} x={labelW + j * cell + cell / 2} y={headH - 8}

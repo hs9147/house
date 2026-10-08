@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import Async from '../../components/Async';
 import Split from '../../components/Split';
+import Tabs from '../../components/Tabs';
 import { api } from '../../lib/api';
 import { useApi } from '../../lib/hooks';
 import { isAdmin } from '../../lib/auth';
@@ -105,6 +106,10 @@ export default function ConversionTab() {
           <>
             <div className="panel">
               <h3 style={{ marginTop: 0 }}>저장소별 전환 상태</h3>
+              {/* 같은 값을 그림과 표로 — 같은 자리에서 바꿔 본다(components/Tabs). */}
+              <Tabs tabs={[
+                { key: 'chart', label: '그림', content: (
+                  <>
               <StackedBars
                 legend={[
                   { key: 'converted', label: '구조 추출됨', color: VIZ.status.good, mark: '●' },
@@ -120,8 +125,10 @@ export default function ConversionTab() {
                   ],
                 }))}
               />
-              <details style={{ marginTop: 8 }}>
-                <summary style={{ fontSize: 12, cursor: 'pointer' }}>표로 보기 · 저장소별 조치</summary>
+                  </>
+                ) },
+                { key: 'table', label: '표 · 저장소별 조치', content: (
+                  <>
                 <table style={{ marginTop: 8 }}>
                   <thead>
                     <tr>
@@ -153,7 +160,9 @@ export default function ConversionTab() {
                     ))}
                   </tbody>
                 </table>
-              </details>
+                  </>
+                ) },
+              ]} />
               {note && <p style={{ fontSize: 12, color: 'var(--green)' }}>{note}</p>}
               {error && <p className="error">{error}</p>}
             </div>
@@ -306,7 +315,8 @@ function SchemaDiagram({ nodeKinds, edgeKinds }: {
     );
   };
   return (
-    <svg width="100%" viewBox={`0 0 ${W} ${H}`} role="img"
+    {/* 폭을 100%로 늘리면 글자까지 커진다(viz.useWidth 주석 참고) — 픽셀 크기로 그린다. */}
+    <svg width={W} height={H} role="img"
          aria-label="온톨로지 스키마: 문서·절·용어·표와 포함·정의·인용 관계">
       {edge('document', 'section', '포함', rel('contains'))}
       {edge('section', 'term', '정의', rel('defines'))}

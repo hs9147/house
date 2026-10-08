@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 import Async from '../components/Async';
 import Split from '../components/Split';
+import Tabs from '../components/Tabs';
 import DeployProgressModal from '../components/DeployProgressModal';
 import Modal from '../components/Modal';
 import AutoDeployMark from '../components/AutoDeployMark';
@@ -18,7 +19,6 @@ export default function ServerConfig() {
     useState<{ projectId: number; ids: number[]; name: string; profile: BuildProfile } | null>(null);
   const [busyKey, setBusyKey] = useState('');
   const [error, setError] = useState('');
-  const [showTopology, setShowTopology] = useState(true);
   // 우측 현황에서 고른 경로. 동작은 좌측 한 자리에서만 한다 — 표에 버튼을 심어 두면
   // 열이 넓어져 정작 봐야 할 주소·상태가 밀린다(동작 열 하나가 280px이었다).
   const [picked, setPicked] = useState<string>('');
@@ -118,9 +118,6 @@ export default function ServerConfig() {
             <span className="status info" title="리버스프록시">
               proxy: {state.data.proxy_backend}
             </span>
-            <button className="small secondary" onClick={() => setShowTopology((v) => !v)}>
-              {showTopology ? '다이어그램 숨기기' : '다이어그램 보기'}
-            </button>
           </>
         )}
       </div>
@@ -134,7 +131,14 @@ export default function ServerConfig() {
         (백엔드)·나머지(프론트엔드)로 자동 라우팅됩니다 — 아래 다이어그램에서
         컴포넌트별 상태를 볼 수 있습니다.
       </p>
-      {showTopology && state.data && <TopologyDiagram cfg={state.data} />}
+      {/* 같은 정보를 경로 목록(그림)과 표로 — 같은 자리에서 바꿔 본다. 기본은 그림이다:
+          "어떤 경로가 어디로 가나"는 모양으로 먼저 읽힌다. */}
+      <Tabs tabs={[
+        { key: 'routes', label: '경로 목록', content: (
+          state.data ? <TopologyDiagram cfg={state.data} /> : null
+        ) },
+        { key: 'table', label: '표', content: (
+          <>
       <Async state={state} empty="등록된 프로젝트가 없습니다.">
         {(cfg) => (
           <table>
@@ -178,6 +182,9 @@ export default function ServerConfig() {
           </table>
         )}
       </Async>
+          </>
+        ) },
+      ]} />
       {state.data && state.data.windows_services.length > 0 && (
         <Section
           title="등록된 Windows Service"

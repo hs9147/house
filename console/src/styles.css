@@ -83,6 +83,7 @@ main:has(.split), main:has(.plan-grid) { max-width: none; }
    왼쪽은 고정 폭이고 자기 칸 안에서만 스크롤한다: 오른쪽을 훑는 동안 입력창이 화면에서
    사라지면 "쓰다가 보고 다시 쓰는" 흐름이 끊긴다. 넓은 쪽은 오른쪽이 받는다 — 흐름도·표가
    반 폭에 들어가면 글자를 읽을 수 없다(29단계에서 실제로 그랬다). */
+.viewtabs { gap: 6px; margin: 2px 0 8px; }
 .split { display: grid; grid-template-columns: var(--split-left, 420px) 1fr; gap: 12px;
          align-items: start; }
 .split-left { position: sticky; top: 8px; max-height: calc(100vh - 96px); overflow-y: auto; }
