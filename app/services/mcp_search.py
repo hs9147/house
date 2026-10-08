@@ -5,8 +5,8 @@
 stdio 전용이라 URL이라는 개념 자체가 없었다. 그래서 **실재하는 것만 내주도록** 바꿨다 —
 플랫폼이 직접 띄우는 사내 MCP 서버(api/mcp_servers.py)다.
 
-목록은 고정 표가 아니라 **지금 있는 것에서 만든다**: 저장소 서버는 환경변수가 정한
-저장소마다(PAAS_STORAGE_ROOT · PAAS_DOC_ROOTS), DB 서버는 허용 목록에 있는 모듈만.
+목록은 고정 표가 아니라 **지금 있는 것에서 만든다**: 저장소 서버는 DB에 등록되고
+호출자가 접근할 수 있는 저장소마다, DB 서버는 허용 목록에 있는 모듈만.
 없는 대상을 목록에 올리면 예전과 같은 실수를 반복하게 된다.
 """
 from datetime import datetime, timezone
@@ -15,7 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import Module, ModuleType
+from ..models import ApiKey, Module, ModuleType
+from ..security import accessible_document_stores
 from . import storage
 
 
@@ -81,7 +82,7 @@ def _entry(server_id: str, name: str, description: str, category: str, path: str
     }
 
 
-def list_internal_servers(db: Session) -> list[dict]:
+def list_internal_servers(db: Session, key: ApiKey | None = None) -> list[dict]:
     """지금 열 수 있는 사내 MCP 서버 전부."""
     settings = get_settings()
     entries = [_entry(
@@ -100,7 +101,7 @@ def list_internal_servers(db: Session) -> list[dict]:
     # 숨긴 저장소(internal)는 올리지 않는다: 서버 자체는 살아 있지만 사람이 가져다
     # 등록할 대상이 아니다.
     try:
-        found = storage.visible_stores()
+        found = accessible_document_stores(db, key) if key is not None else storage.visible_stores(db)
     except storage.StorageError:
         found = []
     for store in found:
@@ -144,13 +145,13 @@ def list_internal_servers(db: Session) -> list[dict]:
     return entries
 
 
-def search_mcp_servers(db: Session, query: str = "") -> list[dict]:
+def search_mcp_servers(db: Session, query: str = "", key: ApiKey | None = None) -> list[dict]:
     """사내 MCP 서버 키워드 검색.
 
     실재하는 서버만 나오지만, 응답까지 보장하지는 않는다 — 등록 후 연결 확인
     (mcp_client.check_server, 모듈 화면의 확인 버튼)으로 실제 응답을 본다.
     """
-    servers = list_internal_servers(db)
+    servers = list_internal_servers(db, key)
     needle = query.lower().strip()
     if not needle:
         return servers

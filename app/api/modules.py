@@ -283,10 +283,10 @@ def project_resources(
 def search_mcp_directory(
     q: str = "",
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_api_key),
+    key: ApiKey = Depends(require_api_key),
 ):
     """사내 MCP 서버 검색 — 이 플랫폼이 실제로 노출하는 서버만 나온다."""
-    return mcp_search.search_mcp_servers(db, q)
+    return mcp_search.search_mcp_servers(db, q, key)
 
 
 @router.post("/modules/import-mcp", status_code=201)

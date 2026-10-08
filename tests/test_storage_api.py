@@ -22,6 +22,13 @@ def _client(monkeypatch, tmp_path, doc_roots="", readonly="") -> TestClient:
     monkeypatch.setenv("PAAS_DOC_ROOTS", doc_roots)
     monkeypatch.setenv("PAAS_DOC_ROOTS_READONLY", readonly)
     get_settings.cache_clear()
+    from app.db import Base, SessionLocal, engine
+    from app.models import DocumentStore, DocumentStoreRegistry
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        db.query(DocumentStore).delete()
+        db.query(DocumentStoreRegistry).delete()
+        db.commit()
     return TestClient(create_app())
 
 
@@ -90,6 +97,7 @@ def test_stores_listing_shows_what_the_env_vars_opened(monkeypatch, tmp_path, fr
     assert list(rows) == ["rules", "missing-folder"]
     assert rows["rules"] == {
         "name": "rules", "root": str(docs), "read_only": False, "exists": True,
+        "organization_id": None,
         "url": rows["rules"]["url"],
     }
     # 없는 경로도 목록에서 빼지 않는다 — 빠지면 "설정이 안 먹었다"와 구분이 안 된다
@@ -207,19 +215,19 @@ def test_readonly_name_that_is_not_a_doc_root_is_rejected(monkeypatch, tmp_path,
     """
     docs = tmp_path / "scratch"
     docs.mkdir()
-    c = _client(monkeypatch, tmp_path, doc_roots=f"scratch={docs}", readonly="scrach")
-    r = c.get(f"{API}/storage/stores", headers=ADMIN)
-    assert r.status_code == 500
-    assert "scrach" in r.json()["detail"]
-    assert "scratch" in r.json()["detail"]  # 있는 이름을 함께 보여 준다
+    monkeypatch.setenv("PAAS_DOC_ROOTS", f"scratch={docs}")
+    monkeypatch.setenv("PAAS_DOC_ROOTS_READONLY", "scrach")
+    get_settings.cache_clear()
+    with pytest.raises(storage.StorageError, match="scrach"):
+        storage._legacy_stores()
 
 
 def test_broken_doc_roots_say_which_entry_is_wrong(monkeypatch, tmp_path, fresh_settings):
     """조용히 빼면 '그 폴더에 문서가 없다'와 구분되지 않는다 — 항목을 그대로 보여 준다."""
-    c = _client(monkeypatch, tmp_path, doc_roots="=/some/path")
-    r = c.get(f"{API}/storage/stores", headers=ADMIN)
-    assert r.status_code == 500
-    assert "'=/some/path'" in r.json()["detail"]
+    monkeypatch.setenv("PAAS_DOC_ROOTS", "=/some/path")
+    get_settings.cache_clear()
+    with pytest.raises(storage.StorageError, match="=/some/path"):
+        storage._legacy_stores()
 
 
 def test_internal_store_name_cannot_be_reused(monkeypatch, tmp_path, fresh_settings):
@@ -227,14 +235,14 @@ def test_internal_store_name_cannot_be_reused(monkeypatch, tmp_path, fresh_setti
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"internal={tmp_path}")
     get_settings.cache_clear()
     with pytest.raises(storage.StorageError, match="internal"):
-        storage.stores()
+        storage._legacy_stores()
 
 
 def test_bare_windows_path_takes_its_last_folder_as_the_name(monkeypatch, fresh_settings):
     """운영 서버가 윈도우다 — 역슬래시 경로에서도 이름이 나와야 한다."""
     monkeypatch.setenv("PAAS_DOC_ROOTS", r"D:\shared\Company Docs")
     get_settings.cache_clear()
-    assert [s.name for s in storage.stores()] == ["internal", "company-docs"]
+    assert [s.name for s in storage._legacy_stores()] == ["company-docs"]
 
 
 def test_quoted_windows_paths_are_accepted(monkeypatch, fresh_settings):
@@ -247,7 +255,7 @@ def test_quoted_windows_paths_are_accepted(monkeypatch, fresh_settings):
                 r" contract = 'D:\1.계약품의' "):
         monkeypatch.setenv("PAAS_DOC_ROOTS", raw)
         get_settings.cache_clear()
-        found = [s for s in storage.stores() if s.name != "internal"]
+        found = storage._legacy_stores()
         assert [s.name for s in found] == ["contract"], raw
         assert str(found[0].root).endswith("D:\\1.계약품의"), raw
 
@@ -267,7 +275,7 @@ def test_spaces_inside_a_path_survive(monkeypatch, tmp_path, fresh_settings):
                 f'costdb="{tmp_path / "cost db"}"'):
         monkeypatch.setenv("PAAS_DOC_ROOTS", raw)
         get_settings.cache_clear()
-        found = [s for s in storage.stores() if s.name != "internal"]
+        found = storage._legacy_stores()
         assert [s.name for s in found] == ["costdb"], raw
         assert found[0].root == tmp_path / "cost db", raw
         # 공백이 든 하위 경로까지 그대로 열린다
@@ -282,11 +290,11 @@ def test_a_korean_folder_asks_for_an_explicit_name(monkeypatch, fresh_settings):
     monkeypatch.setenv("PAAS_DOC_ROOTS", r"D:\공유\사내규정")
     get_settings.cache_clear()
     with pytest.raises(storage.StorageError, match="이름=경로"):
-        storage.stores()
+        storage._legacy_stores()
 
     monkeypatch.setenv("PAAS_DOC_ROOTS", r"rules=D:\공유\사내규정")
     get_settings.cache_clear()
-    assert [s.name for s in storage.stores()] == ["internal", "rules"]
+    assert [s.name for s in storage._legacy_stores()] == ["rules"]
 
 
 # --- 업로드·삭제가 색인을 바로 갱신한다 ---

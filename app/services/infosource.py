@@ -1315,54 +1315,36 @@ def _env_path() -> Path:
     return Path(str(Settings.model_config.get("env_file") or ".env")).resolve()
 
 
-def create_store(name: str, folder: str) -> storage.Store:
-    """새 저장소 — 폴더를 만들고 .env의 PAAS_DOC_ROOTS에 더한 뒤 설정을 다시 읽는다.
-
-    재시작하지 않는다: 저장소 목록은 부를 때마다 설정에서 만들고(storage.stores), 설정은
-    캐시만 비우면 다시 읽힌다. 주기 색인도 다음 차례에 새 저장소를 집는다.
-    """
+def create_store(db: Session, name: str, folder: str, organization_id: int) -> storage.Store:
+    """새 저장소를 부서 소속으로 DB에 등록한다. 원본 문서는 디스크에 남는다."""
     if not storage._NAME_RE.match(name or ""):
         raise SourceError("저장소 이름은 소문자·숫자·하이픈(40자 이내)이어야 합니다.")
-    if "PAAS_DOC_ROOTS" in os.environ:
-        raise SourceError(
-            "PAAS_DOC_ROOTS가 서비스 환경변수로 설정돼 있어 .env를 고쳐도 반영되지 않습니다 — "
-            "환경변수에서 빼고 .env로 옮기거나, 기존 저장소를 고르세요.")
+    from ..models import DocumentStore, Organization  # noqa: PLC0415
+    if organization_id is None or db.get(Organization, organization_id) is None:
+        raise SourceError("새 저장소의 소속 부서를 선택하세요.")
     path = Path((folder or "").strip().strip('"'))
     if not path.is_absolute():
         raise SourceError("폴더는 절대 경로여야 합니다(예: D:\\docs\\sources\\hr-portal).")
-    path = path.resolve()
-    current = storage.stores()
+    try:
+        path = storage.check_allowed_root(path)
+    except storage.StorageError as e:
+        raise SourceError(str(e))
+    current = storage.stores(db)
     if any(s.name == name for s in current):
         raise SourceError(f"이미 있는 저장소 이름입니다: {name}")
-    for s in current:
-        if path == s.root or path.is_relative_to(s.root) or s.root.is_relative_to(path):
-            raise SourceError(f"기존 저장소({s.name}: {s.root})와 폴더가 겹칩니다 — 같은 문서가 "
+    registered = [Path(r.root_path).resolve() for r in db.query(DocumentStore).all()]
+    registered.append(storage.store(storage.INTERNAL_STORE, db).root)
+    for existing_root in registered:
+        s = next((item for item in current if item.root == existing_root), None)
+        display = s.name if s else str(existing_root)
+        if path == existing_root or path.is_relative_to(existing_root) or existing_root.is_relative_to(path):
+            raise SourceError(f"기존 저장소({display}: {existing_root})와 폴더가 겹칩니다 — 같은 문서가 "
                               "두 번 색인됩니다.")
     path.mkdir(parents=True, exist_ok=True)
-
-    env = _env_path()
-    before = env.read_text(encoding="utf-8") if env.exists() else ""
-    value = get_settings().doc_roots.strip().strip(",")
-    entry = f"{name}={path}"
-    line = f"PAAS_DOC_ROOTS={value + ',' if value else ''}{entry}"
-    pattern = re.compile(r"^\s*PAAS_DOC_ROOTS\s*=.*$", re.M)
-    after = pattern.sub(lambda _: line, before, count=1) if pattern.search(before) \
-        else before + ("" if not before or before.endswith("\n") else "\n") + line + "\n"
-    if env.exists():
-        shutil.copyfile(env, env.with_name(".env.bak"))
-    env.write_text(after, encoding="utf-8")
-    get_settings.cache_clear()
-    try:
-        made = storage.store(name)
-    except storage.StorageError as e:
-        made, error = None, str(e)
-    else:
-        error = "새 설정에서 저장소가 보이지 않습니다."
-    if made is None:
-        env.write_text(before, encoding="utf-8")   # 되돌린다 — 반쯤 바뀐 설정으로 남기지 않는다
-        get_settings.cache_clear()
-        raise SourceError(f".env를 고쳤지만 반영되지 않아 되돌렸습니다: {error}")
-    return made
+    db.add(DocumentStore(name=name, root_path=str(path), organization_id=organization_id,
+                         read_only=False, active=True))
+    db.flush()
+    return storage.Store(name, path, False, organization_id=organization_id)
 
 
 def _folder_name(text: str) -> str:
@@ -1508,9 +1490,18 @@ def save(db: Session, row: InfoSource, targets: dict) -> dict:
             continue
         if mode not in ("existing", "new"):
             raise SourceError("mode는 existing·new·skip 중 하나입니다.")
-        chosen[category] = {"mode": mode, "store": name, "path": str(t.get("path") or "")}
+        chosen[category] = {"mode": mode, "store": name, "path": str(t.get("path") or ""),
+                            "organization_id": t.get("organization_id")}
     if not chosen:
         raise SourceError("저장할 유형을 하나 이상 고르세요.")
+    new_locations: dict[str, tuple[str, int | None]] = {}
+    for target in chosen.values():
+        if target["mode"] != "new":
+            continue
+        location = (target["path"], target["organization_id"])
+        previous = new_locations.setdefault(target["store"], location)
+        if previous != location:
+            raise SourceError("같은 새 저장소는 모든 유형에서 경로와 소속 부서가 같아야 합니다.")
 
     # 쓰기 전에 다 확인한다 — 새 저장소를 만든 뒤에 다른 유형에서 막히면 빈 저장소만 남는다.
     plan: list[tuple[str, str, bytes]] = []   # (유형, 상대경로, 내용)
@@ -1532,7 +1523,8 @@ def save(db: Session, row: InfoSource, targets: dict) -> dict:
     created = []
     for c, t in chosen.items():
         if t["mode"] == "new" and t["store"] not in stores:
-            stores[t["store"]] = create_store(t["store"], t["path"])
+            stores[t["store"]] = create_store(db, t["store"], t["path"],
+                                                t["organization_id"])
             created.append(t["store"])
     places = {c: t["store"] for c, t in chosen.items()}
     if "pages" in chosen:

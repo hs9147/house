@@ -70,6 +70,8 @@ def create_app() -> FastAPI:
     _make_console_output_safe()
     settings = get_settings()
     Base.metadata.create_all(engine)
+    from .services.storage import bootstrap_legacy_stores  # noqa: PLC0415
+    bootstrap_legacy_stores()
     _warn_if_schema_is_behind()
 
     if not settings.admin_api_key:

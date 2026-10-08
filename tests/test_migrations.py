@@ -47,6 +47,17 @@ def test_migration_matches_models(alembic_cfg):
     assert migrated == set(Base.metadata.tables.keys())
 
 
+def test_document_store_migration_after_create_all(alembic_cfg):
+    """새 코드가 먼저 기동해 표를 만든 경우에도 저장소 리비전을 적용할 수 있다."""
+    cfg, url = alembic_cfg
+    command.upgrade(cfg, "fc3d4e5f6a7b")
+    from app.db import Base
+
+    Base.metadata.create_all(create_engine(url))
+    command.upgrade(cfg, "head")
+    assert "document_stores" in inspect(create_engine(url)).get_table_names()
+
+
 def test_startup_names_the_missing_columns(monkeypatch, fresh_settings, tmp_path, capsys):
     """회귀: 새 컬럼이 생긴 버전으로 올리고 마이그레이션을 돌리지 않으면 그 테이블을
     건드리는 화면이 전부 500이 됐고, 화면에는 원인 단서가 없었다(기획 세션 이력·서버 구성).

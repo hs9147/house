@@ -1,6 +1,7 @@
 """사내 MCP 서버 7종 — 운영 조회·코드 조회·문서 검색·파일 저장소·DB 조회(SELECT 전용)·
 API 카탈로그·문서 온톨로지(그래프는 tests/test_ontology.py)."""
 import subprocess
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -501,14 +502,13 @@ def test_storage_server_rejects_unknown_store(monkeypatch, fresh_settings, tmp_p
 
 
 def test_storage_server_reports_broken_doc_roots(monkeypatch, fresh_settings, tmp_path):
-    """환경변수가 잘못된 것은 요청 잘못이 아니다 — 어느 항목이 문제인지 그대로 말한다."""
+    """기존 환경설정 오류는 DB 이관 전에 명확히 드러난다."""
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path))
     monkeypatch.setenv("PAAS_DOC_ROOTS", "=/srv/docs")
     get_settings.cache_clear()
-    r = _client().post(f"{API}/mcp/storage/internal", headers=ADMIN,
-                       json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    assert r.status_code == 500
-    assert "'=/srv/docs'" in r.json()["detail"]
+    from app.services import storage
+    with pytest.raises(storage.StorageError, match="=/srv/docs"):
+        storage._legacy_stores()
 
 
 # --- DB 조회 서버 ---

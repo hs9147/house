@@ -6,7 +6,7 @@
 
 저장은 사람이 결정한다. 스캔이 저장 유형(조회 정보 정리·문서·표·발표 파일)마다 제안(기존
 저장소 / 새 저장소와 폴더)을 내고, admin이 그대로 받거나 고쳐서(또는 저장 안 함) 저장을 누른다.
-새 저장소면 폴더를 만들고 .env를 고쳐 재시작 없이 반영한다.
+새 저장소면 소속 부서를 확인하고 DB에 등록한다.
 """
 import json
 
@@ -45,6 +45,7 @@ class SaveTarget(BaseModel):
     mode: str            # existing | new | skip
     store: str = ""
     path: str = ""
+    organization_id: int | None = None
 
 
 class SourceSave(BaseModel):

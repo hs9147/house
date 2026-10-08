@@ -1,22 +1,21 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import Async from '../components/Async';
 import Split from '../components/Split';
 import WorkflowGraph from '../components/WorkflowGraph';
 import { api } from '../lib/api';
-import { useApi, usePolling } from '../lib/hooks';
+import { useApi } from '../lib/hooks';
 import type {
   AgentVerdict, WorkflowAssessment, WorkflowExtracted, WorkflowMessageOut, WorkflowOut,
-  WorkflowProposal, WorkflowRunOut, WorkflowSpec,
+  WorkflowProposal, WorkflowSpec,
 } from '../lib/types';
 import { VIZ } from '../lib/viz';
 
 /**
- * 워크플로 상세 — 왼쪽은 대화, 오른쪽은 그림. 그리고 **읽어 낸 업무**와 실행.
+ * 워크플로 상세 — 왼쪽은 대화, 오른쪽은 그림과 **읽어 낸 업무**.
  *
  * 흐름은 산업·연구가 같이 쓰는 모양이다: LLM이 구조화 스펙을 만들고 → 검증기가 받고 →
- * 사람이 보고 고치고 → 사람이 저장한다. 제안은 저장되지 않는다(캔버스에만 올라간다) —
- * 이 스펙은 실행되면 파일을 쓰고 모듈을 부르므로, 사람의 확인 없이 운영에 들어가지 않는다.
+ * 사람이 보고 고치고 → 사람이 저장한다. 제안은 저장 전까지 캔버스에만 올라간다.
  *
  * '대화에서 읽어 낸 것'(개체·상태·전이·제약)을 함께 보여 주는 이유: 스펙만 보면 그럴듯한데
  * 내 업무가 아닌 워크플로를 알아볼 수 없다. 모델이 무엇을 업무로 이해했는지 따로 적게 하고,
@@ -28,7 +27,6 @@ export default function WorkflowDetail() {
   const navigate = useNavigate();
   const state = useApi(() => api.getWorkflow(workflowId), [workflowId]);
   const messages = useApi(() => api.workflowMessages(workflowId), [workflowId]);
-  const runs = useApi(() => api.listWorkflowRuns(workflowId), [workflowId]);
 
   const [request, setRequest] = useState('');
   const [proposal, setProposal] = useState<WorkflowProposal | null>(null);
@@ -36,7 +34,6 @@ export default function WorkflowDetail() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [selected, setSelected] = useState('');
-  const [openRun, setOpenRun] = useState<number | null>(null);
   const [assessment, setAssessment] = useState<WorkflowAssessment | null>(null);
   // 이름 수정 중일 때만 값이 있다(빈 문자열은 '수정 중이지만 비움'과 구분이 안 되므로 null).
   const [newName, setNewName] = useState<string | null>(null);
@@ -64,7 +61,7 @@ export default function WorkflowDetail() {
     try {
       await api.saveWorkflow(workflowId, spec, extracted);
       setProposal(null);
-      setNotice('저장했습니다 — 이제 이 판으로 실행됩니다.');
+      setNotice('워크플로를 저장했습니다.');
       state.reload();
     } catch (e) {
       setError((e as Error).message);
@@ -93,20 +90,6 @@ export default function WorkflowDetail() {
     setError('');
     try {
       setAssessment(await api.assessWorkflow(workflowId));
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const run = async () => {
-    setBusy('run');
-    setError('');
-    try {
-      const started = await api.startWorkflowRun(workflowId);
-      setOpenRun(started.id);
-      runs.reload();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -166,7 +149,7 @@ export default function WorkflowDetail() {
                 <b>저장된 스펙에 문제가 있습니다</b>
                 <p className="mutedtext" style={{ fontSize: 12, margin: '4px 0' }}>
                   저장할 때는 통과했지만 지금은 아닙니다 — 저장소·모듈·프로바이더가 사라졌거나
-                  이름이 바뀌었습니다. 이 상태로는 실행이 거부됩니다.
+                  이름이 바뀌었습니다. 사용 가능한 흐름이 되도록 구성을 다시 확인하세요.
                 </p>
                 <ul style={{ fontSize: 12, margin: 0 }}>
                   {workflow.problems!.map((p) => <li key={p}>{p}</li>)}
@@ -175,7 +158,7 @@ export default function WorkflowDetail() {
             )}
 
 
-            {/* 좌: 사람이 말을 거는 자리(대화) · 우: 그 답(그림·표·기록).
+            {/* 좌: 사람이 말을 거는 자리(대화) · 우: 그 답(그림·표).
                 내용이 한 화면을 넘는 화면에서만 2단으로 나눈다 — 이 화면은 흐름도와 평가
                 표까지 있어 늘 넘친다. 대화는 접지 않는다 — 이 화면에서 하는 일이 대화다. */}
             <Split
@@ -202,32 +185,14 @@ export default function WorkflowDetail() {
                       <h3 style={{ margin: 0 }}>
                         {isProposal ? '제안 (저장 전)' : '저장된 흐름'}
                       </h3>
-                      <div className="row" style={{ gap: 8 }}>
-                        {isProposal && (
-                          <button className="small"
-                                  disabled={proposal!.problems.length > 0 || busy !== ''}
-                                  onClick={() => save(proposal!.spec, proposal!.extracted)}>
-                            {busy === 'save' ? '저장 중…' : '이 제안 저장'}
-                          </button>
-                        )}
-                        {!isProposal && workflow.summary.node_count > 0 && (
-                          <button className="small" disabled={busy !== ''} onClick={run}
-                                  title="저장된 판을 처음부터 실제로 실행합니다">
-                            {busy === 'run' ? '시작 중…' : '실행'}
-                          </button>
-                        )}
-                      </div>
+                      {isProposal && (
+                        <button className="small"
+                                disabled={proposal!.problems.length > 0 || busy !== ''}
+                                onClick={() => save(proposal!.spec, proposal!.extracted)}>
+                          {busy === 'save' ? '저장 중…' : '이 제안 저장'}
+                        </button>
+                      )}
                     </div>
-                    {!isProposal && workflow.summary.node_count > 0 && (
-                      // 실행은 시험이 아니다 — 파일을 쓰고 모듈·LLM을 부른다. 누르기 전에 알게 한다.
-                      <p className="mutedtext" style={{ fontSize: 12 }}>
-                        「실행」은 <b>저장된 판(v{workflow.version})</b>을 다시 검증한 뒤 서버 작업
-                        큐에서 연결 순서대로 돌립니다 — 문서 조회·LLM·MCP 도구 호출, 저장소에 파일
-                        쓰기까지 <b>실제로</b> 합니다. 사람 단계를 만나면 멈추고 아래 「진행 보기」에서
-                        입력·승인을 기다리며(반려하면 거기서 끝), 분기에서 고르지 않은 쪽은
-                        건너뜁니다. 한 단계라도 실패하거나 15분을 넘기면 그 자리에서 멈춥니다.
-                      </p>
-                    )}
                     {isProposal && (
                       <p className="mutedtext" style={{ fontSize: 12 }}>
                         {proposal!.summary}
@@ -255,52 +220,6 @@ export default function WorkflowDetail() {
                     isProposal={isProposal}
                   />
 
-                  <Async state={runs}>
-                    {(rows: WorkflowRunOut[]) => (
-                      <div className="panel">
-                        <h3 style={{ marginTop: 0 }}>실행</h3>
-                        {rows.length === 0 ? (
-                          <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
-                            아직 실행한 적이 없습니다.
-                          </p>
-                        ) : (
-                          <table>
-                            <thead>
-                              <tr>
-                                <th>#</th><th>상태</th><th>판</th><th>실행자</th>
-                                <th>시작</th><th></th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {rows.map((r) => (
-                                <tr key={r.id}>
-                                  <td className="mono">{r.id}</td>
-                                  <td>{RUN_LABEL[r.status] ?? r.status}</td>
-                                  <td className="mono">v{r.version}</td>
-                                  <td>{r.actor}</td>
-                                  <td className="mutedtext" style={{ fontSize: 11 }}>
-                                    {new Date(r.created_at).toLocaleString('ko-KR')}
-                                  </td>
-                                  <td>
-                                    <button className="small secondary"
-                                            onClick={() => setOpenRun(r.id)}>
-                                      진행 보기
-                                    </button>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        )}
-                      </div>
-                    )}
-                  </Async>
-
-                  {openRun !== null && (
-                    <RunPanel runId={openRun} spec={workflow.spec}
-                              onClose={() => { setOpenRun(null); runs.reload(); }} />
-                  )}
-
                   <AssessmentPanel
                     assessment={assessment}
                     busy={busy === 'assess'}
@@ -317,20 +236,6 @@ export default function WorkflowDetail() {
     </Async>
   );
 }
-
-const RUN_LABEL: Record<string, string> = {
-  running: '도는 중', waiting: '사람 단계 대기', succeeded: '성공',
-  failed: '실패', canceled: '취소',
-};
-
-const STEP_LABEL: Record<string, string> = {
-  ok: '완료', skipped: '건너뜀', failed: '실패', waiting: '대기', rejected: '반려',
-};
-
-const STEP_COLOR: Record<string, string> = {
-  ok: VIZ.status.good, skipped: VIZ.muted, failed: VIZ.status.critical,
-  waiting: VIZ.status.warning, rejected: VIZ.status.critical,
-};
 
 /** 고른 노드가 실제로 무엇을 하는지 — 스펙의 그 줄을 그대로 보여 준다(그림은 요약이다). */
 function NodeDetail({ spec, id }: { spec: WorkflowSpec; id: string }) {
@@ -436,120 +341,6 @@ function ExtractedPanel({ extracted, review, isProposal }: {
           </ul>
         </div>
       )}
-    </div>
-  );
-}
-
-/** 진행 — 단계별 상태를 그림과 표에 함께 보이고, 사람 단계면 제출 창구를 준다. */
-function RunPanel({ runId, spec, onClose }: {
-  runId: number; spec: WorkflowSpec; onClose: () => void;
-}) {
-  const [run, setRun] = useState<WorkflowRunOut | null>(null);
-  const [content, setContent] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const seen = useRef(0);
-
-  const load = async () => {
-    try {
-      setRun(await api.getWorkflowRun(runId));
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
-  useEffect(() => { void load(); }, [runId]);
-  // 도는 동안만 폴링한다 — 끝난 실행을 계속 긁을 이유가 없다.
-  usePolling(load, 2000, run?.status === 'running');
-
-  const submit = async (approved: boolean) => {
-    setBusy(true);
-    setError('');
-    try {
-      await api.submitWorkflowHumanStep(runId, content, approved);
-      setContent('');
-      await load();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (!run) return null;
-  const status: Record<string, string> = {};
-  run.steps.forEach((s) => { status[s.id] = s.status; });
-  seen.current = run.steps.length;
-  const pending = run.pending_node
-    ? (spec.nodes ?? []).find((n) => String(n.id) === run.pending_node)
-    : undefined;
-
-  return (
-    <div className="panel">
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-        <h3 style={{ margin: 0 }}>
-          실행 #{run.id} — {RUN_LABEL[run.status] ?? run.status}
-        </h3>
-        <button className="small secondary" onClick={onClose}>닫기</button>
-      </div>
-      {run.error && <p className="error" style={{ fontSize: 12 }}>{run.error}</p>}
-      <WorkflowGraph spec={spec} status={status} height={320} />
-      <table style={{ marginTop: 8 }}>
-        <thead><tr><th>단계</th><th>종류</th><th>상태</th><th>요약</th><th>ms</th></tr></thead>
-        <tbody>
-          {run.steps.map((s, i) => (
-            <tr key={`${s.id}-${i}`}>
-              <td className="mono">{s.id}</td>
-              <td className="mutedtext" style={{ fontSize: 11 }}>{s.type}</td>
-              <td style={{ color: STEP_COLOR[s.status] }}>
-                {STEP_LABEL[s.status] ?? s.status}
-              </td>
-              <td style={{ fontSize: 12, maxWidth: 420, overflowWrap: 'anywhere' }}>
-                {s.summary}
-              </td>
-              <td className="mono">{s.ms}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-
-      {run.status === 'waiting' && pending && (
-        <div style={{ marginTop: 10 }}>
-          <h4 style={{ margin: '0 0 4px' }}>
-            사람 작업: {String(pending.title ?? run.pending_node)}
-            {pending.role ? ` (${String(pending.role)})` : ''}
-          </h4>
-          {Boolean(pending.instruction) && (
-            <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 4px' }}>
-              {String(pending.instruction)}
-            </p>
-          )}
-          {/* 판단 근거 — 앞 단계가 만든 자료를 여기서 바로 읽을 수 있어야 결정할 수 있다. */}
-          <details>
-            <summary style={{ fontSize: 12, cursor: 'pointer' }}>앞 단계 결과 보기</summary>
-            <pre className="mono" style={{
-              fontSize: 11, maxHeight: 260, overflow: 'auto', padding: 8,
-              border: '1px solid var(--border-soft)', borderRadius: 6,
-            }}>
-              {Object.entries(run.outputs ?? {})
-                .map(([key, value]) => `## ${key}\n${value.text || `(파일 ${value.paths.length}건)`}`)
-                .join('\n\n')}
-            </pre>
-          </details>
-          <textarea rows={3} style={{ width: '100%', marginTop: 6 }}
-                    placeholder="의견·결과를 적습니다(다음 단계의 입력이 됩니다)"
-                    value={content} onChange={(e) => setContent(e.target.value)} />
-          <div className="row" style={{ gap: 8, marginTop: 6 }}>
-            <button className="small" disabled={busy} onClick={() => submit(true)}>
-              승인하고 계속
-            </button>
-            <button className="small secondary" disabled={busy} onClick={() => submit(false)}>
-              반려(여기서 종료)
-            </button>
-          </div>
-        </div>
-      )}
-      {error && <p className="error">{error}</p>}
     </div>
   );
 }

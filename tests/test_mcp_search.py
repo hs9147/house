@@ -37,8 +37,12 @@ def test_storage_and_code_servers_come_from_what_exists(monkeypatch, tmp_path, f
     assert [i["id"] for i in c.get(f"{API}/mcp/search", headers=ADMIN).json()] == [
         "paas-ops", "paas-docs", "paas-code", "paas-graph", "paas-apis"]
 
-    monkeypatch.setenv("PAAS_DOC_ROOTS", f"company-docs={tmp_path / 'docs'}")
-    get_settings.cache_clear()
+    from app.db import SessionLocal
+    from app.models import DocumentStore
+    with SessionLocal() as db:
+        db.add(DocumentStore(name="company-docs", root_path=str(tmp_path / "docs"),
+                             read_only=False, active=True))
+        db.commit()
     pid = c.post(f"{API}/projects", json={
         "name": "shop-web", "type": "react", "git_url": "https://git.example.com/x",
     }, headers=ADMIN).json()["id"]

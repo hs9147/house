@@ -52,7 +52,8 @@ def read(store_name: str, rel: str, source: Path) -> str:
     except OSError as e:
         raise doctext.ExtractError(f"파일을 읽을 수 없습니다: {e}")
 
-    cached = _load(path_for(store_name, rel), stat.st_size, stat.st_mtime)
+    cached = _load(path_for(store_name, rel), stat.st_size, stat.st_mtime,
+                   _source_id(source))
     if cached is not None:
         return cached
 
@@ -71,7 +72,8 @@ def write(store_name: str, rel: str, source: Path, markdown: str) -> Path | None
         target = path_for(store_name, rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
-            f"---\nsource: {rel}\nsize: {stat.st_size}\nmtime: {stat.st_mtime:.6f}\n---\n\n"
+            f"---\nsource: {rel}\norigin: {_source_id(source)}\n"
+            f"size: {stat.st_size}\nmtime: {stat.st_mtime:.6f}\n---\n\n"
             f"{markdown}\n",
             encoding="utf-8",
         )
@@ -88,7 +90,12 @@ def forget(store_name: str, rel: str) -> None:
         pass
 
 
-def _load(target: Path, size: int, mtime: float) -> str | None:
+def _source_id(source: Path) -> str:
+    """같은 저장소 이름·상대 경로를 다른 원본 경로에 재사용해도 캐시를 섞지 않는다."""
+    return hashlib.sha256(str(source.resolve()).encode("utf-8")).hexdigest()
+
+
+def _load(target: Path, size: int, mtime: float, origin: str) -> str | None:
     """front matter가 원본과 맞을 때만 본문을 돌려준다.
 
     파일 mtime만 보고 판정하지 않는 이유: 백업에서 되돌린 문서는 내용이 바뀌었는데도
@@ -105,6 +112,7 @@ def _load(target: Path, size: int, mtime: float) -> str | None:
     fields = dict(
         line.split(": ", 1) for line in match.group(1).split("\n") if ": " in line
     )
-    if fields.get("size") != str(size) or fields.get("mtime") != f"{mtime:.6f}":
+    if (fields.get("origin") != origin or fields.get("size") != str(size)
+            or fields.get("mtime") != f"{mtime:.6f}"):
         return None
     return raw[match.end():].rstrip("\n")

@@ -138,6 +138,7 @@ export interface StorageFile {
 export interface StorageStore {
   name: string;
   root: string;
+  organization_id: number | null;
   read_only: boolean;
   exists: boolean;
   url: string;
@@ -867,31 +868,6 @@ export interface WorkflowProposal {
   facts: string;
 }
 
-export type WorkflowRunStatus = 'running' | 'waiting' | 'succeeded' | 'failed' | 'canceled';
-
-export interface WorkflowStep {
-  id: string;
-  type: string;
-  status: 'ok' | 'skipped' | 'failed' | 'waiting' | 'rejected';
-  summary: string;
-  ms: number;
-}
-
-export interface WorkflowRunOut {
-  id: number;
-  workflow_id: number;
-  version: number;
-  status: WorkflowRunStatus;
-  actor: string;
-  steps: WorkflowStep[];
-  pending_node: string;
-  error: string | null;
-  created_at: string;
-  finished_at: string | null;
-  // 상세 조회에만 — 사람 단계의 판단 근거가 여기 있다.
-  outputs?: Record<string, { text: string; paths: string[]; case?: string }>;
-}
-
 export interface WorkflowMessageOut {
   role: 'user' | 'assistant';
   content: string;
@@ -1035,6 +1011,7 @@ export interface SourceSaveTarget {
   mode: 'existing' | 'new' | 'skip';
   store?: string;
   path?: string;
+  organization_id?: number;
 }
 
 export interface SourceProposal {

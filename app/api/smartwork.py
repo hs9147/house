@@ -71,10 +71,10 @@ def _read_only(tools: list[dict]) -> list[dict]:
 def _toolsets(db: Session, key: ApiKey) -> list[smartwork.Toolset]:
     actor = key.name
     sets: list[smartwork.Toolset] = [
-        ("docs", _read_only(mcp._DOCS_TOOLS), lambda n, a: mcp._docs_call(db, actor, n, a)),
-        ("graph", mcp._GRAPH_TOOLS, lambda n, a: mcp._graph_call(n, a)),
+        ("docs", _read_only(mcp._DOCS_TOOLS), lambda n, a: mcp._docs_call(db, actor, n, a, key=key)),
+        ("graph", mcp._GRAPH_TOOLS, lambda n, a: mcp._graph_call(n, a, db=db, key=key)),
         ("storage", [_STORAGE_LIST_TOOL], lambda n, a: mcp._storage_call(
-            db, actor, mcp._doc_source(str(a.get("source", ""))), n, a)),
+            db, actor, mcp._doc_source(str(a.get("source", "")), db, key), n, a)),
         ("apis", _read_only(mcp._APIS_TOOLS), lambda n, a: mcp._apis_call(db, actor, n, a)),
     ]
     if is_enabled("workspace"):

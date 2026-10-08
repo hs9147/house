@@ -62,10 +62,18 @@ def client(monkeypatch, tmp_path, fresh_settings, fake_site):
     monkeypatch.delenv("PAAS_DOC_ROOTS", raising=False)
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("PAAS_DOC_ALLOWED_ROOTS", str(tmp_path))
     monkeypatch.setattr(llm, "default_provider", lambda db: None)
     monkeypatch.setattr(infosource, "_submit", infosource._scan_job)
     get_settings.cache_clear()
     c = TestClient(create_app())
+    from app.db import SessionLocal
+    from app.models import Organization
+    with SessionLocal() as db:
+        org = Organization(name="source-team")
+        db.add(org)
+        db.commit()
+        c.org_id = org.id
     c.tmp = tmp_path
     return c
 
@@ -79,6 +87,9 @@ def _create(c, **over):
 
 
 def _save(c, source_id, **targets):
+    for target in targets.values():
+        if target.get("mode") == "new":
+            target.setdefault("organization_id", c.org_id)
     return c.post(f"{API}/sources/{source_id}/save", headers=ADMIN, json={"targets": targets})
 
 
@@ -126,7 +137,7 @@ def test_web_scan_reads_menu_and_lookup_info(client, fake_site):
     assert [c["label"] for c in top["휴가 조회"]["children"]] == ["사용 이력"]
 
 
-def test_proposes_new_store_then_creates_it_via_env(client):
+def test_proposes_new_store_then_registers_it_in_db(client):
     made = _create(client, name="hr-portal")
     client.post(f"{API}/sources/{made['id']}/scan", headers=ADMIN)
     proposal = client.get(f"{API}/sources/{made['id']}", headers=ADMIN).json()["proposal"]["targets"]
@@ -140,9 +151,8 @@ def test_proposes_new_store_then_creates_it_via_env(client):
     assert res.status_code == 200, res.text
     assert res.json()["created"] is True
     env = (client.tmp / ".env").read_text(encoding="utf-8")
-    assert f"PAAS_DOC_ROOTS=docs={client.tmp / 'docs'},hr-portal={client.tmp / 'hr-portal'}" in env
-    assert "# 운영 설정" in env and "PAAS_TIER=small" in env   # 다른 줄은 그대로
-    assert (client.tmp / ".env.bak").exists()
+    assert f"PAAS_DOC_ROOTS=docs={client.tmp / 'docs'}" in env  # 기존 설정은 보존
+    assert not (client.tmp / ".env.bak").exists()
     # 재시작 없이 보인다.
     assert storage.store("hr-portal") is not None
     index = (client.tmp / "hr-portal" / "hr-portal" / "index.md").read_text(encoding="utf-8")
@@ -158,12 +168,13 @@ def test_save_into_existing_store(client):
     assert (client.tmp / "docs" / "인사-포털" / "index.md").exists()
 
 
-def test_new_store_is_refused_when_env_var_would_override(client, monkeypatch):
+def test_new_store_uses_db_even_if_env_var_is_set(client, monkeypatch):
     made = _create(client)
     client.post(f"{API}/sources/{made['id']}/scan", headers=ADMIN)
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"docs={client.tmp / 'docs'}")
     res = _save(client, made["id"], pages={"mode": "new", "store": "hr", "path": str(client.tmp / "hr")})
-    assert res.status_code == 400 and "환경변수" in res.json()["detail"]
+    assert res.status_code == 200, res.text
+    assert storage.store("hr") is not None
 
 
 def test_new_store_rejects_overlapping_folder(client):

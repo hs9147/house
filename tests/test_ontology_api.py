@@ -21,6 +21,14 @@ def _store(monkeypatch, tmp_path, name="docs"):
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
     get_settings.cache_clear()
+    from app.db import Base, SessionLocal, engine
+    from app.models import DocumentStore, DocumentStoreRegistry
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        db.query(DocumentStore).delete()
+        db.query(DocumentStoreRegistry).delete()
+        db.commit()
+    create_app()  # 레거시 경로를 DB에 이관한다
     return root
 
 

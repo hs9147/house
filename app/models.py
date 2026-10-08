@@ -50,6 +50,31 @@ class Organization(Base):
     projects: Mapped[list["Project"]] = relationship(back_populates="organization")
 
 
+class DocumentStore(Base):
+    """부서 소속 문서 저장소. name은 색인과 .ready의 안정적인 식별자다."""
+
+    __tablename__ = "document_stores"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(41), unique=True, index=True)
+    root_path: Mapped[str] = mapped_column(String(2048))
+    organization_id: Mapped[int | None] = mapped_column(
+        ForeignKey("organizations.id"), nullable=True, index=True
+    )
+    read_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DocumentStoreRegistry(Base):
+    """레거시 환경변수 이관을 DB 생애 동안 정확히 한 번만 수행한다."""
+
+    __tablename__ = "document_store_registry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Project(Base):
     __tablename__ = "projects"
 

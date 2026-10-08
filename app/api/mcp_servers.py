@@ -59,7 +59,8 @@ from ..models import (
     ApiKey, AuditEvent, BuildProfile, Deployment, DeploymentStatus, Module, ModuleType,
     Project, ProjectType,
 )
-from ..security import require_agent_key, require_project_mcp_access
+from ..security import (accessible_document_stores, require_agent_key,
+                        require_document_store, require_project_mcp_access)
 from ..services import apisearch
 from ..services import codemap as codemap_service
 from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, workspace
@@ -641,38 +642,41 @@ async def docs_mcp_server(
         await mcp_server.read_payload(request),
         server_name="paas-docs",
         tools=_DOCS_TOOLS,
-        call=lambda name, args: _docs_call(db, key.name, name, args),
+        call=lambda name, args: _docs_call(db, key.name, name, args, key=key),
     )
 
 
-def _all_stores() -> list[storage_service.Store]:
+def _all_stores(db: Session | None = None, key: ApiKey | None = None) -> list[storage_service.Store]:
     """**숨긴 저장소까지 포함한 전부.** /mcp/docs는 "사내 문서 전체에서 찾아라"는 창구라
     목록에 안 보이는 저장소의 파일도 찾혀야 한다 — 숨긴 것은 고르는 자리에서 뺀 것이지
     없는 것이 아니다."""
     try:
-        return storage_service.stores()
+        return accessible_document_stores(db, key, include_internal=True) if db is not None and key is not None \
+            else storage_service.stores()
     except storage_service.StorageError as e:
         raise mcp_server.McpToolError(str(e))
 
 
-def _doc_source(name: str) -> storage_service.Store:
-    found = next((s for s in _all_stores() if s.name == name), None)
+def _doc_source(name: str, db: Session | None = None,
+                key: ApiKey | None = None) -> storage_service.Store:
+    found = next((s for s in _all_stores(db, key) if s.name == name), None)
     if found is None:
         raise mcp_server.McpToolError(
             f"문서 저장소를 찾을 수 없습니다: {name} (list_sources로 이름을 확인하세요)")
     return found
 
 
-def _docs_call(db: Session, actor: str, name: str, args: dict) -> str:
+def _docs_call(db: Session, actor: str, name: str, args: dict,
+               *, key: ApiKey | None = None) -> str:
     source_name = _str_arg(args, "source", required=False)
-    sources = [_doc_source(source_name)] if source_name else _all_stores()
+    sources = [_doc_source(source_name, db, key)] if source_name else _all_stores(db, key)
 
     if name == "list_sources":
         return _dump({
             "sources": [
                 # root를 함께 준다 — "붙였는데 안 나온다"의 원인은 거의 언제나 경로이고,
                 # 경로를 감추면 그것을 확인할 방법이 없다(환경변수로 정하는 값이다).
-                {"source": store.name, "root": str(store.root),
+                {"source": store.name, "root": str(store.root) if key is None or key.is_admin else "",
                  "exists": store.root.is_dir(), "read_only": store.read_only,
                  # **문서를 등록할 주소**. 이 서버에는 쓰기 도구가 없다(아래 note) —
                  # 어디로 가야 하는지를 여기서 알려 주지 않으면, 에이전트는 "등록 도구가
@@ -887,7 +891,7 @@ async def storage_mcp_server(
     하면 쓰기 도구가 항상 목록에 떠서, 계약 폴더를 다루는 문맥에서도 모델이 그것을 보게
     된다. 읽기만 필요한 쪽은 /mcp/docs 하나가 전 폴더를 가로지르므로 합칠 이유도 적다.
     """
-    store = _mcp_store(store_name)
+    store = _mcp_store(store_name, db, key)
     tools = list(_STORAGE_READ_TOOLS)
     if not store.read_only:
         tools += _STORAGE_WRITE_TOOLS
@@ -899,9 +903,9 @@ async def storage_mcp_server(
     )
 
 
-def _mcp_store(store_name: str) -> storage_service.Store:
+def _mcp_store(store_name: str, db: Session, key: ApiKey) -> storage_service.Store:
     try:
-        found = storage_service.store(store_name)
+        found = require_document_store(db, key, store_name)
     except storage_service.StorageError as e:
         # 요청이 아니라 서버 환경변수가 잘못돼 있다 — JSON-RPC 이전 단계라 HTTP로 알린다.
         raise HTTPException(status_code=500, detail=str(e))
@@ -1388,7 +1392,7 @@ _GRAPH_TOOLS = [
 async def graph_mcp_server(
     request: Request,
     db: Session = Depends(get_db),
-    _: ApiKey = Depends(require_agent_key),
+    key: ApiKey = Depends(require_agent_key),
 ):
     """사내 문서 온톨로지 MCP 서버(JSON-RPC 2.0) — 읽기 전용.
 
@@ -1400,17 +1404,19 @@ async def graph_mcp_server(
         await mcp_server.read_payload(request),
         server_name="paas-graph",
         tools=_GRAPH_TOOLS,
-        call=lambda name, args: _graph_call(name, args),
+        call=lambda name, args: _graph_call(name, args, db=db, key=key),
     )
 
 
-def _graph_sources(args: dict) -> list[storage_service.Store]:
+def _graph_sources(args: dict, db: Session | None = None,
+                   key: ApiKey | None = None) -> list[storage_service.Store]:
     source = _str_arg(args, "source", required=False)
-    return [_doc_source(source)] if source else _all_stores()
+    return [_doc_source(source, db, key)] if source else _all_stores(db, key)
 
 
-def _graph_call(name: str, args: dict) -> str:
-    sources = _graph_sources(args)
+def _graph_call(name: str, args: dict, *, db: Session | None = None,
+                key: ApiKey | None = None) -> str:
+    sources = _graph_sources(args, db, key)
 
     if name == "graph_schema":
         out = {store.name: docsearch.graph_schema(store.name) for store in sources}

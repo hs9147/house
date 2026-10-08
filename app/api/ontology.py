@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from .. import audit
 from ..db import get_db
 from ..models import ApiKey
-from ..security import require_admin, require_api_key
+from ..security import (accessible_document_stores, require_admin, require_api_key,
+                        require_document_store)
 from ..services import docsearch, ontology_status
 from ..services import storage as storage_service
 
@@ -22,24 +23,24 @@ _REINDEX_BUDGET = 20.0
 
 
 @router.get("/ontology/overview")
-def ontology_overview(_: ApiKey = Depends(require_api_key)):
+def ontology_overview(db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
     """전환 현황 전체 — 저장소별 수치, 합계, 퍼널, 되풀이 표 스키마, 실패 이유.
 
     **아무것도 바꾸지 않는다.** 숫자마다 근거를 댈 수 있게 노드가 0건인 문서 경로도 함께
     준다 — "전환율 86%"보다 "이 문서들이 안 됐다"가 고치는 데 쓸모 있다.
     """
     try:
-        return ontology_status.overview()
+        return ontology_status.overview(accessible_document_stores(db, key, include_internal=True))
     except storage_service.StorageError as e:
         # 저장소 설정 오류다 — 요청이 잘못된 것이 아니다.
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/ontology/stores/{store_name}")
-def ontology_store(store_name: str, _: ApiKey = Depends(require_api_key)):
+def ontology_store(store_name: str, db: Session = Depends(get_db),
+                   key: ApiKey = Depends(require_api_key)):
     """저장소 하나의 전환 현황(목록 화면에서 펼쳐 볼 때)."""
-    if storage_service.store(store_name) is None:
-        raise HTTPException(status_code=404, detail=f"storage '{store_name}' not found")
+    require_document_store(db, key, store_name)
     return {
         **ontology_status.store_summary(store_name),
         "index_bytes": ontology_status.index_file_size(store_name),
@@ -52,15 +53,15 @@ def ontology_store_graph(
     kind: str = "",
     q: str = "",
     limit: int = 40,
-    _: ApiKey = Depends(require_api_key),
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
 ):
     """노드 찾기 — 화면이 종류별 예시를 보여 주고 사람이 그래프로 내려갈 때 쓴다.
 
     종류 수준(문서·절·용어·표)과 관계 종류는 overview가 이미 준다. 여기서는 그 아래,
     실제 노드 몇 개를 본다 — 수치가 맞는지는 결국 이름을 봐야 믿을 수 있다.
     """
-    if storage_service.store(store_name) is None:
-        raise HTTPException(status_code=404, detail=f"storage '{store_name}' not found")
+    require_document_store(db, key, store_name)
     nodes = docsearch.node_search(store_name, kind, q, max(1, min(limit, 200)))
     return {"store": store_name, "kind": kind, "q": q, "nodes": nodes}
 
@@ -71,7 +72,8 @@ def ontology_store_neighbors(
     kind: str,
     name: str,
     limit: int = 40,
-    _: ApiKey = Depends(require_api_key),
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
 ):
     """이 노드에 붙은 것들 — 정보 조회 화면이 한 걸음 펼칠 때 부른다.
 
@@ -79,8 +81,7 @@ def ontology_store_neighbors(
     털뭉치가 되고, 그래서 탐색의 규약은 **찾고(검색) · 문맥을 보고(이웃) · 필요한 데서만
     펼친다**(van Ham & Perer 2009). 서버가 주는 단위도 그 한 걸음이다.
     """
-    if storage_service.store(store_name) is None:
-        raise HTTPException(status_code=404, detail=f"storage '{store_name}' not found")
+    require_document_store(db, key, store_name)
     if not name:
         raise HTTPException(status_code=422, detail="name이 필요합니다")
     return docsearch.neighborhood(store_name, kind, name, max(1, min(limit, 200)))

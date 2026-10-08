@@ -1,26 +1,8 @@
-"""파일 저장소 — 환경변수로 정한 디렉터리를 이름 뒤에 감춘다.
+"""DB 등록 문서 저장소와 환경설정의 플랫폼 내부 저장소.
 
-저장소는 모듈 레지스트리에 등록하는 것이 아니라 **환경변수로 정한다**:
-
-  PAAS_STORAGE_ROOT       플랫폼 자신의 저장소. 이름은 `internal`이고 목록에 안 나온다.
-  PAAS_DOC_ROOTS          사내 문서 폴더(쉼표 구분). `이름=경로` 또는 경로만.
-  PAAS_DOC_ROOTS_READONLY 그중 **잠글** 폴더 이름. 기본은 비어 있다 = 전부 읽기/쓰기.
-
-**전체 읽기는 /mcp/docs, 쓰기는 폴더별.** 읽기만 필요하면 저장소별 서버를 등록할 필요가
-없다 — /mcp/docs 하나가 전 폴더를 가로질러 본문을 찾는다. 저장소별
-서버(/mcp/storage/{이름})는 그 폴더의 파일을 다루는 자리이고, **쓰기 도구는 잠기지 않은
-폴더의 서버에만 광고된다**(api/mcp_servers.py) — 폴더가 URL에 있기 때문에 성립하는
-성질이라, 이 서버를 하나로 합치면 잃는다.
-
-**internal은 숨긴다(hidden).** 플랫폼이 자기 파일을 두는 자리이지 사람이 파일 관리
-화면에서 고를 폴더가 아니다. 목록(GET /storage/stores)과 MCP 서버 디렉터리에서 빠지되,
-이름으로는 그대로 닿고 /mcp/docs 검색에도 포함된다 — 예전에 여기 올린 파일을 못 꺼내게
-만들면 숨긴 것이 아니라 잃은 것이다.
-
-왜 모듈이 아니게 됐나: 저장소가 어느 디렉터리에 얹혀 있는지는 서버를 설치한 사람이
-이미 아는 사실이지 콘솔에서 등록할 일이 아니었다. 모듈로 두면 같은 폴더가 이름만 달리
-두 번 등록되거나, 존재하지 않는 경로가 등록돼도 열어 보기 전까지 아무도 모른다.
-접근은 사내 MCP 서버(/mcp/docs, /mcp/storage/{저장소})와 /storage 창구가 맡는다.
+PAAS_DOC_ROOTS는 최초 기동에만 읽어 DB로 이관한다. 이관된 저장소는 관리자가 부서를
+배정하기 전까지 관리자 전용이다. 저장소 이름은 온톨로지 색인과 .ready 경로의 안정적인
+키이므로 등록 후 바꾸지 않는다. 권한은 security.accessible_document_stores가 결정한다.
 """
 import re
 import shutil
@@ -28,7 +10,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
 from ..config import get_settings
+from ..db import SessionLocal
+from ..models import DocumentStore, DocumentStoreRegistry
 
 # 내부 저장소(PAAS_STORAGE_ROOT)의 이름. 문서 폴더가 이 이름을 다시 쓰면 거부한다.
 INTERNAL_STORE = "internal"
@@ -42,18 +30,13 @@ class StorageError(Exception):
 
 @dataclass(frozen=True)
 class Store:
-    """이름이 붙은 저장소 하나. root는 호출자 밖으로 새어 나가도 되는 값이 아니다 —
-    운영자에게 되비추는 자리(list_sources·/storage/stores)에서만 보여 준다.
-
-    hidden은 "고를 목록에 올리지 않는다"는 뜻이지 "닿지 않는다"가 아니다 — 접근을
-    막는 것은 read_only가 하는 일이고, 둘을 섞으면 숨긴 저장소의 파일을 꺼낼 방법이
-    없어진다.
-    """
+    """물리 저장소 정보. hidden/read_only는 접근 권한이 아니며 조직 필터가 별도다."""
 
     name: str
     root: Path
     read_only: bool
     hidden: bool = False
+    organization_id: int | None = None
 
 
 # 저장소 이름은 URL 조각(/mcp/storage/{이름})이자 색인 파일 이름이고, 모듈로 가져올 때
@@ -100,15 +83,20 @@ def _check_name(name: str, entry: str) -> str:
     return name
 
 
-def stores() -> list[Store]:
-    """지금 열 수 있는 저장소 전부 — 숨긴 internal 하나 + 사내 문서 폴더들.
+def check_allowed_root(path: Path) -> Path:
+    """DB 등록 경로는 운영자가 허용한 상위 디렉터리 안으로 제한한다."""
+    path = path.resolve()
+    raw = get_settings().doc_allowed_roots
+    allowed = [Path(item.strip()).resolve() for item in raw.split(";") if item.strip()]
+    if not allowed:
+        raise StorageError("PAAS_DOC_ALLOWED_ROOTS를 먼저 설정해야 새 저장소를 등록할 수 있습니다")
+    if not any(path == base or path.is_relative_to(base) for base in allowed):
+        raise StorageError("저장소 경로가 PAAS_DOC_ALLOWED_ROOTS 범위 밖입니다")
+    return path
 
-    목록에 보일 것만 필요하면 visible_stores()를 쓴다. 여기서는 숨긴 것도 함께 준다:
-    /mcp/docs의 "전체 읽기"와 이름으로 하는 직접 접근이 이 목록을 쓴다.
 
-    설정이 잘못돼 있으면 조용히 빼지 않고 StorageError를 낸다: 목록에서 사라지는 것과
-    "그 폴더에 문서가 없다"는 구분이 되지 않아 원인을 찾는 데 시간을 다 쓰게 된다.
-    """
+def _legacy_stores() -> list[Store]:
+    """최초 기동에서만 읽는 기존 환경설정. 이관 후에는 다시 참조하지 않는다."""
     settings = get_settings()
     # 잠그는 것이 별도의 행위다 — 경로 옆이 아니라 목록에서 정한다.
     locked = {n.strip() for n in settings.doc_roots_readonly.split(",") if n.strip()}
@@ -145,18 +133,56 @@ def stores() -> list[Store]:
         raise StorageError(
             f"PAAS_DOC_ROOTS_READONLY에 없는 저장소 이름이 있습니다: {', '.join(sorted(unknown))}"
             f" — PAAS_DOC_ROOTS에 있는 이름이어야 합니다(현재: {', '.join(sorted(seen))}).")
-    return found
+    return found[1:]
 
 
-def visible_stores() -> list[Store]:
+def bootstrap_legacy_stores() -> None:
+    """환경변수 저장소를 한 번만 DB에 이관한다. 소속 미지정은 관리자만 볼 수 있다."""
+    with SessionLocal() as db:
+        if db.get(DocumentStoreRegistry, 1) is not None:
+            return
+        for item in _legacy_stores():
+            db.add(DocumentStore(name=item.name, root_path=str(item.root),
+                                 organization_id=None, read_only=item.read_only,
+                                 active=True))
+        db.add(DocumentStoreRegistry(id=1))
+        try:
+            db.commit()
+        except IntegrityError:
+            # 여러 워커가 동시에 최초 기동했다면 먼저 끝낸 워커의 이관을 따른다.
+            db.rollback()
+            if db.get(DocumentStoreRegistry, 1) is None:
+                raise
+
+
+def stores(db: Session | None = None) -> list[Store]:
+    """DB 등록 저장소와 플랫폼 내부 저장소. 접근 권한 필터는 호출 경계에서 적용한다."""
+    own_session = db is None
+    if own_session:
+        db = SessionLocal()
+    try:
+        rows = db.execute(select(DocumentStore).where(DocumentStore.active.is_(True))
+                          .order_by(DocumentStore.id)).scalars().all()
+        found = [Store(INTERNAL_STORE,
+                       Path(get_settings().storage_root or "./data/storage").resolve(),
+                       read_only=False, hidden=True)]
+        found.extend(Store(r.name, Path(r.root_path), r.read_only,
+                           organization_id=r.organization_id) for r in rows)
+        return found
+    finally:
+        if own_session:
+            db.close()
+
+
+def visible_stores(db: Session | None = None) -> list[Store]:
     """사람이 고를 수 있는 저장소 — 숨긴 것을 뺀 목록(파일 관리 화면·MCP 서버 디렉터리)."""
-    return [s for s in stores() if not s.hidden]
+    return [s for s in stores(db) if not s.hidden]
 
 
-def store(name: str) -> Store | None:
+def store(name: str, db: Session | None = None) -> Store | None:
     """이름으로 찾는다 — 숨긴 저장소도 찾힌다. 숨긴 것은 고르는 목록에서 뺀 것이지
     닿지 못하게 한 것이 아니다."""
-    return next((s for s in stores() if s.name == name), None)
+    return next((s for s in stores(db) if s.name == name), None)
 
 
 def url_for(store_name: str) -> str:

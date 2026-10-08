@@ -87,6 +87,10 @@ def test_doc_index_job_per_store(db, monkeypatch, tmp_path, fresh_settings):
     (tmp_path / "rules").mkdir()
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"rules={tmp_path / 'rules'}")
     get_settings.cache_clear()
+    from app.models import DocumentStore
+    db.add(DocumentStore(name="rules", root_path=str(tmp_path / "rules"),
+                         read_only=False, active=True))
+    db.commit()
 
     scheduler.reconcile(db)
     assert "doc_index:rules" in _names(db)

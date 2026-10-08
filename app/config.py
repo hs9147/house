@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     # 여기 적힌 이름이 PAAS_DOC_ROOTS에 없으면 기동을 막는다 — 오타는 조용히 "안 잠긴
     # 폴더"로 남고, 잠근 줄 알았던 폴더가 열려 있게 된다.
     doc_roots_readonly: str = ""
+    # DB에서 새 저장소를 등록할 때 허용하는 서버 경로의 상위 폴더(세미콜론 구분).
+    # 비우면 새 경로 등록을 막는다. 기존 PAAS_DOC_ROOTS의 일회성 이관에는 적용하지 않는다.
+    doc_allowed_roots: str = ""
     powershell_start_dir: str = ""
     # /exec가 쓰는 상주 PowerShell 세션의 로컬 TCP 브로커 포트. paas 프로세스가 재시작돼도
     # 이 고정 포트로 다시 붙어 같은 세션(cd·변수 등 상태)을 잇는다 — services/ps_broker.py.

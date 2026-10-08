@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.main import create_app
 from app.services import workflow as wf
 from app.services import workflowchat
+from app.services import gitea
 
 ADMIN = {"x-api-key": "test-admin-key"}
 API = "/paas/api/v1"
@@ -23,6 +24,7 @@ def client(monkeypatch, tmp_path, fresh_settings):
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"docs={root}")
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setattr(gitea, "ensure_org", lambda name: None)
     get_settings.cache_clear()
 
     # 큐를 인라인으로 — 요청이 돌아왔을 때 실행이 이미 끝나 있어야 단정을 쓸 수 있다.
@@ -40,7 +42,17 @@ def client(monkeypatch, tmp_path, fresh_settings):
 
 
 def _org(c: TestClient, name="gp") -> int:
-    return c.post(f"{API}/orgs", json={"name": name}, headers=ADMIN).json()["id"]
+    result = c.post(f"{API}/orgs", json={"name": name}, headers=ADMIN)
+    assert result.status_code == 201, result.text
+    org_id = result.json()["id"]
+    from app.db import SessionLocal
+    from app.models import DocumentStore
+    with SessionLocal() as db:
+        docs = db.query(DocumentStore).filter(DocumentStore.name == "docs").one_or_none()
+        if docs is not None and docs.organization_id is None:
+            docs.organization_id = org_id
+            db.commit()
+    return org_id
 
 
 def _member(c: TestClient) -> dict:

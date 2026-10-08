@@ -123,7 +123,7 @@ def store_summary(store_name: str) -> dict:
     }
 
 
-def overview() -> dict:
+def overview(stores: list[storage_service.Store] | None = None) -> dict:
     """모든 저장소의 전환 현황 + 합계·퍼널.
 
     저장소 하나가 막혀도(색인 파일 손상 등) 나머지는 그대로 보여 준다 — 한 칸의 실패가
@@ -131,7 +131,7 @@ def overview() -> dict:
     """
     summaries: list[dict] = []
     errors: list[dict] = []
-    for store in storage_service.stores():
+    for store in (stores if stores is not None else storage_service.stores()):
         try:
             summaries.append(store_summary(store.name))
         except Exception as e:  # noqa: BLE001

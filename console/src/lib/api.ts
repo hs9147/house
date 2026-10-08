@@ -29,7 +29,6 @@ import type {
   WorkflowOut,
   WorkflowProposal,
   WorkflowResources,
-  WorkflowRunOut,
   WorkflowSpec,
   OntologyStore,
   OrgOut,
@@ -355,8 +354,7 @@ export const api = {
   resetStartScript: (id: number, profile: BuildProfile, component = '') =>
     request<StartScriptOut>('DELETE', `/projects/${id}/start-script`, undefined,
       { component, profile }),
-  // 워크플로 관리 — 조직 단위. 구성은 대화로 하고 **저장은 사람이 누른다**(제안은 저장되지
-  // 않는다). 실행은 큐에서 돌고 사람 단계에서 멈춘다.
+  // 워크플로 관리 — 조직 단위. 구성은 대화로 하고 **저장은 사람이 누른다**(제안은 저장되지 않는다).
   listWorkflows: (organization_id?: number) =>
     request<WorkflowOut[]>('GET', '/workflows', undefined,
       organization_id === undefined ? undefined : { organization_id }),
@@ -379,16 +377,6 @@ export const api = {
   // 평가 — LLM 호출이므로 POST다. 저장하지 않는다(스펙이 바뀌면 평가도 옛것이다).
   assessWorkflow: (id: number) =>
     request<WorkflowAssessment>('POST', `/workflows/${id}/assessment`),
-  startWorkflowRun: (id: number) =>
-    request<WorkflowRunOut>('POST', `/workflows/${id}/runs`),
-  listWorkflowRuns: (id: number) =>
-    request<WorkflowRunOut[]>('GET', `/workflows/${id}/runs`),
-  getWorkflowRun: (runId: number) =>
-    request<WorkflowRunOut>('GET', `/workflows/runs/${runId}`),
-  submitWorkflowHumanStep: (runId: number, content: string, approved: boolean) =>
-    request<WorkflowRunOut>('POST', `/workflows/runs/${runId}/submit`, { content, approved }),
-  cancelWorkflowRun: (runId: number) =>
-    request<WorkflowRunOut>('POST', `/workflows/runs/${runId}/cancel`),
   // 온톨로지 관리 — 문서→그래프 전환 현황(읽기)과 재색인(전환을 진행시키는 유일한 수단).
   ontologyOverview: () => request<OntologyOverview>('GET', '/ontology/overview'),
   ontologyStore: (store: string) =>
@@ -496,6 +484,10 @@ export const api = {
 
   // 파일 저장소 — 목록은 환경변수(PAAS_STORAGE_ROOT·PAAS_DOC_ROOTS)가 정한다
   listStorageStores: () => request<StorageStore[]>('GET', '/storage/stores'),
+  createStorageStore: (body: { name: string; root: string; organization_id: number; read_only: boolean }) =>
+    request<StorageStore>('POST', '/storage/stores', body),
+  updateStorageStore: (name: string, body: { organization_id: number; read_only: boolean }) =>
+    request<StorageStore>('PATCH', `/storage/stores/${encodeURIComponent(name)}`, body),
   // 파일 목록·다운로드·삭제 엔드포인트는 백엔드에 그대로 있지만 콘솔에서는 쓰지 않는다 —
   // 파일 관리 화면은 저장소 상태와 업로드만 다루고, 내용을 찾는 창구는 paas-docs다.
   uploadStorageFile: (store: string, file: File, path?: string) => {

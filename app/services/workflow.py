@@ -156,7 +156,7 @@ def resources(db: Session, organization_id: int) -> dict:
         "organization": org.name if org else "",
         "stores": [
             {"name": s.name, "read_only": s.read_only, "exists": s.root.is_dir()}
-            for s in storage.visible_stores()
+            for s in storage.visible_stores(db) if s.organization_id == organization_id
         ],
         "modules": [
             {"name": m.name, "type": m.type.value, "category": m.category or ""}
@@ -538,13 +538,13 @@ def _input_of(node_id: str, edges: list, outputs: dict) -> dict:
 def _run_node(db: Session, workflow: Workflow, node: dict, data: dict) -> dict:
     kind = str(node.get("type"))
     if kind == "storage.list":
-        return _node_storage_list(node)
+        return _node_storage_list(node, workflow.organization_id)
     if kind == "docs.search":
-        return _node_docs_search(node)
+        return _node_docs_search(node, workflow.organization_id)
     if kind == "graph.find":
-        return _node_graph_find(node)
+        return _node_graph_find(node, workflow.organization_id)
     if kind == "doc.read":
-        return _node_doc_read(node, data)
+        return _node_doc_read(node, data, workflow.organization_id)
     if kind == "llm":
         return _node_llm(db, workflow, node, data)
     if kind == "mcp.tool":
@@ -552,19 +552,19 @@ def _run_node(db: Session, workflow: Workflow, node: dict, data: dict) -> dict:
     if kind == "branch":
         return _node_branch(db, workflow, node, data)
     if kind == "storage.write":
-        return _node_storage_write(node, data)
+        return _node_storage_write(node, data, workflow.organization_id)
     raise WorkflowError(f"실행할 수 없는 종류입니다: {kind}")
 
 
-def _store_or_fail(name: str) -> storage.Store:
+def _store_or_fail(name: str, organization_id: int) -> storage.Store:
     target = storage.store(str(name))
-    if target is None:
+    if target is None or target.organization_id != organization_id:
         raise WorkflowError(f"저장소 '{name}'가 없습니다.")
     return target
 
 
-def _node_storage_list(node: dict) -> dict:
-    target = _store_or_fail(node["store"])
+def _node_storage_list(node: dict, organization_id: int) -> dict:
+    target = _store_or_fail(node["store"], organization_id)
     prefix = str(node.get("prefix") or "")
     suffix = str(node.get("suffix") or "").lower()
     limit = _as_int(node.get("limit"), MAX_PATHS)
@@ -575,8 +575,8 @@ def _node_storage_list(node: dict) -> dict:
     return {"text": "\n".join(paths), "paths": paths}
 
 
-def _node_docs_search(node: dict) -> dict:
-    target = _store_or_fail(node["store"])
+def _node_docs_search(node: dict, organization_id: int) -> dict:
+    target = _store_or_fail(node["store"], organization_id)
     found = docsearch.search(target.name, str(node["query"]),
                              limit=_as_int(node.get("limit"), 10))
     lines: list[str] = []
@@ -587,7 +587,7 @@ def _node_docs_search(node: dict) -> dict:
     return {"text": "\n\n".join(lines)[:MAX_TEXT], "paths": paths}
 
 
-def _node_graph_find(node: dict) -> dict:
+def _node_graph_find(node: dict, organization_id: int) -> dict:
     """온톨로지에서 노드를 찾고 **그 노드가 있는 문서 경로**를 함께 낸다.
 
     색인이 이미 뽑아 둔 구조(절·용어·표 머리글)를 워크플로가 쓸 수 있게 하는 자리다. 전까지는
@@ -598,7 +598,7 @@ def _node_graph_find(node: dict) -> dict:
     문서별 행을 쓰는 이유(node_search가 아니라 find_nodes): 여기서 필요한 것은 이름이 아니라
     **어느 문서에 있나**다.
     """
-    target = _store_or_fail(node["store"])
+    target = _store_or_fail(node["store"], organization_id)
     rows = docsearch.find_nodes(target.name, str(node.get("kind") or ""),
                                 str(node.get("q") or ""),
                                 _as_int(node.get("limit"), 30))
@@ -611,7 +611,7 @@ def _node_graph_find(node: dict) -> dict:
     return {"text": "\n".join(lines)[:MAX_TEXT], "paths": paths[:MAX_PATHS]}
 
 
-def _node_doc_read(node: dict, data: dict) -> dict:
+def _node_doc_read(node: dict, data: dict, organization_id: int) -> dict:
     # path를 적었으면 그 파일, 안 적었으면 앞 단계가 준 경로들.
     store_name = str(node.get("store") or "")
     targets = [str(node["path"])] if node.get("path") else list(data.get("paths") or [])
@@ -621,7 +621,7 @@ def _node_doc_read(node: dict, data: dict) -> dict:
     blocks: list[str] = []
     used: list[str] = []
     for rel in targets[:limit]:
-        target = _store_or_fail(store_name) if store_name else _owner_of(rel)
+        target = _store_or_fail(store_name, organization_id) if store_name else _owner_of(rel, organization_id)
         source = storage.resolve(target.root, rel)
         if not source.is_file():
             blocks.append(f"## {rel}\n(파일이 없습니다)")
@@ -631,10 +631,10 @@ def _node_doc_read(node: dict, data: dict) -> dict:
     return {"text": "\n\n".join(blocks)[:MAX_TEXT], "paths": used}
 
 
-def _owner_of(rel: str) -> storage.Store:
+def _owner_of(rel: str, organization_id: int) -> storage.Store:
     """어느 저장소의 경로인지 — 앞 단계가 경로만 줬을 때."""
     for candidate in storage.visible_stores():
-        if (candidate.root / Path(rel)).is_file():
+        if candidate.organization_id == organization_id and (candidate.root / Path(rel)).is_file():
             return candidate
     raise WorkflowError(f"'{rel}'가 어느 저장소에도 없습니다 — store를 적으세요.")
 
@@ -715,8 +715,8 @@ def _node_branch(db: Session, workflow: Workflow, node: dict, data: dict) -> dic
     return {"text": text, "paths": list(data.get("paths") or []), "case": case}
 
 
-def _node_storage_write(node: dict, data: dict) -> dict:
-    target = _store_or_fail(node["store"])
+def _node_storage_write(node: dict, data: dict, organization_id: int) -> dict:
+    target = _store_or_fail(node["store"], organization_id)
     if target.read_only:
         raise WorkflowError(f"'{target.name}'는 읽기 전용 저장소입니다.")
     body = (data.get("text") or "").encode("utf-8")

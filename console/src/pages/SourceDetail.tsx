@@ -8,7 +8,7 @@ import { useApi, usePolling } from '../lib/hooks';
 import scanAgent from '../lib/scanAgent.js?raw';
 import type {
   SourceCapabilities, SourceCategory, SourceChange, SourceFile, SourceMenuItem, SourceOut, SourcePage,
-  SourceSaveResult, SourceSaveTarget, SourceTarget, StorageStore,
+  OrgOut, SourceSaveResult, SourceSaveTarget, SourceTarget, StorageStore,
 } from '../lib/types';
 import { kindLabel, SourceStatus } from './Sources';
 
@@ -38,7 +38,7 @@ function ChangeBadge({ value }: { value?: SourceChange }) {
  *
  * 저장 위치는 유형(조회 정보 정리·문서·표·발표 파일)마다 제안을 **고칠 수 있는 입력값**으로 채워
  * 둔다. 그대로 누르면 제안대로, 고치면 고친 대로 저장된다 — 새 저장소면 서버가 폴더를 만들고
- * .env에 넣어 재시작 없이 보이게 한다. 같은 자리에 다시 저장하면 바뀐 것만 덮어쓴다.
+ * 소속 부서를 지정해 DB에 등록한다. 같은 자리에 다시 저장하면 바뀐 것만 덮어쓴다.
  */
 export default function SourceDetail() {
   const id = Number(useParams().id);
@@ -267,18 +267,20 @@ interface Pick {
   existing: string;
   name: string;
   path: string;
+  organizationId: string;
 }
 
 function pickOf(t: SourceTarget): Pick {
   return t.mode === 'existing'
-    ? { mode: 'existing', existing: t.store, name: '', path: '' }
-    : { mode: 'new', existing: '', name: t.store, path: t.path ?? '' };
+    ? { mode: 'existing', existing: t.store, name: '', path: '', organizationId: '' }
+    : { mode: 'new', existing: '', name: t.store, path: t.path ?? '', organizationId: '' };
 }
 
 function SavePanel({ row, onSaved }: { row: SourceOut; onSaved: (r: SourceSaveResult) => void }) {
   const proposal = row.proposal!.targets;
   const categories = CATEGORY_ORDER.filter((c) => proposal[c]);
   const stores = useApi(() => api.listStorageStores(), []);
+  const orgs = useApi<OrgOut[]>(() => api.listOrgs(), []);
   const [picks, setPicks] = useState<Partial<Record<SourceCategory, Pick>>>(
     () => Object.fromEntries(categories.map((c) => [c, pickOf(proposal[c]!)])));
   const [busy, setBusy] = useState(false);
@@ -297,12 +299,13 @@ function SavePanel({ row, onSaved }: { row: SourceOut; onSaved: (r: SourceSaveRe
     const p = picks[c]!;
     targets[c] = p.mode === 'skip' ? { mode: 'skip' }
       : p.mode === 'existing' ? { mode: 'existing', store: p.existing }
-        : { mode: 'new', store: p.name.trim(), path: p.path.trim() };
+        : { mode: 'new', store: p.name.trim(), path: p.path.trim(),
+            organization_id: Number(p.organizationId) };
   });
   const chosen = categories.filter((c) => targets[c]!.mode !== 'skip');
   const ready = chosen.length > 0 && chosen.every((c) => {
     const t = targets[c]!;
-    return t.store && (t.mode !== 'new' || t.path);
+    return t.store && (t.mode !== 'new' || (t.path && t.organization_id));
   });
 
   const save = async () => {
@@ -314,7 +317,7 @@ function SavePanel({ row, onSaved }: { row: SourceOut; onSaved: (r: SourceSaveRe
     });
     if (created.size && !window.confirm(
       `새 저장소를 만듭니다.\n${[...created].map(([n, p]) => `${n} — ${p}`).join('\n')}\n\n` +
-      '폴더를 만들고 .env의 PAAS_DOC_ROOTS에 추가합니다(이전 파일은 .env.bak).')) return;
+      '폴더를 만들고 선택한 부서의 저장소로 DB에 등록합니다.')) return;
     setBusy(true);
     setError('');
     try {
@@ -337,7 +340,8 @@ function SavePanel({ row, onSaved }: { row: SourceOut; onSaved: (r: SourceSaveRe
       </p>
       {categories.map((c) => (
         <TargetPicker key={c} label={`${CATEGORY[c]} · ${sizeOf(c)}`} proposal={proposal[c]!}
-                      pick={picks[c]!} writable={writable} onChange={(patch) => set(c, patch)} />
+                      pick={picks[c]!} writable={writable} orgs={orgs.data ?? []}
+                      onChange={(patch) => set(c, patch)} />
       ))}
       <div className="row" style={{ gap: 8, marginTop: 10 }}>
         <button className="small" disabled={busy || !ready} onClick={save}>
@@ -374,8 +378,8 @@ function SavePanel({ row, onSaved }: { row: SourceOut; onSaved: (r: SourceSaveRe
   );
 }
 
-function TargetPicker({ label, proposal, pick, writable, onChange }: {
-  label: string; proposal: SourceTarget; pick: Pick; writable: StorageStore[];
+function TargetPicker({ label, proposal, pick, writable, orgs, onChange }: {
+  label: string; proposal: SourceTarget; pick: Pick; writable: StorageStore[]; orgs: OrgOut[];
   onChange: (patch: Partial<Pick>) => void;
 }) {
   // 유형마다 라디오 묶음이 따로다.
@@ -422,6 +426,10 @@ function TargetPicker({ label, proposal, pick, writable, onChange }: {
       </label>
       {pick.mode === 'new' && (
         <div style={{ marginLeft: 22, marginBottom: 4 }}>
+          <select value={pick.organizationId} onChange={(e) => onChange({ organizationId: e.target.value })}>
+            <option value="">소속 부서 선택</option>
+            {orgs.map((org) => <option key={org.id} value={org.id}>{org.name}</option>)}
+          </select>
           <input className="mono" placeholder="이름 — 소문자·숫자·하이픈" value={pick.name}
                  style={{ width: '100%' }} onChange={(e) => onChange({ name: e.target.value })} />
           <input className="mono" placeholder="폴더(절대 경로)" value={pick.path}

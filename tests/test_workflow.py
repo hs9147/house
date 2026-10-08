@@ -50,6 +50,12 @@ def docs_store(monkeypatch, tmp_path, fresh_settings):
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
     get_settings.cache_clear()
+    from app.models import DocumentStore, Organization
+    with SessionLocal() as db:
+        owner = db.query(Organization).first()
+        db.add(DocumentStore(name="docs", root_path=str(root), organization_id=owner.id,
+                             read_only=False, active=True))
+        db.commit()
     return root
 
 
@@ -521,6 +527,11 @@ def test_graph_find_reads_the_ontology_and_hands_paths_to_doc_read(org, monkeypa
     monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
     monkeypatch.setenv("PAAS_DOC_READY_DIR", str(tmp_path / "ready"))
     get_settings.cache_clear()
+    from app.models import DocumentStore
+    with SessionLocal() as db:
+        db.add(DocumentStore(name="docs", root_path=str(root), organization_id=org,
+                             read_only=False, active=True))
+        db.commit()
     docsearch.reindex("docs", root)   # 색인이 돌면 그래프와 .ready가 함께 만들어진다
 
     with SessionLocal() as db:

@@ -402,6 +402,26 @@ def viewer_org_ids(db: Session, key: ApiKey) -> set[int]:
     return {o.id for o in user.organizations} if user else set()
 
 
+def accessible_document_stores(db: Session, key: ApiKey, *, include_internal: bool = False):
+    """명시적으로 소속된 부서의 저장소만. 관리자만 미배정/내부 저장소에 접근한다."""
+    from .services import storage  # noqa: PLC0415
+
+    org_ids = viewer_org_ids(db, key) if not key.is_admin else set()
+    return [s for s in storage.stores(db)
+            if (not s.hidden or include_internal)
+            and (key.is_admin or (s.organization_id is not None
+                                  and s.organization_id in org_ids))]
+
+
+def require_document_store(db: Session, key: ApiKey, name: str):
+    """존재와 권한을 같은 404로 처리하여 다른 부서의 저장소 이름을 숨긴다."""
+    found = next((s for s in accessible_document_stores(db, key, include_internal=True)
+                  if s.name == name), None)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"storage '{name}' not found")
+    return found
+
+
 def can_view_git_url(project: Project, key: ApiKey, org_ids: set[int]) -> bool:
     """git_url(리포 위치)을 볼 수 있는지 — 관리자, 전역 프로젝트(조직 미지정),
     또는 그 프로젝트 조직 소속 사용자만. 나머지에는 마스킹한다."""
