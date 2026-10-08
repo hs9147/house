@@ -465,14 +465,34 @@ def test_assessment_drops_made_up_steps_and_tools_and_says_so(org, docs_store, m
     assert any("평가되지 않은 사람 단계: 검토, 승인" in n for n in out["notes"])
 
 
-def test_change_request_only_carries_what_is_possible_now():
+def test_change_request_carries_every_shiftable_step_with_its_prerequisites():
+    """처음에는 전제(needs)가 없는 것만 실었다 — 사내 업무에서는 거의 모든 단계에 전제가
+    붙어서(실측 24/24) 요청문이 비고 버튼이 보이지 않았다. 깨끗하지만 아무것도 못 바꾼다."""
     from app.services import workflowassess
 
     text = workflowassess.change_request({"steps": [
-        {"id": "수집", "ready_now": True, "change": "자동 수집으로 바꾼다", "becomes": []},
-        {"id": "검토", "ready_now": False, "change": "저장소가 생기면 LLM 초안", "becomes": []},
+        {"id": "검토", "verdict": "partial", "ready_now": False, "change": "LLM 초안을 앞에",
+         "becomes": ["llm"], "needs": ["신용평가 저장소"]},
+        {"id": "수집", "verdict": "agent", "ready_now": True, "change": "자동 수집으로",
+         "becomes": ["storage.list"], "needs": []},
+        {"id": "승인", "verdict": "human", "ready_now": False, "change": "", "becomes": []},
     ]})
-    assert "수집: 자동 수집으로 바꾼다" in text
-    assert "검토" not in text
-    # 당장 할 것이 없으면 빈 문자열 — 화면이 버튼을 감춘다.
-    assert workflowassess.change_request({"steps": []}) == ""
+    lines = text.splitlines()
+    assert lines[1].startswith("- 수집:")        # 전제 없는 것이 먼저
+    assert "검토" in text and "전제: 신용평가 저장소" in text
+    assert "승인" not in text                     # 사람으로 남길 단계는 싣지 않는다
+    # 옮길 단계가 하나도 없으면 빈 문자열 — 화면이 버튼을 감춘다.
+    assert workflowassess.change_request(
+        {"steps": [{"id": "승인", "verdict": "human"}]}) == ""
+
+
+def test_decorated_node_types_are_accepted_not_flagged():
+    """실측: 프롬프트가 `- storage.list(파일 목록)`이라 모델이 그 꾸밈말까지 적어 보냈고,
+    운영 평가 한 번에 오탐 7건이 떴다. 거짓이 섞인 검토 목록은 아무도 읽지 않는다."""
+    from app.services import workflowassess
+
+    allowed = set(wf.NODE_TYPES)
+    assert workflowassess._node_type("storage.list(파일 목록)", allowed) == "storage.list"
+    assert workflowassess._node_type(" doc.read ", allowed) == "doc.read"
+    assert workflowassess._node_type("파일 목록", allowed) == "storage.list"   # 라벨만 적은 경우
+    assert workflowassess._node_type("email.send", allowed) == ""            # 없는 것은 없다

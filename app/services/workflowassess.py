@@ -114,8 +114,11 @@ def assess(db: Session, workflow: Workflow) -> dict:
         if verdict not in VERDICTS:
             verdict = "partial"
             notes.append(f"{node_id}: 판정이 분명하지 않아 '부분'으로 둡니다.")
-        becomes = [str(b) for b in (row.get("becomes") or []) if str(b) in allowed]
-        dropped = [str(b) for b in (row.get("becomes") or []) if str(b) not in allowed]
+        becomes: list[str] = []
+        dropped: list[str] = []
+        for raw in row.get("becomes") or []:
+            kind = _node_type(str(raw), allowed)
+            (becomes if kind else dropped).append(kind or str(raw))
         if dropped:
             notes.append(f"{node_id}: 쓸 수 없는 노드 종류를 제안했습니다 — {', '.join(dropped)}")
         needs = [str(n) for n in (row.get("needs") or []) if str(n).strip()]
@@ -164,22 +167,43 @@ def assess(db: Session, workflow: Workflow) -> dict:
     }
 
 
+def _node_type(value: str, allowed: set[str]) -> str:
+    """모델이 적은 노드 종류를 실제 종류 이름으로 — 꾸밈말을 떼고 라벨도 받는다.
+
+    실측: 프롬프트에 `- storage.list(파일 목록): …`으로 적어 두니 모델이 becomes에
+    "storage.list(파일 목록)"을 그대로 넣었다. 그걸 "쓸 수 없는 종류"로 버리면 검토 메모가
+    오탐으로 가득 찬다(운영 평가 한 번에 7건) — 거짓이 섞인 목록은 사람이 더 이상 읽지 않는다.
+    """
+    text = str(value).split("(")[0].strip()
+    if text in allowed:
+        return text
+    labels = {spec["label"]: key for key, spec in workflow_service.NODE_TYPES.items()}
+    return labels.get(str(value).strip(), "")
+
+
 def change_request(assessment: dict) -> str:
     """평가를 **다음 구성 요청**으로 바꾼다 — 읽고 끝나는 평가는 아무것도 바꾸지 않는다.
 
-    지금 바로 할 수 있는 것만 싣는다(needs가 있는 항목은 자원이 생긴 뒤의 일이다).
+    사람으로 남겨야 하는 단계는 싣지 않고, 나머지는 전부 싣는다. 전제(needs)가 있으면 그
+    사실을 문장에 적는다 — 처음에는 전제가 없는 것만 실었는데, 사내 업무에서는 거의 모든
+    단계에 전제가 붙어서(실측: 24단계 전부) 요청문이 비고 버튼이 보이지 않았다.
+    "조건이 없는 것만"은 깨끗하지만 아무것도 바꾸지 못한다.
     """
-    lines = [
-        "아래 평가를 반영해 워크플로를 고쳐 주세요. 사람이 확인·결재하는 자리는 그대로 두고,"
-        " 자료 수집과 초안 작성만 앞 단계로 떼어 냅니다.",
-    ]
-    for step in assessment.get("steps", []):
-        if not step.get("ready_now"):
-            continue
-        becomes = ", ".join(step.get("becomes") or []) or "자동 단계"
-        lines.append(f"- {step['id']}: {step.get('change') or becomes}")
-    if len(lines) == 1:
+    steps = [s for s in assessment.get("steps", []) if s.get("verdict") != "human"]
+    if not steps:
         return ""
+    lines = [
+        "아래 평가를 반영해 워크플로를 고쳐 주세요. 사람이 확인·결재하는 자리는 human 단계로"
+        " 그대로 두고, 자료 수집과 초안 작성만 앞 단계로 떼어 냅니다. 지금 쓸 수 있는 자원으로"
+        " 할 수 없는 것은 만들지 말고 무엇이 없어서 못 했는지 적어 주세요.",
+    ]
+    # 전제가 없는 것(지금 가능)을 먼저 — 바꿀 수 있는 것부터 읽히게.
+    for step in sorted(steps, key=lambda s: not s.get("ready_now")):
+        becomes = " + ".join(step.get("becomes") or []) or "자동 단계"
+        line = f"- {step['id']}: {step.get('change') or step.get('why') or becomes} ({becomes})"
+        if step.get("needs"):
+            line += f" · 전제: {' · '.join(step['needs'])}"
+        lines.append(line)
     return "\n".join(lines)
 
 
