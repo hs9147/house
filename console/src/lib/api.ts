@@ -57,6 +57,10 @@ import type {
   ServerConfigOut,
   StartScriptOut,
   StatusSnapshot,
+  SourceCapabilities,
+  SourceKind,
+  SourceOut,
+  SourceSaveResult,
   StorageStore,
   UserAccountOut,
   UserOrgOut,
@@ -471,6 +475,26 @@ export const api = {
     fd.append('file', file);
     if (path) fd.append('path', path);
     return requestMultipart<{ path: string }>(`/storage/${store}/files`, fd);
+  },
+
+  // 정보 업데이트 — 헤더는 "Name: value" 줄로 보내고, 돌려받는 것은 이름뿐이다.
+  // 수정에서 headers를 빼면(undefined) 그대로 두고, ''이면 지운다.
+  sourceCapabilities: () => request<SourceCapabilities>('GET', '/sources/capabilities'),
+  listSources: () => request<SourceOut[]>('GET', '/sources'),
+  createSource: (body: { name: string; kind: SourceKind; url: string; headers: string; note: string }) =>
+    request<SourceOut>('POST', '/sources', body),
+  getSource: (id: number) => request<SourceOut>('GET', `/sources/${id}`),
+  updateSource: (id: number, body: { name?: string; url?: string; note?: string; headers?: string }) =>
+    request<SourceOut>('PATCH', `/sources/${id}`, body),
+  deleteSource: (id: number) => request<void>('DELETE', `/sources/${id}`),
+  scanSource: (id: number) => request<SourceOut>('POST', `/sources/${id}/scan`),
+  saveSource: (id: number, body: { mode: 'existing' | 'new'; store: string; path?: string }) =>
+    request<SourceSaveResult>('POST', `/sources/${id}/save`, body),
+  // 캡처는 <img src>로 바로 걸 수 없다(키가 헤더로 가야 한다) — 받아서 object URL로 만든다.
+  sourceShotUrl: async (id: number, n: number): Promise<string> => {
+    const res = await fetch(apiUrl(`/sources/${id}/shots/${n}`), { headers: { 'x-api-key': getKey() } });
+    if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
+    return URL.createObjectURL(await res.blob());
   },
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),

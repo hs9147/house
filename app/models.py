@@ -748,3 +748,35 @@ class WorkflowRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class InfoSource(Base):
+    """정보 출처 하나 — 웹사이트·API·MCP 서버. 스캔해서 저장소에 문서로 옮긴다.
+
+    **요청 헤더(쿠키·토큰)는 암호화해 두고 이름만 내보낸다.** 사내 사이트는 대부분 로그인
+    뒤에 있어 쿠키 없이는 메뉴 하나 못 본다. 그러나 그 값은 사람의 세션이다 — 화면·감사·
+    LLM 어디에도 실리면 안 된다(services/infosource가 요청을 보낼 때만 복호화한다).
+
+    스캔 결과와 저장 제안은 행에 둔다. 저장은 사람이 결정하는 별도 단계라, 스캔과 저장
+    사이에 시간이 흐른다 — 그 사이에 결과를 다시 만들 이유가 없다.
+    """
+
+    __tablename__ = "info_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    kind: Mapped[str] = mapped_column(String(16))  # web | api | mcp
+    url: Mapped[str] = mapped_column(String(1024))
+    # {"이름": "값"} JSON을 통째로 암호화한 것. 비어 있으면 헤더 없음.
+    headers_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    # new | scanning | scanned | failed | saved
+    status: Mapped[str] = mapped_column(String(16), default="new")
+    scan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 저장 제안 — {"mode": "existing"|"new", "store", "path", "reason", "evidence"}
+    proposal: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    target_store: Mapped[str] = mapped_column(String(64), default="")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    saved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

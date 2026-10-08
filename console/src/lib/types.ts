@@ -938,3 +938,104 @@ export interface WorkflowAssessment {
   // 이 평가를 그대로 다음 구성 요청으로 쓸 수 있게 만든 문장. 비어 있으면 당장 할 것이 없다.
   change_request: string;
 }
+
+// 정보 업데이트 — app/api/sources.py의 _out과 services/infosource.py의 scan 결과에 맞춘다.
+// 헤더는 **이름만** 온다(값은 서버 밖으로 나오지 않는다).
+export type SourceKind = 'web' | 'api' | 'mcp';
+
+export interface SourceMenuItem {
+  label: string;
+  url: string;
+  children: SourceMenuItem[];
+}
+
+export interface SourcePage {
+  url: string;
+  title: string;
+  kind: string;
+  info: string;
+  filters: string[];
+  tables: string[][];
+  headings: string[];
+  fields: string[];
+  requires_login: boolean;
+  text: string;
+  shot?: number;
+}
+
+export interface SourceEndpoint {
+  method: string;
+  path: string;
+  summary: string;
+  params: string[];
+  fields: string[];
+  read_only: boolean;
+}
+
+export interface SourceTool {
+  name: string;
+  description: string;
+  params: string[];
+  read_only: boolean;
+}
+
+export interface SourceScan {
+  summary: string;
+  keywords: string[];
+  notes: string[];
+  // web
+  origin?: string;
+  menu?: SourceMenuItem[];
+  pages?: SourcePage[];
+  skipped?: { url: string; reason: string }[];
+  sitemap?: number;
+  browser?: boolean;
+  // api
+  openapi?: string;
+  title?: string;
+  description?: string;
+  endpoints?: SourceEndpoint[];
+  sample_shape?: unknown;
+  // mcp
+  tools?: SourceTool[];
+}
+
+export interface SourceProposal {
+  mode: 'existing' | 'new';
+  store: string;
+  path?: string;
+  reason: string;
+  evidence: { store: string; hits: number; keywords: string[]; read_only: boolean }[];
+}
+
+export interface SourceOut {
+  id: number;
+  name: string;
+  kind: SourceKind;
+  url: string;
+  note: string;
+  headers: string[];
+  status: 'new' | 'scanning' | 'scanned' | 'failed' | 'saved';
+  error: string | null;
+  target_store: string;
+  created_at: string;
+  scanned_at: string | null;
+  saved_at: string | null;
+  counts: { pages: number; endpoints: number; tools: number };
+  scan?: SourceScan | null;
+  proposal?: SourceProposal | null;
+}
+
+export interface SourceCapabilities {
+  browser: boolean;
+  llm: boolean;
+  limits: { pages: number; depth: number; shots: number };
+}
+
+export interface SourceSaveResult {
+  store: string;
+  created: boolean;
+  root: string;
+  files: string[];
+  source: SourceOut;
+}

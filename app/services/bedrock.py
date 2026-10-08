@@ -316,6 +316,30 @@ def runtime_url(region: str) -> str:
     return f"https://bedrock-runtime.{region}.amazonaws.com"
 
 
+_DATA_IMAGE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,(.+)$", re.S)
+
+
+def _content_blocks(content) -> list[dict]:
+    """문자열이거나 OpenAI 모양의 부분 목록(text·image_url)이다 — 이미지는 data URL만 받는다.
+
+    Converse REST는 이미지 바이트를 base64 문자열로 받는다(SDK와 달리 원시 바이트가 아니다).
+    """
+    if isinstance(content, str):
+        return [{"text": content}] if content else []
+    blocks: list[dict] = []
+    for part in content or []:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text" and part.get("text"):
+            blocks.append({"text": part["text"]})
+        elif part.get("type") == "image_url":
+            match = _DATA_IMAGE.match((part.get("image_url") or {}).get("url") or "")
+            if match:
+                blocks.append({"image": {"format": match.group(1),
+                                         "source": {"bytes": match.group(2)}}})
+    return blocks
+
+
 def _to_converse(messages: list[dict]) -> tuple[list[dict], list[dict]]:
     """OpenAI 메시지 → Converse. system은 별도 필드이고, 도구 결과는 user 쪽에 실린다."""
     system: list[dict] = []
@@ -336,9 +360,7 @@ def _to_converse(messages: list[dict]) -> tuple[list[dict], list[dict]]:
             else:
                 out.append({"role": "user", "content": [block]})
             continue
-        content: list[dict] = []
-        if m.get("content"):
-            content.append({"text": m["content"]})
+        content: list[dict] = _content_blocks(m.get("content"))
         for tc in m.get("tool_calls") or []:
             fn = tc.get("function", {})
             try:

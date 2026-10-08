@@ -21,6 +21,8 @@ import WorkflowDetail from './pages/WorkflowDetail';
 import Workflows from './pages/Workflows';
 import OntologyExploreTab from './pages/ontology/ExploreTab';
 import Storage from './pages/Storage';
+import SourceDetail from './pages/SourceDetail';
+import Sources from './pages/Sources';
 import CodeTab from './pages/project/CodeTab';
 import DeploymentsTab from './pages/project/DeploymentsTab';
 import EnvTab from './pages/project/EnvTab';
@@ -96,7 +98,24 @@ export default function App() {
             </AdminOnly>
           }
         />
-        {/* 파일 관리 다음 자리 — 문서가 그래프로 얼마나 옮겨졌는지 보고(전환 현황),
+        {/* 파일 관리 다음 자리 — 웹사이트·API·MCP를 스캔해 저장소로 옮긴다. */}
+        <Route
+          path="/sources"
+          element={
+            <AdminOnly>
+              <Sources />
+            </AdminOnly>
+          }
+        />
+        <Route
+          path="/sources/:id"
+          element={
+            <AdminOnly>
+              <SourceDetail />
+            </AdminOnly>
+          }
+        />
+        {/* 문서가 그래프로 얼마나 옮겨졌는지 보고(전환 현황),
             옮겨진 것을 들여다본다(정보 조회). */}
         <Route
           path="/ontology"
