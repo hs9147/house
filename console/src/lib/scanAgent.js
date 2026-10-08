@@ -1,7 +1,7 @@
 /* GPAX 브라우저 스캔 — 사용자가 로그인한 탭에서 북마크릿으로 돈다(pages/SourceDetail.tsx).
  *
  * 하는 일: 화면에 그려진 메뉴 트리, 열려 있는 화면(같은 출처의 iframe 포함)의 제목·표 머리글·
- * 조회 조건, 메뉴의 GET 링크 몇 장을 읽어 JSON 파일로 내려받는다.
+ * 조회 조건, 메뉴의 GET 링크 몇 장, 같은 출처의 문서·표·발표 파일(GET)을 읽어 JSON 파일로 내려받는다.
  * 하지 않는 일: gpax로 보내기(운영 콘솔이 http라 https 페이지가 부를 수 없다), 쿠키 읽기,
  * 입력값 읽기(이름·라벨만), POST, 로그아웃·삭제 링크 열기.
  * 바깥 파일을 불러오지 않는다 — 북마크에 이 코드가 통째로 들어간다(외부 의존 금지).
@@ -10,6 +10,11 @@
 (function (SOURCE) {
   var AGENT = 'gpax-scan/1';
   var MAX_FETCH = 25;
+  /* 받는 파일 — 서버(services/infosource.FILE_TYPES)가 받는 형식과 같다. 크기는 올릴 파일이 너무
+   * 커지지 않게 서버 상한보다 작게 잡는다(base64로 실려 4/3배가 된다). */
+  var MAX_FILES = 20, MAX_FILE_BYTES = 10000000, MAX_TOTAL_BYTES = 50000000;
+  var FILE_EXT = /\.(pdf|docx?|hwpx?|txt|xlsx?|csv|pptx?)$/i;
+  var FILE_TYPE = /pdf|msword|ms-excel|ms-powerpoint|officedocument|hwp|text\/csv/i;
   var DANGER = /log-?out|sign-?out|logoff|로그아웃|delete|remove|삭제/i;
   var NAV = /(^|[-_ ])(nav|navbar|menu|gnb|lnb|snb|sidebar|sitemap|tree)([-_ ]|$)/i;
   var NAV_ROLES = { navigation: 1, menu: 1, menubar: 1, tree: 1, tablist: 1 };
@@ -199,6 +204,33 @@
     return out;
   }
 
+  /* 내려받기 이름 — Content-Disposition의 filename*(RFC 5987)이 먼저, 없으면 filename. */
+  function dispositionName(res) {
+    var h = res.headers.get('content-disposition') || '';
+    var m = /filename\*\s*=\s*[^']*'[^']*'([^;]+)/i.exec(h) || /filename\s*=\s*"?([^";]+)"?/i.exec(h);
+    if (!m) return '';
+    try { return clean(decodeURIComponent(m[1]), 200); } catch (e) { return clean(m[1], 200); }
+  }
+  function base64Of(blob) {
+    return new Promise(function (ok, fail) {
+      var r = new FileReader();
+      r.onload = function () { ok(String(r.result).split(',')[1] || ''); };
+      r.onerror = function () { fail(r.error); };
+      r.readAsDataURL(blob);
+    });
+  }
+  /* 받은 응답이 파일이면 싣는다 — 크기를 넘거나 화면(로그인)이 오면 싣지 않는다. */
+  async function addFile(files, res, t, budget) {
+    var type = res.headers.get('content-type') || '';
+    if (/html/i.test(type) || files.length >= MAX_FILES) return false;
+    var blob = await res.blob();
+    if (!blob.size || blob.size > MAX_FILE_BYTES || blob.size > budget.left) return false;
+    budget.left -= blob.size;
+    files.push({ url: same(res.url) || t.url, name: dispositionName(res), text: clean(t.text, 120),
+                 page: t.page || '', type: clean(type, 200), data: await base64Of(blob) });
+    return true;
+  }
+
   async function run() {
     var pages = [], seen = {}, menu = [], menuN = 0;
     frames(window, 0, []).forEach(function (f) {
@@ -219,29 +251,51 @@
       items.forEach(function (m) { if (m.url) targets.push({ url: m.url, text: m.label }); walk(m.children || []); });
     })(menu);
     pages.forEach(function (p) { p.links.forEach(function (l) { if (l.nav) targets.push(l); }); });
-    var fetched = 0;
+    var fetched = 0, files = [], links = [], budget = { left: MAX_TOTAL_BYTES };
     for (var i = 0; i < targets.length && fetched < MAX_FETCH; i++) {
       var t = targets[i];
+      if (FILE_EXT.test(new URL(t.url).pathname)) { links.push(t); continue; }
       if (seen[t.url] || DANGER.test(t.url + ' ' + t.text)) continue;
       seen[t.url] = 1;
       fetched++;
       say('메뉴 화면 읽는 중 ' + fetched + '…');
       try {
         var res = await fetch(t.url, { credentials: 'same-origin' });
-        if (!res.ok || !/html/.test(res.headers.get('content-type') || '')) continue;
+        if (!res.ok) continue;
+        var type = res.headers.get('content-type') || '';
+        /* 확장자 없이 파일을 주는 메뉴(download.do?id=…) */
+        if (FILE_TYPE.test(type)) { await addFile(files, res, t, budget); continue; }
+        if (!/html/.test(type)) continue;
         var doc = new DOMParser().parseFromString(await res.text(), 'text/html');
         pages.push(readDoc(doc, same(res.url) || t.url, null));
       } catch (e) { /* 열리지 않는 화면은 건너뛴다 */ }
     }
+    /* 읽은 화면에 걸린 파일 링크 — 깊이와 상관없이 모은다(서버 스캔과 같다). */
+    pages.forEach(function (p) {
+      p.links.forEach(function (l) {
+        if (FILE_EXT.test(new URL(l.url).pathname)) links.push({ url: l.url, text: l.text, page: p.url.split('#')[0] });
+      });
+    });
+    for (var j = 0; j < links.length && files.length < MAX_FILES; j++) {
+      var f = links[j];
+      if (seen[f.url] || DANGER.test(f.url + ' ' + f.text)) continue;
+      seen[f.url] = 1;
+      say('파일 받는 중 ' + (files.length + 1) + '…');
+      try {
+        var got = await fetch(f.url, { credentials: 'same-origin' });
+        if (got.ok) await addFile(files, got, f, budget);
+      } catch (e) { /* 받지 못한 파일은 건너뛴다 */ }
+    }
     var out = { agent: AGENT, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
-                url: location.href.split('#')[0], at: new Date().toISOString(), menu: menu, pages: pages };
+                url: location.href.split('#')[0], at: new Date().toISOString(), menu: menu, pages: pages,
+                files: files };
     var a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(out)], { type: 'application/json' }));
     a.download = 'gpax-scan-' + SOURCE.id + '-' + String(SOURCE.name).replace(/[\\/:*?"<>|\s]+/g, '_') + '.json';
     document.body.appendChild(a);
     a.click();
     a.remove();
-    say('끝 — 메뉴 ' + menuN + '개 · 화면 ' + pages.length + '장. 내려받은 파일을 GPAX 콘솔 ' +
+    say('끝 — 메뉴 ' + menuN + '개 · 화면 ' + pages.length + '장 · 파일 ' + files.length + '개. 내려받은 파일을 GPAX 콘솔 ' +
         '정보 업데이트 → ' + SOURCE.name + ' → 브라우저에서 스캔에 올리세요.');
     dismiss();
   }

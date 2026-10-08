@@ -58,9 +58,12 @@ import type {
   StartScriptOut,
   StatusSnapshot,
   SourceCapabilities,
+  SourceCategory,
   SourceKind,
   SourceOut,
   SourceSaveResult,
+  SourceSaveTarget,
+  SourceScanRecord,
   PersonalManifest,
   PersonalStatus,
   DepartmentWorkflow,
@@ -103,11 +106,26 @@ export class ApiError extends Error {
   }
 }
 
+/** SSO 토큰이 만료되면 서버가 로그인을 바로 시작하고 승인 주소를 실패 응답에 싣는다
+ *  (app/api/llm.py provider_error). 어느 화면의 요청이든 같은 안내를 띄우도록 이벤트로 알린다. */
+export type SsoLogin = { profile: string; verification_url: string; code_autofilled: boolean; user_code: string };
+export const SSO_LOGIN_EVENT = 'paas:sso-login';
+
+function ssoLoginOf(detail: unknown): SsoLogin | null {
+  if (!detail || typeof detail !== 'object' || !('sso_login' in detail)) return null;
+  return (detail as { sso_login: SsoLogin }).sso_login;
+}
+
 // FastAPI 422는 detail이 [{loc, msg, type}, ...] 배열 — String(array)는 "[object Object]"가
 // 되어버리므로 사람이 읽을 수 있는 메시지로 풀어낸다. 나머지 에러(409 등)는 detail이
 // 문자열이라 그대로 반환된다.
 function formatDetail(detail: unknown): string {
   if (typeof detail === 'string') return detail;
+  const login = ssoLoginOf(detail);
+  if (login) {
+    window.dispatchEvent(new CustomEvent<SsoLogin>(SSO_LOGIN_EVENT, { detail: login }));
+    return String((detail as { message?: unknown }).message ?? '');
+  }
   if (Array.isArray(detail)) {
     return detail
       .map((d) => {
@@ -494,8 +512,10 @@ export const api = {
     request<SourceOut>('PATCH', `/sources/${id}`, body),
   deleteSource: (id: number) => request<void>('DELETE', `/sources/${id}`),
   scanSource: (id: number) => request<SourceOut>('POST', `/sources/${id}/scan`),
-  saveSource: (id: number, body: { mode: 'existing' | 'new'; store: string; path?: string }) =>
-    request<SourceSaveResult>('POST', `/sources/${id}/save`, body),
+  // 유형마다 위치 — 빠진 유형은 저장하지 않는다.
+  saveSource: (id: number, targets: Partial<Record<SourceCategory, SourceSaveTarget>>) =>
+    request<SourceSaveResult>('POST', `/sources/${id}/save`, { targets }),
+  sourceScans: (id: number) => request<SourceScanRecord[]>('GET', `/sources/${id}/scans`),
   // 북마크릿이 사용자 브라우저에서 내려받은 JSON 파일
   uploadBrowserScan: (id: number, file: File) => {
     const fd = new FormData();
@@ -588,6 +608,9 @@ export const api = {
       code_autofilled: boolean;
       log_path: string; log_tail: string;
     }>('POST', `/llm/aws/login?profile=${encodeURIComponent(profile)}`),
+  // 자동 로그인 승인이 끝났는지 — 관리자가 아니어도 부른다(쓸 수 있는지만 답한다).
+  awsLoginStatus: (profile: string) =>
+    request<{ profile: string; ok: boolean }>('GET', '/llm/aws/login/status', undefined, { profile }),
   listAwsProfiles: () => request<{
     botocore_available: boolean;
     config_path: string; // 어디를 읽었는지 — 서비스 계정이면 홈이 달라 목록이 빈다

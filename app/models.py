@@ -773,13 +773,44 @@ class InfoSource(Base):
     # new | scanning | scanned | failed | saved
     status: Mapped[str] = mapped_column(String(16), default="new")
     scan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # 저장 제안 — {"mode": "existing"|"new", "store", "path", "reason", "evidence"}
+    # 저장 제안 — {"targets": {유형: {"mode": "existing"|"new", "store", "path", "reason", "evidence"}}}
     proposal: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     target_store: Mapped[str] = mapped_column(String(64), default="")
+    # 지난 저장에서 쓴 파일 — [{"category", "store", "path", "sha"}]. 다음 저장이 같은 자리에
+    # 덮어쓰고, 이번에 없는 것을 휴지통으로 옮기는 근거다(파일마다 이력은 두지 않는다).
+    saved_files: Mapped[list | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     saved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    scans: Mapped[list["InfoSourceScan"]] = relationship(
+        back_populates="source", cascade="all, delete-orphan")
+
+
+class InfoSourceScan(Base):
+    """스캔 한 번의 이력 — 주소마다 결과(받음·쉼·HTTP 상태)와 내용 해시.
+
+    다음 스캔이 범위를 정하는 데 쓴다(지난번에 받은 화면을 먼저 다시 보고, 없던 주소는 한 번
+    쉰다). 바뀜 집계(new·changed·same·gone)는 화면의 스캔 이력에 그대로 보인다.
+    """
+
+    __tablename__ = "info_source_scans"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("info_sources.id", ondelete="CASCADE"), index=True)
+    via: Mapped[str] = mapped_column(String(16))      # server | browser
+    status: Mapped[str] = mapped_column(String(16))   # done | failed
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    pages: Mapped[int] = mapped_column(Integer, default=0)
+    files: Mapped[int] = mapped_column(Integer, default=0)
+    changes: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # {url: {"kind": page|file|skip, "status", "sha", "depth"}}
+    urls: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    source: Mapped[InfoSource] = relationship(back_populates="scans")
 
 
 class PersonalContext(Base):

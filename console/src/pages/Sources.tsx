@@ -141,7 +141,7 @@ export default function Sources() {
                       <td className="mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{row.url}</td>
                       <td><SourceStatus value={row.status} /></td>
                       <td className="mono" style={{ fontSize: 11 }}>
-                        {row.kind === 'web' && `${row.counts.pages}쪽`}
+                        {row.kind === 'web' && `${row.counts.pages}쪽${row.counts.files ? ` · 파일 ${row.counts.files}` : ''}`}
                         {row.kind === 'api' && `${row.counts.endpoints}개 엔드포인트`}
                         {row.kind === 'mcp' && `${row.counts.tools}개 도구`}
                       </td>

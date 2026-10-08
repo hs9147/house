@@ -36,12 +36,15 @@ SITE = {
 def fake_site(monkeypatch):
     calls: list[tuple[str, dict]] = []
 
-    def fake_get(url, headers, origin):
+    def fake_get(url, headers, origin, **kw):
         calls.append((url, dict(headers)))
         if url not in SITE:
             return 404, url, "text/html", b""
+        body = SITE[url]
+        if isinstance(body, tuple):   # (content-type, bytes) — 내려받기 파일
+            return 200, url, body[0], body[1]
         kind = "text/plain" if url.endswith(".txt") else "text/html; charset=utf-8"
-        return 200, url, kind, SITE[url].encode("utf-8")
+        return 200, url, kind, body.encode("utf-8")
 
     monkeypatch.setattr(infosource, "_http_get", fake_get)
     monkeypatch.setattr(infosource, "browser_available", lambda: False)
@@ -73,6 +76,10 @@ def _create(c, **over):
     res = c.post(f"{API}/sources", json=body, headers=ADMIN)
     assert res.status_code == 201, res.text
     return res.json()
+
+
+def _save(c, source_id, **targets):
+    return c.post(f"{API}/sources/{source_id}/save", headers=ADMIN, json={"targets": targets})
 
 
 def test_header_values_never_leave_the_server(client, fake_site):
@@ -122,13 +129,14 @@ def test_web_scan_reads_menu_and_lookup_info(client, fake_site):
 def test_proposes_new_store_then_creates_it_via_env(client):
     made = _create(client, name="hr-portal")
     client.post(f"{API}/sources/{made['id']}/scan", headers=ADMIN)
-    proposal = client.get(f"{API}/sources/{made['id']}", headers=ADMIN).json()["proposal"]
-    assert proposal["mode"] == "new" and proposal["store"] == "hr-portal"
+    proposal = client.get(f"{API}/sources/{made['id']}", headers=ADMIN).json()["proposal"]["targets"]
+    assert list(proposal) == ["pages"]   # 받은 파일이 없으면 정리만 저장한다
+    assert proposal["pages"]["mode"] == "new" and proposal["pages"]["store"] == "hr-portal"
     # 제안 폴더는 기존 문서 폴더의 형제 자리다.
-    assert proposal["path"] == str(client.tmp / "hr-portal")
+    assert proposal["pages"]["path"] == str(client.tmp / "hr-portal")
 
-    res = client.post(f"{API}/sources/{made['id']}/save", headers=ADMIN,
-                      json={"mode": "new", "store": "hr-portal", "path": proposal["path"]})
+    res = _save(client, made["id"], pages={"mode": "new", "store": "hr-portal",
+                                           "path": proposal["pages"]["path"]})
     assert res.status_code == 200, res.text
     assert res.json()["created"] is True
     env = (client.tmp / ".env").read_text(encoding="utf-8")
@@ -145,8 +153,7 @@ def test_proposes_new_store_then_creates_it_via_env(client):
 def test_save_into_existing_store(client):
     made = _create(client)
     client.post(f"{API}/sources/{made['id']}/scan", headers=ADMIN)
-    res = client.post(f"{API}/sources/{made['id']}/save", headers=ADMIN,
-                      json={"mode": "existing", "store": "docs"})
+    res = _save(client, made["id"], pages={"mode": "existing", "store": "docs"})
     assert res.status_code == 200, res.text
     assert (client.tmp / "docs" / "인사-포털" / "index.md").exists()
 
@@ -155,16 +162,15 @@ def test_new_store_is_refused_when_env_var_would_override(client, monkeypatch):
     made = _create(client)
     client.post(f"{API}/sources/{made['id']}/scan", headers=ADMIN)
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"docs={client.tmp / 'docs'}")
-    res = client.post(f"{API}/sources/{made['id']}/save", headers=ADMIN,
-                      json={"mode": "new", "store": "hr", "path": str(client.tmp / "hr")})
+    res = _save(client, made["id"], pages={"mode": "new", "store": "hr", "path": str(client.tmp / "hr")})
     assert res.status_code == 400 and "환경변수" in res.json()["detail"]
 
 
 def test_new_store_rejects_overlapping_folder(client):
     made = _create(client)
     client.post(f"{API}/sources/{made['id']}/scan", headers=ADMIN)
-    res = client.post(f"{API}/sources/{made['id']}/save", headers=ADMIN,
-                      json={"mode": "new", "store": "inner", "path": str(client.tmp / "docs" / "x")})
+    res = _save(client, made["id"], pages={"mode": "new", "store": "inner",
+                                           "path": str(client.tmp / "docs" / "x")})
     assert res.status_code == 400 and "겹칩니다" in res.json()["detail"]
 
 
@@ -175,7 +181,7 @@ def test_llm_made_up_urls_are_dropped(client, monkeypatch):
         "menu": [{"label": "휴가", "url": "https://intra.test/leave", "children": [
             {"label": "지어낸 메뉴", "url": "https://intra.test/made-up"}]}],
         "pages": [{"url": "https://intra.test/leave", "kind": "list", "info": "휴가 사용 내역"}],
-        "store": {"mode": "existing", "name": "docs", "reason": "사내 문서"},
+        "stores": {"pages": {"mode": "existing", "name": "docs", "reason": "사내 문서"}},
     }, ensure_ascii=False))
     made = _create(client)
     client.post(f"{API}/sources/{made['id']}/scan", headers=ADMIN)
@@ -183,7 +189,8 @@ def test_llm_made_up_urls_are_dropped(client, monkeypatch):
     child = detail["scan"]["menu"][0]["children"][0]
     assert child["url"] == "" and child["label"] == "지어낸 메뉴"
     assert any("made-up" in n for n in detail["scan"]["notes"])
-    assert detail["proposal"] == {**detail["proposal"], "mode": "existing", "store": "docs"}
+    pages = detail["proposal"]["targets"]["pages"]
+    assert (pages["mode"], pages["store"], pages["reason"]) == ("existing", "docs", "사내 문서")
     leave = next(p for p in detail["scan"]["pages"] if p["url"] == "https://intra.test/leave")
     assert leave["info"] == "휴가 사용 내역"
 
@@ -286,7 +293,7 @@ def test_api_source_reads_openapi(client, monkeypatch):
                    "post": {"summary": "품목 등록"}}},
         "components": {"schemas": {"Item": {"properties": {"id": {}, "name": {}}}}}}
 
-    def fake_get(url, headers, origin):
+    def fake_get(url, headers, origin, **kw):
         if url == "https://api.test/openapi.json":
             return 200, url, "application/json", json.dumps(spec).encode()
         return 404, url, "text/html", b""
@@ -343,3 +350,169 @@ def test_bedrock_carries_images():
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,QUJD"}}]}])
     assert out[0]["content"] == [
         {"text": "보라"}, {"image": {"format": "jpeg", "source": {"bytes": "QUJD"}}}]
+
+
+# ---------------------------------------------------------------- 내려받기 파일 · 유형별 저장 · 스캔 이력
+
+PDF = ("application/pdf", b"%PDF-1.4 leave rules v1")
+LEAVE_WITH_FILES = """<html><head><title>휴가 조회</title></head><body>
+    <div class="lnb"><a href="/leave/history">사용 이력</a></div>
+    <a href="/files/rules.pdf">휴가 규정</a> <a href="/files/days.xlsx">연차 표</a>
+    <a href="/download.do?id=3">규정 내려받기</a> <a href="/files/missing.pdf">없는 파일</a>
+    </body></html>"""
+
+
+def _files_site(monkeypatch, pdf=PDF):
+    monkeypatch.setitem(SITE, "https://intra.test/leave", LEAVE_WITH_FILES)
+    monkeypatch.setitem(SITE, "https://intra.test/files/rules.pdf", pdf)
+    # 확장자 없는 내려받기 — 내용이 rules.pdf와 같으면 한 벌로 친다.
+    monkeypatch.setitem(SITE, "https://intra.test/download.do?id=3", pdf)
+    monkeypatch.setitem(SITE, "https://intra.test/files/days.xlsx", (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", b"PK\x03\x04 sheet"))
+
+
+def _scan(c, source_id):
+    c.post(f"{API}/sources/{source_id}/scan", headers=ADMIN)
+    detail = c.get(f"{API}/sources/{source_id}", headers=ADMIN).json()
+    assert detail["status"] == "scanned", detail["error"]
+    return detail
+
+
+def test_downloads_are_saved_per_type_overwritten_and_trashed(client, monkeypatch):
+    _files_site(monkeypatch)
+    made = _create(client)
+    detail = _scan(client, made["id"])
+    files = {f["url"]: f for f in detail["scan"]["files"]}
+    assert set(files) == {"https://intra.test/files/rules.pdf", "https://intra.test/files/days.xlsx"}
+    assert files["https://intra.test/files/rules.pdf"]["category"] == "documents"
+    assert files["https://intra.test/files/days.xlsx"]["category"] == "sheets"
+    assert any("하나로 합쳤습니다" in n for n in detail["scan"]["notes"])
+    assert any(s["url"].endswith("missing.pdf") for s in detail["scan"]["skipped"])
+    targets = detail["proposal"]["targets"]
+    assert list(targets) == ["pages", "documents", "sheets"]
+    # 파일 유형에 따로 맞는 저장소가 없으면 정리와 같은 자리다.
+    assert targets["documents"]["store"] == targets["pages"]["store"]
+
+    keep = {"pages": {"mode": "existing", "store": "docs"}, "sheets": {"mode": "skip"}}
+    res = _save(client, made["id"], **keep,
+                documents={"mode": "new", "store": "rules", "path": str(client.tmp / "rules")})
+    assert res.status_code == 200, res.text
+    pdf = client.tmp / "rules" / "인사-포털" / "문서" / "rules.pdf"
+    assert pdf.read_bytes() == PDF[1]
+    assert not list(client.tmp.rglob("days.xlsx"))   # 저장 안 함
+    index = (client.tmp / "docs" / "인사-포털" / "index.md").read_text(encoding="utf-8")
+    assert "## 내려받은 파일" in index and "저장소 rules: 인사-포털/문서/rules.pdf" in index
+    pages_dir = client.tmp / "docs" / "인사-포털" / "pages"
+    pages = sorted(p.name for p in pages_dir.iterdir())
+
+    # 그대로 다시 저장 — 바뀐 것이 없으니 아무것도 쓰지 않는다.
+    rules = {"documents": {"mode": "existing", "store": "rules"}}
+    again = _save(client, made["id"], **keep, **rules).json()
+    assert again["files"] == [] and again["removed"] == []
+    assert "인사-포털/문서/rules.pdf" in again["same"]
+
+    # 파일이 바뀌면 같은 자리에 덮어쓴다. 다시 스캔하면 지난번 자리를 제안한다.
+    _files_site(monkeypatch, pdf=("application/pdf", b"%PDF-1.4 leave rules v2"))
+    targets = _scan(client, made["id"])["proposal"]["targets"]
+    assert (targets["documents"]["mode"], targets["documents"]["store"]) == ("existing", "rules")
+    out = _save(client, made["id"], **keep, **rules).json()
+    assert out["files"] == ["인사-포털/문서/rules.pdf"]
+    assert pdf.read_bytes().endswith(b"v2")
+    assert sorted(p.name for p in pages_dir.iterdir()) == pages   # 화면 파일이 두 벌로 늘지 않는다
+
+    # 사이트에서 없어진 파일은 휴지통으로.
+    monkeypatch.setitem(SITE, "https://intra.test/leave", SITE["https://intra.test/leave/history"])
+    _scan(client, made["id"])
+    out = _save(client, made["id"], pages={"mode": "existing", "store": "docs"}).json()
+    assert "rules:인사-포털/문서/rules.pdf" in out["removed"]
+    assert not pdf.exists()
+    assert (client.tmp / "rules" / storage.TRASH_DIRNAME / "인사-포털" / "문서" / "rules.pdf").exists()
+
+
+def test_save_refuses_unknown_type_and_all_skipped(client):
+    made = _create(client)
+    _scan(client, made["id"])
+    assert _save(client, made["id"], pages={"mode": "skip"}).status_code == 400
+    res = _save(client, made["id"], slides={"mode": "existing", "store": "docs"})
+    assert res.status_code == 400 and "없는 저장 유형" in res.json()["detail"]
+
+
+def test_legacy_numbered_pages_are_replaced_not_duplicated(client):
+    made = _create(client)
+    _scan(client, made["id"])
+    legacy = client.tmp / "docs" / "인사-포털" / "pages"
+    legacy.mkdir(parents=True)
+    (legacy / "01-인사-포털.md").write_text("# 옛 이름", encoding="utf-8")
+    from app.db import SessionLocal
+    from app.models import InfoSource
+
+    with SessionLocal() as s:   # 저장 목록을 남기기 전에 저장한 출처
+        row = s.get(InfoSource, made["id"])
+        row.target_store, row.saved_files = "docs", None
+        s.commit()
+    out = _save(client, made["id"], pages={"mode": "existing", "store": "docs"}).json()
+    assert "docs:인사-포털/pages/01-인사-포털.md" in out["removed"]
+    assert not (legacy / "01-인사-포털.md").exists()
+
+
+def test_scan_history_marks_changes_and_rests_missing_pages(client, fake_site, monkeypatch):
+    monkeypatch.setitem(SITE, "https://intra.test/", SITE["https://intra.test/"].replace(
+        '<a href="/pay">', '<a href="/old">옛 메뉴</a><a href="/pay">'))
+    made = _create(client)
+    _scan(client, made["id"])
+    assert "https://intra.test/old" in [u for u, _ in fake_site]   # 처음엔 받아 본다(404)
+
+    fake_site.clear()
+    monkeypatch.setitem(SITE, "https://intra.test/leave/history",
+                        "<html><head><title>사용 이력</title></head><body>바뀐 이력</body></html>")
+    detail = _scan(client, made["id"])
+    # 지난번에 없던 주소는 한 번 쉰다.
+    assert "https://intra.test/old" not in [u for u, _ in fake_site]
+    rested = next(s for s in detail["scan"]["skipped"] if s["url"] == "https://intra.test/old")
+    assert "건너뜀" in rested["reason"]
+    change = {p["url"]: p["change"] for p in detail["scan"]["pages"]}
+    assert change["https://intra.test/leave/history"] == "changed"
+    assert change["https://intra.test/leave"] == "same"
+    assert any("지난 스캔과 비교" in n for n in detail["scan"]["notes"])
+
+    fake_site.clear()
+    _scan(client, made["id"])
+    assert "https://intra.test/old" in [u for u, _ in fake_site]   # 쉰 다음에는 다시 본다
+
+    scans = client.get(f"{API}/sources/{made['id']}/scans", headers=ADMIN).json()
+    assert [s["via"] for s in scans] == ["server"] * 3
+    assert scans[1]["changes"]["changed"] == 1
+    assert scans[2]["changes"]["new"] == scans[2]["pages"]
+
+    client.delete(f"{API}/sources/{made['id']}", headers=ADMIN)
+    from app.db import SessionLocal
+    from app.models import InfoSourceScan
+
+    with SessionLocal() as s:
+        assert s.query(InfoSourceScan).filter(InfoSourceScan.source_id == made["id"]).count() == 0
+
+
+def test_browser_scan_carries_files(client, monkeypatch):
+    import base64
+
+    monkeypatch.setattr(infosource, "_submit_result", infosource._result_job)
+    made = _create(client, headers="")
+    data = base64.b64encode(b"%PDF-1.4 guide").decode()
+    files = [
+        {"url": "https://intra.test/download.do?id=7", "name": "안내서.pdf", "text": "안내",
+         "type": "application/pdf", "data": data},
+        {"url": "https://other.test/a.pdf", "name": "a.pdf", "data": data},
+        {"url": "https://intra.test/setup.exe", "name": "setup.exe", "data": data},
+        {"url": "https://intra.test/broken.pdf", "name": "broken.pdf", "data": "@@not base64@@"},
+    ]
+    res = client.post(f"{API}/sources/{made['id']}/browser-result", headers=ADMIN,
+                      files=_browser_file(made["id"], files=files))
+    assert res.status_code == 202, res.text
+    scan = client.get(f"{API}/sources/{made['id']}", headers=ADMIN).json()["scan"]
+    assert [(f["name"], f["category"]) for f in scan["files"]] == [("안내서.pdf", "documents")]
+    reasons = {s["url"]: s["reason"] for s in scan["skipped"]}
+    assert "받지 않는 형식" in reasons["https://intra.test/setup.exe"]
+    assert "깨져" in reasons["https://intra.test/broken.pdf"]
+    assert "https://other.test/a.pdf" not in reasons   # 다른 출처는 아예 받지 않는다
+    scans = client.get(f"{API}/sources/{made['id']}/scans", headers=ADMIN).json()
+    assert scans[0]["via"] == "browser" and scans[0]["files"] == 1

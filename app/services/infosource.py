@@ -15,6 +15,13 @@
 LLM은 수집한 사실을 **정리**만 한다 — 메뉴 트리·페이지 성격·저장소 추천. 모델이 지어낸 주소는
 버린다(실제로 받은 페이지·링크에 없는 URL). 모델이 없어도 결정론 결과가 남는다.
 
+**내려받을 수 있는 파일**(같은 출처의 PDF·Office·한글·CSV)도 받아 저장소로 옮긴다. 저장 위치는
+**유형마다** 따로 정한다(조회 정보 정리·문서·표·발표). 저장은 같은 주소를 늘 같은 자리에 쓰고,
+내용이 같으면 건너뛰고 바뀌었으면 덮어쓴다 — 지난번에 썼는데 이번에 없는 파일은 휴지통으로
+옮긴다. 파일 하나하나의 이력은 두지 않는다. 대신 **스캔 이력**(주소마다 결과·내용 해시)을 남겨
+다음 스캔의 범위를 정한다: 지난번에 받은 화면은 상한 안에서 먼저 다시 보고, 없던 주소(404)는
+한 번 쉬고, 바뀐 것만 새로 쓴다.
+
 **요청 헤더(쿠키·토큰)는 요청을 보내는 그 순간에만 복호화한다.** 같은 출처로 가는 요청에만
 붙이고(다른 호스트로 리다이렉트되면 떼어 낸다 — httpx는 Authorization만 떼고 Cookie는 그대로
 넘긴다), 결과·감사·LLM 어디에도 값이 실리지 않는다.
@@ -22,6 +29,8 @@ LLM은 수집한 사실을 **정리**만 한다 — 메뉴 트리·페이지 성
 from __future__ import annotations
 
 import base64
+import binascii
+import hashlib
 import importlib.util
 import json
 import os
@@ -31,14 +40,15 @@ import ssl
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import InfoSource
+from ..models import InfoSource, InfoSourceScan
 from ..security import decrypt_value, encrypt_value
 from . import docsearch, jobs, llm, mcp_client, storage
 
@@ -52,6 +62,28 @@ TIMEOUT = 15.0
 MAX_SHOTS = 4           # 브라우저로 캡처할 페이지 수(비전 모델에 함께 보낸다)
 TEXT_CAP = 4000         # 페이지 본문 발췌 상한(저장되는 문서에 실린다)
 STALE_SCAN_SECONDS = 15 * 60
+MAX_FILES = 30                # 한 번 스캔에서 받는 내려받기 파일 수
+MAX_FILE_BYTES = 20_000_000   # 파일 하나의 상한 — 넘으면 받지 않는다(잘린 파일은 열리지 않는다)
+MAX_HISTORY = 30              # 출처마다 남기는 스캔 이력
+
+# 내려받아 저장소로 옮기는 파일 — 색인이 본문을 읽는 형식만(그림·압축·실행 파일은 받지 않는다).
+FILE_TYPES = {".pdf": "documents", ".doc": "documents", ".docx": "documents", ".hwp": "documents",
+              ".hwpx": "documents", ".txt": "documents", ".xls": "sheets", ".xlsx": "sheets",
+              ".csv": "sheets", ".ppt": "slides", ".pptx": "slides"}
+# 주소에 확장자가 없는 내려받기(download.do?id=…)는 content-type으로 안다.
+_FILE_CTYPES = {
+    "application/pdf": ".pdf", "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/x-hwp": ".hwp", "application/haansofthwp": ".hwp", "application/vnd.hancom.hwp": ".hwp",
+    "application/vnd.hancom.hwpx": ".hwpx", "text/csv": ".csv",
+}
+# 저장 유형 — 유형마다 저장 위치를 따로 정한다. 값은 (화면 이름, 저장소 안 폴더).
+CATEGORIES = {"pages": ("조회 정보 정리", ""), "documents": ("문서 파일", "문서"),
+              "sheets": ("표 파일", "표"), "slides": ("발표 파일", "발표")}
 
 # 따라가면 세션이 끊기거나 무언가를 바꾸는 링크 — 쿠키를 들고 도는 크롤러가 밟으면 안 된다.
 _DANGEROUS_LINK = re.compile(r"log-?out|sign-?out|logoff|로그아웃|delete|remove|삭제", re.I)
@@ -140,10 +172,12 @@ def _origin(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}".lower()
 
 
-def _http_get(url: str, headers: dict[str, str], origin: str) -> tuple[int, str, str, bytes]:
+def _http_get(url: str, headers: dict[str, str], origin: str,
+              limit: int = MAX_BYTES) -> tuple[int, str, str, bytes]:
     """테스트에서 monkeypatch하는 실제 HTTP 경계 — (상태, 최종 URL, content-type, 본문).
 
-    리다이렉트를 직접 따른다: 헤더는 **등록한 출처로 가는 요청에만** 붙인다.
+    리다이렉트를 직접 따른다: 헤더는 **등록한 출처로 가는 요청에만** 붙인다. 본문은 limit까지만
+    읽는다(화면은 앞부분이면 충분하고, 파일은 부르는 쪽이 길이로 잘렸는지 본다).
     """
     current = url
     # 인증서는 OS 저장소로 검증한다 — httpx 기본(certifi)은 사내 루트 CA를 모른다. Windows에서
@@ -161,7 +195,7 @@ def _http_get(url: str, headers: dict[str, str], origin: str) -> tuple[int, str,
                 body = b""
                 for chunk in res.iter_bytes():
                     body += chunk
-                    if len(body) >= MAX_BYTES:
+                    if len(body) >= limit:
                         break
                 return res.status_code, current, res.headers.get("content-type", ""), body
     raise SourceError(f"리다이렉트가 너무 많습니다: {url}")
@@ -331,14 +365,29 @@ def _sitemap_urls(origin: str, extra: list[str], headers: dict) -> list[str]:
     return found
 
 
-def _crawl(start: str, headers: dict) -> dict:
+def _file_ext(url: str, ctype: str = "") -> str:
+    """받을 파일의 확장자 — 주소의 확장자, 없으면 content-type. 받지 않는 형식이면 ""."""
+    suffix = Path(urlsplit(url).path).suffix.lower()
+    if suffix in FILE_TYPES:
+        return suffix
+    return _FILE_CTYPES.get(ctype.split(";")[0].strip().lower(), "")
+
+
+def _crawl(start: str, headers: dict, known: dict | None = None) -> dict:
+    """같은 출처 안을 돈다. known은 지난 스캔의 주소별 결과(scan_history) — 범위를 정하는 데 쓴다."""
     origin = _origin(start)
+    known = known or {}
     robots, sitemap_hint = _robots(origin, headers)
     sitemap = _sitemap_urls(origin, sitemap_hint, headers)
+    # 지난번에 받은 화면 — 링크 순서가 조금 바뀌어도 상한 밖으로 밀려나 "사라진" 것처럼 보이지 않게
+    # 메뉴 다음 차례로 다시 본다.
+    revisit = [(u, min(int(k.get("depth") or 1), MAX_DEPTH)) for u, k in known.items()
+               if k.get("kind") == "page" and k.get("status") == "ok" and _origin(u) == origin]
     queue: list[tuple[str, int]] = [(start, 0)]
     seen: set[str] = set()
     pages: list[dict] = []
     skipped: list[dict] = []
+    downloads: dict[str, dict] = {}
     while queue and len(pages) < MAX_PAGES:
         url, depth = queue.pop(0)
         if url in seen:
@@ -346,6 +395,12 @@ def _crawl(start: str, headers: dict) -> dict:
         seen.add(url)
         if not robots.can_fetch(USER_AGENT, url):
             skipped.append({"url": url, "reason": "robots.txt가 막음"})
+            continue
+        # 지난번에 없던 주소는 한 번 쉰다 — 쪽수 상한을 살아 있는 화면에 쓴다. 쉰 다음 스캔에서는
+        # 다시 본다(이력에 "쉼"으로 남아 404가 아니게 된다).
+        if url != start and known.get(url, {}).get("status") in ("HTTP 404", "HTTP 410"):
+            skipped.append({"url": url, "reason": "지난 스캔에서 없던 주소 — 이번에는 건너뜀",
+                            "status": "rested"})
             continue
         try:
             status, final, ctype, body = _http_get(url, headers, origin)
@@ -356,6 +411,12 @@ def _crawl(start: str, headers: dict) -> dict:
             skipped.append({"url": url, "reason": f"HTTP {status}"})
             continue
         if "html" not in ctype.lower():
+            if _file_ext(final, ctype) and _origin(final) == origin:
+                # 확장자 없이 파일을 주는 주소 — 화면이 아니라 내려받기다. 잘렸으면 다시 받는다.
+                downloads.setdefault(final, {"url": final, "text": "", "page": "",
+                                             "body": body if len(body) < MAX_BYTES else None,
+                                             "ctype": ctype})
+                continue
             skipped.append({"url": url, "reason": f"HTML 아님({ctype.split(';')[0] or '?'})"})
             continue
         page = _read_page(final, _decode(body, ctype))
@@ -364,21 +425,109 @@ def _crawl(start: str, headers: dict) -> dict:
             page["requires_login"] = True
         page["depth"] = depth
         pages.append(page)
-        if depth >= MAX_DEPTH or _origin(final) != origin:
+        if _origin(final) != origin:
             continue
-        # 메뉴 링크가 먼저다 — 상한 안에서 사이트의 뼈대를 먼저 본다.
-        ordered = sorted(page["links"], key=lambda link: not link["nav"])
-        for link in ordered:
+        nav, rest = [], []
+        for link in page["links"]:
             target = link["url"]
             if (_origin(target) != origin or target in seen
-                    or _DANGEROUS_LINK.search(f"{target} {link['text']}")
-                    or urlsplit(target).path.lower().endswith(_DOWNLOAD_SUFFIXES)):
+                    or _DANGEROUS_LINK.search(f"{target} {link['text']}")):
                 continue
-            queue.append((target, depth + 1))
+            if _file_ext(target):
+                # 내려받기는 깊이와 상관없이 모은다 — 화면 쪽수 상한에 들지 않는다.
+                downloads.setdefault(target, {"url": target, "text": link["text"], "page": final})
+                continue
+            if urlsplit(target).path.lower().endswith(_DOWNLOAD_SUFFIXES):
+                continue
+            (nav if link["nav"] else rest).append((target, depth + 1))
+        if depth >= MAX_DEPTH:
+            continue
+        # 메뉴 링크가 먼저다 — 상한 안에서 사이트의 뼈대를 먼저 본다. 그다음이 지난번에 받은 화면.
+        queue += nav
+        if depth == 0:
+            queue += [r for r in revisit if r[0] not in seen]
+        queue += rest
         if depth == 0:
             queue.extend((u, 1) for u in sitemap if u not in seen)
     return {"origin": origin, "pages": pages, "skipped": skipped[:50],
+            "downloads": list(downloads.values()),
             "sitemap": len(sitemap), "limits": {"pages": MAX_PAGES, "depth": MAX_DEPTH}}
+
+
+# ---------------------------------------------------------------- 내려받기 파일
+
+def _file_dir(source_id: int) -> Path:
+    """받은 파일을 저장 전까지 두는 자리 — 저장은 사람이 정하는 다음 단계라 그 사이에 둔다."""
+    root = Path(get_settings().storage_root or "./data/storage").resolve()
+    return root / ".infosource" / "files" / str(source_id)
+
+
+def _file_name(url: str, text: str, ext: str) -> str:
+    """저장소에 둘 이름 — 주소의 파일 이름, 없으면 링크 글자. 같은 주소는 늘 같은 이름이다."""
+    base = Path(unquote(urlsplit(url).path)).name
+    stem = Path(base).stem if Path(base).suffix.lower() == ext else (text or Path(base).stem)
+    return _folder_name(stem or "file")[:80] + ext
+
+
+def _download(downloads: list[dict], headers: dict, origin: str) -> tuple[list[dict], list[dict]]:
+    """모은 내려받기 링크를 받는다 — (받은 것[data 포함], 받지 않은 것)."""
+    got, skipped = [], []
+    for d in downloads[MAX_FILES:]:
+        skipped.append({"url": d["url"], "reason": f"파일 수 상한({MAX_FILES}개)을 넘음"})
+    for d in downloads[:MAX_FILES]:
+        body, ctype = d.get("body"), d.get("ctype", "")
+        if body is None:
+            try:
+                status, final, ctype, body = _http_get(d["url"], headers, origin, limit=MAX_FILE_BYTES)
+            except (httpx.HTTPError, SourceError) as e:
+                skipped.append({"url": d["url"], "reason": f"요청 실패: {e}"[:200]})
+                continue
+            if status >= 400:
+                skipped.append({"url": d["url"], "reason": f"HTTP {status}"})
+                continue
+            if "html" in ctype.lower():
+                # 파일 대신 화면이 왔다 — 대개 로그인 화면이다.
+                skipped.append({"url": d["url"], "reason": "파일 대신 화면이 옴(로그인이 필요할 수 있음)"})
+                continue
+        if len(body) >= MAX_FILE_BYTES:
+            skipped.append({"url": d["url"], "reason": f"파일이 너무 큼({MAX_FILE_BYTES // 1_000_000}MB 이상)"})
+            continue
+        ext = d.get("ext") or _file_ext(d["url"], ctype)
+        if not ext or not body:
+            skipped.append({"url": d["url"], "reason": "받지 않는 형식이거나 빈 파일"})
+            continue
+        got.append({"url": d["url"], "name": d.get("name") or _file_name(d["url"], d.get("text", ""), ext),
+                    "text": d.get("text", ""), "page": d.get("page", ""), "ext": ext, "data": body})
+    return got, skipped
+
+
+def _stage(source_id: int, items: list[dict]) -> tuple[list[dict], list[str]]:
+    """받은 파일을 내용 해시 이름으로 둔다. **같은 내용은 한 벌만** — 주소가 달라도 하나로 친다.
+
+    이번 스캔에 없는 파일은 지운다(받아 둔 자리에 지난 스캔의 찌꺼기가 쌓이지 않게).
+    """
+    out_dir = _file_dir(source_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files, notes, by_sha = [], [], {}
+    for item in items:
+        data = item.pop("data")
+        sha = hashlib.sha256(data).hexdigest()
+        if sha in by_sha:
+            notes.append(f"내용이 같은 파일을 하나로 합쳤습니다: {item['url']} = {by_sha[sha]}")
+            continue
+        by_sha[sha] = item["url"]
+        (out_dir / f"{sha}{item['ext']}").write_bytes(data)
+        files.append({**item, "sha": sha, "size": len(data),
+                      "category": FILE_TYPES.get(item["ext"], "documents")})
+    keep = {f"{f['sha']}{f['ext']}" for f in files}
+    for old in out_dir.iterdir():
+        if old.name not in keep:
+            old.unlink(missing_ok=True)
+    return files, notes
+
+
+def staged_file(row: InfoSource, f: dict) -> Path:
+    return _file_dir(row.id) / f"{f['sha']}{f['ext']}"
 
 
 # ---------------------------------------------------------------- 브라우저(선택)
@@ -556,15 +705,18 @@ PROMPT = """당신은 사내 정보 출처를 스캔한 결과를 정리한다. 
   "pages": [{{"url": "사실에 있는 주소", "kind": "list|detail|form|dashboard|doc|login|other",
               "info": "이 화면에서 조회할 수 있는 정보", "filters": ["조회 조건"]}}],
   "keywords": ["이 출처의 정보를 대표하는 낱말 5~10개"],
-  "store": {{"mode": "existing|new", "name": "저장소 이름", "reason": "이유 한 문장"}}
+  "stores": {{"유형": {{"mode": "existing|new", "name": "저장소 이름", "reason": "이유 한 문장"}}}}
 }}
 
-저장소 추천 규칙: 기존 저장소 중 주제가 같은 것이 있으면 existing과 그 이름을, 없으면 new와
-새 이름(소문자·숫자·하이픈, 40자 이내)을 쓴다. menu·pages는 웹사이트일 때만 채운다.
+저장소 추천 규칙: 저장 유형마다 따로 고른다 — 유형이 다르면 맞는 저장소도 다를 수 있다(예: 화면
+정리는 업무 시스템 안내 저장소, 내려받은 규정 PDF는 규정 저장소). 기존 저장소 중 주제가 같은 것이
+있으면 existing과 그 이름을, 없으면 new와 새 이름(소문자·숫자·하이픈, 40자 이내)을 쓴다.
+menu·pages는 웹사이트일 때만 채운다.
 
 출처 종류: {kind}
 출처 이름: {name}
 기존 저장소: {stores}
+저장 유형: {categories}
 
 수집한 사실:
 {facts}
@@ -595,12 +747,20 @@ def _facts(kind: str, scan: dict) -> str:
             "requires_login": p["requires_login"], "text": p["text"][:500],
             **({"aria": p["aria"][:2000]} if p.get("aria") else {}),
         } for p in scan.get("pages", [])]
+        files = [{"name": f["name"], "link_text": f["text"], "type": f["category"]}
+                 for f in scan.get("files") or []]
+        facts = {"pages": pages, **({"files": files} if files else {})}
         if scan.get("menu_dom"):
             # 화면에 그려진 메뉴 트리(브라우저 스캔) — 메뉴 구성의 1차 근거다.
-            return json.dumps({"menu_tree": scan["menu_dom"], "pages": pages},
-                              ensure_ascii=False)[:60000]
-        return json.dumps(pages, ensure_ascii=False)[:60000]
+            facts = {"menu_tree": scan["menu_dom"], **facts}
+        return json.dumps(facts, ensure_ascii=False)[:60000]
     return json.dumps(scan, ensure_ascii=False)[:60000]
+
+
+def categories_of(scan: dict) -> list[str]:
+    """이 스캔에서 저장할 유형 — 조회 정보 정리는 늘, 파일 유형은 받은 것이 있을 때만."""
+    present = {f.get("category") for f in scan.get("files") or []}
+    return ["pages", *(c for c in CATEGORIES if c != "pages" and c in present)]
 
 
 def _ask_llm(db: Session, row: InfoSource, scan: dict, stores: list[str]) -> tuple[dict, list[str]]:
@@ -609,6 +769,7 @@ def _ask_llm(db: Session, row: InfoSource, scan: dict, stores: list[str]) -> tup
     if provider is None:
         return {}, ["기본 LLM 프로바이더가 없어 정리 없이 수집한 구조만 남겼습니다."]
     text = PROMPT.format(kind=row.kind, name=row.name, stores=", ".join(stores) or "(없음)",
+                         categories=", ".join(f"{c}({CATEGORIES[c][0]})" for c in categories_of(scan)),
                          facts=_facts(row.kind, scan))
     images = []
     for p in scan.get("pages", []):
@@ -697,7 +858,7 @@ def _web_result(scan: dict, data: dict) -> tuple[dict, list[str]]:
             "info": str(hint.get("info") or " · ".join(p["headings"][:5]))[:500],
             "filters": [str(f)[:60] for f in hint.get("filters") or p["fields"]][:15],
             "tables": p["tables"], "headings": p["headings"], "fields": p["fields"],
-            "requires_login": p["requires_login"], "text": p["text"],
+            "requires_login": p["requires_login"], "text": p["text"], "depth": p.get("depth", 0),
             **({"shot": p["shot"]} if p.get("shot") is not None else {}),
         })
     notes = [f"LLM이 낸 주소 중 받지 않은 것을 버렸습니다: {', '.join(sorted(set(dropped))[:5])}"
@@ -745,10 +906,11 @@ def default_folder(name: str) -> str:
     return str(base / name)
 
 
-def _proposal(row: InfoSource, data: dict, evidence: list[dict]) -> dict:
+def _proposal(row: InfoSource, pick: dict, evidence: list[dict], planned: dict[str, str]) -> dict:
+    """유형 하나의 저장 위치. planned는 이 제안에서 이미 새로 만들기로 한 저장소 {이름: 폴더} —
+    유형 여럿이 같은 새 저장소를 고르면 하나를 함께 쓴다."""
     writable = [e for e in evidence if not e["read_only"]]
     names = {e["store"] for e in writable}
-    pick = data.get("store") if isinstance(data.get("store"), dict) else {}
     mode, name = str(pick.get("mode") or ""), str(pick.get("name") or "")
     reason = str(pick.get("reason") or "")[:300]
     if mode == "existing" and name in names:
@@ -760,13 +922,55 @@ def _proposal(row: InfoSource, data: dict, evidence: list[dict]) -> dict:
                 "reason": f"키워드가 이 저장소 문서 {best['hits']}건에 걸립니다."}
     candidate = name if mode == "new" and storage._NAME_RE.match(name) else ""
     candidate = candidate or slugify(row.name) or slugify(urlsplit(row.url).hostname or "") or f"source-{row.id}"
-    taken = {s.name for s in storage.stores()}
-    base, n = candidate, 2
-    while candidate in taken:
-        candidate = f"{base[:37]}-{n}"
-        n += 1
-    return {"mode": "new", "store": candidate, "path": default_folder(candidate),
+    if candidate not in planned:
+        taken = {s.name for s in storage.stores()}
+        base, n = candidate, 2
+        while candidate in taken:
+            candidate = f"{base[:37]}-{n}"
+            n += 1
+        planned.setdefault(candidate, default_folder(candidate))
+    return {"mode": "new", "store": candidate, "path": planned[candidate],
             "reason": reason or "주제가 맞는 기존 저장소가 없습니다.", "evidence": evidence}
+
+
+def _file_words(files: list[dict]) -> list[str]:
+    words = [w for f in files for t in (Path(f["name"]).stem, f.get("text") or "")
+             for w in re.split(r"[\s|·:\-_/().\[\]]+", t) if len(w) >= 2 and not w.isdigit()]
+    return list(dict.fromkeys(words))[:10]
+
+
+def _targets(row: InfoSource, data: dict, result: dict, visible: list[storage.Store]) -> dict:
+    """저장 유형마다 위치를 정한다 — 조회 정보 정리는 출처의 키워드로, 파일 유형은 그 파일들의
+    이름·링크 글자로 기존 저장소를 견준다. 파일 유형에 근거가 없으면 정리와 같은 자리로 간다
+    (같은 출처의 것은 한곳에 모여 있는 편이 찾기 쉽다).
+
+    지난번에 저장한 유형은 그 자리를 그대로 제안한다 — 다른 곳에 쓰면 같은 파일이 두 벌이 된다."""
+    picks = data.get("stores") if isinstance(data.get("stores"), dict) else {}
+    planned: dict[str, str] = {}
+    writable = {s.name for s in visible if not s.read_only}
+    previous = {f["category"]: f["store"] for f in row.saved_files or [] if f["store"] in writable}
+    if row.saved_files is None and row.target_store in writable:   # 저장 목록을 남기기 전에 저장한 출처
+        previous["pages"] = row.target_store
+    out: dict[str, dict] = {}
+    for category in categories_of(result):
+        files = [f for f in result.get("files") or [] if f["category"] == category]
+        pick = picks.get(category) if isinstance(picks.get(category), dict) else {}
+        evidence = _evidence(_file_words(files) if files else result["keywords"], visible)
+        if category in previous:
+            out[category] = {"mode": "existing", "store": previous[category], "evidence": evidence,
+                             "reason": "지난번에 저장한 저장소입니다 — 같은 자리에 덮어씁니다."}
+            continue
+        if category == "pages":
+            out[category] = _proposal(row, pick, evidence, planned)
+            continue
+        best = next((e for e in evidence if not e["read_only"]), None)
+        if not pick and not (best and best["hits"] >= 5):
+            same = {k: v for k, v in out["pages"].items() if k != "reason"}
+            out[category] = {**same, "evidence": evidence,
+                             "reason": "따로 맞는 저장소가 없어 조회 정보 정리와 같은 자리에 둡니다."}
+            continue
+        out[category] = _proposal(row, pick, evidence, planned)
+    return out
 
 
 def scan(db: Session, row: InfoSource) -> None:
@@ -774,7 +978,11 @@ def scan(db: Session, row: InfoSource) -> None:
     headers = _headers(row)
     notes: list[str] = []
     if row.kind == "web":
-        result = _crawl(row.url, headers)
+        result = _crawl(row.url, headers, known_urls(db, row, "server"))
+        got, missed = _download(result.pop("downloads"), headers, result["origin"])
+        result["files"], stage_notes = _stage(row.id, got)
+        result["skipped"] = (result["skipped"] + missed)[:80]
+        notes += stage_notes
         if not result["pages"]:
             raise SourceError("받은 페이지가 없습니다: "
                               + "; ".join(f"{s['url']} — {s['reason']}" for s in result["skipped"][:3]))
@@ -815,8 +1023,79 @@ def scan(db: Session, row: InfoSource) -> None:
     _finish(db, row, result, notes)
 
 
+# ---------------------------------------------------------------- 스캔 이력
+
+def known_urls(db: Session, row: InfoSource, via: str) -> dict:
+    """같은 방법(server·browser)으로 한 지난 스캔의 주소별 결과 — {url: {kind, status, sha, depth}}.
+
+    방법끼리는 섞지 않는다: 브라우저 스캔은 로그인한 화면을 보고 서버는 못 본다 — 섞으면 서버가
+    못 여는 화면을 범위에 넣고, 방법을 바꿀 때마다 전부 "새로"·"없어짐"으로 보인다.
+    """
+    last = db.execute(
+        select(InfoSourceScan).where(InfoSourceScan.source_id == row.id, InfoSourceScan.via == via,
+                                     InfoSourceScan.status == "done")
+        .order_by(InfoSourceScan.id.desc()).limit(1)
+    ).scalar_one_or_none()
+    return dict(last.urls or {}) if last else {}
+
+
+def _page_sha(p: dict) -> str:
+    # 화면이 바뀌었는지는 저장되는 내용으로 본다(정리 문구는 LLM이 매번 조금씩 달리 쓴다).
+    keys = ("title", "headings", "tables", "fields", "text")
+    return hashlib.sha256(json.dumps([p.get(k) for k in keys], ensure_ascii=False).encode()).hexdigest()
+
+
+def _compare(result: dict, before: dict) -> tuple[dict, dict]:
+    """이번 결과에 바뀜 표시(new·changed·same)를 달고, 이력에 남길 주소표와 집계를 만든다."""
+    urls: dict[str, dict] = {}
+    counts = {"new": 0, "changed": 0, "same": 0, "gone": 0}
+    for kind, items in (("page", result.get("pages") or []), ("file", result.get("files") or [])):
+        for item in items:
+            sha = item.get("sha") or _page_sha(item)
+            prev = before.get(item["url"], {})
+            if prev.get("kind") != kind or prev.get("status") != "ok":
+                change = "new"
+            else:
+                change = "same" if prev.get("sha") == sha else "changed"
+            item["change"] = change
+            counts[change] += 1
+            urls[item["url"]] = {"kind": kind, "status": "ok", "sha": sha,
+                                 **({"depth": item.get("depth", 0)} if kind == "page" else {})}
+    for s in result.get("skipped") or []:
+        urls.setdefault(s["url"], {"kind": "skip", "status": s.get("status") or s["reason"][:40]})
+    gone = [u for u, k in before.items() if k.get("status") == "ok" and u not in urls]
+    counts["gone"] = len(gone)
+    result["gone"] = gone[:50]
+    return urls, counts
+
+
+def _record(db: Session, row: InfoSource, *, via: str, started, status: str, urls=None,
+            counts=None, pages: int = 0, files: int = 0, error: str | None = None) -> None:
+    db.add(InfoSourceScan(source_id=row.id, via=via, status=status, started_at=started,
+                          finished_at=datetime.now(timezone.utc), pages=pages, files=files,
+                          changes=counts, urls=urls, error=error))
+    db.flush()
+    old = db.execute(
+        select(InfoSourceScan).where(InfoSourceScan.source_id == row.id)
+        .order_by(InfoSourceScan.id.desc()).offset(MAX_HISTORY)
+    ).scalars().all()
+    for o in old:
+        db.delete(o)
+
+
+def history(db: Session, row: InfoSource) -> list[dict]:
+    rows = db.execute(
+        select(InfoSourceScan).where(InfoSourceScan.source_id == row.id)
+        .order_by(InfoSourceScan.id.desc())
+    ).scalars().all()
+    return [{"id": r.id, "via": r.via, "status": r.status, "started_at": r.started_at,
+             "finished_at": r.finished_at, "pages": r.pages, "files": r.files,
+             "changes": r.changes, "error": r.error} for r in rows]
+
+
 def _finish(db: Session, row: InfoSource, result: dict, notes: list[str]) -> None:
     """수집한 것을 정리·제안해 행에 쓴다 — 서버 스캔과 브라우저 스캔이 같은 길로 끝난다."""
+    started = row.scanned_at   # 스캔 중에는 시작 시각이다(start_scan)
     visible = storage.visible_stores()
     data, llm_notes = _ask_llm(db, row, result, [s.name for s in visible])
     notes += llm_notes
@@ -824,13 +1103,30 @@ def _finish(db: Session, row: InfoSource, result: dict, notes: list[str]) -> Non
         shaped, web_notes = _web_result(result, data)
         result.update(shaped)
         notes += web_notes
+    via = result.get("via") or "server"
+    before = known_urls(db, row, via)
+    urls, counts = _compare(result, before)
+    if before:
+        notes.append(f"지난 스캔과 비교 — 새로 {counts['new']} · 바뀜 {counts['changed']} · "
+                     f"그대로 {counts['same']} · 없어짐 {counts['gone']}")
     result["summary"] = str(data.get("summary") or "")[:2000]
     result["keywords"] = _keywords(row, result, data)
     result["notes"] = notes
     row.scan = result
-    row.proposal = _proposal(row, data, _evidence(result["keywords"], visible))
+    row.proposal = {"targets": _targets(row, data, result, visible)}
     row.status, row.error = "scanned", None
     row.scanned_at = datetime.now(timezone.utc)
+    _record(db, row, via=via, started=started, status="done", urls=urls,
+            counts=counts, pages=len(result.get("pages") or []), files=len(result.get("files") or []))
+    db.commit()
+
+
+def _fail(db: Session, source_id: int, error: Exception, via: str) -> None:
+    db.rollback()
+    row = db.get(InfoSource, source_id)
+    started = row.scanned_at
+    row.status, row.error = "failed", str(error)[:2000]
+    _record(db, row, via=via, started=started, status="failed", error=row.error)
     db.commit()
 
 
@@ -849,10 +1145,7 @@ def _scan_job(source_id: int) -> None:
         try:
             scan(session, row)
         except Exception as e:  # noqa: BLE001 — 실패 이유는 화면에 그대로 보인다
-            session.rollback()
-            row = session.get(InfoSource, source_id)
-            row.status, row.error = "failed", str(e)[:2000]
-            session.commit()
+            _fail(session, source_id, e, "server")
 
 
 def _refuse_if_running(row: InfoSource) -> None:
@@ -878,7 +1171,9 @@ def start_scan(db: Session, row: InfoSource) -> None:
 # (혼합 콘텐츠). 올라온 것은 **남이 만든 입력**으로 다룬다 — 출처가 같은지 보고, 모양·길이를 자른다.
 
 BROWSER_AGENT = "gpax-scan/1"
-MAX_UPLOAD_BYTES = 5_000_000
+# 북마크릿이 받은 파일까지 싣는다(scanAgent.js: 파일 20개, 하나 10MB, 합 50MB) — base64로 4/3배가 된다.
+MAX_UPLOAD_BYTES = 80_000_000
+MAX_BROWSER_FILES = 20
 
 
 def _s(value, cap: int) -> str:
@@ -941,8 +1236,38 @@ def from_browser(row: InfoSource, payload) -> dict:
         })
     if not pages:
         raise SourceError("파일에 이 출처의 화면이 없습니다.")
-    return {"origin": origin, "pages": pages, "skipped": [], "sitemap": 0, "browser": False,
-            "via": "browser", "menu_dom": _menu_in(payload.get("menu"), origin, [400])}
+    downloads, skipped = _browser_files(payload.get("files"), origin)
+    return {"origin": origin, "pages": pages, "skipped": skipped, "sitemap": 0, "browser": False,
+            "via": "browser", "menu_dom": _menu_in(payload.get("menu"), origin, [400]),
+            "downloads": downloads}
+
+
+def _browser_files(items, origin: str) -> tuple[list[dict], list[dict]]:
+    """북마크릿이 받아 실은 파일 — 같은 출처의 주소, 받는 형식, 크기 상한만 받는다."""
+    downloads, skipped, seen = [], [], set()
+    for f in (items if isinstance(items, list) else [])[:MAX_BROWSER_FILES]:
+        if not isinstance(f, dict):
+            continue
+        url = _same(f.get("url"), origin)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        given = _s(f.get("name"), 200)
+        ext = _file_ext(url, _s(f.get("type"), 200)) or (
+            Path(given).suffix.lower() if Path(given).suffix.lower() in FILE_TYPES else "")
+        try:
+            body = base64.b64decode(_s(f.get("data"), MAX_FILE_BYTES * 2), validate=True)
+        except (binascii.Error, ValueError):
+            skipped.append({"url": url, "reason": "파일 내용이 깨져 있음"})
+            continue
+        if not ext:
+            skipped.append({"url": url, "reason": "받지 않는 형식"})
+            continue
+        name = (_folder_name(Path(given).stem)[:80] + ext if Path(given).suffix.lower() == ext
+                else _file_name(url, _s(f.get("text"), 120), ext))
+        downloads.append({"url": url, "name": name, "text": _s(f.get("text"), 120),
+                          "page": _same(f.get("page"), origin), "body": body, "ctype": "", "ext": ext})
+    return downloads, skipped
 
 
 def _submit_result(source_id: int, result: dict) -> None:
@@ -959,23 +1284,25 @@ def _result_job(source_id: int, result: dict) -> None:
             return
         try:
             _finish(session, row, result, [
-                "사용자 브라우저에서 읽은 결과입니다(로그인한 세션, 화면 캡처 없음)."])
+                "사용자 브라우저에서 읽은 결과입니다(로그인한 세션, 화면 캡처 없음).",
+                *result.pop("stage_notes", [])])
         except Exception as e:  # noqa: BLE001
-            session.rollback()
-            row = session.get(InfoSource, source_id)
-            row.status, row.error = "failed", str(e)[:2000]
-            session.commit()
+            _fail(session, source_id, e, "browser")
 
 
 def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
     """검사는 지금(틀리면 바로 400), 정리(LLM)는 큐에서 — 정리는 수십 초 걸린다."""
     _refuse_if_running(row)
     result = from_browser(row, payload)
+    # 받은 파일은 지금 둔다 — 큐로 넘길 결과에 수십 MB의 본문을 싣지 않는다.
+    got, missed = _download(result.pop("downloads"), {}, result["origin"])
+    result["files"], result["stage_notes"] = _stage(row.id, got)
+    result["skipped"] += missed
     row.status, row.error = "scanning", None
     row.scanned_at = datetime.now(timezone.utc)
     db.commit()
     _submit_result(row.id, result)
-    return {"pages": len(result["pages"]), "menu": len(result["menu_dom"])}
+    return {"pages": len(result["pages"]), "menu": len(result["menu_dom"]), "files": len(result["files"])}
 
 
 # ---------------------------------------------------------------- 저장(admin 결정)
@@ -1051,9 +1378,35 @@ def _menu_md(items: list[dict], depth: int = 0) -> list[str]:
     return lines
 
 
-def render(row: InfoSource) -> dict[str, str]:
-    """저장할 문서들 — {상대경로: 마크다운}. 색인·온톨로지가 제목·표를 그대로 읽는다."""
+def _tag(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:6]
+
+
+def _page_name(p: dict) -> str:
+    # 같은 화면은 늘 같은 이름 — 스캔마다 순번을 붙이면 순서만 바뀌어도 전부 다른 파일이 된다.
+    return f"pages/{_folder_name(p.get('title') or 'page')[:40]}-{_tag(p['url'])}.md"
+
+
+def file_paths(row: InfoSource) -> list[tuple[dict, str]]:
+    """받은 파일마다 저장소 안 자리 — {출처 폴더}/{유형 폴더}/{파일 이름}. 이름이 겹치면 주소로 가른다."""
+    folder, used, out = _folder_name(row.name), set(), []
+    for f in (row.scan or {}).get("files") or []:
+        rel = f"{folder}/{CATEGORIES[f['category']][1]}/{f['name']}"
+        if rel.lower() in used:
+            stem, ext = rel.rsplit(".", 1)
+            rel = f"{stem}-{_tag(f['url'])}.{ext}"
+        used.add(rel.lower())
+        out.append((f, rel))
+    return out
+
+
+def render(row: InfoSource, places: dict[str, str] | None = None) -> dict[str, str]:
+    """저장할 문서들 — {상대경로: 마크다운}. 색인·온톨로지가 제목·표를 그대로 읽는다.
+
+    places는 유형별로 고른 저장소 이름 — 내려받은 파일이 정리와 같은 저장소면 링크로, 다른
+    저장소면 그 이름으로 적는다."""
     scan_data = row.scan or {}
+    places = places or {}
     folder = _folder_name(row.name)
     head = [f"# {row.name}", "", f"- 출처: {row.url}", f"- 종류: {row.kind}",
             f"- 스캔: {row.scanned_at:%Y-%m-%d %H:%M}" if row.scanned_at else "- 스캔: -", ""]
@@ -1065,9 +1418,9 @@ def render(row: InfoSource) -> dict[str, str]:
     if row.kind == "web":
         head += ["## 메뉴 구성", "", *(_menu_md(scan_data.get("menu") or []) or ["(메뉴를 찾지 못함)"]), ""]
         head += ["## 조회 가능한 정보", "", "| 화면 | 종류 | 정보 | 조회 조건 |", "|---|---|---|---|"]
-        for i, p in enumerate(scan_data.get("pages") or []):
+        for p in scan_data.get("pages") or []:
             title = (p.get("title") or p["url"]).replace("|", "/")
-            name = f"pages/{i + 1:02d}-{_folder_name(p.get('title') or 'page')[:40]}.md"
+            name = _page_name(p)
             head.append(f"| [{title}]({name}) | {p.get('kind', '')} | "
                         f"{(p.get('info') or '').replace('|', '/')} | "
                         f"{', '.join(p.get('filters') or []).replace('|', '/')} |")
@@ -1085,6 +1438,15 @@ def render(row: InfoSource) -> dict[str, str]:
             if p.get("text"):
                 body += ["## 본문 발췌", "", p["text"], ""]
             files[f"{folder}/{name}"] = "\n".join(body)
+        placed = file_paths(row)
+        if placed:
+            head += ["", "## 내려받은 파일", "", "| 파일 | 종류 | 링크 글자 | 위치 |", "|---|---|---|---|"]
+            for f, rel in placed:
+                store = places.get(f["category"])
+                where = (f"[{rel.split('/', 1)[1]}]({rel.split('/', 1)[1]})" if store == places.get("pages")
+                         else f"저장소 {store}: {rel}" if store else f"저장 안 함 — {f['url']}")
+                head.append(f"| {f['name'].replace('|', '/')} | {CATEGORIES[f['category']][0]} | "
+                            f"{(f.get('text') or '').replace('|', '/')} | {where} |")
     elif row.kind == "api":
         if scan_data.get("openapi"):
             head += [f"- OpenAPI: {scan_data['openapi']}", ""]
@@ -1111,27 +1473,105 @@ def render(row: InfoSource) -> dict[str, str]:
     return files
 
 
-def save(db: Session, row: InfoSource, *, mode: str, store_name: str, folder: str = "") -> dict:
+def _legacy_saved(row: InfoSource) -> list[dict]:
+    """저장 목록을 남기기 전에 저장한 출처 — 그때는 화면 문서에 순번(01-…)을 붙였다. 이름 규칙이
+    바뀌었으니 그 문서들을 지난번 저장으로 쳐야 새 이름과 두 벌이 되지 않는다."""
+    store = storage.store(row.target_store) if row.target_store else None
+    if store is None:
+        return []
+    folder = _folder_name(row.name)
+    return [{"category": "pages", "store": store.name, "path": f"{folder}/pages/{p.name}"}
+            for p in sorted((store.root / folder / "pages").glob("[0-9][0-9]-*.md"))]
+
+
+def _sha_of(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def save(db: Session, row: InfoSource, targets: dict) -> dict:
+    """유형마다 고른 저장소에 쓴다. targets = {유형: {mode: existing|new|skip, store, path}}.
+
+    같은 자리의 내용이 같으면 쓰지 않고(색인도 그대로), 바뀌었으면 덮어쓴다. 지난번에 이 출처가
+    썼는데 이번에 없는 파일은 휴지통으로 옮긴다 — 저장 안 함으로 둔 유형은 건드리지 않는다.
+    """
     if row.status not in ("scanned", "saved") or not row.scan:
         raise SourceError("스캔이 끝난 출처만 저장할 수 있습니다.")
-    created = False
-    if mode == "new":
-        target = create_store(store_name, folder)
-        created = True
-    elif mode == "existing":
-        target = storage.store(store_name)
-        if target is None or target.hidden:
-            raise SourceError(f"저장소를 찾을 수 없습니다: {store_name}")
-    else:
-        raise SourceError("mode는 existing 또는 new입니다.")
-    if target.read_only:
-        raise SourceError(f"잠긴 저장소에는 쓸 수 없습니다: {target.name}")
-    written = [storage.write_file(target, rel, text.encode("utf-8"))
-               for rel, text in render(row).items()]
-    row.status, row.target_store = "saved", target.name
+    categories = categories_of(row.scan)
+    unknown = set(targets) - set(categories)
+    if unknown:
+        raise SourceError(f"이 스캔에 없는 저장 유형입니다: {', '.join(sorted(unknown))}")
+    chosen: dict[str, dict] = {}
+    for category in categories:
+        t = targets.get(category) or {"mode": "skip"}
+        mode, name = str(t.get("mode") or ""), str(t.get("store") or "")
+        if mode == "skip":
+            continue
+        if mode not in ("existing", "new"):
+            raise SourceError("mode는 existing·new·skip 중 하나입니다.")
+        chosen[category] = {"mode": mode, "store": name, "path": str(t.get("path") or "")}
+    if not chosen:
+        raise SourceError("저장할 유형을 하나 이상 고르세요.")
+
+    # 쓰기 전에 다 확인한다 — 새 저장소를 만든 뒤에 다른 유형에서 막히면 빈 저장소만 남는다.
+    plan: list[tuple[str, str, bytes]] = []   # (유형, 상대경로, 내용)
+    for f, rel in file_paths(row):
+        if f["category"] in chosen:
+            staged = staged_file(row, f)
+            if not staged.is_file():
+                raise SourceError("받아 둔 파일이 없습니다 — 다시 스캔한 뒤 저장하세요.")
+            plan.append((f["category"], rel, staged.read_bytes()))
+    stores: dict[str, storage.Store] = {}
+    for c, t in chosen.items():
+        if t["mode"] == "existing" and t["store"] not in stores:
+            found = storage.store(t["store"])
+            if found is None or found.hidden:
+                raise SourceError(f"저장소를 찾을 수 없습니다: {t['store']}")
+            if found.read_only:
+                raise SourceError(f"잠긴 저장소에는 쓸 수 없습니다: {found.name}")
+            stores[found.name] = found
+    created = []
+    for c, t in chosen.items():
+        if t["mode"] == "new" and t["store"] not in stores:
+            stores[t["store"]] = create_store(t["store"], t["path"])
+            created.append(t["store"])
+    places = {c: t["store"] for c, t in chosen.items()}
+    if "pages" in chosen:
+        plan += [("pages", rel, text.encode("utf-8")) for rel, text in render(row, places).items()]
+
+    written, same, saved = [], [], []
+    for category, rel, data in plan:
+        store = stores[places[category]]
+        sha = hashlib.sha256(data).hexdigest()
+        if _sha_of(storage.resolve(store.root, rel)) == sha:
+            same.append(rel)
+        else:
+            written.append(storage.write_file(store, rel, data))
+        saved.append({"category": category, "store": store.name, "path": rel, "sha": sha})
+    keep = {(s["store"], s["path"]) for s in saved}
+    removed, untouched = [], []
+    for old in row.saved_files if row.saved_files is not None else _legacy_saved(row):
+        # 저장 안 함으로 둔 유형만 그대로 둔다 — 이번 스캔에 그 유형이 아예 없으면 사이트에서 없어진 것이다.
+        if old["category"] in categories and old["category"] not in chosen:
+            untouched.append(old)
+            continue
+        if (old["store"], old["path"]) in keep:
+            continue
+        store = storage.store(old["store"])
+        if store is None or store.read_only:
+            continue
+        try:
+            storage.delete_file(store, old["path"])
+            removed.append(f"{old['store']}:{old['path']}")
+        except (FileNotFoundError, storage.StorageError):
+            pass   # 사람이 이미 옮기거나 지웠다
+    row.saved_files = saved + untouched
+    row.status = "saved"
+    row.target_store = places.get("pages") or next(iter(places.values()))
     row.saved_at = datetime.now(timezone.utc)
     db.commit()
-    return {"store": target.name, "created": created, "root": str(target.root), "files": written}
+    return {"stores": [{"store": s.name, "root": str(s.root), "created": s.name in created}
+                       for s in stores.values()],
+            "created": bool(created), "files": written, "same": same, "removed": removed}
 
 
 def shot_path(row: InfoSource, n: int) -> Path | None:
@@ -1141,3 +1581,4 @@ def shot_path(row: InfoSource, n: int) -> Path | None:
 
 def forget(row: InfoSource) -> None:
     shutil.rmtree(_shot_dir(row.id), ignore_errors=True)
+    shutil.rmtree(_file_dir(row.id), ignore_errors=True)

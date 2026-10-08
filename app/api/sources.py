@@ -4,8 +4,9 @@
 수정할 때 headers를 비워 보내면(None) 그대로 두고, 빈 문자열이면 지운다 — 값을 다시 보여 줄
 수 없으니 "그대로 둔다"를 따로 표현해야 한다.
 
-저장은 사람이 결정한다. 스캔이 제안(기존 저장소 / 새 저장소와 폴더)을 내고, admin이 그대로
-받거나 고쳐서 저장을 누른다. 새 저장소면 폴더를 만들고 .env를 고쳐 재시작 없이 반영한다.
+저장은 사람이 결정한다. 스캔이 저장 유형(조회 정보 정리·문서·표·발표 파일)마다 제안(기존
+저장소 / 새 저장소와 폴더)을 내고, admin이 그대로 받거나 고쳐서(또는 저장 안 함) 저장을 누른다.
+새 저장소면 폴더를 만들고 .env를 고쳐 재시작 없이 반영한다.
 """
 import json
 
@@ -40,10 +41,15 @@ class SourceUpdate(BaseModel):
     headers: str | None = None
 
 
-class SourceSave(BaseModel):
-    mode: str
-    store: str
+class SaveTarget(BaseModel):
+    mode: str            # existing | new | skip
+    store: str = ""
     path: str = ""
+
+
+class SourceSave(BaseModel):
+    # {유형: 위치} — 유형은 스캔이 낸 제안의 키(pages·documents·sheets·slides)
+    targets: dict[str, SaveTarget]
 
 
 def _host(url: str) -> str:
@@ -68,7 +74,7 @@ def _out(row: InfoSource, *, full: bool = False) -> dict:
 def _counts(row: InfoSource) -> dict:
     scan = row.scan or {}
     return {"pages": len(scan.get("pages") or []), "endpoints": len(scan.get("endpoints") or []),
-            "tools": len(scan.get("tools") or [])}
+            "tools": len(scan.get("tools") or []), "files": len(scan.get("files") or [])}
 
 
 def _row_or_404(db: Session, source_id: int) -> InfoSource:
@@ -184,7 +190,8 @@ def browser_result(source_id: int, file: UploadFile = File(...), db: Session = D
     row = _row_or_404(db, source_id)
     raw = file.file.read(infosource.MAX_UPLOAD_BYTES + 1)
     if len(raw) > infosource.MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="파일이 너무 큽니다(5MB 이하).")
+        raise HTTPException(status_code=413, detail=(
+            f"파일이 너무 큽니다({infosource.MAX_UPLOAD_BYTES // 1_000_000}MB 이하)."))
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -205,19 +212,28 @@ def browser_result(source_id: int, file: UploadFile = File(...), db: Session = D
 def save_source(source_id: int, body: SourceSave, db: Session = Depends(get_db),
                 admin: ApiKey = Depends(require_admin)):
     row = _row_or_404(db, source_id)
+    targets = {c: {**t.model_dump(), "store": t.store.strip()} for c, t in body.targets.items()}
     try:
-        result = infosource.save(db, row, mode=body.mode, store_name=body.store.strip(),
-                                 folder=body.path)
+        result = infosource.save(db, row, targets)
     except (infosource.SourceError, storage.StorageError) as e:
         raise HTTPException(status_code=400, detail=str(e))
-    proposed = (row.proposal or {})
+    proposed = (row.proposal or {}).get("targets") or {}
     audit.record(db, admin.name, "source.save", row.name, {
-        "store": result["store"], "created": result["created"], "files": len(result["files"]),
-        # 제안을 그대로 받았는지 — 제안이 자주 틀리면 여기서 보인다.
-        "as_proposed": proposed.get("mode") == body.mode and proposed.get("store") == body.store,
-        **({"root": result["root"]} if result["created"] else {}),
+        "targets": {c: t["store"] if t["mode"] != "skip" else "-" for c, t in targets.items()},
+        "written": len(result["files"]), "same": len(result["same"]), "removed": len(result["removed"]),
+        # 유형마다 제안을 그대로 받았는지 — 제안이 자주 틀리면 여기서 보인다.
+        "as_proposed": {c: (proposed.get(c) or {}).get("mode") == t["mode"]
+                        and (proposed.get(c) or {}).get("store") == t["store"]
+                        for c, t in targets.items()},
+        "created": [s["root"] for s in result["stores"] if s["created"]],
     })
     return {**result, "source": _out(row, full=True)}
+
+
+@router.get("/sources/{source_id}/scans")
+def list_scans(source_id: int, db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """스캔 이력 — 언제 무엇으로 몇 쪽·몇 파일을 받았고, 지난번과 무엇이 달랐는지."""
+    return infosource.history(db, _row_or_404(db, source_id))
 
 
 @router.get("/sources/{source_id}/shots/{n}")

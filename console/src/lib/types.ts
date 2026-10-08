@@ -961,6 +961,25 @@ export interface SourcePage {
   requires_login: boolean;
   text: string;
   shot?: number;
+  change?: SourceChange;
+}
+
+// 지난 스캔(같은 방법)과 견준 표시
+export type SourceChange = 'new' | 'changed' | 'same';
+
+// 저장 유형 — services/infosource.CATEGORIES
+export type SourceCategory = 'pages' | 'documents' | 'sheets' | 'slides';
+
+export interface SourceFile {
+  url: string;
+  name: string;
+  text: string;
+  page: string;
+  ext: string;
+  sha: string;
+  size: number;
+  category: Exclude<SourceCategory, 'pages'>;
+  change?: SourceChange;
 }
 
 export interface SourceEndpoint {
@@ -987,7 +1006,9 @@ export interface SourceScan {
   origin?: string;
   menu?: SourceMenuItem[];
   pages?: SourcePage[];
-  skipped?: { url: string; reason: string }[];
+  files?: SourceFile[];
+  gone?: string[];
+  skipped?: { url: string; reason: string; status?: string }[];
   sitemap?: number;
   browser?: boolean;
   via?: 'browser';
@@ -1001,12 +1022,23 @@ export interface SourceScan {
   tools?: SourceTool[];
 }
 
-export interface SourceProposal {
+export interface SourceTarget {
   mode: 'existing' | 'new';
   store: string;
   path?: string;
   reason: string;
   evidence: { store: string; hits: number; keywords: string[]; read_only: boolean }[];
+}
+
+// 저장 요청의 유형 하나 — skip이면 그 유형은 쓰지도, 지난번 것을 치우지도 않는다.
+export interface SourceSaveTarget {
+  mode: 'existing' | 'new' | 'skip';
+  store?: string;
+  path?: string;
+}
+
+export interface SourceProposal {
+  targets: Partial<Record<SourceCategory, SourceTarget>>;
 }
 
 export interface SourceOut {
@@ -1022,7 +1054,7 @@ export interface SourceOut {
   created_at: string;
   scanned_at: string | null;
   saved_at: string | null;
-  counts: { pages: number; endpoints: number; tools: number };
+  counts: { pages: number; endpoints: number; tools: number; files: number };
   scan?: SourceScan | null;
   proposal?: SourceProposal | null;
 }
@@ -1034,11 +1066,24 @@ export interface SourceCapabilities {
 }
 
 export interface SourceSaveResult {
-  store: string;
+  stores: { store: string; root: string; created: boolean }[];
   created: boolean;
-  root: string;
-  files: string[];
+  files: string[];      // 새로 쓰거나 덮어쓴 것
+  same: string[];       // 내용이 같아 그대로 둔 것
+  removed: string[];    // "저장소:경로" — 사이트에서 없어져 휴지통으로 옮긴 것
   source: SourceOut;
+}
+
+export interface SourceScanRecord {
+  id: number;
+  via: 'server' | 'browser';
+  status: 'done' | 'failed';
+  started_at: string | null;
+  finished_at: string;
+  pages: number;
+  files: number;
+  changes: { new: number; changed: number; same: number; gone: number } | null;
+  error: string | null;
 }
 
 // 스마트워크

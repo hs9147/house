@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import Async from '../components/Async';
 import Split from '../components/Split';
@@ -7,7 +7,8 @@ import { api } from '../lib/api';
 import { useApi, usePolling } from '../lib/hooks';
 import scanAgent from '../lib/scanAgent.js?raw';
 import type {
-  SourceCapabilities, SourceMenuItem, SourceOut, SourcePage, SourceSaveResult, StorageStore,
+  SourceCapabilities, SourceCategory, SourceChange, SourceFile, SourceMenuItem, SourceOut, SourcePage,
+  SourceSaveResult, SourceSaveTarget, SourceTarget, StorageStore,
 } from '../lib/types';
 import { kindLabel, SourceStatus } from './Sources';
 
@@ -16,11 +17,28 @@ const PAGE_KIND: Record<string, string> = {
   login: '로그인', other: '기타',
 };
 
+// services/infosource.CATEGORIES
+const CATEGORY: Record<SourceCategory, string> = {
+  pages: '조회 정보 정리', documents: '문서 파일', sheets: '표 파일', slides: '발표 파일',
+};
+const CATEGORY_ORDER: SourceCategory[] = ['pages', 'documents', 'sheets', 'slides'];
+
+const CHANGE: Record<SourceChange, { label: string; cls: string }> = {
+  new: { label: '새로', cls: 'info' }, changed: { label: '바뀜', cls: 'warn' }, same: { label: '그대로', cls: 'dim' },
+};
+
+function ChangeBadge({ value }: { value?: SourceChange }) {
+  // 그대로인 것은 표시하지 않는다 — 바뀐 것만 눈에 띄게.
+  if (!value || value === 'same') return null;
+  return <span className={`status ${CHANGE[value].cls}`} style={{ marginLeft: 6 }}>{CHANGE[value].label}</span>;
+}
+
 /**
  * 정보 출처 상세 — 왼쪽은 사람이 할 일(스캔·헤더·저장 결정), 오른쪽은 스캔이 읽은 것.
  *
- * 저장 위치는 제안을 **고칠 수 있는 입력값**으로 채워 둔다. 그대로 누르면 제안대로, 고치면
- * 고친 대로 저장된다 — 새 저장소면 서버가 폴더를 만들고 .env에 넣어 재시작 없이 보이게 한다.
+ * 저장 위치는 유형(조회 정보 정리·문서·표·발표 파일)마다 제안을 **고칠 수 있는 입력값**으로 채워
+ * 둔다. 그대로 누르면 제안대로, 고치면 고친 대로 저장된다 — 새 저장소면 서버가 폴더를 만들고
+ * .env에 넣어 재시작 없이 보이게 한다. 같은 자리에 다시 저장하면 바뀐 것만 덮어쓴다.
  */
 export default function SourceDetail() {
   const id = Number(useParams().id);
@@ -71,8 +89,10 @@ export default function SourceDetail() {
       </div>
       {row.kind === 'web' && <BrowserScanPanel row={row} onChange={setRow} />}
       <HeadersPanel row={row} onChange={setRow} />
-      {row.scan && row.proposal && row.status !== 'scanning' && (
-        <SavePanel row={row} onSaved={(r) => setRow(r.source)} />
+      {/* 유형별 제안 전에 스캔한 출처(proposal에 targets가 없다)는 다시 스캔해야 저장할 수 있다. */}
+      {row.scan && row.proposal?.targets && row.status !== 'scanning' && (
+        // 다시 스캔하면 제안이 바뀐다 — 입력값도 새 제안으로 다시 채운다.
+        <SavePanel key={row.scanned_at ?? ''} row={row} onSaved={(r) => setRow(r.source)} />
       )}
     </>
   );
@@ -182,7 +202,8 @@ function BrowserScanPanel({ row, onChange }: { row: SourceOut; onChange: (r: Sou
       </ol>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         메뉴의 GET 링크는 최대 25곳까지 더 열어 보고(로그아웃·삭제는 건너뜀), 스크립트로만 여는 메뉴는
-        지금 열려 있는 화면만 읽습니다. 화면 캡처는 없습니다.
+        지금 열려 있는 화면만 읽습니다. 화면에 걸린 문서·표·발표 파일은 20개(하나 10MB, 모두 50MB)까지
+        함께 받습니다. 화면 캡처는 없습니다.
       </p>
       {busy && <p className="mutedtext" style={{ fontSize: 12 }}>올리는 중…</p>}
       {error && <p className="error">{error}</p>}
@@ -241,39 +262,63 @@ function HeadersPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceO
   );
 }
 
+interface Pick {
+  mode: 'existing' | 'new' | 'skip';
+  existing: string;
+  name: string;
+  path: string;
+}
+
+function pickOf(t: SourceTarget): Pick {
+  return t.mode === 'existing'
+    ? { mode: 'existing', existing: t.store, name: '', path: '' }
+    : { mode: 'new', existing: '', name: t.store, path: t.path ?? '' };
+}
+
 function SavePanel({ row, onSaved }: { row: SourceOut; onSaved: (r: SourceSaveResult) => void }) {
-  const proposal = row.proposal!;
+  const proposal = row.proposal!.targets;
+  const categories = CATEGORY_ORDER.filter((c) => proposal[c]);
   const stores = useApi(() => api.listStorageStores(), []);
-  const [mode, setMode] = useState(proposal.mode);
-  const [existing, setExisting] = useState(proposal.mode === 'existing' ? proposal.store : '');
-  const [newName, setNewName] = useState(proposal.mode === 'new' ? proposal.store : '');
-  const [path, setPath] = useState(proposal.path ?? '');
+  const [picks, setPicks] = useState<Partial<Record<SourceCategory, Pick>>>(
+    () => Object.fromEntries(categories.map((c) => [c, pickOf(proposal[c]!)])));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<SourceSaveResult | null>(null);
 
-  // 다시 스캔하면 제안이 바뀐다 — 입력값도 새 제안으로 다시 채운다.
-  useEffect(() => {
-    setMode(proposal.mode);
-    if (proposal.mode === 'existing') setExisting(proposal.store);
-    else {
-      setNewName(proposal.store);
-      setPath(proposal.path ?? '');
-    }
-  }, [proposal.mode, proposal.store, proposal.path]);
-
   const writable = (stores.data ?? []).filter((s: StorageStore) => !s.read_only);
-  const target = mode === 'existing' ? existing : newName.trim();
+  const set = (c: SourceCategory, patch: Partial<Pick>) =>
+    setPicks((cur) => ({ ...cur, [c]: { ...cur[c]!, ...patch } }));
+  const files = row.scan?.files ?? [];
+  const sizeOf = (c: SourceCategory) =>
+    c === 'pages' ? `화면 ${row.scan?.pages?.length ?? 0}장` : `${files.filter((f) => f.category === c).length}개`;
+
+  const targets: Partial<Record<SourceCategory, SourceSaveTarget>> = {};
+  categories.forEach((c) => {
+    const p = picks[c]!;
+    targets[c] = p.mode === 'skip' ? { mode: 'skip' }
+      : p.mode === 'existing' ? { mode: 'existing', store: p.existing }
+        : { mode: 'new', store: p.name.trim(), path: p.path.trim() };
+  });
+  const chosen = categories.filter((c) => targets[c]!.mode !== 'skip');
+  const ready = chosen.length > 0 && chosen.every((c) => {
+    const t = targets[c]!;
+    return t.store && (t.mode !== 'new' || t.path);
+  });
 
   const save = async () => {
-    if (!target) return;
-    if (mode === 'new' && !window.confirm(
-      `새 저장소 '${target}'을 만듭니다.\n폴더: ${path}\n\n폴더를 만들고 .env의 PAAS_DOC_ROOTS에 추가합니다(이전 파일은 .env.bak).`)) return;
+    // 같은 이름의 새 저장소는 한 번만 만든다(서버도 그렇다) — 폴더는 먼저 적은 유형의 것.
+    const created = new Map<string, string>();
+    chosen.forEach((c) => {
+      const t = targets[c]!;
+      if (t.mode === 'new' && !created.has(t.store!)) created.set(t.store!, t.path!);
+    });
+    if (created.size && !window.confirm(
+      `새 저장소를 만듭니다.\n${[...created].map(([n, p]) => `${n} — ${p}`).join('\n')}\n\n` +
+      '폴더를 만들고 .env의 PAAS_DOC_ROOTS에 추가합니다(이전 파일은 .env.bak).')) return;
     setBusy(true);
     setError('');
     try {
-      const res = await api.saveSource(row.id, mode === 'existing'
-        ? { mode, store: target } : { mode, store: target, path: path.trim() });
+      const res = await api.saveSource(row.id, targets);
       setResult(res);
       onSaved(res);
     } catch (e) {
@@ -286,60 +331,38 @@ function SavePanel({ row, onSaved }: { row: SourceOut; onSaved: (r: SourceSaveRe
   return (
     <div className="panel">
       <h3 style={{ marginTop: 0 }}>저장 위치</h3>
-      <p style={{ fontSize: 12 }}>
-        제안: <b>{proposal.mode === 'existing' ? `기존 저장소 ${proposal.store}` : `새 저장소 ${proposal.store}`}</b>
-        <br /><span className="mutedtext">{proposal.reason}</span>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        유형마다 따로 고릅니다. 같은 자리에 다시 저장하면 바뀐 파일만 덮어쓰고, 사이트에서 없어진 파일은
+        그 저장소의 휴지통(.trash)으로 옮깁니다. 저장 안 함으로 둔 유형은 지난번 것을 건드리지 않습니다.
       </p>
-      {proposal.evidence.length > 0 && (
-        <table style={{ fontSize: 11 }}>
-          <thead><tr><th>저장소</th><th>걸린 문서</th><th>걸린 키워드</th></tr></thead>
-          <tbody>
-            {proposal.evidence.map((e) => (
-              <tr key={e.store}>
-                <td className="mono">{e.store}{e.read_only && ' (읽기 전용)'}</td>
-                <td className="mono">{e.hits}</td>
-                <td>{e.keywords.join(', ') || '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      <div style={{ marginTop: 10, fontSize: 12 }}>
-        <label style={{ display: 'block', marginBottom: 6 }}>
-          <input type="radio" checked={mode === 'existing'} onChange={() => setMode('existing')} />
-          {' '}기존 저장소에
-          {mode === 'existing' && (
-            <select value={existing} style={{ marginLeft: 8 }} onChange={(e) => setExisting(e.target.value)}>
-              <option value="">선택</option>
-              {writable.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}
-            </select>
-          )}
-        </label>
-        <label style={{ display: 'block' }}>
-          <input type="radio" checked={mode === 'new'} onChange={() => setMode('new')} />
-          {' '}새 저장소를 만들어
-        </label>
-        {mode === 'new' && (
-          <div style={{ marginLeft: 22, marginTop: 6 }}>
-            <input className="mono" placeholder="이름 — 소문자·숫자·하이픈" value={newName}
-                   style={{ width: '100%' }} onChange={(e) => setNewName(e.target.value)} />
-            <input className="mono" placeholder="폴더(절대 경로)" value={path}
-                   style={{ width: '100%', marginTop: 6 }} onChange={(e) => setPath(e.target.value)} />
-          </div>
-        )}
-      </div>
+      {categories.map((c) => (
+        <TargetPicker key={c} label={`${CATEGORY[c]} · ${sizeOf(c)}`} proposal={proposal[c]!}
+                      pick={picks[c]!} writable={writable} onChange={(patch) => set(c, patch)} />
+      ))}
       <div className="row" style={{ gap: 8, marginTop: 10 }}>
-        <button className="small" disabled={busy || !target || (mode === 'new' && !path.trim())} onClick={save}>
+        <button className="small" disabled={busy || !ready} onClick={save}>
           {busy ? '저장 중…' : row.status === 'saved' ? '다시 저장' : '저장'}
         </button>
       </div>
       {error && <p className="error">{error}</p>}
       {result && (
-        <p style={{ fontSize: 12 }}>
-          <b>{result.store}</b>에 {result.files.length}개 문서를 썼습니다
-          {result.created && <> — 새 저장소를 만들었습니다(<span className="mono">{result.root}</span>)</>}.
-          색인이 돌면 문서 검색·온톨로지에 나타납니다.
-        </p>
+        <div style={{ fontSize: 12, marginTop: 8 }}>
+          <p style={{ margin: '4px 0' }}>
+            {result.files.length}개를 썼습니다 · 내용이 같아 그대로 둔 것 {result.same.length}개
+            {result.removed.length > 0 && <> · 휴지통으로 옮긴 것 {result.removed.length}개</>}.
+            색인이 돌면 문서 검색·온톨로지에 나타납니다.
+          </p>
+          {result.stores.filter((st) => st.created).map((st) => (
+            <p key={st.store} style={{ margin: '4px 0' }}>
+              새 저장소 <b>{st.store}</b>를 만들었습니다(<span className="mono">{st.root}</span>).
+            </p>
+          ))}
+          {result.removed.length > 0 && (
+            <ul className="mono" style={{ fontSize: 11, margin: '4px 0', paddingLeft: 18 }}>
+              {result.removed.map((r) => <li key={r}>{r}</li>)}
+            </ul>
+          )}
+        </div>
       )}
       {!result && row.status === 'saved' && row.target_store && (
         <p className="mutedtext" style={{ fontSize: 11 }}>
@@ -347,6 +370,68 @@ function SavePanel({ row, onSaved }: { row: SourceOut; onSaved: (r: SourceSaveRe
           {row.saved_at && ` · ${new Date(row.saved_at).toLocaleString('ko-KR')}`}
         </p>
       )}
+    </div>
+  );
+}
+
+function TargetPicker({ label, proposal, pick, writable, onChange }: {
+  label: string; proposal: SourceTarget; pick: Pick; writable: StorageStore[];
+  onChange: (patch: Partial<Pick>) => void;
+}) {
+  // 유형마다 라디오 묶음이 따로다.
+  const group = useId();
+  return (
+    <div style={{ borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 8, fontSize: 12 }}>
+      <b>{label}</b>
+      <p style={{ margin: '4px 0' }}>
+        제안: {proposal.mode === 'existing' ? `기존 저장소 ${proposal.store}` : `새 저장소 ${proposal.store}`}
+        <br /><span className="mutedtext">{proposal.reason}</span>
+      </p>
+      {(proposal.evidence ?? []).length > 0 && (
+        <details style={{ margin: '4px 0' }}>
+          <summary className="mutedtext" style={{ fontSize: 11 }}>저장소마다 걸린 문서</summary>
+          <table style={{ fontSize: 11 }}>
+            <thead><tr><th>저장소</th><th>걸린 문서</th><th>걸린 키워드</th></tr></thead>
+            <tbody>
+              {proposal.evidence.map((e) => (
+                <tr key={e.store}>
+                  <td className="mono">{e.store}{e.read_only && ' (읽기 전용)'}</td>
+                  <td className="mono">{e.hits}</td>
+                  <td>{e.keywords.join(', ') || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
+      <label style={{ display: 'block', marginBottom: 4 }}>
+        <input type="radio" name={group} checked={pick.mode === 'existing'}
+               onChange={() => onChange({ mode: 'existing' })} />
+        {' '}기존 저장소에
+        {pick.mode === 'existing' && (
+          <select value={pick.existing} style={{ marginLeft: 8 }}
+                  onChange={(e) => onChange({ existing: e.target.value })}>
+            <option value="">선택</option>
+            {writable.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}
+          </select>
+        )}
+      </label>
+      <label style={{ display: 'block', marginBottom: 4 }}>
+        <input type="radio" name={group} checked={pick.mode === 'new'} onChange={() => onChange({ mode: 'new' })} />
+        {' '}새 저장소를 만들어
+      </label>
+      {pick.mode === 'new' && (
+        <div style={{ marginLeft: 22, marginBottom: 4 }}>
+          <input className="mono" placeholder="이름 — 소문자·숫자·하이픈" value={pick.name}
+                 style={{ width: '100%' }} onChange={(e) => onChange({ name: e.target.value })} />
+          <input className="mono" placeholder="폴더(절대 경로)" value={pick.path}
+                 style={{ width: '100%', marginTop: 6 }} onChange={(e) => onChange({ path: e.target.value })} />
+        </div>
+      )}
+      <label style={{ display: 'block' }}>
+        <input type="radio" name={group} checked={pick.mode === 'skip'} onChange={() => onChange({ mode: 'skip' })} />
+        {' '}저장 안 함
+      </label>
     </div>
   );
 }
@@ -365,6 +450,9 @@ function ScanView({ row }: { row: SourceOut }) {
       ? [
           { key: 'menu', label: '메뉴 구성', content: <MenuTree items={scan.menu ?? []} /> },
           { key: 'pages', label: '조회 가능한 정보', content: <PagesTable pages={scan.pages ?? []} /> },
+          ...((scan.files ?? []).length > 0
+            ? [{ key: 'files', label: '내려받은 파일', content: <FilesTable files={scan.files ?? []} /> }]
+            : []),
           ...((scan.pages ?? []).some((p) => p.shot !== undefined)
             ? [{ key: 'shots', label: '캡처', content: <Shots id={row.id} pages={scan.pages ?? []} /> }]
             : []),
@@ -379,6 +467,7 @@ function ScanView({ row }: { row: SourceOut }) {
             { key: 'tools', label: '도구', content: <Tools row={row} /> },
             { key: 'notes', label: '기록', content: notes },
           ];
+  tabs.push({ key: 'history', label: '스캔 이력', content: <ScanHistory row={row} /> });
   return (
     <>
       {(scan.summary || scan.keywords.length > 0) && (
@@ -419,6 +508,7 @@ function PagesTable({ pages }: { pages: SourcePage[] }) {
           <tr key={p.url}>
             <td>
               <a href={p.url} target="_blank" rel="noreferrer">{p.title || p.url}</a>
+              <ChangeBadge value={p.change} />
               <div className="mono mutedtext" style={{ fontSize: 10, wordBreak: 'break-all' }}>{p.url}</div>
             </td>
             <td>{PAGE_KIND[p.kind] ?? p.kind}{p.requires_login && p.kind !== 'login' && ' · 로그인 필요'}</td>
@@ -429,6 +519,79 @@ function PagesTable({ pages }: { pages: SourcePage[] }) {
         ))}
       </tbody>
     </table>
+  );
+}
+
+function FilesTable({ files }: { files: SourceFile[] }) {
+  return (
+    <table style={{ fontSize: 12 }}>
+      <thead><tr><th>파일</th><th>유형</th><th>링크 글자</th><th>크기</th><th>걸린 화면</th></tr></thead>
+      <tbody>
+        {files.map((f) => (
+          <tr key={f.url}>
+            <td>
+              <span className="mono">{f.name}</span>
+              <ChangeBadge value={f.change} />
+              <div className="mono mutedtext" style={{ fontSize: 10, wordBreak: 'break-all' }}>{f.url}</div>
+            </td>
+            <td>{CATEGORY[f.category]}</td>
+            <td>{f.text || '—'}</td>
+            <td className="mono">
+              {f.size >= 1_000_000 ? `${(f.size / 1_000_000).toFixed(1)}MB` : `${Math.ceil(f.size / 1000)}KB`}
+            </td>
+            <td className="mono" style={{ fontSize: 10, wordBreak: 'break-all' }}>{f.page || '—'}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/** 스캔 이력 — 같은 방법(서버·브라우저)의 지난 스캔이 다음 스캔의 범위와 바뀜 표시의 기준이다. */
+function ScanHistory({ row }: { row: SourceOut }) {
+  const scans = useApi(() => api.sourceScans(row.id), [row.id, row.scanned_at]);
+  const gone = row.scan?.gone ?? [];
+  return (
+    <div style={{ fontSize: 12 }}>
+      <p className="mutedtext" style={{ marginTop: 0, fontSize: 11 }}>
+        지난번에 받은 화면은 다음 스캔에서 다시 보고, 지난번에 없던 주소(404)는 한 번 쉬어 쪽수 상한을
+        살아 있는 화면에 씁니다. 바뀜 표시는 같은 방법으로 한 지난 스캔과 견준 것입니다.
+      </p>
+      {gone.length > 0 && (
+        <>
+          <h4 style={{ margin: '6px 0' }}>지난 스캔에 있었는데 이번에 없는 주소</h4>
+          <ul className="mono" style={{ fontSize: 11, margin: 0, paddingLeft: 18 }}>
+            {gone.map((u) => <li key={u} style={{ wordBreak: 'break-all' }}>{u}</li>)}
+          </ul>
+        </>
+      )}
+      <Async state={scans} empty="아직 스캔 이력이 없습니다.">
+        {(rows) => (
+          <table style={{ marginTop: 8 }}>
+            <thead>
+              <tr><th>끝난 시각</th><th>방법</th><th>결과</th><th>화면</th><th>파일</th><th>지난번과 견줌</th></tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td className="mono" style={{ fontSize: 11 }}>{new Date(r.finished_at).toLocaleString('ko-KR')}</td>
+                  <td>{r.via === 'browser' ? '브라우저' : '서버'}</td>
+                  <td>{r.status === 'done' ? '완료' : <span className="error">실패</span>}</td>
+                  <td className="mono">{r.pages}</td>
+                  <td className="mono">{r.files}</td>
+                  <td style={{ fontSize: 11 }}>
+                    {r.status !== 'done'
+                      ? (r.error ?? '').slice(0, 120)
+                      : r.changes && `새로 ${r.changes.new} · 바뀜 ${r.changes.changed} · ` +
+                        `그대로 ${r.changes.same} · 없어짐 ${r.changes.gone}`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Async>
+    </div>
   );
 }
 
