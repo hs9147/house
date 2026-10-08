@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -135,7 +136,10 @@ def _http_get(url: str, headers: dict[str, str], origin: str) -> tuple[int, str,
     리다이렉트를 직접 따른다: 헤더는 **등록한 출처로 가는 요청에만** 붙인다.
     """
     current = url
-    with httpx.Client(timeout=TIMEOUT, follow_redirects=False) as client:
+    # 인증서는 OS 저장소로 검증한다 — httpx 기본(certifi)은 사내 루트 CA를 모른다. Windows에서
+    # 표준 ssl의 기본 컨텍스트가 시스템 저장소(ROOT·CA)를 읽는다(pu-gps4.lge.com에서 확인).
+    with httpx.Client(timeout=TIMEOUT, follow_redirects=False,
+                      verify=ssl.create_default_context()) as client:
         for _ in range(6):
             sent = {"user-agent": USER_AGENT}
             if _origin(current) == origin:
