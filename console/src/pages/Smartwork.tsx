@@ -64,7 +64,6 @@ export default function Smartwork() {
   const [report, setReport] = useState<SmartworkReport | null>(null);
   const [view, setView] = useState<View>('agent');
   const [leftTab, setLeftTab] = useState<'chat' | 'settings'>('chat');
-  const [collapsed, setCollapsed] = useState(false);
   const opened = useRef(false);
   // 폴링(usePolling)은 처음 받은 함수를 계속 부른다 — 지금 세션은 ref로 읽는다.
   const current = useRef<SmartworkSession | null>(null);
@@ -494,8 +493,7 @@ export default function Smartwork() {
   );
 
   return (
-    <Split left={left} right={right} leftLabel="대화·설정" leftWidth={440}
-      collapsed={collapsed} onToggle={setCollapsed} />
+    <Split left={left} right={right} leftWidth={440} />
   );
 }
 
