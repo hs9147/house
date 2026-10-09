@@ -29,7 +29,7 @@ export function kindLabel(kind: SourceKind): string {
 }
 
 /**
- * 정보 업데이트 — 출처(웹사이트·API·MCP)를 등록하면 스캔이 구조를 읽고, 어느 저장소에 넣을지
+ * 데이터 수집 — 출처(웹사이트·API·MCP)를 등록하면 스캔이 구조를 읽고, 어느 저장소에 넣을지
  * 제안한다. 저장은 상세 화면에서 사람이 결정한다.
  *
  * 요청 헤더(쿠키·토큰)는 여기서 한 번 받고 다시 보여 주지 않는다 — 서버가 암호화해 두고
@@ -79,7 +79,7 @@ export default function Sources() {
   return (
     <>
       <div className="panel">
-        <h2 style={{ marginTop: 0 }}>정보 업데이트</h2>
+        <h2 style={{ marginTop: 0 }}>데이터 수집</h2>
         <p className="mutedtext" style={{ fontSize: 12 }}>
           정보 출처를 등록하면 스캔합니다 — 웹사이트는 메뉴 구성과 화면마다 조회할 수 있는 정보를,
           API는 엔드포인트를, MCP 서버는 도구 목록을 읽습니다. 스캔이 끝나면 기존 저장소에 넣을지

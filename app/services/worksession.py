@@ -199,38 +199,46 @@ def set_context(db: Session, email: str, session_id: int, folders: list[str], ma
 
 
 def send(db: Session, key: ApiKey, provider, session_id: int, content: str,
-         toolsets: list) -> dict:
+         toolsets: list, attachments: list[dict] | None = None) -> dict:
     """한 턴 — 묻고 답한 두 줄을 **답이 나온 뒤에 함께** 남긴다. 모델이 실패하면 아무것도
     남지 않아 같은 말을 다시 보내면 된다(질문만 남은 대화가 다른 참여자에게 보이지 않는다).
 
-    content가 비면 여는 턴(업무 제안) — 대화가 아직 없을 때만 받는다.
+    content가 비면 여는 턴(업무 제안) — 대화가 아직 없을 때만 받는다. attachments는 이번
+    요청에 붙인 참고 자료다(services/smartwork.read_attachments).
     """
     row, member = get(db, session_id, key.name)
     content = content.strip()[:smartwork.MAX_MESSAGE_CHARS]
-    history = [{"role": m.role, "content": m.content, "author": m.author}
+    history = [{"role": m.role, "content": m.content, "author": m.author,
+                "attachments": (m.view or {}).get("attachments") if m.role == "user" else None}
                for m in db.execute(select(SmartworkSessionMessage)
                                    .where(SmartworkSessionMessage.session_id == row.id)
                                    .order_by(SmartworkSessionMessage.id)).scalars()]
-    if not content and history:
+    if not content and (history or attachments):
         raise SessionError(422, "보낼 내용이 없습니다.")
+    try:
+        kept, images = smartwork.read_attachments(attachments or [])
+    except smartwork.AttachmentError as e:
+        raise SessionError(422, str(e))
     if content:
-        history.append({"role": "user", "content": content, "author": key.name})
+        history.append({"role": "user", "content": content, "author": key.name,
+                        "attachments": kept})
     participants = [m.email for m in db.execute(
         select(SmartworkSessionMember).where(SmartworkSessionMember.session_id == row.id)
         .order_by(SmartworkSessionMember.id)).scalars()]
     result = smartwork.chat(
         db, key, provider, history, toolsets, org_id=row.organization_id,
         workflow=row.workflow.name if row.workflow else "", participants=participants,
-        folders=member.folders or [], mail=bool(member.mail))
+        folders=member.folders or [], mail=bool(member.mail), images=images)
     if content:
         db.add(SmartworkSessionMessage(session_id=row.id, role="user", author=key.name,
-                                       content=content))
+                                       content=content,
+                                       view={"attachments": kept} if kept else None))
         if not row.title:
             # 제목을 따로 묻지 않는다 — 첫 요청이 곧 이 업무의 이름이다.
             row.title = content.splitlines()[0][:80]
     answer = SmartworkSessionMessage(
         session_id=row.id, role="assistant", author=key.name, content=result["reply"],
-        view={k: result[k] for k in ("agent", "report", "suggestions", "tools")})
+        view={k: result[k] for k in ("agent", "report", "suggestions", "choices", "tools")})
     db.add(answer)
     row.updated_at = utcnow()
     db.commit()

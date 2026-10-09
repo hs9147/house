@@ -71,6 +71,7 @@ import type {
   SmartworkOrgChoice,
   SmartworkSession,
   SmartworkSessionSummary,
+  SmartworkAttachmentIn,
   SmartworkTurn,
   StorageStore,
   UserAccountOut,
@@ -167,10 +168,9 @@ async function request<T>(
     method,
     headers: {
       'x-api-key': getKey(),
-      ...(body !== undefined && !(body instanceof Blob) ? { 'content-type': 'application/json' } : {}),
+      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
     },
-    // Blob(File)은 그대로 — JSON으로 감싸지 않고 본문 자체로 보낸다(personalUpload)
-    body: body === undefined ? undefined : body instanceof Blob ? body : JSON.stringify(body),
+    body: body !== undefined ? JSON.stringify(body) : undefined,
     signal,
   });
   if (res.status === 401) {
@@ -221,6 +221,48 @@ async function requestMultipart<T>(path: string, formData: FormData): Promise<T>
     throw new ApiError(res.status, detail);
   }
   return data as T;
+}
+
+// fetch는 올라간 바이트를 알려 주지 않는다 — 진행률이 필요한 본문 업로드만 XHR로 보낸다.
+// XHR도 File을 디스크에서 흘려 보내므로 통째로 메모리에 올리지 않는다.
+function uploadWithProgress<T>(
+  method: string,
+  path: string,
+  file: Blob,
+  query: Record<string, string | number>,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<T> {
+  const qs = new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]));
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, `${apiUrl(path)}?${qs}`);
+    xhr.setRequestHeader('x-api-key', getKey());
+    if (onProgress) xhr.upload.onprogress = (e) => onProgress(e.loaded, e.lengthComputable ? e.total : file.size);
+    xhr.onerror = () => reject(new ApiError(0, '업로드 중 연결이 끊겼습니다.'));
+    xhr.onload = () => {
+      if (xhr.status === 401) {
+        logout();
+        window.location.hash = '#/login';
+        reject(new ApiError(401, '인증이 만료되었습니다. 다시 로그인하세요.'));
+        return;
+      }
+      let data: unknown = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        /* 본문 없는 응답 */
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new ApiError(xhr.status,
+          data && typeof data === 'object' && 'detail' in data
+            ? formatDetail((data as { detail: unknown }).detail)
+            : `HTTP ${xhr.status}`));
+        return;
+      }
+      resolve(data as T);
+    };
+    xhr.send(file);
+  });
 }
 
 export const api = {
@@ -547,23 +589,25 @@ export const api = {
   setSessionContext: (id: number, context: SmartworkContext) =>
     request<SmartworkContext>('PUT', `/smartwork/sessions/${id}/context`, context),
   // 빈 content는 여는 턴(업무 맥락을 보고 할 일을 제안하며 시작한다) — 대화가 없을 때만
-  sendSessionMessage: (id: number, content: string) =>
-    request<SmartworkTurn>('POST', `/smartwork/sessions/${id}/messages`, { content }),
+  sendSessionMessage: (id: number, content: string, attachments: SmartworkAttachmentIn[] = []) =>
+    request<SmartworkTurn>('POST', `/smartwork/sessions/${id}/messages`, { content, attachments }),
   // 개인 업무 맥락 — 로그인한 그 사람의 것만. 경로에 누구의 것인지 고르는 자리가 없다.
   personalStatus: () => request<PersonalStatus>('GET', '/smartwork/personal'),
   personalConsent: () => request<PersonalStatus>('POST', '/smartwork/personal/consent'),
   personalRevoke: () => request<void>('DELETE', '/smartwork/personal'),
+  // 폴더 이름은 쿼리로 싣는다 — 한글·&·%가 든 이름을 URL 경로에 넣으면 IIS/ARR이 400으로 막는다.
   personalManifest: (folder: string, entries: { path: string; size: number; mtime: number }[]) =>
-    request<PersonalManifest>(
-      'POST', `/smartwork/personal/folders/${encodeURIComponent(folder)}/manifest`, { entries }),
+    request<PersonalManifest>('POST', '/smartwork/personal/folders/manifest', { entries }, { folder }),
   // 파일 하나를 본문 그대로 PUT한다 — File을 body로 주면 브라우저가 디스크에서 흘려 보내고,
   // 서버도 임시 파일로 흘려 받는다(한 요청에 여러 파일·통째 메모리 적재가 없다).
-  personalUpload: (folder: string, item: { file: File; path: string; mtime: number }) =>
-    request<{ path: string; status: 'saved' | 'skipped' | 'failed'; error?: string }>(
-      'PUT', `/smartwork/personal/folders/${encodeURIComponent(folder)}/file`, item.file,
-      { path: item.path, mtime: item.mtime }),
+  // onProgress는 올라간 바이트다 — 다 올라간 뒤에도 서버가 변환을 마칠 때까지 응답이 없다.
+  personalUpload: (folder: string, item: { file: File; path: string; mtime: number },
+                   onProgress?: (loaded: number, total: number) => void) =>
+    uploadWithProgress<{ path: string; status: 'saved' | 'skipped' | 'failed'; error?: string }>(
+      'PUT', '/smartwork/personal/folders/file', item.file,
+      { folder, path: item.path, mtime: item.mtime }, onProgress),
   personalRemoveFolder: (folder: string) =>
-    request<void>('DELETE', `/smartwork/personal/folders/${encodeURIComponent(folder)}`),
+    request<void>('DELETE', '/smartwork/personal/folders', undefined, { folder }),
   // 메일은 브라우저가 Graph에서 읽어 온 것(lib/msgraph.ts)을 보낸다 — 토큰은 싣지 않는다.
   mailSave: (account: string, messages: object[]) =>
     request<{ fetched: number; new: number }>('POST', '/smartwork/personal/mail/messages', { account, messages }),

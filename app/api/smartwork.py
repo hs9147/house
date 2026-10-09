@@ -192,9 +192,16 @@ def set_session_context(session_id: int, body: SessionContextIn, db: Session = D
         raise _session_error(e)
 
 
+class AttachmentIn(BaseModel):
+    name: str
+    type: str = ""
+    data: str  # base64 — 클립보드 이미지도 같은 모양으로 온다
+
+
 class SessionMessageIn(BaseModel):
     # 비어 있으면 여는 턴 — 업무 맥락을 보고 할 일을 제안하며 시작한다(services/smartwork).
     content: str = ""
+    attachments: list[AttachmentIn] = []
 
 
 @router.post("/sessions/{session_id}/messages")
@@ -205,7 +212,8 @@ def session_message(session_id: int, body: SessionMessageIn, db: Session = Depen
         raise HTTPException(status_code=503, detail=(
             "기본 LLM 프로바이더가 없습니다 — 관리자가 LLM 메뉴에서 기본 프로바이더를 지정해야 합니다."))
     try:
-        return worksession.send(db, key, provider, session_id, body.content, _toolsets(db, key))
+        return worksession.send(db, key, provider, session_id, body.content, _toolsets(db, key),
+                                [a.model_dump() for a in body.attachments])
     except worksession.SessionError as e:
         raise _session_error(e)
     except (bedrock.BedrockError, llm_service.LlmTimeout, llm_service.LlmCallFailed,
@@ -245,7 +253,9 @@ class ManifestIn(BaseModel):
     entries: list[ManifestEntry]
 
 
-@router.post("/personal/folders/{folder}/manifest")
+# 폴더 이름은 사람이 PC에서 지은 것이라 한글·&·% 등이 흔하다 — URL 경로에 넣으면 IIS/ARR
+# 앞단이 사유 없이 400으로 막는다(README: 경로에 한글을 넣지 않는다). 쿼리로 받는다.
+@router.post("/personal/folders/manifest")
 def folder_manifest(folder: str, body: ManifestIn, db: Session = Depends(get_db),
                     key: ApiKey = Depends(require_api_key)):
     try:
@@ -254,7 +264,7 @@ def folder_manifest(folder: str, body: ManifestIn, db: Session = Depends(get_db)
         raise _personal_error(e)
 
 
-@router.put("/personal/folders/{folder}/file")
+@router.put("/personal/folders/file")
 async def folder_file(folder: str, path: str, request: Request, mtime: float = 0,
                       db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
     """manifest가 needed로 돌려준 파일 **하나**를 본문 그대로 받는다(path는 폴더 안 상대경로).
@@ -286,7 +296,7 @@ async def folder_file(folder: str, path: str, request: Request, mtime: float = 0
             raise _personal_error(e)
 
 
-@router.delete("/personal/folders/{folder}", status_code=204)
+@router.delete("/personal/folders", status_code=204)
 def folder_remove(folder: str, db: Session = Depends(get_db),
                   key: ApiKey = Depends(require_api_key)):
     try:

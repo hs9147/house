@@ -24,6 +24,7 @@ def client(monkeypatch, tmp_path, fresh_settings):
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"docs={root}")
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "")
     monkeypatch.setattr(gitea, "ensure_org", lambda name: None)
     get_settings.cache_clear()
 
@@ -57,6 +58,17 @@ def _org(c: TestClient, name="gp") -> int:
 
 def _member(c: TestClient) -> dict:
     key = c.post(f"{API}/keys", json={"name": "dev1"}, headers=ADMIN).json()["key"]
+    return {"x-api-key": key}
+
+
+def _user(c: TestClient, email: str, org_id: int) -> dict:
+    c.post(f"{API}/auth/register", json={"email": email, "name": "user", "password": "pw12345"})
+    account_id = next(a["id"] for a in c.get(f"{API}/auth/accounts", headers=ADMIN).json()
+                      if a["email"] == email)
+    c.post(f"{API}/auth/accounts/{account_id}/approve", headers=ADMIN)
+    c.post(f"{API}/auth/accounts/{account_id}/organizations/modify",
+           json={"organization_id": org_id, "action": "add"}, headers=ADMIN)
+    key = c.post(f"{API}/auth/login", json={"email": email, "password": "pw12345"}).json()["key"]
     return {"x-api-key": key}
 
 
@@ -109,16 +121,41 @@ def test_saving_an_invalid_spec_is_rejected_with_every_problem(client):
     assert good.json()["extracted"]["entities"][0]["name"] == "계약서"
 
 
-def test_members_can_read_but_not_change(client):
-    org = _org(client)
-    wid = client.post(f"{API}/workflows", headers=ADMIN,
-                      json={"organization_id": org, "name": "w"}).json()["id"]
-    member = _member(client)
-    assert client.get(f"{API}/workflows/{wid}", headers=member).status_code == 200
-    assert client.put(f"{API}/workflows/{wid}", headers=member,
-                      json={"spec": {"nodes": [], "edges": []}}).status_code == 403
-    assert client.post(f"{API}/workflows/{wid}/runs", headers=member).status_code == 403
-    assert client.delete(f"{API}/workflows/{wid}", headers=member).status_code == 403
+def test_org_members_manage_their_own_workflows_only(client):
+    org, other = _org(client, "gp"), _org(client, "vs")
+    member = _user(client, "kim@example.com", org)
+
+    made = client.post(f"{API}/workflows", headers=member,
+                       json={"organization_id": org, "name": "w"})
+    assert made.status_code == 201, made.text
+    wid = made.json()["id"]
+    saved = client.put(f"{API}/workflows/{wid}", headers=member, json={"spec": {
+        "nodes": [{"id": "목록", "type": "storage.list", "store": "docs"},
+                  {"id": "검토", "type": "human", "title": "법무 검토"}],
+        "edges": [{"from": "목록", "to": "검토"}],
+    }})
+    assert saved.status_code == 200, saved.text
+    assert client.patch(f"{API}/workflows/{wid}", headers=member,
+                        json={"name": "w2"}).status_code == 200
+    assert client.get(f"{API}/workflows/resources", headers=member,
+                      params={"organization_id": org}).status_code == 200
+
+    # 다른 조직에는 만들 수 없고, 다른 조직의 것은 목록에도 없고 열리지도 않는다.
+    assert client.post(f"{API}/workflows", headers=member,
+                       json={"organization_id": other, "name": "x"}).status_code == 403
+    theirs = client.post(f"{API}/workflows", headers=ADMIN,
+                         json={"organization_id": other, "name": "남의것"}).json()["id"]
+    assert [w["name"] for w in client.get(f"{API}/workflows", headers=member).json()] == ["w2"]
+    assert client.get(f"{API}/workflows/{theirs}", headers=member).status_code == 404
+    assert client.put(f"{API}/workflows/{theirs}", headers=member,
+                      json={"spec": {"nodes": [], "edges": []}}).status_code == 404
+    assert client.delete(f"{API}/workflows/{theirs}", headers=member).status_code == 404
+    assert client.get(f"{API}/workflows/resources", headers=member,
+                      params={"organization_id": other}).status_code == 404
+    # 조직이 없는 발급 키도 마찬가지다.
+    assert client.get(f"{API}/workflows/{wid}", headers=_member(client)).status_code == 404
+
+    assert client.delete(f"{API}/workflows/{wid}", headers=member).status_code == 204
     assert client.get(f"{API}/workflows/{wid}").status_code == 401
 
 
@@ -293,9 +330,9 @@ def test_assessment_endpoint_reports_and_offers_a_change_request(client, monkeyp
     empty = client.post(f"{API}/workflows", headers=ADMIN,
                         json={"organization_id": org, "name": "빈것"}).json()["id"]
     assert client.post(f"{API}/workflows/{empty}/assessment", headers=ADMIN).status_code == 400
-    # 비관리자는 평가를 돌릴 수 없다(LLM 호출이고 감사 로그에 남는다).
+    # 소속 조직이 아니면 평가를 돌릴 수 없다(LLM 호출이고 감사 로그에 남는다).
     assert client.post(f"{API}/workflows/{wid}/assessment",
-                       headers=_member(client)).status_code == 403
+                       headers=_member(client)).status_code == 404
 
 
 def test_rename_does_not_bump_the_version_or_revalidate(client):
@@ -322,8 +359,8 @@ def test_rename_does_not_bump_the_version_or_revalidate(client):
                 json={"organization_id": org, "name": "신규업체등록"})
     assert client.patch(f"{API}/workflows/{wid}", headers=ADMIN,
                         json={"name": "신규업체등록"}).status_code == 409
-    # 비어 있는 이름은 받지 않고, 비관리자는 바꿀 수 없다.
+    # 비어 있는 이름은 받지 않고, 소속 조직이 아니면 바꿀 수 없다.
     assert client.patch(f"{API}/workflows/{wid}", headers=ADMIN,
                         json={"name": ""}).status_code == 422
     assert client.patch(f"{API}/workflows/{wid}", headers=_member(client),
-                        json={"name": "x"}).status_code == 403
+                        json={"name": "x"}).status_code == 404

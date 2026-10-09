@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
 import { api } from '../lib/api';
+import { isAdmin } from '../lib/auth';
 import { useApi } from '../lib/hooks';
-import type { OrgOut, WorkflowOut } from '../lib/types';
+import type { WorkflowOut } from '../lib/types';
 
 /**
  * 워크플로 관리 — **조직 단위** 목록. 한 조직이 여러 개를 갖는다.
@@ -17,7 +18,9 @@ export default function Workflows() {
   const [org, setOrg] = useState<number | ''>('');
   const [name, setName] = useState('');
   const [error, setError] = useState('');
-  const orgs = useApi(() => api.listOrgs(), []);
+  // 관리자는 모든 조직, 사용자는 소속 조직에만 만든다 — 서버도 같은 기준으로 막는다.
+  const orgs = useApi<{ id: number; name: string }[]>(
+    () => (isAdmin() ? api.listOrgs() : api.smartworkOrgs()), []);
   const list = useApi(() => api.listWorkflows(), []);
 
   const create = async () => {
@@ -53,7 +56,7 @@ export default function Workflows() {
           검증을 통과해야 저장되고, 저장된 것만 실행됩니다.
         </p>
         <Async state={orgs}>
-          {(rows: OrgOut[]) => (
+          {(rows: { id: number; name: string }[]) => (
             <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
               <select value={org} onChange={(e) => setOrg(e.target.value === '' ? '' : Number(e.target.value))}>
                 <option value="">조직 선택</option>

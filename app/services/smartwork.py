@@ -9,8 +9,12 @@
 저장소)를 **그 사람의 이메일에 묶어** 붙인다 — 개인 도구에는 누구의 저장소인지 고르는
 인자가 없다.
 """
+import base64
+import binascii
 import json
+import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from datetime import datetime
 
 from sqlalchemy import select
@@ -37,16 +41,78 @@ MAX_HISTORY = 20
 MAX_MESSAGE_CHARS = 20_000
 # 개인 문서 한 편을 도구 결과로 돌려줄 최대 글자 수(사내 문서 서버와 같은 값).
 _MAX_READ_CHARS = 40_000
-REPORT_FORMATS = ("md", "html", "csv")
+# 보고서는 HTML 하나로 낸다 — 표·강조·여러 구역을 한 문서로 담고, 그대로 내려받아 돌려 볼 수 있다.
+REPORT_FORMATS = ("html",)
 MAX_SUGGESTIONS = 6
+MAX_CHOICES = 6
+
+# 대화 첨부 — 이번 요청의 참고 자료. 원본은 남기지 않는다: 문서는 읽어 낸 글만 대화에 남고
+# (다음 턴에도 모델이 읽는다), 이미지는 그 턴에만 모델에게 간다.
+MAX_ATTACHMENTS = 5
+# 첨부는 JSON(base64)으로 온다 — IIS 기본 요청 상한(약 28MB) 안에 들도록 한 개 10MB, 합 20MB.
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_ATTACHMENTS_TOTAL = 20 * 1024 * 1024
+MAX_ATTACHMENT_CHARS = 20_000
+# Bedrock Converse가 받는 이미지 한 장의 상한(3.75MB).
+MAX_IMAGE_BYTES = 3_750_000
+IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpeg", "image/gif": "gif", "image/webp": "webp"}
+
+
+class AttachmentError(ValueError):
+    pass
+
+
+def read_attachments(items: list[dict]) -> tuple[list[dict], list[str]]:
+    """[{name, type, data(base64)}] → (대화에 남길 것 [{name, kind, text}], 이번 턴의 이미지 data URL)."""
+    if len(items) > MAX_ATTACHMENTS:
+        raise AttachmentError(f"첨부는 한 번에 {MAX_ATTACHMENTS}개까지입니다.")
+    kept: list[dict] = []
+    images: list[str] = []
+    total = 0
+    for item in items:
+        name = Path(str(item.get("name") or "첨부")).name[:120]
+        try:
+            data = base64.b64decode(str(item.get("data") or ""), validate=True)
+        except (binascii.Error, ValueError):
+            raise AttachmentError(f"{name}: 내용을 읽을 수 없습니다.")
+        total += len(data)
+        if total > MAX_ATTACHMENTS_TOTAL:
+            raise AttachmentError(f"첨부는 합해서 {MAX_ATTACHMENTS_TOTAL // (1024 * 1024)}MB까지입니다.")
+        mime = str(item.get("type") or "").lower()
+        if mime in IMAGE_TYPES:
+            if len(data) > MAX_IMAGE_BYTES:
+                raise AttachmentError(f"{name}: 이미지는 {MAX_IMAGE_BYTES / 1_000_000:g}MB까지입니다.")
+            images.append(f"data:image/{IMAGE_TYPES[mime]};base64,{base64.b64encode(data).decode()}")
+            kept.append({"name": name, "kind": "image", "text": ""})
+            continue
+        suffix = Path(name).suffix.lower()
+        if suffix not in personal.DOC_SUFFIXES:
+            raise AttachmentError(f"{name}: 첨부할 수 없는 형식입니다(문서·이미지만).")
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            raise AttachmentError(f"{name}: 파일은 {MAX_ATTACHMENT_BYTES // (1024 * 1024)}MB까지입니다.")
+        # 형식 판별·추출은 파일 경로로 한다(doctext) — 읽고 나면 임시 폴더째 지운다.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / f"attachment{suffix}"
+            path.write_bytes(data)
+            try:
+                text = doctext.extract_markdown(path)
+            except doctext.ExtractError as e:
+                raise AttachmentError(f"{name}: {e}")
+        kept.append({"name": name, "kind": "document", "text": text[:MAX_ATTACHMENT_CHARS]})
+    return kept, images
 # 대화는 **제안으로 시작한다** — 빈 화면에 "무엇을 도와드릴까요"를 띄우면 사람이 할 일을
 # 떠올려야 한다. 첫 턴에는 이 지시를 사용자 차례로 넣어 모델이 업무 맥락을 먼저 훑게 한다.
 # 화면에는 나오지 않는다(콘솔은 답변부터 보여 준다).
+# 워크플로는 절차일 뿐 진행할 **대상**(과제·계약·구매요청 같은 업무 단위 한 건)이 있어야
+# 일이 된다 — 대상은 개인 업무 맥락(메일·문서)에서 찾고, 워크플로는 그 건의 다음 할 일을 정한다.
 OPENING_PROMPT = (
-    "대화를 시작한다. dept__workflows로 우리 부서 워크플로를 먼저 보고, 그 업무 중에서"
-    " 지금 진행할 만한 것을 제안해 줘. 개인 업무 맥락이 있으면 my__recent로 최근 메일·문서를"
-    " 보고 어느 업무가 지금 진행 중인지 판단하는 근거로 삼고, 맡을 에이전트가 있는 업무는"
-    " 그렇다고 밝혀 줘. 제안은 suggest_tasks로 띄우고 대화에는 인사와 한두 줄 요약만 써."
+    "대화를 시작한다. dept__workflows로 우리 부서 워크플로와 각 워크플로가 다루는 업무 단위"
+    "(targets)를 먼저 보고, 개인 업무 맥락이 있으면 my__recent·my__search로 최근 메일·문서에서"
+    " 실제 업무 단위(과제·계약·구매요청 등 — 이름이 붙은 건 하나하나)를 찾아 줘. 찾은 건마다"
+    " 어느 워크플로의 어느 상태인지 판단해 다음에 할 일을 제안하고, 맡을 에이전트가 있으면"
+    " 그렇다고 밝혀 줘. 대상이 없는 제안은 하지 않는다 — 찾지 못했으면 그렇다고 말하고 업무"
+    " 맥락을 고르거나 대상을 알려 달라고 해. 제안은 suggest_tasks로 띄우고 대화에는 인사와"
+    " 한두 줄 요약만 써."
 )
 
 
@@ -112,8 +178,28 @@ def department_workflows(db: Session, key: ApiKey, org_id: int | None = None) ->
             "steps": [_step(n) for n in nodes],
             "constraints": workflow_service.constraints_of(row),
             "waiting_runs": len(waiting),
+            **_targets_of(row.extracted or {}),
         })
     return out
+
+
+def _targets_of(extracted: dict) -> dict:
+    """워크플로가 다루는 업무 단위(대화에서 읽어 낸 entities)와 그 상태·전이 — 개인 맥락에서
+    찾은 건이 지금 어느 상태이고 다음에 무엇을 할지 가늠하는 잣대다."""
+    def rows(key: str) -> list[dict]:
+        found = extracted.get(key)
+        return [r for r in found if isinstance(r, dict)] if isinstance(found, list) else []
+
+    states = rows("states")
+    return {
+        "targets": [{"kind": str(e.get("name") or ""), "note": str(e.get("note") or ""),
+                     "states": [str(st.get("name") or "") for st in states
+                                if st.get("entity") == e.get("name")]}
+                    for e in rows("entities") if e.get("name")],
+        "transitions": [f"{t.get('from', '')} → {t.get('to', '')}"
+                        + (f" ({t['trigger']})" if t.get("trigger") else "")
+                        for t in rows("transitions")],
+    }
 
 
 def _step(node: dict) -> str:
@@ -129,7 +215,8 @@ _DEPT_TOOLS = [{
     "name": "workflows",
     "description": (
         "우리 부서(소속 조직)의 워크플로 — 이름·설명·단계(사람 작업 포함)·업무 규칙, 사람"
-        " 단계에서 멈춰 있는 실행 수. 업무를 제안할 때 먼저 부른다."
+        " 단계에서 멈춰 있는 실행 수, 다루는 업무 단위(targets: 종류·상태)와 상태 전이."
+        " 업무를 제안할 때 먼저 부른다."
     ),
     "inputSchema": {"type": "object", "properties": {}},
 }]
@@ -304,9 +391,10 @@ def _view_tools(agent_names: list[str]) -> list[dict]:
     tools = [{
         "name": "suggest_tasks",
         "description": (
-            "지금 진행할 만한 업무를 제안 버튼으로 띄운다. 업무는 부서 워크플로에서 고른다."
-            " 사람이 버튼을 누르면 prompt가 그대로 다음 요청이 된다 — prompt는 그 사람이 직접"
-            " 쓴 요청처럼 완결된 문장으로 쓴다."
+            "지금 진행할 업무를 제안 버튼으로 띄운다. 제안 하나 = 업무 단위 한 건(target)과 그"
+            " 건에 적용할 부서 워크플로. 대상이 없는 제안은 버려진다. 사람이 버튼을 누르면"
+            " prompt가 그대로 다음 요청이 된다 — prompt는 그 사람이 직접 쓴 요청처럼 대상을"
+            " 이름으로 밝힌 완결된 문장으로 쓴다."
         ),
         "inputSchema": {
             "type": "object",
@@ -318,31 +406,68 @@ def _view_tools(agent_names: list[str]) -> list[dict]:
                         "properties": {
                             "title": {"type": "string", "description": "버튼에 쓸 짧은 제목"},
                             "prompt": {"type": "string"},
+                            "target": {
+                                "type": "object",
+                                "description": "진행할 업무 단위 한 건",
+                                "properties": {
+                                    "kind": {"type": "string",
+                                             "description": "종류 — 워크플로 targets의 kind(과제·계약·구매요청 등)"},
+                                    "name": {"type": "string",
+                                             "description": "그 건을 가리키는 이름(예: A사 유지보수 계약)"},
+                                    "state": {"type": "string",
+                                              "description": "지금 상태 — 워크플로 targets의 states 중(모르면 비움)"},
+                                },
+                                "required": ["kind", "name"],
+                            },
                             "workflow": {"type": "string",
                                          "description": "근거가 된 부서 워크플로 이름(없으면 비움)"},
                             "why": {"type": "string", "description": "근거(어느 메일·문서) 한 줄"},
                         },
-                        "required": ["title", "prompt"],
+                        "required": ["title", "prompt", "target"],
                     },
                 },
             },
             "required": ["tasks"],
         },
     }, {
+        "name": "ask_user",
+        "description": (
+            "실행하기 전에 사람에게 확인받는다 — 요청이 모호하거나 그 일을 할 수 있는 도구·"
+            "에이전트·출처가 둘 이상일 때. 선택지는 버튼으로 뜨고, 누르면 prompt가 그대로 다음"
+            " 요청이 된다 — prompt는 그 선택을 확정한 완결된 요청으로 쓴다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "description": "버튼에 쓸 짧은 이름"},
+                            "prompt": {"type": "string"},
+                        },
+                        "required": ["label", "prompt"],
+                    },
+                },
+            },
+            "required": ["question", "options"],
+        },
+    }, {
         "name": "show_report",
         "description": (
-            "오른쪽 화면에 보고서를 띄운다. 표·목록·여러 단락으로 정리할 결과는 대화에 길게"
-            " 쓰지 말고 이것으로 띄운 뒤 대화에는 요지만 쓴다. format: md(마크다운) |"
-            " html(완결된 HTML 문서, 스크립트는 실행되지 않는다) | csv(첫 줄이 머리글)."
+            "요청의 결과를 오른쪽 화면에 보고서로 띄운다. 결과는 대화에 쓰지 않고 늘 이것으로"
+            " 낸다. content는 완결된 HTML 문서다(<style> 인라인 가능, 스크립트·외부 자원은"
+            " 막힌다)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
-                "format": {"type": "string", "enum": list(REPORT_FORMATS)},
-                "content": {"type": "string"},
+                "content": {"type": "string", "description": "HTML 문서"},
             },
-            "required": ["title", "format", "content"],
+            "required": ["title", "content"],
         },
     }]
     if agent_names:
@@ -350,7 +475,7 @@ def _view_tools(agent_names: list[str]) -> list[dict]:
             "name": "show_agent",
             "description": (
                 "오른쪽 화면에 사내 에이전트(배포된 업무 앱)를 띄운다. 요청한 일을 맡는"
-                " 에이전트가 있으면 **다른 무엇보다 먼저** 이것을 부른다."
+                " 에이전트가 하나면 **다른 무엇보다 먼저** 이것을 부른다(둘 이상이면 ask_user)."
             ),
             "inputSchema": {
                 "type": "object",
@@ -362,6 +487,13 @@ def _view_tools(agent_names: list[str]) -> list[dict]:
             },
         })
     return tools
+
+
+def _target(raw) -> dict | None:
+    if not isinstance(raw, dict) or not str(raw.get("name") or "").strip():
+        return None
+    return {"kind": str(raw.get("kind") or "")[:40], "name": str(raw["name"]).strip()[:120],
+            "state": str(raw.get("state") or "")[:40]}
 
 
 def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
@@ -388,15 +520,22 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
             lines.append("제안·답변은 이 워크플로의 업무 안에서 한다.")
     lines += [
         "",
+        "대화와 보고서:",
+        "- 대화는 요청을 정확히 확인하는 자리다. 요청의 결과는 대화에 쓰지 않고 늘"
+        " show_report(HTML 보고서)로 낸다. 대화 답변은 확인 질문이나 보고서의 한두 줄 요지만 쓴다.",
+        "- 요청이 모호하면(대상·범위·기간·결과 모양) 실행하기 전에 ask_user로 확인하고 멈춘다.",
+        "- 그 일을 할 수 있는 도구·에이전트·출처가 둘 이상이면 고르지 말고 ask_user로 어느 것을"
+        " 쓸지 확인받는다. 사람이 이미 고른 것은 다시 묻지 않는다.",
+        "- 첨부 문서·이미지는 이번 요청의 참고 자료다.",
+        "",
         "도구 사용 규칙:",
         "- 사내 문서·온톨로지·API·코드에 근거해 답한다. 추측하지 말고 도구로 확인한 뒤,"
-        " 근거가 된 문서(저장소·경로)를 밝힌다.",
-        "- 요청한 일을 맡는 에이전트가 아래 목록에 있으면 show_agent를 먼저 부른다.",
-        "- 정리된 결과(표·목록·여러 단락)는 show_report로 오른쪽 화면에 띄우고, 대화에는"
-        " 요지만 짧게 쓴다.",
-        "- 업무 제안(suggest_tasks)은 부서 워크플로(dept__workflows)를 근거로 한다. 제안마다"
-        " 어느 워크플로의 업무인지 workflow에 적고, 사람 단계에서 멈춘 실행이 있는 워크플로를"
-        " 먼저 다룬다. 부서 워크플로가 없으면 없다고 밝힌 뒤 다른 맥락으로 제안한다.",
+        " 근거가 된 문서(저장소·경로)를 보고서에 밝힌다.",
+        "- 요청한 일을 맡는 에이전트가 아래 목록에 하나 있으면 show_agent를 먼저 부른다.",
+        "- 업무 제안(suggest_tasks)은 진행할 업무 단위 한 건(과제·계약·구매요청 등)마다 하나다."
+        " 대상은 개인 업무 맥락에서 찾고(target), 그 건에 맞는 부서 워크플로(dept__workflows)를"
+        " workflow에 적어 그 워크플로의 상태·전이로 다음 할 일을 정한다. 사람 단계에서 멈춘 실행이"
+        " 있는 워크플로의 건을 먼저 다룬다. 대상을 찾지 못했으면 지어내지 말고 없다고 밝힌다.",
     ]
     if has_personal:
         lines.append(
@@ -418,6 +557,10 @@ def _clean_history(history: list[dict], shared: bool = False) -> list[dict]:
     for msg in history[-MAX_HISTORY:]:
         role = msg.get("role")
         content = str(msg.get("content") or "")[:MAX_MESSAGE_CHARS]
+        for a in msg.get("attachments") or []:
+            # 이미지는 그 턴에만 모델에게 갔다 — 뒤 턴에는 이름만 남는다.
+            content += (f"\n\n[첨부 문서: {a['name']}]\n{a['text']}" if a.get("kind") == "document"
+                        else f"\n\n[첨부 이미지: {a['name']}]")
         if shared and role == "user" and msg.get("author"):
             content = f"[{msg['author']}] {content}"
         if role in ("user", "assistant") and content:
@@ -433,11 +576,12 @@ def _clean_history(history: list[dict], shared: bool = False) -> list[dict]:
 def chat(db: Session, key: ApiKey, provider, history: list[dict],
          toolsets: list[Toolset], *, org_id: int | None = None, workflow: str = "",
          participants: list[str] | None = None, folders: list[str] | None = None,
-         mail: bool = False) -> dict:
+         mail: bool = False, images: list[str] | None = None) -> dict:
     """대화 한 턴. history의 마지막이 이번 사용자 메시지다 — 비어 있으면 여는 턴이다.
 
     세션 맥락: org_id·workflow(이름)는 소유자가 고른 업무, participants는 공유 참여자,
-    folders·mail은 **지금 말하는 사람이** 이 세션에 고른 개인 맥락이다.
+    folders·mail은 **지금 말하는 사람이** 이 세션에 고른 개인 맥락이다. images는 이번
+    사용자 메시지에 붙인 이미지(data URL)다.
 
     돌려주는 것: 답변, 제안 업무, 오른쪽 화면에 띄울 에이전트·보고서(없을 수 있다 —
     그러면 화면은 대시보드를 그대로 둔다), 쓴 도구 이름.
@@ -469,7 +613,7 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
             registry[fn_name] = (call, t["name"])
 
     used: list[str] = []
-    view: dict = {"agent": None, "report": None, "suggestions": []}
+    view: dict = {"agent": None, "report": None, "suggestions": [], "choices": []}
     names = {w["name"] for w in dept}
 
     def execute(fn_name: str, args: dict) -> str:
@@ -484,17 +628,26 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
             tasks = args.get("tasks") if isinstance(args.get("tasks"), list) else []
             view["suggestions"] = [
                 {"title": str(t.get("title") or "")[:80], "prompt": str(t.get("prompt") or ""),
+                 "target": _target(t.get("target")),
                  # 부서에 없는 이름은 버린다 — 화면이 "워크플로: …"로 근거를 내보이는 자리다.
                  "workflow": str(t.get("workflow") or "") if t.get("workflow") in names else "",
                  "why": str(t.get("why") or "")}
                 for t in tasks if isinstance(t, dict) and t.get("title") and t.get("prompt")
+                # 대상 없는 제안은 버린다 — 워크플로만으로는 진행할 일이 아니다.
+                and _target(t.get("target"))
             ][:MAX_SUGGESTIONS]
             return f"제안 {len(view['suggestions'])}건을 띄웠습니다."
+        if fn_name == "ask_user":
+            options = args.get("options") if isinstance(args.get("options"), list) else []
+            view["choices"] = [
+                {"label": str(o.get("label"))[:80], "prompt": str(o.get("prompt"))}
+                for o in options if isinstance(o, dict) and o.get("label") and o.get("prompt")
+            ][:MAX_CHOICES]
+            return f"선택지 {len(view['choices'])}개를 띄웠습니다. 사람이 고를 때까지 멈춘다."
         if fn_name == "show_report":
-            fmt = str(args.get("format", "md"))
             view["report"] = {
                 "title": str(args.get("title") or "보고서"),
-                "format": fmt if fmt in REPORT_FORMATS else "md",
+                "format": "html",
                 "content": str(args.get("content") or ""),
             }
             return "보고서를 오른쪽 화면에 띄웠습니다."
@@ -514,6 +667,10 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
                     key.name, agent_list, mine is not None, [w["name"] for w in dept],
                     task, participants)},
                 *_clean_history(history, shared)]
+    if images and messages[-1]["role"] == "user":
+        messages[-1] = {"role": "user", "content": [
+            {"type": "text", "text": messages[-1]["content"]},
+            *({"type": "image_url", "image_url": {"url": url}} for url in images)]}
     reply = llm_service.chat_completion(provider, messages, db, tools, execute)
     # 무엇을 물었는지는 남기지 않는다 — 개인 메일·문서 내용이 감사 기록으로 새면 안 된다.
     audit.record(db, key.name, "smartwork.chat", "-", {"tools": used})

@@ -1080,6 +1080,9 @@ export interface DepartmentWorkflow {
   steps: string[];
   constraints: string[];
   waiting_runs: number;
+  // 다루는 업무 단위(워크플로 대화에서 읽어 낸 entities)와 그 상태 — 제안이 찾을 대상의 종류
+  targets: { kind: string; note: string; states: string[] }[];
+  transitions: string[];
 }
 
 export type ReportFormat = 'md' | 'html' | 'csv';
@@ -1093,6 +1096,8 @@ export interface SmartworkReport {
 export interface SmartworkSuggestion {
   title: string;
   prompt: string;
+  // 진행할 업무 단위 한 건 — 대상 없는 제안은 서버가 버린다
+  target: { kind: string; name: string; state: string };
   // 근거가 된 부서 워크플로 이름(부서에 없는 이름은 서버가 비운다)
   workflow: string;
   why: string;
@@ -1112,6 +1117,24 @@ export interface SmartworkSessionSummary {
   members: number;
 }
 
+// 실행 전에 확인받는 선택지(ask_user) — 누르면 prompt가 다음 요청이 된다
+export interface SmartworkChoice {
+  label: string;
+  prompt: string;
+}
+
+// 대화 첨부 — 보낼 때는 base64, 대화에 남는 것은 이름과 읽어 낸 글(이미지는 이름만)
+export interface SmartworkAttachmentIn {
+  name: string;
+  type: string;
+  data: string;
+}
+export interface SmartworkAttachment {
+  name: string;
+  kind: 'document' | 'image';
+  text: string;
+}
+
 export interface SmartworkSessionMessage {
   id: number;
   role: 'user' | 'assistant';
@@ -1121,6 +1144,8 @@ export interface SmartworkSessionMessage {
   agent?: SmartworkAgent | null;
   report?: SmartworkReport | null;
   suggestions?: SmartworkSuggestion[];
+  choices?: SmartworkChoice[];
+  attachments?: SmartworkAttachment[];
   tools?: string[];
   created_at: string;
 }
@@ -1148,6 +1173,7 @@ export interface SmartworkTurn {
   agent: SmartworkAgent | null;
   report: SmartworkReport | null;
   suggestions: SmartworkSuggestion[];
+  choices: SmartworkChoice[];
   tools: string[];
   provider: string;
   message: SmartworkSessionMessage;

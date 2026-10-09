@@ -57,13 +57,13 @@ def _user(c: TestClient, email: str, org_id: int | None = None) -> dict:
 
 def _upload(c, headers, folder, files: dict[str, bytes], mtime=1_700_000_000.0):
     entries = [{"path": p, "size": len(b), "mtime": mtime} for p, b in files.items()]
-    plan = c.post(f"{API}/smartwork/personal/folders/{folder}/manifest",
+    plan = c.post(f"{API}/smartwork/personal/folders/manifest", params={"folder": folder},
                   json={"entries": entries}, headers=headers)
     assert plan.status_code == 200, plan.text
     # 브라우저처럼 needed를 하나씩, 본문 그대로 올린다
     for p in plan.json()["needed"]:
-        r = c.put(f"{API}/smartwork/personal/folders/{folder}/file",
-                  params={"path": p, "mtime": mtime}, content=files[p], headers=headers)
+        r = c.put(f"{API}/smartwork/personal/folders/file",
+                  params={"folder": folder, "path": p, "mtime": mtime}, content=files[p], headers=headers)
         assert r.status_code == 200, r.text
     return plan.json()
 
@@ -105,11 +105,69 @@ def _chat(c, headers, monkeypatch, calls, text="질문", sid=None, folders=None,
     return r.json(), script
 
 
+def test_ask_user_offers_choices_before_running(client, monkeypatch):
+    """도구가 여럿이면 실행 전에 묻는다 — 선택지는 버튼으로, 누르면 prompt가 다음 요청이다."""
+    alice = _user(client, "alice@corp.com")
+    out, script = _chat(client, alice, monkeypatch, [("ask_user", {
+        "question": "어느 자료로 정리할까요?",
+        "options": [{"label": "사내 문서", "prompt": "사내 문서로 정리해 줘"},
+                    {"label": "내 메일", "prompt": "내 메일로 정리해 줘"},
+                    {"label": "", "prompt": "버려진다"}],
+    })], text="지난주 계약 진행 정리해 줘")
+    assert out["choices"] == [{"label": "사내 문서", "prompt": "사내 문서로 정리해 줘"},
+                              {"label": "내 메일", "prompt": "내 메일로 정리해 줘"}]
+    assert out["report"] is None
+    system = script.messages[0]["content"]
+    assert "ask_user" in system and "HTML 보고서" in system
+
+
+def test_attachments_are_reference_material_for_the_request(client, monkeypatch):
+    import base64
+    alice = _user(client, "alice@corp.com")
+    sid = _session(client, alice)
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
+    script = Script([])
+    monkeypatch.setattr(llm, "chat_completion", script)
+    r = client.post(f"{API}/smartwork/sessions/{sid}/messages", headers=alice, json={
+        "content": "이 견적 검토해 줘",
+        "attachments": [
+            {"name": "견적.md", "type": "text/markdown",
+             "data": base64.b64encode("# 견적\n금액 3천만원".encode()).decode()},
+            {"name": "image.png", "type": "image/png", "data": png},
+        ]})
+    assert r.status_code == 200, r.text
+    # 이번 턴: 문서는 글로, 이미지는 그림으로 모델에게 간다.
+    last = script.messages[-1]
+    assert last["role"] == "user"
+    assert "금액 3천만원" in last["content"][0]["text"]
+    assert last["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+    # 대화에는 첨부의 이름과 읽어 낸 글만 남는다 — 이미지는 남기지 않는다.
+    mine = client.get(f"{API}/smartwork/sessions/{sid}", headers=alice).json()["messages"][0]
+    assert [(a["name"], a["kind"]) for a in mine["attachments"]] == [
+        ("견적.md", "document"), ("image.png", "image")]
+    assert mine["attachments"][1]["text"] == ""
+
+    # 다음 턴에도 문서 글은 다시 읽히고, 이미지는 이름만 남는다.
+    r = client.post(f"{API}/smartwork/sessions/{sid}/messages", headers=alice,
+                    json={"content": "금액만 다시"})
+    assert r.status_code == 200, r.text
+    earlier = script.messages[1]["content"]
+    assert "금액 3천만원" in earlier and "[첨부 이미지: image.png]" in earlier
+    assert isinstance(script.messages[-1]["content"], str)
+
+    # 문서·이미지가 아닌 것, 깨진 내용은 받지 않는다.
+    for bad in ({"name": "setup.exe", "type": "", "data": png},
+                {"name": "a.md", "type": "", "data": "%%%"}):
+        r = client.post(f"{API}/smartwork/sessions/{sid}/messages", headers=alice,
+                        json={"content": "이것도", "attachments": [bad]})
+        assert r.status_code == 422, r.text
+
+
 def test_personal_context_requires_consent(client):
     alice = _user(client, "alice@corp.com")
     status = client.get(f"{API}/smartwork/personal", headers=alice).json()
     assert status["consented"] is False
-    r = client.post(f"{API}/smartwork/personal/folders/work/manifest",
+    r = client.post(f"{API}/smartwork/personal/folders/manifest", params={"folder": "work"},
                     json={"entries": []}, headers=alice)
     assert r.status_code == 400 and "동의" in r.json()["detail"]
 
@@ -220,11 +278,12 @@ def test_chat_shows_agent_and_report(client, monkeypatch):
     alice = _user(client, "alice@corp.com")
     out, script = _chat(client, alice, monkeypatch, [
         ("show_agent", {"name": "leave-agent", "reason": "휴가 신청"}),
-        ("show_report", {"title": "요약", "format": "md", "content": "# 요약"}),
+        # 형식을 무엇으로 적어 보내든 보고서는 HTML이다.
+        ("show_report", {"title": "요약", "format": "md", "content": "<h1>요약</h1>"}),
     ], text="휴가 신청하고 싶어")
     assert out["agent"]["name"] == "leave-agent"
     assert out["agent"]["path"] == "/apps/_/leave-agent/"
-    assert out["report"] == {"title": "요약", "format": "md", "content": "# 요약"}
+    assert out["report"] == {"title": "요약", "format": "html", "content": "<h1>요약</h1>"}
     assert out["tools"] == ["show_agent", "show_report"]
 
     names = set(script.tool_names)
@@ -259,7 +318,13 @@ def _workflow(org_id: int, name: str, nodes: list[dict], waiting: bool = False) 
     with SessionLocal() as db:
         row = Workflow(organization_id=org_id, name=name, description=f"{name} 절차",
                        spec={"nodes": nodes, "edges": []},
-                       extracted={"constraints": [{"text": "500만원 넘으면 팀장 승인"}]})
+                       extracted={
+                           "constraints": [{"text": "500만원 넘으면 팀장 승인"}],
+                           "entities": [{"name": "집행 요청", "note": "예산을 쓰겠다는 건"}],
+                           "states": [{"entity": "집행 요청", "name": "접수"},
+                                      {"entity": "집행 요청", "name": "승인"}],
+                           "transitions": [{"from": "접수", "to": "승인", "trigger": "팀장 결재"}],
+                       })
         db.add(row)
         db.flush()
         if waiting:
@@ -280,10 +345,15 @@ def test_chat_opens_with_task_suggestions_from_department_workflows(client, monk
     client.post(f"{API}/smartwork/personal/consent", headers=alice)
     _upload(client, alice, "work", {"report.md": b"# weekly\n\nreport"})
     tasks = [
-        {"title": "예산 집행 승인", "prompt": "멈춰 있는 예산 집행 건을 승인 준비해 줘",
+        {"title": "예산 집행 승인", "prompt": "3분기 장비 구매 집행 요청을 승인 준비해 줘",
+         "target": {"kind": "집행 요청", "name": "3분기 장비 구매", "state": "접수"},
          "workflow": "예산 집행", "why": "report.md"},
         # 다른 부서의 워크플로 이름은 근거로 남지 않는다
-        {"title": "견적", "prompt": "견적 보내 줘", "workflow": "견적 발송", "why": ""},
+        {"title": "견적", "prompt": "B사 견적 보내 줘", "target": {"kind": "견적", "name": "B사 견적"},
+         "workflow": "견적 발송", "why": ""},
+        # 진행할 대상이 없는 제안은 버린다 — 워크플로만으로는 할 일이 아니다
+        {"title": "예산 집행", "prompt": "예산 집행해 줘", "workflow": "예산 집행"},
+        {"title": "예산 집행", "prompt": "예산 집행해 줘", "target": {"kind": "집행 요청", "name": " "}},
     ]
     sid = _session(client, alice)
     out, script = _chat(client, alice, monkeypatch,
@@ -296,11 +366,17 @@ def test_chat_opens_with_task_suggestions_from_department_workflows(client, monk
     assert dept[0]["steps"] == ["문서 검색: 예산안 찾기", "사람 작업: 집행 승인 (팀장)"]
     assert dept[0]["waiting_runs"] == 1
     assert dept[0]["constraints"] == ["500만원 넘으면 팀장 승인"]
+    # 제안이 찾을 대상의 종류와 그 상태 — 워크플로 대화에서 읽어 둔 업무 단위다
+    assert dept[0]["targets"] == [{"kind": "집행 요청", "note": "예산을 쓰겠다는 건",
+                                   "states": ["접수", "승인"]}]
+    assert dept[0]["transitions"] == ["접수 → 승인 (팀장 결재)"]
     # 대시보드는 대화와 같은 목록을 본다
     assert client.get(f"{API}/smartwork/workflows", headers=alice).json() == dept
     assert json.loads(script.results["my__recent"])[0]["path"] == "work/report.md.md"
     assert out["suggestions"][0] == tasks[0]
     assert out["suggestions"][1]["workflow"] == ""
+    assert out["suggestions"][1]["target"] == {"kind": "견적", "name": "B사 견적", "state": ""}
+    assert len(out["suggestions"]) == 2
 
     # 제안(assistant)으로 시작하는 대화에도 여는 지시가 앞에 되살아난다
     _, script = _chat(client, alice, monkeypatch, [], text="첫 번째로 할게", sid=sid)
@@ -502,23 +578,37 @@ def test_session_sees_only_the_folders_chosen_for_it(client, monkeypatch):
     assert [d["path"] for d in json.loads(script.results["my__recent"])] == ["work/plan.md.md"]
 
 
+def test_folder_name_travels_in_the_query_not_the_path(client):
+    """PC 폴더 이름에는 한글·&·%가 흔하다 — URL 경로에 넣으면 IIS/ARR 앞단이 사유 없이
+    400으로 막았다. 쿼리로 받아 그대로 폴더 이름이 되어야 한다(지울 때도 같다)."""
+    alice = _user(client, "alice@corp.com")
+    client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    name = "1.계약&품의 50%"
+    _upload(client, alice, name, {"하위 폴더/검토 v1.md": "# 계약 검토".encode()})
+    status = client.get(f"{API}/smartwork/personal", headers=alice).json()
+    assert [f["name"] for f in status["folders"]] == [name]
+    r = client.delete(f"{API}/smartwork/personal/folders", params={"folder": name}, headers=alice)
+    assert r.status_code == 204
+    assert client.get(f"{API}/smartwork/personal", headers=alice).json()["folders"] == []
+
+
 def test_file_upload_streams_one_file_and_stops_at_the_cap(client, monkeypatch):
     alice = _user(client, "alice@corp.com")
     client.post(f"{API}/smartwork/personal/consent", headers=alice)
     monkeypatch.setattr(personal, "MAX_FILE_BYTES", 16)
-    url = f"{API}/smartwork/personal/folders/work/file"
+    url = f"{API}/smartwork/personal/folders/file"
 
     # 길이를 미리 밝히면 받기 전에 끊는다
-    r = client.put(url, params={"path": "big.md"}, content=b"x" * 17, headers=alice)
+    r = client.put(url, params={"folder": "work", "path": "big.md"}, content=b"x" * 17, headers=alice)
     assert r.status_code == 413
     # 길이 없이(조각으로) 흘려 보내도 상한에서 끊는다
-    r = client.put(url, params={"path": "big.md"}, content=iter([b"x" * 10, b"x" * 10]),
+    r = client.put(url, params={"folder": "work", "path": "big.md"}, content=iter([b"x" * 10, b"x" * 10]),
                    headers=alice)
     assert r.status_code == 413
     store = personal.store_for("alice@corp.com")
     assert not store.root.exists() or not any(p.is_file() for p in store.root.rglob("*"))
 
-    r = client.put(url, params={"path": "ok.md", "mtime": 1_700_000_000}, content=b"# ok\n\nfine",
+    r = client.put(url, params={"folder": "work", "path": "ok.md", "mtime": 1_700_000_000}, content=b"# ok\n\nfine",
                    headers=alice)
     assert r.json() == {"path": "ok.md", "status": "saved"}
     assert (store.root / "work/ok.md.md").is_file()

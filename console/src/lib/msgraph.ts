@@ -12,13 +12,17 @@
  * 그래야 Microsoft가 이 출처의 토큰 요청을 CORS로 받아 준다.
  */
 
+import { getEmail } from './auth';
+
 const SCOPE = 'Mail.Read User.Read';
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 // 서버(services/personal.py MAIL_SYNC_COUNT)와 같은 값.
 const MAIL_COUNT = 100;
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 
-let cached: { clientId: string; token: string; expires: number } | null = null;
+// 토큰은 **콘솔 사용자별**이다 — 같은 탭에서 다른 사람이 콘솔에 로그인하면 앞사람의 메일
+// 토큰을 이어 쓰지 않고 그 사람이 자기 계정으로 다시 로그인한다.
+let cached: { user: string; clientId: string; token: string; expires: number } | null = null;
 
 /** 앱 등록에 넣을 리디렉션 URI — 콘솔이 놓인 자리(IIS 서브패스 포함) 옆의 빈 페이지. */
 export function redirectUri(): string {
@@ -67,7 +71,10 @@ function waitForRedirect(popup: Window, target: string): Promise<URLSearchParams
 }
 
 async function login(clientId: string, tenant: string): Promise<string> {
-  if (cached && cached.clientId === clientId && cached.expires > Date.now()) return cached.token;
+  const user = getEmail();
+  if (cached && cached.user === user && cached.clientId === clientId && cached.expires > Date.now()) {
+    return cached.token;
+  }
   // 팝업은 await보다 먼저 연다 — 클릭에서 멀어지면 브라우저가 팝업을 막는다.
   const popup = window.open('', 'paas-ms-login', 'width=520,height=680');
   if (!popup) throw new Error('팝업이 막혔습니다 — 이 사이트의 팝업을 허용하고 다시 누르세요.');
@@ -78,6 +85,8 @@ async function login(clientId: string, tenant: string): Promise<string> {
   const url = `${authority}/authorize?${new URLSearchParams({
     client_id: clientId, response_type: 'code', redirect_uri: redirect, response_mode: 'query',
     scope: SCOPE, state, code_challenge: challenge, code_challenge_method: 'S256',
+    // 브라우저에 다른 Microsoft 계정 세션이 살아 있어도 콘솔 사용자의 계정으로 로그인하게 한다.
+    ...(user ? { login_hint: user } : {}),
   })}`;
   popup.location.href = url;
   const params = await waitForRedirect(popup, redirect);
@@ -97,7 +106,7 @@ async function login(clientId: string, tenant: string): Promise<string> {
   const body = await res.json();
   if (!res.ok) throw new Error(`메일 토큰을 받지 못했습니다: ${body.error_description || body.error}`);
   // 만료 1분 전까지만 다시 쓴다.
-  cached = { clientId, token: body.access_token, expires: Date.now() + (Number(body.expires_in) - 60) * 1000 };
+  cached = { user, clientId, token: body.access_token, expires: Date.now() + (Number(body.expires_in) - 60) * 1000 };
   return cached.token;
 }
 

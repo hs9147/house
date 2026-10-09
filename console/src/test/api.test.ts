@@ -131,15 +131,43 @@ describe('SSO 만료 응답은 승인 주소를 화면 전체에 알린다', () 
 });
 
 describe('개인 폴더 파일은 하나씩 본문 그대로 올린다', () => {
-  // 여러 파일을 multipart 한 요청에 싣지 않는다 — File을 그대로 body로 주면 브라우저가 흘려 보낸다.
-  it('File을 JSON으로 감싸지 않고 PUT 본문으로 보낸다', async () => {
-    const calls = captureFetch();
+  // 여러 파일을 multipart 한 요청에 싣지 않는다 — File을 그대로 send하면 브라우저가 흘려 보낸다.
+  // fetch는 올라간 바이트를 알려 주지 않아 XHR로 보낸다 — 진행률이 그 자리에서 나와야 한다.
+  it('File을 PUT 본문으로 보내고 올라간 바이트를 알린다', async () => {
+    const sent: Array<{ method: string; url: string; body: unknown; headers: Record<string, string> }> = [];
+    class FakeXhr {
+      upload: { onprogress?: (e: { loaded: number; total: number; lengthComputable: boolean }) => void } = {};
+      status = 0;
+      responseText = '';
+      onload?: () => void;
+      onerror?: () => void;
+      private req = { method: '', url: '', body: null as unknown, headers: {} as Record<string, string> };
+      open(method: string, url: string) { Object.assign(this.req, { method, url }); }
+      setRequestHeader(k: string, v: string) { this.req.headers[k] = v; }
+      send(body: unknown) {
+        this.req.body = body;
+        sent.push(this.req);
+        this.upload.onprogress?.({ loaded: 3, total: 6, lengthComputable: true });
+        this.upload.onprogress?.({ loaded: 6, total: 6, lengthComputable: true });
+        this.status = 200;
+        this.responseText = JSON.stringify({ path: 'plan/q3.md', status: 'saved' });
+        this.onload?.();
+      }
+    }
+    vi.stubGlobal('XMLHttpRequest', FakeXhr);
     const file = new Blob(['# 메모']) as File;
-    await api.personalUpload('work', { file, path: 'plan/q3.md', mtime: 1700000000 });
-    const { url, init } = calls[0];
-    expect(init.method).toBe('PUT');
-    expect(url).toContain('/smartwork/personal/folders/work/file?path=plan%2Fq3.md&mtime=1700000000');
-    expect(init.body).toBe(file);
-    expect((init.headers as Record<string, string>)['content-type']).toBeUndefined();
+    const seen: number[] = [];
+    const out = await api.personalUpload('1.계약&품의', { file, path: 'plan/q3.md', mtime: 1700000000 },
+                                         (loaded) => seen.push(loaded));
+    expect(out.status).toBe('saved');
+    expect(seen).toEqual([3, 6]);
+    const { method, url, body, headers } = sent[0];
+    expect(method).toBe('PUT');
+    // 폴더 이름(한글·&)은 경로가 아니라 쿼리에 — 경로에 넣으면 IIS/ARR 앞단이 400으로 막는다
+    expect(url.split('?')[0]).toMatch(/\/smartwork\/personal\/folders\/file$/);
+    const q = new URLSearchParams(url.split('?')[1]);
+    expect([q.get('folder'), q.get('path'), q.get('mtime')]).toEqual(['1.계약&품의', 'plan/q3.md', '1700000000']);
+    expect(body).toBe(file);
+    expect(headers['x-api-key']).toBe('test-key');
   });
 });

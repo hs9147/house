@@ -84,6 +84,10 @@ main:has(.split), main:has(.plan-grid) { max-width: none; }
    사라지면 "쓰다가 보고 다시 쓰는" 흐름이 끊긴다. 넓은 쪽은 오른쪽이 받는다 — 흐름도·표가
    반 폭에 들어가면 글자를 읽을 수 없다(29단계에서 실제로 그랬다). */
 .viewtabs { gap: 6px; margin: 2px 0 8px; }
+/* 탭과 그 닫기 버튼을 한 덩어리로 붙인다 — 떨어져 있으면 어느 탭의 ×인지 헷갈린다. */
+.viewtab { display: inline-flex; }
+.viewtab > button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.viewtab > button:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 8px; }
 /* 칸은 minmax(0, …)다 — 그냥 1fr이면 최소 폭이 내용 폭이 되어, 폭을 재서 그리는 차트가 한 번
    넓어지면 창을 줄여도 칸이 줄지 않는다(그린 폭이 다시 칸을 붙든다). */
 .split { display: grid; grid-template-columns: var(--split-left, 420px) minmax(0, 1fr); gap: 12px;
@@ -440,4 +444,18 @@ pre.logbox {
 @keyframes progress-slide {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(300%); }
+}
+/* 진행률을 실제로 아는 작업(업로드한 바이트 등)에만 — 같은 트랙에 채운 만큼 그린다. */
+.progress-bar {
+  height: 4px;
+  margin: 12px 0 8px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.progress-bar > div {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.2s;
 }

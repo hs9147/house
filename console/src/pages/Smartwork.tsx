@@ -10,6 +10,7 @@ import type {
   HealthInfo,
   PersonalStatus,
   SmartworkAgent,
+  SmartworkAttachmentIn,
   SmartworkContext,
   SmartworkOrgChoice,
   SmartworkReport,
@@ -19,7 +20,7 @@ import type {
 } from '../lib/types';
 
 /**
- * 스마트워크 — 왼쪽 대화, 오른쪽 화면(대시보드·에이전트·보고서).
+ * 스마트워크 — 왼쪽 대화·설정(에이전트·부서 워크플로·내 업무 맥락), 오른쪽 화면(에이전트·보고서).
  *
  * 대화는 세션 단위다 — **세션 하나 = 업무 하나.** 소유자가 그 업무의 조직·워크플로를
  * 대화창에서 고르고, 필요하면 다른 사람(다른 부서여도)과 공유한다. 공유받은 사람은 읽고
@@ -31,7 +32,7 @@ import type {
  * 부서 워크플로와 개인 업무 맥락을 본 모델이 할 일을 버튼으로 띄운다.
  */
 
-type View = 'dashboard' | 'agent' | 'report';
+type View = 'agent' | 'report';
 // 공유 세션은 다른 참여자가 보낸 말을 이 간격으로 다시 읽는다.
 const SHARED_POLL_MS = 5000;
 
@@ -53,12 +54,16 @@ export default function Smartwork() {
   // 실패하면 여기 남은 것을 그대로 다시 보낸다.
   const [pending, setPending] = useState<string | null>(null);
   const [input, setInput] = useState('');
+  // 이번 요청에 붙일 참고 자료 — 보내기에 성공해야 비운다(실패하면 다시 시도에 그대로 실린다).
+  const [files, setFiles] = useState<(SmartworkAttachmentIn & { size: number })[]>([]);
+  const fileInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState(false);
   const [agent, setAgent] = useState<SmartworkAgent | null>(null);
   const [report, setReport] = useState<SmartworkReport | null>(null);
-  const [view, setView] = useState<View>('dashboard');
+  const [view, setView] = useState<View>('agent');
+  const [leftTab, setLeftTab] = useState<'chat' | 'settings'>('chat');
   const [collapsed, setCollapsed] = useState(false);
   const opened = useRef(false);
   // 폴링(usePolling)은 처음 받은 함수를 계속 부른다 — 지금 세션은 ref로 읽는다.
@@ -77,7 +82,7 @@ export default function Smartwork() {
       const last = [...s.messages].reverse().find((m) => m.agent || m.report);
       setAgent(last?.agent ?? null);
       setReport(last?.report ?? null);
-      setView(last?.agent ? 'agent' : last?.report ? 'report' : 'dashboard');
+      setView(last?.agent ? 'agent' : 'report');
     } catch (e) {
       setError((e as Error).message);
     }
@@ -107,14 +112,15 @@ export default function Smartwork() {
   };
   usePolling(catchUp, SHARED_POLL_MS, !!session && session.members.length > 1 && !busy);
 
-  const send = async (s: SmartworkSession, content: string) => {
+  const send = async (s: SmartworkSession, content: string, attachments: SmartworkAttachmentIn[] = []) => {
     setPending(content);
     setBusy(true);
     setError(null);
     try {
-      const out = await api.sendSessionMessage(s.id, content);
+      const out = await api.sendSessionMessage(s.id, content, attachments);
       await catchUp();
       setPending(null);
+      if (attachments.length > 0) setFiles([]);
       if (out.report) {
         setReport(out.report);
         setView('report');
@@ -148,7 +154,6 @@ export default function Smartwork() {
     setSharing(false);
     setAgent(null);
     setReport(null);
-    setView('dashboard');
     sessions.reload();
     await send(s, '');
   };
@@ -173,7 +178,6 @@ export default function Smartwork() {
     setCreating(true);
     setAgent(null);
     setReport(null);
-    setView('dashboard');
     sessions.reload();
   };
 
@@ -191,18 +195,32 @@ export default function Smartwork() {
     const text = input.trim();
     if (!text || busy || !session) return;
     setInput('');
-    void send(session, text);
+    void send(session, text, files.map(({ name, type, data }) => ({ name, type, data })));
+  };
+
+  const attach = async (list: File[]) => {
+    setError(null);
+    const total = [...files, ...list].reduce((sum, f) => sum + f.size, 0);
+    if (files.length + list.length > MAX_ATTACHMENTS || total > MAX_ATTACHMENT_TOTAL) {
+      setError(`첨부는 ${MAX_ATTACHMENTS}개, 합해서 ${mb(MAX_ATTACHMENT_TOTAL)}까지입니다.`);
+      return;
+    }
+    const read = await Promise.all(list.map(async (f) => ({
+      name: f.name || 'clipboard.png', type: f.type, size: f.size, data: await base64Of(f),
+    })));
+    setFiles((cur) => [...cur, ...read]);
   };
 
   const me = getEmail();
   const shared = (session?.members.length ?? 0) > 1;
   const messages = session?.messages ?? [];
   const last = messages.length > 0 ? messages[messages.length - 1] : null;
-  const suggestions = !busy && pending === null && last?.role === 'assistant' ? last.suggestions ?? [] : [];
+  const settled = !busy && pending === null && last?.role === 'assistant';
+  const suggestions = settled ? last.suggestions ?? [] : [];
+  const choices = settled ? last.choices ?? [] : [];
 
-  const left = (
+  const chat = (
     <div className="panel">
-      <h2>대화</h2>
       <div className="row" style={{ marginBottom: 8 }}>
         <select
           style={{ flex: 1, minWidth: 0 }}
@@ -265,6 +283,16 @@ export default function Smartwork() {
               </p>
             )}
           </div>
+          {choices.length > 0 && (
+            <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+              {choices.map((c, i) => (
+                <button key={i} className="small secondary" title={c.prompt}
+                  onClick={() => void send(session, c.prompt)}>
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          )}
           {suggestions.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
               {suggestions.map((s, i) => (
@@ -276,11 +304,11 @@ export default function Smartwork() {
                   onClick={() => void send(session, s.prompt)}
                 >
                   {s.title}
-                  {(s.workflow || s.why) && (
-                    <div className="mutedtext" style={{ fontSize: 12 }}>
-                      {[s.workflow && `워크플로: ${s.workflow}`, s.why].filter(Boolean).join(' · ')}
-                    </div>
-                  )}
+                  <div className="mutedtext" style={{ fontSize: 12 }}>
+                    {[`대상: ${[s.target.kind, s.target.name].filter(Boolean).join(' ')}`
+                        + (s.target.state ? ` (${s.target.state})` : ''),
+                      s.workflow && `워크플로: ${s.workflow}`, s.why].filter(Boolean).join(' · ')}
+                  </div>
                 </button>
               ))}
             </div>
@@ -291,7 +319,8 @@ export default function Smartwork() {
         <div className="row" style={{ marginBottom: 10 }}>
           <p className="error" style={{ margin: 0 }}>{error}</p>
           {!busy && session && pending !== null && (
-            <button className="small secondary" onClick={() => void send(session, pending)}>다시 시도</button>
+            <button className="small secondary" onClick={() => void send(session, pending,
+              files.map(({ name, type, data }) => ({ name, type, data })))}>다시 시도</button>
           )}
         </div>
       )}
@@ -302,6 +331,15 @@ export default function Smartwork() {
             value={input}
             placeholder="무엇을 할까요? (Enter 보내기, Shift+Enter 줄바꿈)"
             onChange={(e) => setInput(e.target.value)}
+            onPaste={(e) => {
+              // 화면 캡처처럼 글 없이 파일만 든 클립보드는 첨부로 받는다. 엑셀 셀을 복사하면
+              // 글과 함께 그림도 실리는데, 그때는 글을 붙이는 쪽이 사람이 바란 것이다.
+              const pasted = Array.from(e.clipboardData.files);
+              if (pasted.length > 0 && !e.clipboardData.types.includes('text/plain')) {
+                e.preventDefault();
+                void attach(pasted);
+              }
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
@@ -309,106 +347,174 @@ export default function Smartwork() {
               }
             }}
           />
+          {files.length > 0 && (
+            <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+              {files.map((f, i) => (
+                <span key={i} className="viewtab">
+                  <span className="status dim">{f.name} · {mb(f.size)}</span>
+                  <button className="small secondary" title="빼기" aria-label={`${f.name} 빼기`}
+                    onClick={() => setFiles((cur) => cur.filter((_, j) => j !== i))}>×</button>
+                </span>
+              ))}
+            </div>
+          )}
           <div className="row" style={{ marginTop: 8 }}>
             <button onClick={submit} disabled={busy || !input.trim()}>보내기</button>
+            <button className="secondary" disabled={busy} onClick={() => fileInput.current?.click()}>
+              첨부
+            </button>
+            <input ref={fileInput} type="file" multiple hidden
+              accept={[...DOC_SUFFIXES, ...ATTACH_IMAGE_TYPES].join(',')}
+              onChange={(e) => {
+                void attach(Array.from(e.target.files ?? []));
+                e.target.value = '';
+              }} />
+            <span className="mutedtext" style={{ fontSize: 12 }}>문서·이미지, 화면 캡처는 붙여넣기</span>
           </div>
         </>
       )}
     </div>
   );
 
-  const tabs: { key: View; label: string }[] = [
-    { key: 'dashboard', label: '대시보드' },
-    ...(agent ? [{ key: 'agent' as const, label: `에이전트 · ${agent.name}` }] : []),
-    ...(report ? [{ key: 'report' as const, label: `보고서 · ${report.title}` }] : []),
-  ];
+  const settings = (
+    <>
+      <div className="panel">
+        <h2>에이전트</h2>
+        <Async state={agents} empty="쓸 수 있는 에이전트가 없습니다 — 운영 중(release)인 앱이 에이전트가 됩니다.">
+          {(list) => (
+            <table>
+              <thead><tr><th>이름</th><th>조직</th><th>종류</th><th /></tr></thead>
+              <tbody>
+                {list.map((a) => (
+                  <tr key={a.name}>
+                    <td>{a.name}</td>
+                    <td>{a.org ?? '공용'}</td>
+                    <td>{a.type}</td>
+                    <td>
+                      <button className="small secondary" onClick={() => {
+                        setAgent(a);
+                        setView('agent');
+                      }}>열기</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Async>
+      </div>
+      <div className="panel">
+        <h2>부서 워크플로</h2>
+        <Async state={workflows} empty="소속 조직에 워크플로가 없습니다 — 업무 제안은 개인 업무 맥락으로만 합니다.">
+          {(list) => (
+            <table>
+              <thead><tr><th>워크플로</th><th>조직</th><th>단계</th><th>대기 중</th></tr></thead>
+              <tbody>
+                {list.map((w) => (
+                  <tr key={`${w.org}/${w.name}`}>
+                    <td title={w.steps.join('\n')}>
+                      {w.name}
+                      {w.description && <div className="mutedtext" style={{ fontSize: 12 }}>{w.description}</div>}
+                    </td>
+                    <td>{w.org}</td>
+                    <td>{w.steps.length}</td>
+                    <td>
+                      {w.waiting_runs > 0
+                        ? <span className="status warn">{w.waiting_runs}건</span>
+                        : <span className="mutedtext">-</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Async>
+      </div>
+      <PersonalPanel status={personal} />
+    </>
+  );
 
-  const right = (
+  const left = (
     <>
       <div className="row viewtabs" role="tablist">
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            role="tab"
-            aria-selected={view === t.key}
-            className={view === t.key ? 'small' : 'small secondary'}
-            onClick={() => setView(t.key)}
-          >
-            {t.label}
+        {([['chat', '대화'], ['settings', '설정']] as const).map(([key, label]) => (
+          <button key={key} role="tab" aria-selected={leftTab === key}
+            className={leftTab === key ? 'small' : 'small secondary'}
+            onClick={() => setLeftTab(key)}>
+            {label}
           </button>
         ))}
       </div>
-      {view === 'agent' && agent ? (
+      {leftTab === 'chat' ? chat : settings}
+    </>
+  );
+
+  const tabs: { key: View; label: string }[] = [
+    ...(agent ? [{ key: 'agent' as const, label: `에이전트 · ${agent.name}` }] : []),
+    ...(report ? [{ key: 'report' as const, label: `보고서 · ${report.title}` }] : []),
+  ];
+  // 고른 탭이 비었으면 남은 쪽을 보인다 — 에이전트를 보고서보다 먼저.
+  const shown: View | null = view === 'report' && report ? 'report' : agent ? 'agent' : report ? 'report' : null;
+
+  const right = (
+    <>
+      {tabs.length > 0 && (
+        <div className="row viewtabs" role="tablist">
+          {tabs.map((t) => (
+            <span key={t.key} className="viewtab">
+              <button
+                role="tab"
+                aria-selected={shown === t.key}
+                className={shown === t.key ? 'small' : 'small secondary'}
+                onClick={() => setView(t.key)}
+              >
+                {t.label}
+              </button>
+              <button className="small secondary" title="닫기" aria-label={`${t.label} 닫기`}
+                onClick={() => (t.key === 'agent' ? setAgent(null) : setReport(null))}>
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      {shown === 'agent' && agent ? (
         <AgentView agent={agent} health={health.data} />
-      ) : view === 'report' && report ? (
+      ) : shown === 'report' && report ? (
         <ReportView report={report} />
       ) : (
-        <>
-          <div className="panel">
-            <h2>에이전트</h2>
-            <Async state={agents} empty="쓸 수 있는 에이전트가 없습니다 — 운영 중(release)인 앱이 에이전트가 됩니다.">
-              {(list) => (
-                <table>
-                  <thead><tr><th>이름</th><th>조직</th><th>종류</th><th /></tr></thead>
-                  <tbody>
-                    {list.map((a) => (
-                      <tr key={a.name}>
-                        <td>{a.name}</td>
-                        <td>{a.org ?? '공용'}</td>
-                        <td>{a.type}</td>
-                        <td>
-                          <button className="small secondary" onClick={() => {
-                            setAgent(a);
-                            setView('agent');
-                          }}>열기</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </Async>
-          </div>
-          <div className="panel">
-            <h2>부서 워크플로</h2>
-            <Async state={workflows} empty="소속 조직에 워크플로가 없습니다 — 업무 제안은 개인 업무 맥락으로만 합니다.">
-              {(list) => (
-                <table>
-                  <thead><tr><th>워크플로</th><th>조직</th><th>단계</th><th>대기 중</th></tr></thead>
-                  <tbody>
-                    {list.map((w) => (
-                      <tr key={`${w.org}/${w.name}`}>
-                        <td title={w.steps.join('\n')}>
-                          {w.name}
-                          {w.description && <div className="mutedtext" style={{ fontSize: 12 }}>{w.description}</div>}
-                        </td>
-                        <td>{w.org}</td>
-                        <td>{w.steps.length}</td>
-                        <td>
-                          {w.waiting_runs > 0
-                            ? <span className="status warn">{w.waiting_runs}건</span>
-                            : <span className="mutedtext">-</span>}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </Async>
-          </div>
-          <PersonalPanel status={personal} />
-        </>
+        <div className="panel">
+          <p className="mutedtext">
+            대화에서 에이전트나 보고서를 띄우면 여기에 나옵니다. 에이전트·부서 워크플로·내 업무
+            맥락은 왼쪽 「설정」에 있습니다.
+          </p>
+        </div>
       )}
     </>
   );
 
   return (
-    <Split left={left} right={right} leftLabel="대화" leftWidth={440}
+    <Split left={left} right={right} leftLabel="대화·설정" leftWidth={440}
       collapsed={collapsed} onToggle={setCollapsed} />
   );
 }
 
 // --- 세션 ---
+
+// 서버(services/smartwork.py)와 같은 상한 — 서버가 다시 거르지만, 다 읽어 보낸 뒤에 거절되면
+// 기다린 시간이 아깝다.
+const MAX_ATTACHMENTS = 5;
+const MAX_ATTACHMENT_TOTAL = 20 * 1024 * 1024;
+const ATTACH_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+function base64Of(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).replace(/^data:[^,]*,/, ''));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
 
 function Message({ message: m, showAuthor }: { message: SmartworkSessionMessage; showAuthor: boolean }) {
   return (
@@ -417,6 +523,11 @@ function Message({ message: m, showAuthor }: { message: SmartworkSessionMessage;
         <div className="mutedtext" style={{ fontSize: 11, marginBottom: 4 }}>{m.author}</div>
       )}
       {m.content}
+      {m.attachments && m.attachments.length > 0 && (
+        <div className="mutedtext" style={{ fontSize: 11, marginTop: 6 }}>
+          첨부: {m.attachments.map((a) => a.name).join(', ')}
+        </div>
+      )}
       {m.tools && m.tools.length > 0 && (
         <div className="mutedtext mono" style={{ fontSize: 11, marginTop: 6 }}>
           도구: {m.tools.join(', ')}
@@ -653,6 +764,8 @@ function when(iso: string | null | undefined): string {
 function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
+  // 올라간 바이트 / 올릴 바이트 — 서버가 변환하는 동안은 100%에 머문다(그건 글로 알린다).
+  const [bytes, setBytes] = useState<{ sent: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement | null>(null);
 
@@ -665,6 +778,7 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
+      setBytes(null);
       status.reload();
     }
   };
@@ -690,12 +804,24 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
     // 남기지 않는다) 여러 개를 한꺼번에 보내면 OCR·구형 Office 변환이 몰려 시간 제한에 걸린다.
     let skipped = 0;
     let failed = 0;
+    const total = todo.reduce((n, it) => n + it.file.size, 0);
+    let done = 0;
     for (let i = 0; i < todo.length; i += 1) {
-      setProgress(`${folder}: ${i}/${todo.length} 변환 중... (${todo[i].path})`);
-      const out = await api.personalUpload(folder, todo[i]);
+      const { path, file } = todo[i];
+      const head = `${folder}: ${i + 1}/${todo.length}`;
+      setProgress(`${head} 올리는 중 0% (${path})`);
+      setBytes({ sent: done, total });
+      const out = await api.personalUpload(folder, todo[i], (loaded, size) => {
+        setBytes({ sent: done + loaded, total });
+        setProgress(loaded < size
+          ? `${head} 올리는 중 ${Math.floor((loaded / size) * 100)}% (${path})`
+          : `${head} 변환 중... (${path})`);
+      });
+      done += file.size;
       if (out.status === 'skipped') skipped += 1;
       if (out.status === 'failed') failed += 1;
     }
+    setBytes(null);
     setProgress(
       `${folder}: 문서 ${plan.files}개 — 새로 변환 ${todo.length - skipped - failed}, 그대로 ${plan.files - todo.length}` +
       `, 지움 ${plan.removed}${failed ? `, 변환 실패 ${failed}` : ''}${skipped ? `, 건너뜀 ${skipped}` : ''}`);
@@ -820,8 +946,17 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
           </>
         )}
       </Async>
+      {bytes && bytes.total > 0 && (
+        <div className="progress-bar" title={`${mb(bytes.sent)} / ${mb(bytes.total)}`}>
+          <div style={{ width: `${(bytes.sent / bytes.total) * 100}%` }} />
+        </div>
+      )}
       {progress && <p className="mutedtext">{progress}</p>}
       {error && <p className="error">{error}</p>}
     </div>
   );
+}
+
+function mb(n: number): string {
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
 }

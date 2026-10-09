@@ -133,23 +133,10 @@ export default function App() {
           {/* 옛 주소는 살려 둔다 — 북마크·공유 링크가 깨지면 "없어졌다"로 읽힌다. */}
           <Route path="explore" element={<Navigate to="/ontology" replace />} />
         </Route>
-        {/* 온톨로지 다음 자리 — 조직이 플랫폼 자원과 사람 작업을 엮어 돌리는 흐름. */}
-        <Route
-          path="/workflows"
-          element={
-            <AdminOnly>
-              <Workflows />
-            </AdminOnly>
-          }
-        />
-        <Route
-          path="/workflows/:id"
-          element={
-            <AdminOnly>
-              <WorkflowDetail />
-            </AdminOnly>
-          }
-        />
+        {/* 온톨로지 다음 자리 — 조직이 플랫폼 자원과 사람 작업을 엮어 돌리는 흐름.
+            소속 조직의 사용자가 직접 다룬다(다른 조직 것은 서버가 404로 숨긴다). */}
+        <Route path="/workflows" element={<Workflows />} />
+        <Route path="/workflows/:id" element={<WorkflowDetail />} />
         <Route
           path="/server-config"
           element={
