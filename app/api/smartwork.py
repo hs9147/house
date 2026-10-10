@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from .. import audit
 from ..db import get_db
 from ..features import is_enabled
-from ..models import ApiKey
+from ..models import ApiKey, LlmProvider
 from ..security import require_api_key
 from ..services import bedrock, personal, smartwork, worksession
 from ..services import llm as llm_service
@@ -202,16 +202,32 @@ class SessionMessageIn(BaseModel):
     # 비어 있으면 여는 턴 — 업무 맥락을 보고 할 일을 제안하며 시작한다(services/smartwork).
     content: str = ""
     attachments: list[AttachmentIn] = []
+    # 비어 있으면 기본 프로바이더 — 이 턴을 어느 모델로 돌릴지 사람이 고를 수 있다.
+    provider_id: int | None = None
+
+
+def _provider_for(db: Session, provider_id: int | None, organization_id: int | None):
+    if provider_id is None:
+        provider = llm_service.default_provider(db)
+        if provider is None:
+            raise HTTPException(status_code=503, detail=(
+                "기본 LLM 프로바이더가 없습니다 — 관리자가 LLM 메뉴에서 기본 프로바이더를 지정해야 합니다."))
+        return provider
+    provider = db.get(LlmProvider, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="LLM 프로바이더를 찾을 수 없습니다")
+    # 조직 범위는 워크플로와 같은 규칙이다(전역 또는 이 업무의 조직).
+    if provider.organization_id not in (None, organization_id):
+        raise HTTPException(status_code=403, detail=f"'{provider.name}'는 이 조직에서 쓸 수 없습니다.")
+    return provider
 
 
 @router.post("/sessions/{session_id}/messages")
 def session_message(session_id: int, body: SessionMessageIn, db: Session = Depends(get_db),
                     key: ApiKey = Depends(require_api_key)):
-    provider = llm_service.default_provider(db)
-    if provider is None:
-        raise HTTPException(status_code=503, detail=(
-            "기본 LLM 프로바이더가 없습니다 — 관리자가 LLM 메뉴에서 기본 프로바이더를 지정해야 합니다."))
     try:
+        row, _ = worksession.get(db, session_id, key.name)
+        provider = _provider_for(db, body.provider_id, row.organization_id)
         return worksession.send(db, key, provider, session_id, body.content, _toolsets(db, key),
                                 [a.model_dump() for a in body.attachments])
     except worksession.SessionError as e:

@@ -46,6 +46,7 @@ export default function Smartwork() {
   const agents = useApi(() => api.smartworkAgents());
   const workflows = useApi(() => api.smartworkWorkflows());
   const personal = useApi(() => api.personalStatus());
+  const providers = useApi(() => api.listProviders());
   const orgs = useApi(() => api.smartworkOrgs());
   const sessions = useApi(() => api.listSessions());
   const [session, setSession] = useState<SmartworkSession | null>(null);
@@ -57,6 +58,8 @@ export default function Smartwork() {
   // 이번 요청에 붙일 참고 자료 — 보내기에 성공해야 비운다(실패하면 다시 시도에 그대로 실린다).
   const [files, setFiles] = useState<(SmartworkAttachmentIn & { size: number })[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
+  // 이번 대화를 돌릴 모델 — 0 = 기본 프로바이더(서버가 고른다). 다시 시도에도 그대로 실린다.
+  const [providerId, setProviderId] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -116,7 +119,7 @@ export default function Smartwork() {
     setBusy(true);
     setError(null);
     try {
-      const out = await api.sendSessionMessage(s.id, content, attachments);
+      const out = await api.sendSessionMessage(s.id, content, attachments, chosenProvider || null);
       await catchUp();
       setPending(null);
       if (attachments.length > 0) setFiles([]);
@@ -190,6 +193,11 @@ export default function Smartwork() {
     }
   };
 
+  // 전역 프로바이더와 이 업무의 조직 것만 — 서버도 같은 규칙으로 막는다.
+  const usable = (providers.data ?? []).filter(
+    (p) => p.organization_id == null || p.organization_id === session?.organization_id);
+  // 다른 조직의 업무로 옮겨 고른 모델을 쓸 수 없게 되면 기본으로 돌아간다.
+  const chosenProvider = usable.some((p) => p.id === providerId) ? providerId : 0;
   const submit = () => {
     const text = input.trim();
     if (!text || busy || !session) return;
@@ -359,6 +367,13 @@ export default function Smartwork() {
           )}
           <div className="row" style={{ marginTop: 8 }}>
             <button onClick={submit} disabled={busy || !input.trim()}>보내기</button>
+            <select value={chosenProvider} disabled={busy} title="이 대화에 쓸 LLM"
+              onChange={(e) => setProviderId(Number(e.target.value))}>
+              <option value={0}>LLM: 기본</option>
+              {usable.map((p) => (
+                <option key={p.id} value={p.id}>{p.name} · {p.model}{p.is_default ? ' (기본)' : ''}</option>
+              ))}
+            </select>
             <button className="secondary" disabled={busy} onClick={() => fileInput.current?.click()}>
               첨부
             </button>

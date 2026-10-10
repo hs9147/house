@@ -612,3 +612,34 @@ def test_file_upload_streams_one_file_and_stops_at_the_cap(client, monkeypatch):
                    headers=alice)
     assert r.json() == {"path": "ok.md", "status": "saved"}
     assert (store.root / "work/ok.md.md").is_file()
+
+
+def test_conversation_runs_on_the_chosen_provider_within_its_organization(client, monkeypatch):
+    finance = client.post(f"{API}/orgs", json={"name": "finance"}, headers=ADMIN).json()["id"]
+    sales = client.post(f"{API}/orgs", json={"name": "sales"}, headers=ADMIN).json()["id"]
+
+    def provider(name, org=None):
+        r = client.post(f"{API}/llm/providers", json={
+            "name": name, "kind": "openai", "base_url": "https://api.example.com",
+            "api_key": "sk-secret", "model": f"{name}-model", "organization_id": org}, headers=ADMIN)
+        assert r.status_code == 201, r.text
+        return r.json()["id"]
+
+    default_id = client.get(f"{API}/llm/providers", headers=ADMIN).json()[0]["id"]
+    client.post(f"{API}/llm/providers/{default_id}/default", headers=ADMIN)
+    global_pick, finance_only, sales_only = provider("fast"), provider("fin", finance), provider("sal", sales)
+    used: list[str] = []
+    monkeypatch.setattr(llm, "chat_completion",
+                        lambda p, *a, **k: used.append(p.name) or "완료")
+    alice = _user(client, "alice@corp.com", finance)
+    sid = _session(client, alice, organization_id=finance)
+
+    def send(provider_id=None):
+        return client.post(f"{API}/smartwork/sessions/{sid}/messages",
+                           json={"content": "질문", "provider_id": provider_id}, headers=alice)
+
+    assert send().status_code == 200 and used[-1] == "claude"      # 안 고르면 기본
+    assert send(global_pick).status_code == 200 and used[-1] == "fast"
+    assert send(finance_only).status_code == 200 and used[-1] == "fin"
+    assert send(sales_only).status_code == 403                      # 다른 조직 전용 모델
+    assert send(9999).status_code == 404

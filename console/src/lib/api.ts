@@ -589,8 +589,10 @@ export const api = {
   setSessionContext: (id: number, context: SmartworkContext) =>
     request<SmartworkContext>('PUT', `/smartwork/sessions/${id}/context`, context),
   // 빈 content는 여는 턴(업무 맥락을 보고 할 일을 제안하며 시작한다) — 대화가 없을 때만
-  sendSessionMessage: (id: number, content: string, attachments: SmartworkAttachmentIn[] = []) =>
-    request<SmartworkTurn>('POST', `/smartwork/sessions/${id}/messages`, { content, attachments }),
+  sendSessionMessage: (id: number, content: string, attachments: SmartworkAttachmentIn[] = [],
+    provider_id: number | null = null) =>
+    request<SmartworkTurn>('POST', `/smartwork/sessions/${id}/messages`,
+      { content, attachments, provider_id }),
   // 개인 업무 맥락 — 로그인한 그 사람의 것만. 경로에 누구의 것인지 고르는 자리가 없다.
   personalStatus: () => request<PersonalStatus>('GET', '/smartwork/personal'),
   personalConsent: () => request<PersonalStatus>('POST', '/smartwork/personal/consent'),
