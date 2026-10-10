@@ -709,3 +709,43 @@ def test_eml_mail_files_are_searchable_and_not_kept(client):
     assert docsearch.search(store.name, "펠리컨")["hits"][0]["path"] == "mail/a.eml.md"
     assert sorted(p.relative_to(store.root).as_posix() for p in store.root.rglob("*") if p.is_file()) \
         == ["mail/a.eml.md"]
+
+
+def test_answer_rating_is_by_participants_and_the_last_press_wins(client, monkeypatch):
+    """답변 평가는 그 세션 사람만, 한 사람에 하나 — 다시 누르면 덮어쓴다.
+
+    여러 번 누른 사람이 집계를 끌면 모델 비교가 무의미해진다. 그리고 점수에는 **그때 답한
+    모델**이 박혀야 한다 — 세션 모델은 나중에 바뀌므로 설정을 보면 알 수 없다.
+    """
+    alice = _user(client, "alice@corp.com")
+    bob = _user(client, "bob@corp.com")
+    sid = _session(client, alice)
+    out, _ = _chat(client, alice, monkeypatch, [], text="예산안 정리하자", sid=sid)
+    answer = out["message"]
+    assert (answer["model"], answer["provider"]) == ("test-model", "claude")
+    rate = f"{API}/smartwork/messages/{answer['id']}/rating"
+
+    assert client.post(rate, json={"score": 1}, headers=alice).status_code == 200
+    assert client.post(rate, json={"score": -1, "reason": "숫자가 틀렸다"},
+                       headers=alice).json()["score"] == -1
+    # 남의 세션 답변은 평가할 수 없고, 점수는 좋음·아쉬움 둘뿐이다
+    assert client.post(rate, json={"score": 1}, headers=bob).status_code == 404
+    assert client.post(rate, json={"score": 5}, headers=alice).status_code == 422
+    assert client.post(f"{API}/smartwork/messages/9999/rating", json={"score": 1},
+                       headers=alice).status_code == 404
+    # 사람이 쓴 말에는 평가가 붙지 않는다
+    messages = client.get(f"{API}/smartwork/sessions/{sid}", headers=alice).json()["messages"]
+    assert messages[0]["role"] == "user"
+    assert client.post(f"{API}/smartwork/messages/{messages[0]['id']}/rating",
+                       json={"score": 1}, headers=alice).status_code == 404
+    # 누른 상태가 대화에 보인다 — 같은 답을 또 평가하지 않게
+    assert [m["my_rating"] for m in messages] == [0, -1]
+
+    summary = client.get(f"{API}/telemetry/quality?days=30", headers=ADMIN).json()
+    assert summary["totals"] == {"rated": 1, "good": 0, "poor": 1, "raters": 1}
+    assert summary["by_model"] == [{"key": "claude / test-model", "rated": 1,
+                                    "good": 0, "poor": 1}]
+    assert summary["recent_poor"][0]["reason"] == "숫자가 틀렸다"
+    # **누가 매겼는지는 내보내지 않는다** — 이름이 보이면 솔직한 평가가 줄어든다.
+    assert "alice@corp.com" not in json.dumps(summary, ensure_ascii=False)
+    assert client.get(f"{API}/telemetry/quality").status_code == 401

@@ -423,7 +423,14 @@ def _from_converse(data: dict) -> dict:
         reply["tool_calls"] = calls
     # stopReason을 OpenAI의 finish_reason 자리로 옮긴다 — 잘림 판정을 호출부 한 곳에서
     # 하기 위해서다(llm.chat_completion). Bedrock은 "max_tokens", OpenAI는 "length"다.
-    return {"choices": [{"message": reply, "finish_reason": data.get("stopReason") or ""}]}
+    out: dict = {"choices": [{"message": reply, "finish_reason": data.get("stopReason") or ""}]}
+    # 토큰 수도 OpenAI 이름으로 옮긴다 — 관측이 경로마다 다른 이름을 알 필요는 없다
+    # (services/telemetry.result_fields). Converse는 inputTokens/outputTokens로 준다.
+    usage = data.get("usage") or {}
+    if usage:
+        out["usage"] = {"prompt_tokens": usage.get("inputTokens") or 0,
+                        "completion_tokens": usage.get("outputTokens") or 0}
+    return out
 
 
 def _tool_config(tools: list[dict]) -> dict:

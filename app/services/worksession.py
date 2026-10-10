@@ -10,8 +10,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ..models import (
-    ApiKey, Organization, PersonalContext, SmartworkSession, SmartworkSessionMember,
-    SmartworkSessionMessage, UserAccount, Workflow, utcnow,
+    AnswerRating, ApiKey, Organization, PersonalContext, SmartworkSession,
+    SmartworkSessionMember, SmartworkSessionMessage, UserAccount, Workflow, utcnow,
 )
 from ..security import viewer_org_ids
 from . import smartwork
@@ -139,9 +139,10 @@ def _summary(row: SmartworkSession) -> dict:
     }
 
 
-def _message_out(m: SmartworkSessionMessage) -> dict:
+def _message_out(m: SmartworkSessionMessage, my_rating: int = 0) -> dict:
     return {"id": m.id, "role": m.role, "author": m.author, "content": m.content,
-            **(m.view or {}), "created_at": m.created_at.isoformat()}
+            **(m.view or {}), "my_rating": my_rating,
+            "created_at": m.created_at.isoformat()}
 
 
 def detail(db: Session, row: SmartworkSession, member: SmartworkSessionMember,
@@ -153,13 +154,19 @@ def detail(db: Session, row: SmartworkSession, member: SmartworkSessionMember,
     messages = db.execute(select(SmartworkSessionMessage).where(
         SmartworkSessionMessage.session_id == row.id, SmartworkSessionMessage.id > after)
         .order_by(SmartworkSessionMessage.id)).scalars().all()
+    # 내가 매긴 평가 — 누른 상태가 보여야 같은 답을 또 평가하지 않는다. 남이 매긴 것은
+    # 내보내지 않는다(평가는 집계로만 읽는 것이고, 누가 아쉽다고 했는지는 대화의 일이 아니다).
+    mine = {r.message_id: r.score for r in db.execute(
+        select(AnswerRating).where(AnswerRating.rater == member.email,
+                                   AnswerRating.message_id.in_([m.id for m in messages]))
+    ).scalars()}
     return {
         **_summary(row),
         "is_owner": row.owner == member.email,
         # 남의 개인 맥락 선택은 내보내지 않는다 — 어떤 폴더를 골랐는지도 그 사람의 것이다.
         "members": [{"email": m.email, "is_owner": m.email == row.owner} for m in members],
         "my_context": {"folders": member.folders or [], "mail": bool(member.mail)},
-        "messages": [_message_out(m) for m in messages],
+        "messages": [_message_out(m, mine.get(m.id, 0)) for m in messages],
     }
 
 
@@ -238,8 +245,39 @@ def send(db: Session, key: ApiKey, provider, session_id: int, content: str,
             row.title = content.splitlines()[0][:80]
     answer = SmartworkSessionMessage(
         session_id=row.id, role="assistant", author=key.name, content=result["reply"],
-        view={k: result[k] for k in ("agent", "report", "suggestions", "choices", "tools")})
+        # **어느 모델이 답했는지 함께 남긴다.** 대화마다 모델을 고를 수 있어서, 나중에 보면
+        # 세션 설정으로는 알 수 없다 — 평가(answer_ratings)가 이 값으로 묶인다.
+        view={**{k: result[k] for k in ("agent", "report", "suggestions", "choices", "tools")},
+              "model": provider.model, "provider": provider.name})
     db.add(answer)
     row.updated_at = utcnow()
     db.commit()
     return {**result, "message": _message_out(answer)}
+
+
+def rate(db: Session, email: str, message_id: int, score: int, reason: str) -> dict:
+    """답변 하나에 좋음(+1)·아쉬움(-1)을 매긴다 — 그 세션 참여자만, 한 사람에 하나.
+
+    남의 세션 답변은 평가할 수 없다(get이 참여 여부를 본다). 다시 누르면 덮어쓴다 —
+    여러 번 누른 사람이 집계를 끌면 모델 비교가 무의미해진다.
+    """
+    if score not in (1, -1):
+        raise SessionError(422, "평가는 좋음(1) 또는 아쉬움(-1)입니다.")
+    msg = db.get(SmartworkSessionMessage, message_id)
+    if msg is None or msg.role != "assistant":
+        raise SessionError(404, "평가할 답변을 찾을 수 없습니다.")
+    get(db, msg.session_id, email)
+    found = db.execute(select(AnswerRating).where(
+        AnswerRating.message_id == message_id,
+        AnswerRating.rater == email)).scalar_one_or_none()
+    if found is None:
+        found = AnswerRating(message_id=message_id, rater=email)
+        db.add(found)
+    view = msg.view or {}
+    found.score = score
+    found.reason = (reason or "").strip()[:500]
+    # 답이 만들어진 시점의 모델을 박아 둔다 — 세션 모델은 나중에 바뀐다.
+    found.model = str(view.get("model") or "")[:128]
+    found.provider = str(view.get("provider") or "")[:64]
+    db.commit()
+    return {"message_id": message_id, "score": found.score, "reason": found.reason}

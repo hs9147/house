@@ -17,6 +17,7 @@ import type {
   DeploymentOut,
   EnvVarRow,
   LlmProviderOut,
+  LlmTelemetry,
   McpDirectoryItem,
   ModuleOut,
   ModuleSummary,
@@ -50,6 +51,7 @@ import type {
   ProjectOut,
   ProjectType,
   ProviderCheck,
+  QualityTelemetry,
   RedirectRule,
   SchedulerSnapshot,
   ResourceItem,
@@ -273,6 +275,12 @@ export const api = {
   health: () => request<HealthInfo>('GET', '/health'),
   status: () => request<StatusSnapshot>('GET', '/status'),
   audit: (limit = 100) => request<AuditRow[]>('GET', '/audit', undefined, { limit }),
+  // 대시보드가 읽는 LLM 호출 집계 — 화면이 행을 더하지 않는다(서버가 센다).
+  llmTelemetry: (days = 7) =>
+    request<LlmTelemetry>('GET', '/telemetry/llm', undefined, { days }),
+  // 평가 탭이 읽는 답변 평가 집계 — 창이 넓어서 기본 30일이다(평가는 호출보다 드물다).
+  qualityTelemetry: (days = 30) =>
+    request<QualityTelemetry>('GET', '/telemetry/quality', undefined, { days }),
   issueKey: (name: string, is_admin: boolean) =>
     request<ApiKeyIssued>('POST', '/keys', { name, is_admin }),
 
@@ -596,6 +604,10 @@ export const api = {
     provider_id: number | null = null) =>
     request<SmartworkTurn>('POST', `/smartwork/sessions/${id}/messages`,
       { content, attachments, provider_id }),
+  // 답변 하나에 좋음(+1)·아쉬움(-1) — 그 세션 참여자만, 다시 누르면 덮어쓴다.
+  rateAnswer: (messageId: number, score: number, reason = '') =>
+    request<{ message_id: number; score: number; reason: string }>(
+      'POST', `/smartwork/messages/${messageId}/rating`, { score, reason }),
   // 개인 업무 맥락 — 로그인한 그 사람의 것만. 경로에 누구의 것인지 고르는 자리가 없다.
   personalStatus: () => request<PersonalStatus>('GET', '/smartwork/personal'),
   personalConsent: () => request<PersonalStatus>('POST', '/smartwork/personal/consent'),

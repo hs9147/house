@@ -673,6 +673,76 @@ class AuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class LlmCallLog(Base):
+    """LLM 호출 한 건 — 대시보드·평가가 세는 바탕. **본문은 없다.**
+
+    왜 따로 두는가: audit_events는 사람이 **지시한 일**을 남긴다(배포·키 발급). 모델 호출은
+    그 안에서 수십 번 일어나고, 느려졌는지·실패하는지·토큰을 얼마나 쓰는지는 거기에 전혀
+    남지 않았다 — 지금까지 usage를 읽은 곳이 한 군데도 없었다. 그래서 "LLM이 이상하다"는
+    말에 답할 숫자가 없었다.
+
+    **프롬프트와 응답 텍스트는 절대 싣지 않는다.** 개인 업무 맥락이 섞이고, 관측은 그것 없이
+    성립한다(모델 이름·시간·토큰 수·실패 사유). error는 프로바이더가 돌려준 거부 사유이지
+    사람이 쓴 내용이 아니다.
+    """
+
+    __tablename__ = "llm_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(128))
+    # chat.completions / responses / bedrock.converse — 어느 경로로 나갔는지. 같은 모델이
+    # 도구 때문에 응답 API로 돌아가는 일이 있어서(services/llm.py), 그걸 봐야 설명이 된다.
+    path: Mapped[str] = mapped_column(String(32), default="")
+    # 어느 화면에서 왔는지(요청 경로). 토큰을 태우거나 실패하는 기능을 찾는 열이다.
+    route: Mapped[str] = mapped_column(String(128), default="")
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    ms: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # 도구 왕복 몇 번째 호출인지, 그 호출에서 모델이 도구를 몇 개 불렀는지.
+    tool_round: Mapped[int] = mapped_column(Integer, default=0)
+    tool_calls: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # OpenTelemetry 트레이스 — 나중에 수집기를 붙이면 같은 호출을 양쪽에서 맞춰 볼 수 있다.
+    trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class AnswerRating(Base):
+    """사람이 답변 하나에 매긴 평가 — LLM·에이전트 품질의 바탕.
+
+    **모델이 자기 답을 채점하게 하지 않는다.** 이 플랫폼의 판정 원칙은 "셈과 근거는 서버가,
+    판정만 LLM이"인데, 품질은 바로 그 판정의 대상이다 — 모델이 스스로 매기면 측정이 아니라
+    자기 보고가 되고, 모델을 바꿀 근거로 쓸 수 없다.
+
+    점수는 좋음(+1)·아쉬움(-1) 둘이다. 5점 척도는 사람마다 기준이 달라 모델 비교에 쓰기
+    어렵고, 무엇보다 **눌리지 않는다** — 쌓이지 않는 평가는 없는 평가다.
+
+    model·provider를 이 행에 적어 둔다: 세션의 모델은 나중에 바뀔 수 있어서(대화마다 고른다),
+    평가한 시점의 답을 만든 모델을 그 자리에서 박아 두지 않으면 집계가 조용히 틀린다.
+    """
+
+    __tablename__ = "answer_ratings"
+    # 한 사람이 한 답에 하나 — 다시 누르면 덮어쓴다(여러 번 누른 사람이 집계를 끌지 않게).
+    __table_args__ = (UniqueConstraint("message_id", "rater", name="uq_rating_message_rater"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    message_id: Mapped[int] = mapped_column(
+        ForeignKey("smartwork_session_messages.id", ondelete="CASCADE"), index=True
+    )
+    rater: Mapped[str] = mapped_column(String(255))
+    score: Mapped[int] = mapped_column(Integer)  # +1 좋음 / -1 아쉬움
+    # 왜 그렇게 봤는지(선택). 사람이 쓴 글이라 **짧게만** 받고, 평가 탭에서만 보인다 —
+    # 업무 내용을 적는 칸이 아니라는 뜻을 화면 문구로도 말한다.
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    model: Mapped[str] = mapped_column(String(128), default="")
+    provider: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class WorkflowRunStatus(str, enum.Enum):
     running = "running"
     # 사람 단계에서 멈춰 있다 — 실패가 아니다. 사람이 제출하면 그 자리에서 이어 돈다.

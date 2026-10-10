@@ -5,6 +5,9 @@ import { isAdmin, isLoggedIn } from './lib/auth';
 import Accounts from './pages/Accounts';
 import AgentPlanning from './pages/AgentPlanning';
 import Audit from './pages/Audit';
+import AuditAssessmentTab from './pages/audit/AssessmentTab';
+import AuditDashboardTab from './pages/audit/DashboardTab';
+import AuditLogTab from './pages/audit/LogTab';
 import Dashboard from './pages/Dashboard';
 import Git from './pages/Git';
 import Login from './pages/Login';
@@ -162,6 +165,7 @@ export default function App() {
           }
         />
         <Route path="/planning" element={<AgentPlanning />} />
+        {/* 사람이 지시한 일(기록), 모델 호출의 숫자(대시보드), 사람이 매긴 점수(평가). */}
         <Route
           path="/audit"
           element={
@@ -169,7 +173,12 @@ export default function App() {
               <Audit />
             </AdminOnly>
           }
-        />
+        >
+          {/* 기본은 기록 — 여태 이 주소가 보여 준 화면이다(북마크가 깨지지 않는다). */}
+          <Route index element={<AuditLogTab />} />
+          <Route path="dashboard" element={<AuditDashboardTab />} />
+          <Route path="assessment" element={<AuditAssessmentTab />} />
+        </Route>
         <Route
           path="/powershell"
           element={

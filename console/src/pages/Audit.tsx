@@ -1,55 +1,35 @@
-import { useState } from 'react';
-import Async from '../components/Async';
-import { api } from '../lib/api';
-import { fmtDate } from '../lib/format';
-import { useApi } from '../lib/hooks';
+import { NavLink, Outlet } from 'react-router-dom';
+
+/**
+ * 작업 로그 — 탭 셋.
+ *
+ *  - **기록**: 사람이 지시한 일 한 줄씩(배포·키 발급·승인 — audit_events).
+ *  - **대시보드**: 그 안에서 실제로 일어난 모델 호출의 숫자(llm_calls) — 느려졌는지,
+ *    실패하는지, 토큰을 얼마나 쓰는지.
+ *  - **평가**: 그 답이 도움이 됐는지 — 사람이 누른 좋음·아쉬움(answer_ratings).
+ *    숫자(지연·토큰)로는 "빠른 헛소리"가 좋아 보인다. 품질은 따로 재야 한다.
+ *
+ * 한 화면에 섞지 않는 이유는 단위가 다르기 때문이다. 기록은 사건 하나하나를 보는 자리고,
+ * 대시보드는 분포를 보는 자리다 — 수천 건의 모델 호출을 기록처럼 늘어놓으면 사람이 지시한
+ * 일이 그 속에 묻힌다(그래서 모델 호출은 audit_events에 넣지 않았다).
+ */
+const TABS: [string, string][] = [
+  ['/audit', '기록'],
+  ['/audit/dashboard', '대시보드'],
+  ['/audit/assessment', '평가'],
+];
 
 export default function Audit() {
-  const [limit, setLimit] = useState(100);
-  const state = useApi(() => api.audit(limit), [limit]);
-
   return (
-    <div className="panel">
-      <div className="row" style={{ marginBottom: 12 }}>
-        <h2 style={{ margin: 0 }}>작업 로그</h2>
-        <div className="spacer" />
-        <select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
-          <option value={100}>최근 100건</option>
-          <option value={250}>최근 250건</option>
-          <option value={500}>최근 500건</option>
-        </select>
-        <button className="secondary small" onClick={state.reload}>
-          새로고침
-        </button>
+    <>
+      <div className="tabs">
+        {TABS.map(([path, label]) => (
+          <NavLink key={path} to={path} end={path === '/audit'}>
+            {label}
+          </NavLink>
+        ))}
       </div>
-      <Async state={state} empty="기록이 없습니다.">
-        {(rows) => (
-          <table>
-            <thead>
-              <tr>
-                <th>시각</th>
-                <th>주체</th>
-                <th>행위</th>
-                <th>대상</th>
-                <th>상세</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={i}>
-                  <td className="mono">{fmtDate(r.at)}</td>
-                  <td>{r.actor}</td>
-                  <td className="mono">{r.action}</td>
-                  <td>{r.target}</td>
-                  <td className="mono" style={{ fontSize: 11 }}>
-                    {r.detail ? JSON.stringify(r.detail) : '-'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Async>
-    </div>
+      <Outlet />
+    </>
   );
 }

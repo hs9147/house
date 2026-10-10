@@ -8,7 +8,8 @@ from starlette.staticfiles import StaticFiles
 from .api import (
     a2a_gateway, llm, mcp_servers,
     mcp_tokens, modules, oidc_provider, orgs, planning, previews, projects,
-    ontology, proxy_gateway, server, smartwork, sources, storage, system, webhooks, workflows,
+    ontology, proxy_gateway, server, smartwork, sources, storage, system, telemetry,
+    webhooks, workflows,
 )
 from .config import get_settings
 from .db import Base, engine
@@ -107,11 +108,23 @@ def create_app() -> FastAPI:
         ),
         version="0.1.0",
     )
+    # 요청 경로를 관측 컨텍스트에 넣는다 — LLM 호출 기록에 "어디서 왔는지"가 적힌다
+    # (services/telemetry.py). 이 플랫폼의 유일한 미들웨어이므로 순수 ASGI로 두고,
+    # 요청마다 DB에 쓰지는 않는다 — 쓰기 증폭이 관측보다 먼저 문제가 된다.
+    from .services.telemetry import RouteTagMiddleware, setup_tracing  # noqa: PLC0415
+
+    app.add_middleware(RouteTagMiddleware)
+    # 외부 수집기로도 보낼지는 설정이 정한다(PAAS_OTEL_ENDPOINT) — 비어 있으면 아무것도
+    # 켜지 않는다. 기록은 그와 무관하게 DB에 남는다.
+    setup_tracing()
+
     features = enabled_features()
 
     # core — 항상 켜짐 (projects 안의 배포 계열 엔드포인트는 require_feature("deploy")로 게이트)
     app.include_router(system.health_router, prefix=PAAS_PREFIX)  # /paas/health, /paas/status
     app.include_router(system.router, prefix=API_PREFIX)
+    # 작업 로그의 숫자 — LLM 호출 기록을 모아 센다(admin 전용, system.audit_log 옆자리).
+    app.include_router(telemetry.router, prefix=API_PREFIX)
     # 스마트워크 — 모든 사용자에게 열린 메뉴(대화 + 대시보드·에이전트·보고서, 개인 업무 맥락)
     app.include_router(smartwork.router, prefix=API_PREFIX)
     app.include_router(projects.router, prefix=API_PREFIX)

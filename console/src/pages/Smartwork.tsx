@@ -547,6 +547,56 @@ function Message({ message: m, showAuthor }: { message: SmartworkSessionMessage;
           도구: {m.tools.join(', ')}
         </div>
       )}
+      {m.role === 'assistant' && <Rating message={m} />}
+    </div>
+  );
+}
+
+/**
+ * 답 하나에 좋음·아쉬움 — **품질을 재는 유일한 입력이다.**
+ *
+ * 지연과 토큰은 서버가 저절로 세지만(작업 로그 · 대시보드), 그 답이 도움이 됐는지는
+ * 누른 사람만 안다. 모델에게 자기 답을 채점하게 하면 측정이 아니라 자기 보고가 된다.
+ *
+ * 아쉬움은 누르는 **즉시** 보낸다. 사유를 적어야 점수가 들어가게 하면 대부분 안 적고
+ * 떠나므로 아무것도 안 남는다 — 점수를 먼저 남기고, 사유는 덮어쓰기로 더한다.
+ */
+function Rating({ message: m }: { message: SmartworkSessionMessage }) {
+  const [score, setScore] = useState(m.my_rating ?? 0);
+  const [reason, setReason] = useState('');
+  const [failed, setFailed] = useState<string | null>(null);
+
+  const send = async (next: number, text: string) => {
+    setFailed(null);
+    setScore(next);  // 눌린 것은 바로 보인다 — 왕복을 기다리면 두 번 누른다
+    try {
+      await api.rateAnswer(m.id, next, text);
+    } catch (e) {
+      setScore(m.my_rating ?? 0);
+      setFailed((e as Error).message);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div className="row" style={{ gap: 6, fontSize: 11 }}>
+        <button className={`small ${score > 0 ? '' : 'secondary'}`}
+          onClick={() => send(1, '')}>좋음</button>
+        <button className={`small ${score < 0 ? '' : 'secondary'}`}
+          onClick={() => send(-1, reason)}>아쉬움</button>
+        {score !== 0 && <span className="mutedtext">평가해 주셔서 고맙습니다</span>}
+      </div>
+      {score < 0 && (
+        <div className="row" style={{ gap: 6, marginTop: 6 }}>
+          <input value={reason} placeholder="무엇이 아쉬웠나요? (선택)"
+            style={{ flex: 1 }}
+            onChange={(e) => setReason(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && send(-1, reason)} />
+          <button className="secondary small" disabled={!reason.trim()}
+            onClick={() => send(-1, reason)}>보내기</button>
+        </div>
+      )}
+      {failed && <div className="mutedtext" style={{ fontSize: 11 }}>평가 실패: {failed}</div>}
     </div>
   );
 }

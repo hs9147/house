@@ -294,6 +294,14 @@ class Settings(BaseSettings):
     # 사람이 기다리는 요청이므로 무한정 두지는 않는다 — 콘솔의 진행 팝업에서 취소할 수 있다.
     llm_timeout_seconds: int = 600
 
+    # --- 관측 (services/telemetry.py) ---
+    # OpenTelemetry 수집기(OTLP/HTTP)의 주소. **비어 있으면 내보내기를 아예 켜지 않는다** —
+    # 기본값(localhost:4318)으로 켜면 수집기가 없는 환경에서 호출마다 조용히 재시도하며
+    # 로그만 더럽힌다. 비어 있어도 관측 자체는 돈다: 기록은 우리 DB(llm_calls)에 남고,
+    # 작업 로그의 대시보드가 그것을 읽는다. 이 값은 사내 수집기에 함께 흘릴 때만 채운다.
+    # 예: http://otel-collector.lge.com:4318/v1/traces
+    otel_endpoint: str = ""
+
     # --- 외부 API 디렉터리 검색 (services/apisearch.py) ---
     # 키워드로 공개 API를 검색해 external_api 모듈로 추가할 때 조회하는 머신리더블
     # OpenAPI 디렉터리. 기본은 apis.guru 공개 목록. 폐쇄망이라면 사내 미러 URL로 교체.

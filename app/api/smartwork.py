@@ -239,6 +239,23 @@ def session_message(session_id: int, body: SessionMessageIn, db: Session = Depen
         raise provider_error(db, key.name, e)
 
 
+class RatingIn(BaseModel):
+    score: int  # +1 좋음 / -1 아쉬움
+    # 왜 그렇게 봤는지(선택). **업무 내용을 적는 칸이 아니다** — 관리자의 평가 탭에 보인다.
+    reason: str = ""
+
+
+@router.post("/messages/{message_id}/rating")
+def rate_answer(message_id: int, body: RatingIn, db: Session = Depends(get_db),
+                key: ApiKey = Depends(require_api_key)):
+    """이 답이 좋았는지 — 모델·에이전트 품질을 재는 **유일한** 바탕(모델이 자기 답을
+    채점하면 측정이 아니라 자기 보고다). 집계는 작업 로그의 평가 탭이 본다."""
+    try:
+        return worksession.rate(db, key.name, message_id, body.score, body.reason)
+    except worksession.SessionError as e:
+        raise _session_error(e)
+
+
 # --- 개인 업무 맥락 ---
 
 @router.get("/personal")

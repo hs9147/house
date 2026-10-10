@@ -651,6 +651,49 @@ export interface AuditRow {
   at: string;
 }
 
+/** 작업 로그 대시보드가 읽는 LLM 호출 집계 — 셈은 서버가 한다(api/telemetry.py). */
+export interface LlmCallBucket {
+  /** 묶은 이름 — 모델별이면 "프로바이더 / 모델", 경로별이면 요청 경로, 일별이면 날짜. */
+  key: string;
+  calls: number;
+  failed: number;
+  avg_ms: number;
+  tokens: number;
+}
+
+export interface LlmTelemetry {
+  days: number;
+  /** 창 안의 행이 상한을 넘어 최근 것만 센 경우 — 숫자를 그대로 믿지 말라는 표시. */
+  truncated: boolean;
+  totals: {
+    calls: number;
+    failed: number;
+    p50_ms: number;
+    p95_ms: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+  };
+  by_model: LlmCallBucket[];
+  by_route: LlmCallBucket[];
+  daily: LlmCallBucket[];
+  failures: {
+    at: string;
+    model: string;
+    provider: string;
+    route: string;
+    path: string;
+    error: string | null;
+  }[];
+}
+
+/** 평가 탭이 읽는 답변 평가 집계 — 누가 매겼는지는 내려오지 않는다(사람 수만). */
+export interface QualityTelemetry {
+  days: number;
+  totals: { rated: number; good: number; poor: number; raters: number };
+  by_model: { key: string; rated: number; good: number; poor: number }[];
+  recent_poor: { at: string; model: string; provider: string; reason: string }[];
+}
+
 export interface GpuInfo {
   index: number;
   name: string;
@@ -1147,6 +1190,11 @@ export interface SmartworkSessionMessage {
   choices?: SmartworkChoice[];
   attachments?: SmartworkAttachment[];
   tools?: string[];
+  // 어느 모델이 답했는지 — 대화마다 고를 수 있어서 설정만 보면 알 수 없다(평가의 바탕).
+  model?: string;
+  provider?: string;
+  // 내가 매긴 평가(+1 좋음 / -1 아쉬움 / 0 아직). 남이 매긴 것은 내려오지 않는다.
+  my_rating?: number;
   created_at: string;
 }
 

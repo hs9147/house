@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..models import ApiKey, BuildProfile, LlmProvider, LlmProviderKind, Project
 from ..security import decrypt_value
-from . import bedrock
+from . import bedrock, telemetry
 
 # 플랫폼이 정한 기획·구현 원칙. 문서 하나가 원천이고, 에이전트 기획의 시스템 프롬프트에
 # 주입되는 동시에 외부 빌더가 받아 가는 구현 규범이기도 하다.
@@ -177,18 +177,25 @@ def chat_completion(
     """tools/tool_executor를 주면(예: 프로젝트에 바인딩된 MCP 서버) OpenAI 호환
     tool-call 프로토콜로 모델↔도구를 오간다 — 모델이 더 이상 tool_calls를 요청하지
     않을 때까지(최대 MAX_TOOL_ROUNDS회) 반복하고 최종 텍스트만 반환한다."""
-    if uses_aws_credentials(provider):
-        # Bedrock 네이티브 Converse — 키가 아니라 AWS 자격증명으로 서명한다. 응답을
-        # OpenAI 모양으로 되돌려 주므로 아래 tool-call 루프는 그대로 쓴다.
-        data = bedrock.converse(
-            profile=provider.aws_profile,
-            region=bedrock.region_from_url(provider.base_url, provider.aws_profile),
-            model_id=provider.model,
-            messages=messages,
-            tools=tools,
-        )
-    else:
-        data = _openai_style_call(provider, messages, tools, db)
+    native = uses_aws_credentials(provider)
+    # **호출 한 번을 잰다** — 느려졌는지·실패하는지·토큰을 얼마나 쓰는지는 여기 말고는
+    # 남는 곳이 없었다(services/telemetry.py). 도구 왕복마다 한 행이고, 본문은 싣지 않는다.
+    with telemetry.llm_call(
+            provider.name, provider.model,
+            "bedrock.converse" if native else "chat.completions", _round):
+        if native:
+            # Bedrock 네이티브 Converse — 키가 아니라 AWS 자격증명으로 서명한다. 응답을
+            # OpenAI 모양으로 되돌려 주므로 아래 tool-call 루프는 그대로 쓴다.
+            data = bedrock.converse(
+                profile=provider.aws_profile,
+                region=bedrock.region_from_url(provider.base_url, provider.aws_profile),
+                model_id=provider.model,
+                messages=messages,
+                tools=tools,
+            )
+        else:
+            data = _openai_style_call(provider, messages, tools, db)
+        telemetry.note(**telemetry.result_fields(data))
     choice = data["choices"][0]
     message = choice["message"]
     # **잘린 응답을 완전한 것처럼 돌려주지 않는다.** 예전에는 finish_reason을 아예 읽지
@@ -472,7 +479,13 @@ def _responses_to_choice(data: dict) -> dict:
     message: dict = {"role": "assistant", "content": "".join(text_parts)}
     if tool_calls:
         message["tool_calls"] = tool_calls
-    return {"choices": [{"message": message, "finish_reason": reason}]}
+    out: dict = {"choices": [{"message": message, "finish_reason": reason}]}
+    # 토큰 수는 이름이 다르다(input_tokens/output_tokens) — chat 쪽 이름으로 맞춰 둔다.
+    usage = data.get("usage") or {}
+    if usage:
+        out["usage"] = {"prompt_tokens": usage.get("input_tokens") or 0,
+                        "completion_tokens": usage.get("output_tokens") or 0}
+    return out
 
 
 def _responses_call(url: str, headers: dict, payload: dict, refused: NeedsResponsesApi) -> dict:
@@ -484,6 +497,7 @@ def _responses_call(url: str, headers: dict, payload: dict, refused: NeedsRespon
                          timeout=seconds)
     except httpx.TimeoutException:
         raise LlmTimeout(seconds, get_settings().llm_max_output_tokens)
+    telemetry.note(path="responses")
     if res.status_code >= 400:
         # chat/completions의 사유를 버리지 않는다 — "응답 API도 400"만 남으면 애초에
         # 왜 여기로 왔는지가 사라져, 사람은 모델 설정부터 다시 추측한다.
