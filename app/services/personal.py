@@ -31,7 +31,7 @@ from . import storage as storage_service
 # 고르면 그 안의 사진·설치 파일·소스 트리까지 딸려 온다.
 DOC_SUFFIXES = {
     ".pdf", ".docx", ".xlsx", ".pptx", ".hwpx", ".doc", ".xls", ".ppt", ".hwp",
-    ".txt", ".md", ".csv", ".html", ".htm", ".json",
+    ".txt", ".md", ".csv", ".html", ".htm", ".json", ".eml",
 }
 MAX_FILE_BYTES = docsearch.MAX_FILE_BYTES
 # 변환본 확장자. 원래 이름 뒤에 **늘** 붙인다 — .md 원본만 빼 주면 "a.txt"와 "a.txt.md"가

@@ -41,6 +41,8 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from email import policy as email_policy
+from email.parser import BytesParser
 from html import escape, unescape
 from pathlib import Path
 from xml.etree import ElementTree
@@ -108,6 +110,10 @@ def extract(path: Path) -> tuple[str, str]:
         head = path.open("rb").read(8)
     except OSError as e:
         raise ExtractError(f"파일을 열 수 없습니다: {e}")
+
+    if path.suffix.lower() == ".eml":
+        text = _eml_markdown(path)[:MAX_TEXT_CHARS]
+        return text, text
 
     if head[:4] == b"PK\x03\x04":
         markdown = _ooxml_markdown(path)[:MAX_TEXT_CHARS]
@@ -773,6 +779,34 @@ def _soffice() -> str | None:
 
 
 # --- 평문 ---
+
+def _eml_markdown(path: Path) -> str:
+    """메일 한 통(.eml) — 제목·보낸 사람·받는 사람·시각과 본문. 첨부는 이름만 남긴다.
+
+    웹 Outlook에서 메일을 내려받으면 이 형식이다. 본문은 MIME(base64·인코딩된 헤더)이라
+    평문으로 읽으면 알아볼 수 없으므로 파서로 푼다.
+    """
+    try:
+        msg = BytesParser(policy=email_policy.default).parsebytes(path.read_bytes())
+        body = msg.get_body(preferencelist=("plain", "html"))
+        content = body.get_content() if body is not None else ""
+        if body is not None and body.get_content_type() == "text/html":
+            content = re.sub(r"(?is)<(script|style).*?</\1>", "", content)
+            content = unescape(re.sub(r"<[^>]+>", " ", content))
+            content = re.sub(r"[ \t]+", " ", re.sub(r"\s*\n\s*", "\n", content))
+        names = [part.get_filename() for part in msg.iter_attachments() if part.get_filename()]
+        lines = [
+            f"# {str(msg['subject'] or '(제목 없음)').strip()}", "",
+            f"- 보낸 사람: {msg['from'] or ''}",
+            f"- 받는 사람: {msg['to'] or ''}",
+            f"- 받은 시각: {msg['date'] or ''}",
+        ]
+        if names:
+            lines.append(f"- 첨부: {', '.join(names)}")
+        return "\n".join([*lines, "", content.strip(), ""])
+    except (OSError, ValueError, LookupError) as e:
+        raise ExtractError(f"메일을 읽을 수 없습니다: {e}")
+
 
 def _plain_text(path: Path) -> str:
     return _decode(path.read_bytes())

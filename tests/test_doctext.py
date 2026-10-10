@@ -657,3 +657,36 @@ def test_ocr_end_to_end_reads_a_scanned_korean_pdf(tmp_path):
     markdown, plain = doctext.extract(pdf)
     assert "반출" in plain and "승인" in plain
     assert markdown.startswith("<!-- 이미지에서 OCR로 추출한 텍스트입니다 -->")
+
+
+def _eml(**parts) -> bytes:
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = "예산 승인 요청", "김팀장 <kim@corp.com>", "alice@corp.com"
+    msg["Date"] = "Tue, 07 Oct 2026 09:00:00 +0900"
+    if "plain" in parts:
+        msg.set_content(parts["plain"])
+    if "html" in parts:
+        msg.add_alternative(parts["html"], subtype="html") if "plain" in parts else msg.set_content(
+            parts["html"], subtype="html")
+    if "attach" in parts:
+        msg.add_attachment(b"%PDF-1.4", maintype="application", subtype="pdf", filename=parts["attach"])
+    return msg.as_bytes()
+
+
+def test_eml_is_unpacked_to_headers_and_body_and_names_attachments(tmp_path):
+    path = tmp_path / "mail.eml"
+    path.write_bytes(_eml(plain="펠리컨 예산안을 검토해 주세요", attach="예산안.pdf"))
+    text = doctext.extract_text(path)
+    assert text.startswith("# 예산 승인 요청")
+    assert "보낸 사람: 김팀장 <kim@corp.com>" in text and "펠리컨 예산안을 검토해 주세요" in text
+    assert "첨부: 예산안.pdf" in text
+    assert "%PDF" not in text  # 첨부 내용은 읽지 않는다
+
+
+def test_eml_with_only_html_body_is_stripped_to_text(tmp_path):
+    path = tmp_path / "mail.eml"
+    path.write_bytes(_eml(html="<style>p{color:red}</style><p>펠리컨&nbsp;일정</p><script>x()</script>"))
+    text = doctext.extract_text(path)
+    assert "펠리컨" in text and "일정" in text and "color" not in text and "x()" not in text

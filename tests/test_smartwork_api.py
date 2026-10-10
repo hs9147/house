@@ -406,6 +406,9 @@ class _Resp:
 def test_outlook_mail_login_by_device_code_keeps_no_token(client, monkeypatch):
     alice = _user(client, "alice@corp.com")
     client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    # 개발자 .env에 값이 있어도 "미설정"에서 시작한다.
+    monkeypatch.setenv("PAAS_MS_GRAPH_CLIENT_ID", "")
+    get_settings.cache_clear()
     assert client.get(f"{API}/smartwork/personal", headers=alice).json()["mail"]["configured"] is False
     assert client.post(f"{API}/smartwork/personal/mail/login", headers=alice).status_code == 502
 
@@ -689,3 +692,20 @@ def test_conversation_runs_on_the_chosen_provider_within_its_organization(client
     assert send(finance_only).status_code == 200 and used[-1] == "fin"
     assert send(sales_only).status_code == 403                      # 다른 조직 전용 모델
     assert send(9999).status_code == 404
+
+
+def test_eml_mail_files_are_searchable_and_not_kept(client):
+    """Entra 앱 없이도 웹 Outlook에서 내려받은 .eml을 폴더로 올려 메일을 맥락으로 쓴다."""
+    from email.message import EmailMessage
+
+    alice = _user(client, "alice@corp.com")
+    client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = "예산 승인 요청", "kim@corp.com", "alice@corp.com"
+    msg.set_content("펠리컨 예산안을 검토해 주세요")
+    assert _upload(client, alice, "mail", {"a.eml": msg.as_bytes()})["needed"] == ["a.eml"]
+
+    store = personal.store_for("alice@corp.com")
+    assert docsearch.search(store.name, "펠리컨")["hits"][0]["path"] == "mail/a.eml.md"
+    assert sorted(p.relative_to(store.root).as_posix() for p in store.root.rglob("*") if p.is_file()) \
+        == ["mail/a.eml.md"]

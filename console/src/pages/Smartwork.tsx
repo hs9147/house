@@ -3,6 +3,7 @@ import Async from '../components/Async';
 import Split from '../components/Split';
 import { api } from '../lib/api';
 import { getEmail } from '../lib/auth';
+import { copyText } from '../lib/clipboard';
 import { type AsyncState, useApi, usePolling } from '../lib/hooks';
 import { parseCsv, renderMarkdown } from '../lib/markdown';
 import type {
@@ -763,7 +764,7 @@ function ReportView({ report }: { report: SmartworkReport }) {
 // 서버(services/personal.py DOC_SUFFIXES)와 같은 목록 — 서버가 다시 거르지만, 사진·설치
 // 파일까지 목록에 실어 보낼 까닭이 없다.
 const DOC_SUFFIXES = ['.pdf', '.docx', '.xlsx', '.pptx', '.hwpx', '.doc', '.xls', '.ppt', '.hwp',
-  '.txt', '.md', '.csv', '.html', '.htm', '.json'];
+  '.txt', '.md', '.csv', '.html', '.htm', '.json', '.eml'];
 function isDocument(name: string): boolean {
   const lower = name.toLowerCase();
   return DOC_SUFFIXES.some((s) => lower.endsWith(s));
@@ -782,6 +783,7 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
   const [error, setError] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement | null>(null);
   const [mailLogin, setMailLogin] = useState<MailLogin | null>(null);
+  const [codeCopied, setCodeCopied] = useState(false);
   const mailCancel = useRef(false);
 
   const run = async (fn: () => Promise<unknown>) => {
@@ -846,6 +848,7 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
   // 끝나면 서버가 그 자리에서 메일을 받아 보관한다(토큰은 저장하지 않는다).
   const syncMail = () => run(async () => {
     const login = await api.mailLogin();
+    setCodeCopied(false);
     setMailLogin(login);
     mailCancel.current = false;
     try {
@@ -934,13 +937,16 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
               <p className="mutedtext">
                 <span className="status dim">미설정</span> 관리자가 Entra ID 앱을 등록하고
                 (공용 클라이언트 흐름 허용) PAAS_MS_GRAPH_CLIENT_ID를 지정하면 쓸 수 있습니다.
+                그 전에는 웹 Outlook에서 메일을 .eml로 내려받아 위 「폴더 선택」으로 올리세요 —
+                문서와 같이 텍스트만 보관합니다.
               </p>
             ) : (
               <>
                 <p className="mutedtext">
                   버튼을 누르면 Microsoft 로그인 주소와 코드가 나옵니다 — 이 브라우저에서 열어
                   코드를 넣고 승인하세요. 서버는 토큰을 저장하지 않고, 받은편지함 최근 메일의
-                  내용만 보관합니다.
+                  내용만 보관합니다. 로그인이 막히면(조건부 액세스 등) 웹 Outlook에서 메일을
+                  .eml로 내려받아 위 「폴더 선택」으로 올려도 됩니다 — 문서와 같이 텍스트만 보관합니다.
                 </p>
                 <div className="row">
                   {s.mail.connected && (
@@ -967,6 +973,12 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
                       {mailLogin.verification_url}
                     </a>
                     <span>코드 <b className="mono">{mailLogin.user_code}</b></span>
+                    <button className="small secondary" onClick={() => {
+                      void copyText(mailLogin.user_code).then((ok) => {
+                        if (ok) setCodeCopied(true);
+                        else window.alert('복사하지 못했습니다 — 코드를 직접 선택해 복사하세요.');
+                      });
+                    }}>{codeCopied ? '복사됨' : '복사'}</button>
                     <span className="mutedtext">승인하면 자동으로 이어집니다.</span>
                     <button className="small secondary" onClick={() => { mailCancel.current = true; }}>취소</button>
                   </div>
