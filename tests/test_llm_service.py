@@ -248,3 +248,35 @@ def test_max_tokens_is_retried_as_max_completion_tokens(monkeypatch):
                                  {"model": "m", "max_tokens": 1000})
     assert out["choices"][0]["message"]["content"] == "ok"
     assert "max_tokens" not in sent[1] and sent[1]["max_completion_tokens"] == 1000
+
+def test_reasoning_effort_conflict_with_tools_is_retried_as_none(monkeypatch):
+    """추론 모델은 chat/completions에서 tools와 추론을 함께 거부한다(실측: gpt-6.1-sol).
+
+    우리는 reasoning_effort를 보내지 않는데도 모델의 서버 기본값 때문에 400이 온다 —
+    본문이 알려 주는 대로 'none'을 명시해 한 번 더 보낸다.
+    """
+    sent: list[dict] = []
+    refusal = ('{"error": {"message": "Function tools with reasoning_effort are not supported '
+               'for gpt-6.1-sol in /v1/chat/completions. To use function tools, use /v1/responses '
+               'or set reasoning_effort to \'none\'.", "param": "reasoning_effort"}}')
+
+    class _Res:
+        def __init__(self, status, text='{"choices": [{"message": {"content": "ok"}}]}'):
+            self.status_code = status
+            self.text = text
+
+        def json(self):
+            import json as _json
+            return _json.loads(self.text)
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.append(json)
+        if json.get("reasoning_effort") != "none":
+            return _Res(400, refusal)
+        return _Res(200)
+
+    monkeypatch.setattr(llm_service.httpx, "post", fake_post)
+    out = llm_service._post_chat("http://x/v1/chat/completions", {},
+                                 {"model": "gpt-6.1-sol", "tools": [{"name": "t"}]})
+    assert out["choices"][0]["message"]["content"] == "ok"
+    assert sent[1]["reasoning_effort"] == "none" and sent[1]["tools"] == [{"name": "t"}]

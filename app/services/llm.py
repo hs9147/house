@@ -290,8 +290,13 @@ def _openai_style_call(
 def _post_chat(url: str, headers: dict, payload: dict) -> dict:
     """테스트에서 monkeypatch하는 실제 HTTP 경계."""
     seconds = get_settings().llm_timeout_seconds
+    limit = payload.get("max_tokens")
+
+    def send(body: dict):
+        return httpx.post(url, headers=headers, json=body, timeout=seconds)
+
     try:
-        res = httpx.post(url, headers=headers, json=payload, timeout=seconds)
+        res = send(payload)
     except httpx.TimeoutException:
         # "the read operation timed out"만 남으면 무엇을 해야 할지 알 수 없다 — 얼마를
         # 기다렸는지와 어디를 고치는지 말한다. 출력 한도를 올리면 생성이 길어져 이쪽이
@@ -305,9 +310,17 @@ def _post_chat(url: str, headers: dict, payload: dict) -> dict:
     if res.status_code == 400 and "max_tokens" in payload:
         body = res.text[:500]
         if "max_completion_tokens" in body or "max_tokens" in body:
-            retry = {k: v for k, v in payload.items() if k != "max_tokens"}
-            retry["max_completion_tokens"] = payload["max_tokens"]
-            res = httpx.post(url, headers=headers, json=retry, timeout=seconds)
+            payload = {k: v for k, v in payload.items() if k != "max_tokens"}
+            payload["max_completion_tokens"] = limit
+            res = send(payload)
+    # **추론 모델은 chat/completions에서 도구와 추론을 함께 못 쓴다.** 우리는
+    # reasoning_effort를 보내지 않지만, 모델에 서버 기본값이 걸려 있으면 tools와 부딪혀
+    # 400이 온다(실측: gpt-6.1-sol). 본문이 알려 주는 대로 'none'을 명시해 한 번 더 보낸다 —
+    # 도구를 쓰는 대화가 추론 설정 때문에 아예 못 돌아가는 것보다 낫다.
+    if res.status_code == 400 and "reasoning_effort" in res.text[:500] \
+            and payload.get("reasoning_effort") != "none":
+        payload = {**payload, "reasoning_effort": "none"}
+        res = send(payload)
     if res.status_code >= 400:
         # **본문을 싣는다.** 400의 이유는 본문에만 있다(어느 파라미터가 문제인지, 배포
         # 이름이 틀렸는지). 그것을 버리면 화면에 남는 것은 상태 코드뿐이고, 그러면 사람은
