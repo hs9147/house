@@ -1216,3 +1216,10 @@ export interface PersonalManifest {
   needed: string[];
   removed: number;
 }
+
+/** 프로바이더 점검 결과 — 실제로 한 번 불러 본 것(도구를 붙여서). */
+export type ProviderCheck = {
+  ok: boolean;
+  elapsed_ms: number;
+  reply: string;
+};

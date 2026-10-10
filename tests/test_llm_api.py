@@ -305,3 +305,48 @@ def test_default_provider_falls_back_to_the_only_one(fresh_settings):
         assert llm_service.default_provider(db).name == "only"
     finally:
         db.close()
+
+
+def test_provider_check_calls_the_model_with_tools(monkeypatch):
+    """점검은 **도구를 붙여** 실제로 한 번 부른다 — 도구 없는 호출만 받는 모델이 있다.
+
+    도구 없이 점검하면 "통과"라고 말한 뒤 대화에서만 터진다(실측: 추론 모델이 tools와
+    부딪혀 400).
+    """
+    seen: list[dict] = []
+
+    def fake_post_chat(url, headers, payload):
+        seen.append(payload)
+        return {"choices": [{"message": {"content": "OK"}}]}
+
+    monkeypatch.setattr(llm_service, "_post_chat", fake_post_chat)
+    c = _client()
+    prov = _create_provider(c)
+    r = c.post(f"{API}/llm/providers/{prov}/check", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True and r.json()["reply"] == "OK"
+    assert seen[0]["tools"], "점검이 도구를 붙이지 않았다"
+
+
+def test_provider_check_reports_the_failure_body(monkeypatch):
+    """실패 사유(본문)를 그대로 올린다 — 상태 코드만 남으면 고칠 곳을 알 수 없다."""
+    def boom(url, headers, payload):
+        raise llm_service.LlmCallFailed(400, url, '{"error": {"message": "model not found"}}')
+
+    monkeypatch.setattr(llm_service, "_post_chat", boom)
+    c = _client()
+    prov = _create_provider(c, name="broken")
+    r = c.post(f"{API}/llm/providers/{prov}/check", headers=ADMIN)
+    assert r.status_code == 502
+    assert "model not found" in r.text
+
+
+def test_provider_check_is_admin_only():
+    c = _client()
+    prov = _create_provider(c, name="scoped")
+    assert c.post(f"{API}/llm/providers/{prov}/check").status_code in (401, 403)
+
+
+def test_provider_check_404_for_unknown_provider():
+    c = _client()
+    assert c.post(f"{API}/llm/providers/9999/check", headers=ADMIN).status_code == 404

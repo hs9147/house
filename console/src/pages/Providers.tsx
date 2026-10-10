@@ -4,6 +4,7 @@ import StatusPill from '../components/StatusPill';
 import { api } from '../lib/api';
 import { isAdmin } from '../lib/auth';
 import { useApi } from '../lib/hooks';
+import type { ProviderCheck } from '../lib/types';
 
 export default function Providers() {
   const state = useApi(() => api.listProviders());
@@ -68,6 +69,9 @@ export default function Providers() {
   const endpointFromProfile = form.kind === 'aws' && Boolean(form.aws_profile);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // 점검 결과는 프로바이더마다 따로 남긴다 — 여러 개를 눌러 비교하는 자리다.
+  const [checks, setChecks] = useState<Record<number, ProviderCheck | string>>({});
+  const [checking, setChecking] = useState(0);
 
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -159,7 +163,27 @@ export default function Providers() {
                       ) : '-'}
                     </td>
                     {admin && (
-                      <td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        <button
+                          className="small"
+                          disabled={checking === p.id}
+                          title="이 프로바이더를 실제로 한 번 불러 봅니다(도구를 붙여서)"
+                          onClick={async () => {
+                            setChecking(p.id);
+                            try {
+                              const r = await api.checkProvider(p.id);
+                              setChecks((prev) => ({ ...prev, [p.id]: r }));
+                            } catch (err) {
+                              // 실패 사유를 그 줄에 남긴다 — alert은 닫으면 사라져 비교가 안 된다.
+                              // SSO 만료면 서버가 이미 로그인을 시작했고 SsoLoginNotice가 창을 연다.
+                              setChecks((prev) => ({ ...prev, [p.id]: (err as Error).message }));
+                            } finally {
+                              setChecking(0);
+                            }
+                          }}
+                        >
+                          {checking === p.id ? '점검 중…' : '점검'}
+                        </button>{' '}
                         <button
                           className="small danger"
                           onClick={async () => {
@@ -175,6 +199,7 @@ export default function Providers() {
                         >
                           삭제
                         </button>
+                        <CheckResult result={checks[p.id]} />
                       </td>
                     )}
                   </tr>
@@ -440,5 +465,20 @@ export default function Providers() {
         </div>
       )}
     </>
+  );
+}
+
+
+/** 점검 결과 한 줄 — 실패 사유는 그 줄에 남긴다(alert은 닫으면 사라져 비교가 안 된다). */
+function CheckResult({ result }: { result: ProviderCheck | string | undefined }) {
+  if (result === undefined) return null;
+  if (typeof result === 'string') {
+    return <p className="error" style={{ margin: '6px 0 0', fontSize: 12 }}>{result}</p>;
+  }
+  return (
+    <p className="mutedtext" style={{ margin: '6px 0 0', fontSize: 12 }}>
+      ✅ 응답 {result.elapsed_ms}ms
+      {result.reply && <> — <span className="mono">{result.reply}</span></>}
+    </p>
   );
 }

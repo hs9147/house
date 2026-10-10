@@ -5,6 +5,7 @@
 """
 import json
 import re
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -137,6 +138,14 @@ class LlmCallFailed(RuntimeError):
         self.body = body
 
 
+class NeedsResponsesApi(LlmCallFailed):
+    """이 모델은 chat/completions에서 도구를 쓸 수 없다 — /v1/responses로 가야 한다.
+
+    LlmCallFailed를 상속한다: 응답 경로까지 실패하면 호출부(provider_error 등)가 지금처럼
+    502로 올리면 되고, 새 except 절을 온 코드에 뿌릴 필요가 없다.
+    """
+
+
 class LlmTruncated(RuntimeError):
     """응답이 길이 제한에서 끊겼다 — 받은 부분을 함께 들고 간다.
 
@@ -209,6 +218,32 @@ def chat_completion(
     if truncated:
         raise LlmTruncated(text, get_settings().llm_max_output_tokens)
     return text
+
+
+# 점검용 도구 하나 — **도구를 붙이는 것이 요점이다.** 대화는 늘 MCP 도구를 함께 보내는데,
+# 도구 없는 호출만 받는 모델이 있다(추론 모델이 tools와 부딪힌다 — _post_chat 참조).
+# 도구 없이 점검하면 "통과"라고 말한 뒤 대화에서만 터진다.
+_CHECK_TOOL = [{
+    "type": "function",
+    "function": {"name": "paas_ping", "description": "점검용 — 호출하지 마세요.",
+                 "parameters": {"type": "object", "properties": {}}},
+}]
+
+
+def check(provider: LlmProvider, db: Session | None = None) -> dict:
+    """프로바이더를 실제로 한 번 불러 본다 — 걸린 시간과 고쳐 보낸 내역을 함께 돌려준다.
+
+    실패를 삼키지 않는다: 예외를 그대로 올려 호출부가 provider_error로 바꾼다(SSO 만료면
+    그 자리에서 서버 로그인이 시작되고 사람 화면에 승인 주소가 뜬다).
+    """
+    started = time.monotonic()
+    reply = chat_completion(
+        provider,
+        [{"role": "user", "content": "연결 점검입니다. 도구를 쓰지 말고 OK 라고만 답하세요."}],
+        db, tools=_CHECK_TOOL,
+    )
+    return {"ok": True, "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "reply": reply.strip()[:200]}
 
 
 def uses_aws_credentials(provider: LlmProvider) -> bool:
@@ -284,7 +319,12 @@ def _openai_style_call(
         payload["max_tokens"] = limit
     if tools:
         payload["tools"] = tools
-    return _post_chat(url, headers, payload)
+    try:
+        return _post_chat(url, headers, payload)
+    except NeedsResponsesApi as e:
+        # 모델이 직접 알려 준 길로 간다. 설정을 받지 않는 이유: 모델 이름 표를 두면 새
+        # 모델이 나올 때마다 뒤처진다(max_tokens 재시도와 같은 판단).
+        return _responses_call(url, headers, payload, e)
 
 
 def _post_chat(url: str, headers: dict, payload: dict) -> dict:
@@ -319,14 +359,138 @@ def _post_chat(url: str, headers: dict, payload: dict) -> dict:
     # 도구를 쓰는 대화가 추론 설정 때문에 아예 못 돌아가는 것보다 낫다.
     if res.status_code == 400 and "reasoning_effort" in res.text[:500] \
             and payload.get("reasoning_effort") != "none":
+        conflict = res.text.strip()[:400]
         payload = {**payload, "reasoning_effort": "none"}
         res = send(payload)
+        # **'none'까지 거부하는 모델이 있다** — 지원값이 low·medium·high·xhigh뿐이라고
+        # 답한다(실측). 앞 400은 "none으로 두라"고 했으니 두 답이 서로 모순이고, 그러면
+        # 이 모델로는 chat/completions에서 도구를 쓸 길이 없다. 앞 400이 알려 준 다른 길
+        # (/v1/responses)로 가라고 전용 예외를 던진다 — 두 사유를 함께 싣는다.
+        if res.status_code == 400 and "reasoning_effort" in res.text[:500]:
+            raise NeedsResponsesApi(400, url, (
+                f"{conflict} / reasoning_effort=none으로 다시 보냈더니: "
+                f"{res.text.strip()[:300]}"))
     if res.status_code >= 400:
         # **본문을 싣는다.** 400의 이유는 본문에만 있다(어느 파라미터가 문제인지, 배포
         # 이름이 틀렸는지). 그것을 버리면 화면에 남는 것은 상태 코드뿐이고, 그러면 사람은
         # 추측부터 시작한다.
         raise LlmCallFailed(res.status_code, url, res.text)
     return res.json()
+
+
+# --- 응답(Responses) API ---
+#
+# 추론 모델 일부는 chat/completions에서 **도구를 아예 받지 않는다**(_post_chat 참조).
+# 그 모델이 알려 주는 다른 길이 /v1/responses다. 요청·응답 모양이 달라서, 경계에서
+# 번역만 하고 **위쪽 도구 루프는 그대로 쓴다** — chat_completion이 두 가지 모양을 알게
+# 되면 분기가 온 함수로 번진다.
+#
+# 번역하는 것(요청): messages → input, 중첩 tools → 평평한 tools, max_tokens →
+# max_output_tokens. 번역하는 것(응답): output 항목들 → choices[0].message.
+# 추론 설정(reasoning)은 **보내지 않는다** — 모델 기본값에 맡긴다. 그걸 건드리려다
+# 막다른 길에 들어선 것이다.
+
+
+def _responses_url(url: str) -> str:
+    return url.replace("/chat/completions", "/responses")
+
+
+def _responses_input(messages: list[dict]) -> list[dict]:
+    """chat 모양의 대화를 응답 API의 input 항목으로 옮긴다.
+
+    도구 왕복이 핵심이다: chat은 assistant.tool_calls와 role="tool" 메시지로 짝을 짓고,
+    응답 API는 function_call·function_call_output 항목으로 짓는다. call_id로 이어지므로
+    그 값을 잃으면 모델이 어느 호출의 결과인지 모른다.
+    """
+    items: list[dict] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content") or ""
+        if role == "tool":
+            items.append({"type": "function_call_output",
+                          "call_id": m.get("tool_call_id", ""), "output": str(content)})
+            continue
+        if role == "assistant":
+            if content:
+                items.append({"role": "assistant", "content": str(content)})
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                items.append({"type": "function_call", "call_id": tc.get("id", ""),
+                              "name": fn.get("name", ""), "arguments": fn.get("arguments") or "{}"})
+            continue
+        items.append({"role": role or "user", "content": str(content)})
+    return items
+
+
+def _responses_tools(tools: list[dict]) -> list[dict]:
+    """중첩({"function": {...}})을 평평하게 — 응답 API는 한 겹으로 받는다."""
+    flat: list[dict] = []
+    for t in tools:
+        fn = t.get("function", t)
+        flat.append({"type": "function", "name": fn.get("name", ""),
+                     "description": fn.get("description", ""),
+                     "parameters": fn.get("parameters") or {"type": "object", "properties": {}}})
+    return flat
+
+
+def _responses_payload(payload: dict) -> dict:
+    out: dict = {"model": payload["model"], "input": _responses_input(payload["messages"])}
+    limit = payload.get("max_tokens") or payload.get("max_completion_tokens")
+    if limit:
+        out["max_output_tokens"] = limit
+    if payload.get("tools"):
+        out["tools"] = _responses_tools(payload["tools"])
+    return out
+
+
+def _responses_to_choice(data: dict) -> dict:
+    """응답 API의 output을 chat completions 모양으로 되돌린다."""
+    text_parts: list[str] = []
+    tool_calls: list[dict] = []
+    for item in data.get("output") or []:
+        kind = item.get("type")
+        if kind == "function_call":
+            tool_calls.append({
+                "id": item.get("call_id") or item.get("id", ""),
+                "type": "function",
+                "function": {"name": item.get("name", ""),
+                             "arguments": item.get("arguments") or "{}"},
+            })
+        elif kind == "message":
+            for part in item.get("content") or []:
+                if part.get("type") == "output_text":
+                    text_parts.append(part.get("text") or "")
+        # type="reasoning"은 버린다 — 요약이 올 수 있지만 산출물이 아니다.
+    # 길이에서 끊긴 것을 완전한 것처럼 돌려주지 않는다(chat_completion이 finish_reason을 본다).
+    incomplete = str((data.get("incomplete_details") or {}).get("reason") or "")
+    if incomplete == "max_output_tokens":
+        reason = "length"
+    elif tool_calls:
+        reason = "tool_calls"
+    else:
+        reason = "stop"
+    message: dict = {"role": "assistant", "content": "".join(text_parts)}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return {"choices": [{"message": message, "finish_reason": reason}]}
+
+
+def _responses_call(url: str, headers: dict, payload: dict, refused: NeedsResponsesApi) -> dict:
+    """응답 API로 한 번 보낸다. 여기서도 막히면 **두 경로의 사유를 함께** 올린다."""
+    target = _responses_url(url)
+    seconds = get_settings().llm_timeout_seconds
+    try:
+        res = httpx.post(target, headers=headers, json=_responses_payload(payload),
+                         timeout=seconds)
+    except httpx.TimeoutException:
+        raise LlmTimeout(seconds, get_settings().llm_max_output_tokens)
+    if res.status_code >= 400:
+        # chat/completions의 사유를 버리지 않는다 — "응답 API도 400"만 남으면 애초에
+        # 왜 여기로 왔는지가 사라져, 사람은 모델 설정부터 다시 추측한다.
+        raise LlmCallFailed(res.status_code, target, (
+            f"{res.text.strip()[:400]} (chat/completions가 도구를 거부해 응답 API로 "
+            f"옮겨 온 것입니다 — 먼저 받은 사유: {refused.body.strip()[:300]})"))
+    return _responses_to_choice(res.json())
 
 
 def review_diff(provider: LlmProvider, diff: str, db: Session | None = None) -> list[dict]:

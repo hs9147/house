@@ -49,6 +49,7 @@ import type {
   PlatformModuleReportOut,
   ProjectOut,
   ProjectType,
+  ProviderCheck,
   RedirectRule,
   SchedulerSnapshot,
   ResourceItem,
@@ -641,6 +642,9 @@ export const api = {
   // 기본 프로바이더 — 배포 점검·실패 원인 분석·레포 검토가 이 모델로 돈다.
   setDefaultProvider: (id: number) =>
     request<LlmProviderOut>('POST', `/llm/providers/${id}/default`),
+  // 등록 화면은 받아 적기만 한다 — 실제로 답하는지는 눌러 봐야 안다.
+  checkProvider: (id: number) =>
+    request<ProviderCheck>('POST', `/llm/providers/${id}/check`),
   deleteProvider: (id: number) => request<void>('DELETE', `/llm/providers/${id}`),
   createProvider: (body: {
     name: string; kind: string; base_url: string; api_key?: string; model: string;

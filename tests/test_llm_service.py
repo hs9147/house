@@ -280,3 +280,100 @@ def test_reasoning_effort_conflict_with_tools_is_retried_as_none(monkeypatch):
                                  {"model": "gpt-6.1-sol", "tools": [{"name": "t"}]})
     assert out["choices"][0]["message"]["content"] == "ok"
     assert sent[1]["reasoning_effort"] == "none" and sent[1]["tools"] == [{"name": "t"}]
+
+
+def test_reasoning_effort_dead_end_names_both_refusals(monkeypatch):
+    """'none'까지 거부하는 모델이 있다 — 그러면 도구를 쓸 길이 없다는 것을 말해야 한다.
+
+    실측에서 프로바이더가 서로 모순된 400 둘을 돌려줬다("none으로 두라" → "none은 지원하지
+    않는다"). 둘째만 올리면 화면에는 "none을 지원하지 않는다"만 남아, 무엇을 바꿔야 할지
+    알 수 없다.
+    """
+    first = ('{"error": {"message": "Function tools with reasoning_effort are not supported '
+             'for gpt-6.1-sol in /v1/chat/completions."}}')
+    second = ('{"error": {"message": "Unsupported value: reasoning_effort does not '
+              'support none with this model. Supported values are: low, medium."}}')
+
+    class _Res:
+        def __init__(self, text):
+            self.status_code = 400
+            self.text = text
+
+        def json(self):
+            return {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _Res(second if json.get("reasoning_effort") == "none" else first)
+
+    monkeypatch.setattr(llm_service.httpx, "post", fake_post)
+    with pytest.raises(llm_service.LlmCallFailed) as raised:
+        llm_service._post_chat("http://x/v1/chat/completions", {},
+                               {"model": "gpt-6.1-sol", "tools": [{"name": "t"}]})
+    # 두 사유를 함께 싣고, 모델이 알려 준 다른 길(/v1/responses)로 가라는 전용 예외다.
+    assert isinstance(raised.value, llm_service.NeedsResponsesApi)
+    detail = str(raised.value)
+    assert "Function tools with reasoning_effort" in detail
+    assert "does not support" in detail
+
+
+def test_tools_dead_end_falls_back_to_the_responses_api(monkeypatch):
+    """chat/completions에서 도구를 못 쓰는 모델은 /v1/responses로 옮겨 그대로 돌아간다.
+
+    도구 왕복까지 본다: call_id가 끊기면 모델은 어느 호출의 결과인지 모른다.
+    """
+    seen: list[tuple] = []
+    first = ('{"error": {"message": "Function tools with reasoning_effort are not '
+             'supported in /v1/chat/completions."}}')
+    second = '{"error": {"message": "Unsupported value: reasoning_effort does not support none."}}'
+    wants_tool = ('{"output": [{"type": "reasoning", "summary": []}, '
+                  '{"type": "function_call", "call_id": "fc_1", "name": "srv__search", '
+                  '"arguments": "{}"}]}')
+    final = ('{"output": [{"type": "message", "content": '
+             '[{"type": "output_text", "text": "맑음입니다."}]}]}')
+
+    class _Res:
+        def __init__(self, status, text):
+            self.status_code = status
+            self.text = text
+
+        def json(self):
+            import json as _json
+            return _json.loads(self.text)
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen.append((url, json))
+        if url.endswith("/chat/completions"):
+            return _Res(400, second if json.get("reasoning_effort") == "none" else first)
+        done = any(i.get("type") == "function_call_output" for i in json["input"])
+        return _Res(200, final if done else wants_tool)
+
+    monkeypatch.setattr(llm_service.httpx, "post", fake_post)
+    reply = llm_service.chat_completion(
+        _provider(), [{"role": "user", "content": "날씨?"}],
+        tools=TOOLS, tool_executor=lambda name, args: "맑음, 22C",
+    )
+    assert reply == "맑음입니다."
+
+    responses = [(u, body) for u, body in seen if u.endswith("/responses")]
+    assert responses[0][0] == "https://api.example.com/v1/responses"
+    # 도구는 한 겹으로 펴서 보낸다 — 응답 API는 중첩 모양을 받지 않는다.
+    assert responses[0][1]["tools"] == [{
+        "type": "function", "name": "srv__search", "description": "",
+        "parameters": {"type": "object", "properties": {}},
+    }]
+    # 두 번째 요청에 호출과 그 결과가 같은 call_id로 짝지어 들어간다.
+    items = responses[1][1]["input"]
+    assert {"type": "function_call", "call_id": "fc_1", "name": "srv__search",
+            "arguments": "{}"} in items
+    assert {"type": "function_call_output", "call_id": "fc_1", "output": "맑음, 22C"} in items
+
+
+def test_responses_api_truncation_is_not_passed_off_as_complete():
+    """응답 API는 잘림을 incomplete_details로 알린다 — finish_reason으로 옮겨야 한다.
+
+    옮기지 않으면 길이에서 끊긴 산출물이 완전한 것처럼 저장된다(LlmTruncated 주석 참조).
+    """
+    data = {"output": [{"type": "message",
+                        "content": [{"type": "output_text", "text": "반쯤 쓰다"}]}],
+            "incomplete_details": {"reason": "max_output_tokens"}}
+    assert llm_service._responses_to_choice(data)["choices"][0]["finish_reason"] == "length"

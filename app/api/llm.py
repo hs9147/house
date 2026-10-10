@@ -210,6 +210,37 @@ def set_default_provider(
     return _provider_out(row)
 
 
+@router.post("/llm/providers/{provider_id}/check")
+def check_provider(
+    provider_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """이 프로바이더를 **실제로 한 번 불러** 본다 — 설정이 아니라 동작을 본다.
+
+    등록 화면은 주소·키·모델 이름을 받아 적기만 한다. 틀렸는지는 누군가 대화를 돌릴 때야
+    드러나고, 그때는 "LLM 프로바이더가 HTTP 400으로 답했습니다"가 업무 화면에 뜬다 —
+    관리자가 먼저 눌러 보고 고칠 자리가 필요하다.
+
+    고칠 수 있는 것은 그 자리에서 고친다(자가 치유):
+      - SSO 만료 → 서버가 로그인을 시작하고 승인 주소를 이 화면에 띄운다(provider_error).
+      - 파라미터 거부(max_tokens·reasoning_effort) → 고쳐 다시 보낸다. 그래도 거부하면
+        무엇이 막혔는지 두 답을 함께 올린다(services/llm.py _post_chat).
+    """
+    row = db.get(LlmProvider, provider_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="provider not found")
+    try:
+        result = llm_service.check(row, db)
+    except (bedrock.BedrockError, llm_service.LlmTimeout, llm_service.LlmCallFailed,
+            llm_service.LlmTruncated) as e:
+        audit.record(db, admin.name, "llm.provider.check", row.name, {"ok": False})
+        raise provider_error(db, admin.name, e)
+    audit.record(db, admin.name, "llm.provider.check", row.name,
+                 {"ok": True, "elapsed_ms": result["elapsed_ms"]})
+    return result
+
+
 @router.delete("/llm/providers/{provider_id}", status_code=204)
 def delete_provider(
     provider_id: int,
