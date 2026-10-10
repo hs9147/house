@@ -101,11 +101,7 @@ def revoke(db: Session, email: str) -> None:
 def status(db: Session, email: str) -> dict:
     row = get(db, email)
     settings = get_settings()
-    # 브라우저가 로그인하려면 앱 등록의 클라이언트 ID·테넌트가 필요하다 — 비밀이 아니다
-    # (공용 클라이언트라 비밀 값이 아예 없다).
-    mail = {"configured": bool(settings.ms_graph_client_id),
-            "client_id": settings.ms_graph_client_id, "tenant": settings.ms_graph_tenant,
-            "connected": False, "account": "", "synced_at": None}
+    mail = {"configured": bool(settings.ms_graph_client_id), "connected": False, "account": "", "synced_at": None}
     if row is None:
         return {"consented": False, "folders": [], "index": None, "mail": mail}
     mail.update(connected=row.mail_synced_at is not None, account=row.mail_account,
@@ -260,7 +256,7 @@ def remove_folder(db: Session, email: str, folder: str) -> None:
 
 
 def mail_save(db: Session, email: str, account: str, messages: list[dict]) -> dict:
-    """브라우저가 Graph에서 읽어 온 메일을 메일 한 통 = 마크다운 한 파일로 남기고 색인한다.
+    """Graph에서 읽어 온 메일(services/msgraph)을 메일 한 통 = 마크다운 한 파일로 남기고 색인한다.
 
     파일로 두는 이유: 문서와 **같은 길**(색인·.ready·온톨로지)을 타게 하려는 것이다.
     메일 전용 검색을 따로 두면 "문서와 메일에서 함께 찾아라"가 두 번의 검색이 된다.
@@ -286,7 +282,7 @@ def mail_save(db: Session, email: str, account: str, messages: list[dict]) -> di
 
 
 def mail_disconnect(db: Session, email: str) -> None:
-    """받아 둔 메일 사본을 지운다. 서버에 토큰이 없으니 "연결"은 이 사본이 전부다."""
+    """받아 둔 메일 사본을 지운다. 토큰은 저장하지 않으니 "연결"은 이 사본이 전부다."""
     row = require(db, email)
     store = store_for(email)
     shutil.rmtree(store.root / MAIL_DIR, ignore_errors=True)

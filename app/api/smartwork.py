@@ -19,7 +19,7 @@ from ..db import get_db
 from ..features import is_enabled
 from ..models import ApiKey, LlmProvider
 from ..security import require_api_key
-from ..services import bedrock, personal, smartwork, worksession
+from ..services import bedrock, msgraph, personal, smartwork, worksession
 from ..services import llm as llm_service
 from . import mcp_servers as mcp
 from .llm import provider_error
@@ -321,22 +321,34 @@ def folder_remove(folder: str, db: Session = Depends(get_db),
         raise _personal_error(e)
 
 
-class MailIn(BaseModel):
-    account: str = ""
-    # Graph 메시지 그대로(id·subject·from·toRecipients·receivedDateTime·body·webLink)
-    messages: list[dict]
-
-
-@router.post("/personal/mail/messages")
-def mail_save(body: MailIn, db: Session = Depends(get_db),
-              key: ApiKey = Depends(require_api_key)):
-    """브라우저가 Graph에서 읽어 온 메일을 받는다 — 서버는 토큰을 보지 않는다."""
+@router.post("/personal/mail/login")
+def mail_login(db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """메일 로그인을 시작한다 — 사람은 돌려준 주소를 열어 코드를 넣고 승인한다(services/msgraph)."""
     try:
-        result = personal.mail_save(db, key.name, body.account, body.messages)
+        personal.require(db, key.name)
+        login = msgraph.start(key.name)
     except personal.PersonalError as e:
         raise _personal_error(e)
-    audit.record(db, key.name, "smartwork.personal.mail.sync", body.account, {"new": result["new"]})
-    return result
+    except msgraph.MailLoginError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    audit.record(db, key.name, "smartwork.personal.mail.login", key.name)
+    return login
+
+
+@router.post("/personal/mail/login/poll")
+def mail_login_poll(db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """승인이 끝났는지 묻는다. 끝났으면 그 자리에서 메일을 받아 보관하고 토큰은 버린다."""
+    try:
+        inbox = msgraph.finish(key.name, personal.MAIL_SYNC_COUNT)
+        if inbox is None:
+            return {"status": "pending"}
+        result = personal.mail_save(db, key.name, inbox["account"], inbox["messages"])
+    except personal.PersonalError as e:
+        raise _personal_error(e)
+    except msgraph.MailLoginError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    audit.record(db, key.name, "smartwork.personal.mail.sync", inbox["account"], {"new": result["new"]})
+    return {"status": "done", "account": inbox["account"], **result}
 
 
 @router.delete("/personal/mail", status_code=204)

@@ -64,6 +64,8 @@ import type {
   SourceSaveTarget,
   SourceScanRecord,
   PersonalManifest,
+  MailLogin,
+  MailLoginPoll,
   PersonalStatus,
   DepartmentWorkflow,
   SmartworkAgent,
@@ -611,8 +613,8 @@ export const api = {
   personalRemoveFolder: (folder: string) =>
     request<void>('DELETE', '/smartwork/personal/folders', undefined, { folder }),
   // 메일은 브라우저가 Graph에서 읽어 온 것(lib/msgraph.ts)을 보낸다 — 토큰은 싣지 않는다.
-  mailSave: (account: string, messages: object[]) =>
-    request<{ fetched: number; new: number }>('POST', '/smartwork/personal/mail/messages', { account, messages }),
+  mailLogin: () => request<MailLogin>('POST', '/smartwork/personal/mail/login'),
+  mailLoginPoll: () => request<MailLoginPoll>('POST', '/smartwork/personal/mail/login/poll'),
   mailDisconnect: () => request<void>('DELETE', '/smartwork/personal/mail'),
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),

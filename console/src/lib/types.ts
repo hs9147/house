@@ -1192,14 +1192,23 @@ export interface PersonalStatus {
   index: { total: number; indexed: number; failed: number } | null;
   mail: {
     configured: boolean;
-    // 브라우저 로그인(lib/msgraph.ts)에 쓰는 앱 등록 값 — 비밀이 아니다.
-    client_id: string;
-    tenant: string;
     connected: boolean;
     account: string;
     synced_at: string | null;
   };
 }
+
+// 메일 로그인(Device Code) — 사람이 주소를 열어 코드를 넣고 승인한다
+export interface MailLogin {
+  verification_url: string;
+  user_code: string;
+  expires_in: number;
+  interval: number;
+}
+
+export type MailLoginPoll =
+  | { status: 'pending' }
+  | { status: 'done'; account: string; fetched: number; new: number };
 
 export interface PersonalManifest {
   folder: string;

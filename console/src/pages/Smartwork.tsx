@@ -5,9 +5,9 @@ import { api } from '../lib/api';
 import { getEmail } from '../lib/auth';
 import { type AsyncState, useApi, usePolling } from '../lib/hooks';
 import { parseCsv, renderMarkdown } from '../lib/markdown';
-import { fetchInbox, redirectUri } from '../lib/msgraph';
 import type {
   HealthInfo,
+  MailLogin,
   PersonalStatus,
   SmartworkAgent,
   SmartworkAttachmentIn,
@@ -781,6 +781,8 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
   const [bytes, setBytes] = useState<{ sent: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement | null>(null);
+  const [mailLogin, setMailLogin] = useState<MailLogin | null>(null);
+  const mailCancel = useRef(false);
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -840,13 +842,26 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
       `, 지움 ${plan.removed}${failed ? `, 변환 실패 ${failed}` : ''}${skipped ? `, 건너뜀 ${skipped}` : ''}`);
   });
 
-  // 로그인·메일 읽기는 이 브라우저가 하고(lib/msgraph.ts), 서버에는 메일 내용만 보낸다.
-  const syncMail = (clientId: string, tenant: string) => run(async () => {
-    setProgress('Microsoft 로그인 창에서 로그인하세요...');
-    const inbox = await fetchInbox(clientId, tenant);
-    setProgress(`메일 ${inbox.messages.length}통을 올리는 중...`);
-    const out = await api.mailSave(inbox.account, inbox.messages);
-    setProgress(`메일 ${out.fetched}통 확인(${inbox.account}) — 새 메일 ${out.new}통`);
+  // 서버가 Device Code 로그인을 시작하면 사람은 아래 주소에서 코드를 넣고 승인한다. 승인이
+  // 끝나면 서버가 그 자리에서 메일을 받아 보관한다(토큰은 저장하지 않는다).
+  const syncMail = () => run(async () => {
+    const login = await api.mailLogin();
+    setMailLogin(login);
+    mailCancel.current = false;
+    try {
+      const deadline = Date.now() + login.expires_in * 1000;
+      while (!mailCancel.current && Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, login.interval * 1000));
+        if (mailCancel.current) break;
+        const out = await api.mailLoginPoll();
+        if (out.status === 'pending') continue;
+        setProgress(`메일 ${out.fetched}통 확인(${out.account}) — 새 메일 ${out.new}통`);
+        return;
+      }
+      if (!mailCancel.current) throw new Error('승인 시간이 지났습니다 — 다시 시도하세요.');
+    } finally {
+      setMailLogin(null);
+    }
   });
 
   return (
@@ -917,15 +932,15 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
             <h3 style={{ fontSize: 14, marginTop: 18 }}>아웃룩 메일</h3>
             {!s.mail.configured ? (
               <p className="mutedtext">
-                <span className="status dim">미설정</span> 관리자가 Entra ID 앱을 등록하고(SPA
-                리디렉션 URI <span className="mono">{redirectUri()}</span>)
-                PAAS_MS_GRAPH_CLIENT_ID를 지정하면 쓸 수 있습니다.
+                <span className="status dim">미설정</span> 관리자가 Entra ID 앱을 등록하고
+                (공용 클라이언트 흐름 허용) PAAS_MS_GRAPH_CLIENT_ID를 지정하면 쓸 수 있습니다.
               </p>
             ) : (
               <>
                 <p className="mutedtext">
-                  로그인과 메일 읽기는 이 브라우저에서 합니다 — 서버는 메일 토큰을 받지 않고,
-                  받은편지함 최근 메일의 내용만 보관합니다. 로그인 창(팝업)이 뜹니다.
+                  버튼을 누르면 Microsoft 로그인 주소와 코드가 나옵니다 — 이 브라우저에서 열어
+                  코드를 넣고 승인하세요. 서버는 토큰을 저장하지 않고, 받은편지함 최근 메일의
+                  내용만 보관합니다.
                 </p>
                 <div className="row">
                   {s.mail.connected && (
@@ -936,7 +951,7 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
                     </>
                   )}
                   <button className="small" disabled={busy}
-                    onClick={() => void syncMail(s.mail.client_id, s.mail.tenant)}>
+                    onClick={() => void syncMail()}>
                     {s.mail.connected ? '동기화' : '메일 가져오기'}
                   </button>
                   {s.mail.connected && (
@@ -946,6 +961,16 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
                     }}>메일 지우기</button>
                   )}
                 </div>
+                {mailLogin && (
+                  <div className="row" style={{ marginTop: 8, flexWrap: 'wrap', gap: 8 }}>
+                    <a href={mailLogin.verification_url} target="_blank" rel="noopener noreferrer">
+                      {mailLogin.verification_url}
+                    </a>
+                    <span>코드 <b className="mono">{mailLogin.user_code}</b></span>
+                    <span className="mutedtext">승인하면 자동으로 이어집니다.</span>
+                    <button className="small secondary" onClick={() => { mailCancel.current = true; }}>취소</button>
+                  </div>
+                )}
               </>
             )}
 

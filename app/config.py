@@ -251,10 +251,9 @@ class Settings(BaseSettings):
     # 사내 문서 폴더(PAAS_DOC_ROOTS)와 섞이지 않는다 — 전체 검색·온톨로지에 안 잡힌다.
     personal_root: Path = Path("./data/personal")
     # 아웃룩 메일(Microsoft Graph) — Entra ID 앱 등록의 애플리케이션(클라이언트) ID.
-    # 로그인과 메일 읽기는 사용자 브라우저가 한다(서버는 토큰을 받지 않는다). 그래서 앱에
-    # 위임 권한 Mail.Read·User.Read를 주고, 플랫폼 "단일 페이지 애플리케이션(SPA)"에
-    # 리디렉션 URI `https://<콘솔 주소>/console/ms-login.html`을 등록해야 한다(IIS
-    # 서브패스 뒤면 그 경로까지). 비우면 메일 연동이 "미설정"으로 꺼진다.
+    # 서버가 Device Code로 로그인을 시작하고 사용자는 자기 브라우저에서 승인한다(토큰은
+    # 저장하지 않는다). 앱에는 위임 권한 Mail.Read·User.Read를 주고 인증 > "공용 클라이언트
+    # 흐름 허용"을 켠다. 리디렉션 URI는 필요 없다. 비우면 메일 연동이 "미설정"으로 꺼진다.
     ms_graph_client_id: str = ""
     # 테넌트 ID 또는 도메인. 기본 organizations = 회사 계정이면 어느 테넌트든.
     ms_graph_tenant: str = "organizations"

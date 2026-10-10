@@ -16,7 +16,7 @@ from app.models import (
     Deployment, DeploymentStatus, PersonalContext, Project, Workflow, WorkflowRun,
     WorkflowRunStatus,
 )
-from app.services import docsearch, gitea, llm, personal, smartwork
+from app.services import docsearch, gitea, llm, msgraph, personal, smartwork
 
 ADMIN = {"x-api-key": "test-admin-key"}
 API = "/paas/api/v1"
@@ -395,34 +395,67 @@ def test_chat_opens_with_task_suggestions_from_department_workflows(client, monk
     assert json.loads(script.results["dept__workflows"]) == []
 
 
-def test_outlook_mail_comes_from_the_browser(client, monkeypatch):
+class _Resp:
+    def __init__(self, status: int, body: dict):
+        self.status_code, self._body, self.text = status, body, str(body)
+
+    def json(self):
+        return self._body
+
+
+def test_outlook_mail_login_by_device_code_keeps_no_token(client, monkeypatch):
     alice = _user(client, "alice@corp.com")
     client.post(f"{API}/smartwork/personal/consent", headers=alice)
     assert client.get(f"{API}/smartwork/personal", headers=alice).json()["mail"]["configured"] is False
+    assert client.post(f"{API}/smartwork/personal/mail/login", headers=alice).status_code == 502
 
     monkeypatch.setenv("PAAS_MS_GRAPH_CLIENT_ID", "client-123")
     get_settings.cache_clear()
-    mail = client.get(f"{API}/smartwork/personal", headers=alice).json()["mail"]
-    # 브라우저가 로그인할 때 쓰는 값 — 비밀이 아니다
-    assert mail["configured"] and mail["client_id"] == "client-123"
-    assert mail["tenant"] == "organizations" and mail["connected"] is False
+    assert client.get(f"{API}/smartwork/personal", headers=alice).json()["mail"]["configured"] is True
 
-    body = {"account": "alice@corp.com", "messages": [{
+    inbox = {"value": [{
         "id": "m1", "subject": "예산 승인 요청", "receivedDateTime": "2026-10-07T09:00:00Z",
         "from": {"emailAddress": {"name": "김팀장", "address": "kim@corp.com"}},
         "toRecipients": [], "body": {"content": "펠리컨 예산안을 검토해 주세요"},
     }]}
-    r = client.post(f"{API}/smartwork/personal/mail/messages", json=body, headers=alice)
-    assert r.json() == {"fetched": 1, "new": 1}
+    approved = {"yes": False}
+    sent: list[tuple[str, dict]] = []
+
+    def post(url, data=None, **kw):
+        sent.append((url, data))
+        if url.endswith("/devicecode"):
+            return _Resp(200, {"device_code": "dc-secret", "user_code": "ABC123", "expires_in": 900,
+                               "interval": 5, "verification_uri": "https://login.microsoft.com/device"})
+        if not approved["yes"]:
+            return _Resp(400, {"error": "authorization_pending"})
+        return _Resp(200, {"access_token": "tok-secret", "expires_in": 3600})
+
+    def get(url, **kw):
+        assert kw["headers"]["Authorization"] == "Bearer tok-secret"
+        return _Resp(200, {"mail": "alice@corp.com"} if url.endswith("/me") else inbox)
+
+    monkeypatch.setattr(msgraph.httpx, "post", post)
+    monkeypatch.setattr(msgraph.httpx, "get", get)
+
+    login = client.post(f"{API}/smartwork/personal/mail/login", headers=alice).json()
+    # 사람이 쓸 것만 나간다 — device_code는 서버에 남는다
+    assert login == {"verification_url": "https://login.microsoft.com/device", "user_code": "ABC123",
+                     "expires_in": 900, "interval": 5}
+    assert "offline_access" not in sent[0][1]["scope"]  # refresh token을 받지 않는다
+
+    poll = f"{API}/smartwork/personal/mail/login/poll"
+    assert client.post(poll, headers=alice).json() == {"status": "pending"}
+    approved["yes"] = True
+    done = client.post(poll, headers=alice).json()
+    assert done == {"status": "done", "account": "alice@corp.com", "fetched": 1, "new": 1}
+    assert "tok-secret" not in str(msgraph._pending)
+    # 한 번 끝난 로그인은 다시 쓸 수 없다
+    assert client.post(poll, headers=alice).status_code == 502
 
     store = personal.store_for("alice@corp.com")
     hit = docsearch.search(store.name, "펠리컨")["hits"][0]
     assert hit["path"].startswith("outlook/2026-10-07_")
     assert "김팀장" in (store.root / hit["path"]).read_text(encoding="utf-8")
-
-    # 이미 받은 메일은 다시 쓰지 않는다
-    again = client.post(f"{API}/smartwork/personal/mail/messages", json=body, headers=alice).json()
-    assert again == {"fetched": 1, "new": 0}
     mail = client.get(f"{API}/smartwork/personal", headers=alice).json()["mail"]
     assert mail["connected"] and mail["account"] == "alice@corp.com"
     # 서버에는 메일 토큰을 둘 자리 자체가 없다
@@ -432,6 +465,19 @@ def test_outlook_mail_comes_from_the_browser(client, monkeypatch):
     assert not (store.root / "outlook").exists()
     assert docsearch.search(store.name, "펠리컨")["hits"] == []
     assert client.get(f"{API}/smartwork/personal", headers=alice).json()["mail"]["connected"] is False
+
+
+def test_outlook_mail_login_needs_consent_and_names_the_app_setting(client, monkeypatch):
+    alice = _user(client, "alice@corp.com")
+    monkeypatch.setenv("PAAS_MS_GRAPH_CLIENT_ID", "client-123")
+    get_settings.cache_clear()
+    assert client.post(f"{API}/smartwork/personal/mail/login", headers=alice).status_code == 400
+
+    client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    monkeypatch.setattr(msgraph.httpx, "post", lambda *a, **k: _Resp(400, {
+        "error": "invalid_client", "error_description": "AADSTS7000218: The request body must contain"}))
+    r = client.post(f"{API}/smartwork/personal/mail/login", headers=alice)
+    assert r.status_code == 502 and "공용 클라이언트 흐름 허용" in r.json()["detail"]
 
 
 def test_expired_sso_starts_the_login_and_hands_the_url_to_the_user(client, monkeypatch):
