@@ -782,6 +782,10 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
   const [bytes, setBytes] = useState<{ sent: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement | null>(null);
+  // 행의 「동기화」로 열었을 때 그 폴더 이름 — 브라우저는 한 번 고른 폴더를 다시 읽을 수
+  // 없어서(평문 http라 showDirectoryPicker도 없다) 사람이 같은 폴더를 다시 골라야 한다.
+  // 다른 폴더를 고르면 그 행을 고치려던 뜻과 달라지므로 그 자리에서 멈춘다.
+  const resyncTarget = useRef<string | null>(null);
   const [mailLogin, setMailLogin] = useState<MailLogin | null>(null);
   const [codeCopied, setCodeCopied] = useState(false);
   const mailCancel = useRef(false);
@@ -805,6 +809,11 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
     if (all.length === 0) return;
     // webkitRelativePath = "고른폴더/하위/파일" — 첫 마디가 폴더 이름이다.
     const folder = all[0].webkitRelativePath.split('/')[0];
+    const target = resyncTarget.current;
+    resyncTarget.current = null;
+    if (target && folder !== target) {
+      throw new Error(`'${target}'를 다시 동기화하려는데 '${folder}'를 골랐습니다 — 같은 폴더를 고르세요.`);
+    }
     const items = all
       .filter((f) => isDocument(f.name) && f.size > 0)
       .map((f) => ({
@@ -895,7 +904,8 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
             <p className="mutedtext">
               폴더를 고르면 그 안의 문서(PDF·Office·한글·텍스트)만 올라가 텍스트·온톨로지로
               바뀌고, 원본은 변환 직후 서버에서 지워집니다. 같은 폴더를 다시 고르면 바뀐 파일만
-              올리고, PC에서 지운 파일은 여기서도 지웁니다.
+              올리고, PC에서 지운 파일은 여기서도 지웁니다. 아래 표의 「동기화」는 그 폴더를
+              다시 고르게 해 같은 일을 합니다.
             </p>
             {s.folders.length > 0 && (
               <table style={{ marginBottom: 10 }}>
@@ -906,7 +916,11 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
                       <td>{f.name}</td>
                       <td>{f.files}</td>
                       <td>{when(f.synced_at)}</td>
-                      <td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        <button className="small" disabled={busy} onClick={() => {
+                          resyncTarget.current = f.name;
+                          picker.current?.click();
+                        }}>동기화</button>{' '}
                         <button className="small secondary" disabled={busy} onClick={() => {
                           if (!window.confirm(`'${f.name}' 폴더의 텍스트와 색인을 지울까요? (PC의 원본은 그대로입니다)`)) return;
                           void run(() => api.personalRemoveFolder(f.name));
@@ -930,7 +944,19 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
                 e.target.value = '';  // 같은 폴더를 다시 골라도 onChange가 오게
               }}
             />
-            <button disabled={busy} onClick={() => picker.current?.click()}>폴더 선택(추가·다시 동기화)</button>
+            <button disabled={busy} onClick={() => {
+              resyncTarget.current = null;
+              picker.current?.click();
+            }}>폴더 선택(추가·다시 동기화)</button>
+
+            {/* 진행 현황은 **누른 버튼 옆**에 둔다 — 패널 맨 아래에 두었더니 메일 설정
+                아래로 밀려, 올리는 중인지 끝났는지 보려면 스크롤을 내려야 했다. */}
+            {bytes && bytes.total > 0 && (
+              <div className="progress-bar" title={`${mb(bytes.sent)} / ${mb(bytes.total)}`}>
+                <div style={{ width: `${(bytes.sent / bytes.total) * 100}%` }} />
+              </div>
+            )}
+            {progress && <p className="mutedtext">{progress}</p>}
 
             <h3 style={{ fontSize: 14, marginTop: 18 }}>아웃룩 메일</h3>
             {!s.mail.configured ? (
@@ -996,12 +1022,6 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
           </>
         )}
       </Async>
-      {bytes && bytes.total > 0 && (
-        <div className="progress-bar" title={`${mb(bytes.sent)} / ${mb(bytes.total)}`}>
-          <div style={{ width: `${(bytes.sent / bytes.total) * 100}%` }} />
-        </div>
-      )}
-      {progress && <p className="mutedtext">{progress}</p>}
       {error && <p className="error">{error}</p>}
     </div>
   );
