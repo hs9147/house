@@ -908,10 +908,10 @@ def sw_update(
         # 만들거나 강제로 덮어쓰지 않는다(그건 사람이 판단할 일이다).
         "Write-Host '[SW Update] git fetch...'; "
         "git fetch origin; "
-        # **콘솔 lockfile만은 되돌린다.** 서버에서 바뀌는 길은 이 스크립트의 npm뿐인데(예전에는
-        # npm install이 lockfile을 다시 썼다), 그 변경이 남아 있으면 아래 fast-forward가 "로컬
-        # 변경이 덮어써진다"로 실패하고 업데이트가 거기서 멈춘다 — 실측으로 50a73d2에서 네 커밋이
-        # 그렇게 쌓였다. 사람이 고친 파일이 아니니 판단할 것이 없다. 다른 파일은 건드리지 않는다.
+        # **콘솔 lockfile만은 되돌린다.** 서버에서 바뀌는 길은 이 스크립트의 npm install뿐인데,
+        # 그 변경이 남아 있으면 아래 fast-forward가 "로컬 변경이 덮어써진다"로 실패하고 업데이트가
+        # 거기서 멈춘다 — 실측으로 50a73d2에서 다섯 커밋이 그렇게 쌓였다. 설치 뒤에도 되돌리지만
+        # (아래), 그 전에 남은 것이 있을 수 있다. 사람이 고친 파일이 아니니 판단할 것이 없다.
         "if (git status --porcelain -- console/package-lock.json) { "
         "  Write-Host '[SW Update] 지난 npm이 바꾼 console/package-lock.json을 되돌립니다'; "
         "  git checkout -- console/package-lock.json; } "
@@ -949,13 +949,15 @@ def sw_update(
         f"if (Test-Path '{escaped_console}\package.json') {{ "
         "  if (Get-Command npm -ErrorAction SilentlyContinue) { "
         f"    Push-Location '{escaped_console}'; "
-        # npm ci — lockfile 그대로 설치하고 **lockfile을 고쳐 쓰지 않는다.** npm install은 서버의
-        # npm 판·레지스트리에 맞춰 lockfile을 다시 써서 다음 업데이트의 git을 막았다(위 참고).
-        # package.json과 lockfile이 어긋나면 ci가 거부하는데, 그건 커밋을 고쳐야 할 신호다.
-        "    Write-Host '[SW Update] console: npm ci...'; "
-        "    npm ci; "
+        # npm install — **npm ci를 쓰지 않는다.** ci는 node_modules를 통째로 지우는데, 콘솔 서비스
+        # (vite 개발 서버)가 떠 있으면 윈도우가 esbuild.exe를 잠가 지우지 못하고(EPERM)
+        # node_modules가 반쯤 지워진 채 남는다. install은 바뀐 것만 더한다. 대신 lockfile을
+        # 서버의 npm 판에 맞춰 다시 쓰므로, 설치 직후 커밋된 것으로 되돌려 git을 깨끗이 둔다.
+        "    Write-Host '[SW Update] console: npm install...'; "
+        "    npm install; "
         "    if ($LASTEXITCODE -ne 0) { "
-        "      Write-Host '[SW Update] !! npm ci 실패 — package.json과 package-lock.json이 맞는지 보세요'; } "
+        "      Write-Host '[SW Update] !! npm install 실패 — 새 패키지가 없으면 콘솔이 그 화면에서 깨집니다'; } "
+        "    git checkout -- package-lock.json; "
         "    Write-Host '[SW Update] console: npm run build...'; "
         "    npm run build; "
         "    if ($LASTEXITCODE -ne 0) { "

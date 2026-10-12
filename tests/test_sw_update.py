@@ -44,10 +44,12 @@ def test_sw_update_schedules_git_pull_and_restart():
             assert "Restart-Service -Name 'paas-console'" in script
             # 콘솔은 플랫폼 자신이라 배포 파이프라인이 없다 — 여기서 빌드하지 않으면
             # 의존성이 늘었을 때 예전 dist가 조용히 계속 서빙된다(실제로 겪었다).
-            # npm ci — lockfile 그대로 설치하고 고쳐 쓰지 않는다. npm install은 서버에서
-            # lockfile을 다시 써서 다음 업데이트의 fast-forward를 막았다(실측: 50a73d2에 멈춤).
-            assert "npm ci;" in script and "npm install;" not in script
-            assert script.index("npm ci;") < script.index("npm run build")
+            # npm ci는 쓰지 않는다 — node_modules를 통째로 지우는데, 콘솔 서비스(vite)가 떠 있으면
+            # 윈도우가 esbuild.exe를 잠가 반쯤 지워진 채 남는다. install 뒤 lockfile을 되돌린다:
+            # 서버의 npm이 다시 쓴 lockfile이 남으면 다음 업데이트의 fast-forward가 막힌다(실측).
+            assert "npm install;" in script and "npm ci" not in script
+            install = script.index("npm install;")
+            assert install < script.index("git checkout -- package-lock.json") < script.index("npm run build")
             assert "npm run build" in script
             # 콘솔 소스나 npm이 없는 설치본에서는 건너뛴다
             assert "Test-Path" in script and "Get-Command npm" in script
