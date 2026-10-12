@@ -78,9 +78,12 @@ class Script:
         self.results: dict[str, str] = {}
         self.tool_names: list[str] = []
         self.messages: list[dict] = []
+        self.finish_tools: list[str] = []
 
-    def __call__(self, provider, messages, db=None, tools=None, tool_executor=None):
+    def __call__(self, provider, messages, db=None, tools=None, tool_executor=None,
+                 finish_tools=()):
         self.messages = messages
+        self.finish_tools = list(finish_tools)
         self.tool_names = [t["function"]["name"] for t in tools or []]
         for name, args in self.calls:
             self.results[name] = tool_executor(name, args)
@@ -120,7 +123,8 @@ def test_ask_user_offers_choices_before_running(client, monkeypatch):
                               {"label": "내 메일", "prompt": "내 메일로 정리해 줘"}]
     assert out["report"] is None
     system = script.messages[0]["content"]
-    assert "ask_user" in system and "HTML 보고서" in system
+    # 결과는 대화가 아니라 결과 화면으로 — show_report는 보고서 요청만이 아니라 답의 기본 형식이다.
+    assert "ask_user" in system and "show_report가 답의 기본 형식" in system
 
 
 def test_attachments_are_reference_material_for_the_request(client, monkeypatch):
@@ -854,3 +858,38 @@ def test_office_preview_converts_and_keeps_nothing(client, monkeypatch, tmp_path
     r = client.post(preview, params={"name": "a.pptx"}, content=b"x", headers=alice)
     assert r.status_code == 503 and "LibreOffice" in r.json()["detail"]
     assert client.post(preview, params={"name": "a.docx"}, content=b"x").status_code == 401
+
+
+def test_a_turn_that_ends_without_a_result_says_why(client, monkeypatch):
+    """찾기만 하다 끝난 턴은 빈 말풍선이 아니라 이유를 남긴다 — 그래야 사람이 좁혀 다시 묻는다.
+
+    왕복 한도를 넘기면 결과를 내는 도구만 돌게(llm.WRAP_UP_ROUNDS) 화면 도구 이름을 넘긴다.
+    """
+    alice = _user(client, "alice@corp.com")
+    out, script = _chat(client, alice, monkeypatch, [("docs__search_docs", {"query": "x"})] * 3,
+                        text="보고서 써 줘")
+    assert out["reply"] == "완료"  # 짧은 답은 그대로
+    # show_report가 기본 응답 형식이라 맨 앞이다 — 한도에 이르면 다른 화면이 맞지 않는 한 그것으로 낸다.
+    assert script.finish_tools[0] == "show_report"
+    assert {"ask_user", "make_file"} <= set(script.finish_tools)
+    assert not any(n.startswith(("docs__", "my__")) for n in script.finish_tools)
+    assert "도구 왕복은 최대" in script.messages[0]["content"]
+    assert "답의 기본 형식" in script.messages[0]["content"]
+
+    # 화면을 고르지 않고 결과를 대화에 길게 쓰고 끝냈으면 — 결과 화면(show_report)으로 받는다.
+    long_answer = "# 협력사 3곳 비교\n\n" + "가 협력사는 단가가 낮다. " * 40
+    script = Script([], reply=long_answer)
+    monkeypatch.setattr(llm, "chat_completion", script)
+    r = client.post(f"{API}/smartwork/sessions/{_session(client, alice)}/messages",
+                    json={"content": "협력사 비교해 줘"}, headers=alice).json()
+    assert r["report"] == {"title": "협력사 3곳 비교", "format": "md", "content": long_answer.strip()}
+    assert r["reply"] == "협력사 3곳 비교 — 자세한 내용은 오른쪽 화면에 띄웠습니다."
+    assert r["message"]["report"]["format"] == "md"  # 다시 열어도 그 화면이 남는다
+
+    script = Script([("docs__search_docs", {"query": "x"})] * 3, reply="")
+    monkeypatch.setattr(llm, "chat_completion", script)
+    sid = _session(client, alice)
+    r = client.post(f"{API}/smartwork/sessions/{sid}/messages", json={"content": "보고서"}, headers=alice)
+    assert r.status_code == 200, r.text
+    assert "결과를 내지 못했습니다 — 도구를 3번" in r.json()["reply"]
+    assert "결과를 내지 못했습니다" in r.json()["message"]["content"]

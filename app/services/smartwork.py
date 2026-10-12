@@ -480,9 +480,10 @@ def _view_tools(agent_names: list[str], has_files: bool = False) -> list[dict]:
     }, {
         "name": "show_report",
         "description": (
-            "요청의 결과를 오른쪽 화면에 보고서로 띄운다. 결과는 대화에 쓰지 않고 늘 이것으로"
-            " 낸다. content는 완결된 HTML 문서다(<style> 인라인 가능, 스크립트·외부 자원은"
-            " 막힌다)."
+            "요청의 결과를 오른쪽 화면에 띄운다 — **답의 기본 형식**이다. 보고서를 써 달라는"
+            " 요청만이 아니라 조회·요약·비교·확인·안내 등 무엇이든, 다른 화면(에이전트·파일·웹)이"
+            " 맞지 않으면 결과는 이것으로 낸다. 결과는 대화에 쓰지 않는다. content는 완결된 HTML"
+            " 문서다(<style> 인라인 가능, 스크립트·외부 자원은 막힌다)."
         ),
         "inputSchema": {
             "type": "object",
@@ -592,6 +593,27 @@ def _view_tools(agent_names: list[str], has_files: bool = False) -> list[dict]:
     return tools
 
 
+# 화면을 고르지 않은 답이 이보다 길면 결과로 본다 — 확인 질문은 이만큼 길지 않다.
+FALLBACK_REPORT_CHARS = 400
+
+
+def _fallback(reply: str, view: dict, tool_count: int) -> str:
+    """모델이 아무 화면도 고르지 않고 끝난 턴 — show_report가 **기본 응답 형식**이므로 거기로 받는다.
+
+    결과를 대화에 길게 쓰고 끝냈으면 그 글을 결과 화면(md)으로 옮기고 대화에는 요지만 남긴다.
+    아무것도 없으면 빈 말풍선 대신 이유를 남긴다 — 그래야 사람이 좁혀 다시 묻는다.
+    """
+    text = reply.strip()
+    if not text:
+        return (f"결과를 내지 못했습니다 — 도구를 {tool_count}번 썼지만 결론에 이르지 못했습니다."
+                " 대상·범위·기간을 좁혀 다시 요청해 주세요.")
+    if len(text) <= FALLBACK_REPORT_CHARS:
+        return reply
+    first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
+    view["report"] = {"title": first[:60] or "결과", "format": "md", "content": text}
+    return f"{first[:200]} — 자세한 내용은 오른쪽 화면에 띄웠습니다."
+
+
 def session_files(db: Session, email: str, folders: list[str] | None) -> list[dict]:
     """이 업무에 고른 내 폴더의 파일 중 뷰어가 여는 것 — 파일 뷰어의 목록이자 open_file의 범위.
 
@@ -686,9 +708,11 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
             lines.append("제안·답변은 이 워크플로의 업무 안에서 한다.")
     lines += [
         "",
-        "대화와 보고서:",
-        "- 대화는 요청을 정확히 확인하는 자리다. 요청의 결과는 대화에 쓰지 않고 늘"
-        " show_report(HTML 보고서)로 낸다. 대화 답변은 확인 질문이나 보고서의 한두 줄 요지만 쓴다.",
+        "대화와 결과:",
+        "- 대화는 요청을 정확히 확인하는 자리다. 요청의 결과는 대화에 쓰지 않는다. show_report가"
+        " 답의 기본 형식이다 — 보고서 작성 요청만이 아니라 무엇을 물었든, 다른 화면(에이전트·"
+        "파일·웹)이 맞지 않으면 결과는 show_report로 낸다. 대화 답변은 확인 질문이나 결과의 한두"
+        " 줄 요지만 쓴다.",
         "- 요청이 모호하면(대상·범위·기간·결과 모양) 실행하기 전에 ask_user로 확인하고 멈춘다.",
         "- 그 일을 할 수 있는 도구·에이전트·출처가 둘 이상이면 고르지 말고 ask_user로 어느 것을"
         " 쓸지 확인받는다. 사람이 이미 고른 것은 다시 묻지 않는다.",
@@ -696,7 +720,10 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
         "",
         "도구 사용 규칙:",
         "- 사내 문서·온톨로지·API·코드에 근거해 답한다. 추측하지 말고 도구로 확인한 뒤,"
-        " 근거가 된 문서(저장소·경로)를 보고서에 밝힌다.",
+        " 근거가 된 문서(저장소·경로)를 결과에 밝힌다.",
+        f"- 도구 왕복은 최대 {llm_service.MAX_TOOL_ROUNDS}번이다(한 번에 여러 도구를 함께 부르면"
+        " 한 번). 같은 검색을 말만 바꿔 되풀이하지 말고, 찾은 만큼으로 결과(show_report)를 낸다 —"
+        " 찾지 못한 것은 결과에 '확인하지 못함'으로 적는다.",
         "- 에이전트는 아래 목록의 목적·하는 일이 요청과 맞을 때만 show_agent로 띄운다. 이름이"
         " 비슷하다는 것, 목록에 하나뿐이라는 것은 근거가 아니다. '하지 않는 일'에 걸리면 띄우지"
         " 않는다. 용도 검토 전인 에이전트는 이름만으로 고르지 않는다.",
@@ -890,7 +917,13 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
         messages[-1] = {"role": "user", "content": [
             {"type": "text", "text": messages[-1]["content"]},
             *({"type": "image_url", "image_url": {"url": url}} for url in images)]}
-    reply = llm_service.chat_completion(provider, messages, db, tools, execute)
+    # 왕복 한도를 넘기면 결과를 내는 도구만 돌린다(llm.WRAP_UP_ROUNDS) — 찾기만 하다 끝나지 않게.
+    # 맨 앞이 기본 형식이다: 다른 화면이 맞지 않으면 결과는 show_report로.
+    finish = ["show_report", *(t["name"] for t in _view_tools(list(by_name), bool(files))
+                               if t["name"] != "show_report")]
+    reply = llm_service.chat_completion(provider, messages, db, tools, execute, finish_tools=finish)
+    if not any(view[k] for k in ("agent", "report", "web", "file", "suggestions", "choices")):
+        reply = _fallback(reply, view, len(used))
     # 무엇을 물었는지는 남기지 않는다 — 개인 메일·문서 내용이 감사 기록으로 새면 안 된다.
     audit.record(db, key.name, "smartwork.chat", "-", {"tools": used})
     return {"reply": reply, **view, "tools": used, "provider": provider.name}

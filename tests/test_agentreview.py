@@ -144,7 +144,7 @@ def test_smartwork_picks_by_purpose_and_reviews_unreviewed_agents(app_db, monkey
     monkeypatch.setattr(agentreview, "schedule", lambda pid, sha: scheduled.append((pid, sha)))
     captured: dict = {}
 
-    def fake_chat(provider, messages, db=None, tools=None, tool_executor=None):
+    def fake_chat(provider, messages, db=None, tools=None, tool_executor=None, **kw):
         captured["system"] = messages[0]["content"]
         captured["tools"] = tools
         return "완료"

@@ -6,6 +6,7 @@
 import json
 import re
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable
 
@@ -106,6 +107,15 @@ def resolve_base_url(base_url: str, db: Session | None = None) -> str:
 
 
 MAX_TOOL_ROUNDS = 6
+# 상한에 이른 뒤 **마무리하는 왕복**. 예전에는 상한에서 모델이 요청한 도구를 버리고 빈 답을
+# 돌려줬다 — 찾기만 하다 상한을 넘긴 대화는 결과를 띄울 차례(show_report)를 얻지 못하고 빈
+# 답으로 끝났다(실측: 보고서 요청에 도구 19번, 화면에 아무것도 없음). 상한을 넘긴 뒤에는 찾기
+# 도구를 실행하지 않고 "지금까지로 마무리하라"를 그 도구의 결과로 돌려주며, 마무리 도구
+# (finish_tools)만 실행한다. 결과를 띄우고 한 줄 답을 쓰는 데 두 번이면 된다. finish_tools의
+# 첫 도구가 **기본 응답 형식**이다(스마트워크는 show_report) — 다른 것이 맞지 않으면 그것으로 낸다.
+# 결과로 돌려주는 이유: 도구 호출마다 결과가 짝지어져야 하고(Bedrock은 짝이 없으면 거부한다),
+# 그 사이에 사용자 메시지를 끼우면 역할 교대를 요구하는 프로바이더가 거부한다.
+WRAP_UP_ROUNDS = 2
 
 
 class LlmTimeout(RuntimeError):
@@ -172,11 +182,14 @@ def chat_completion(
     db: Session | None = None,
     tools: list[dict] | None = None,
     tool_executor: Callable[[str, dict], str] | None = None,
+    *,
+    finish_tools: Sequence[str] = (),
     _round: int = 0,
 ) -> str:
     """tools/tool_executor를 주면(예: 프로젝트에 바인딩된 MCP 서버) OpenAI 호환
     tool-call 프로토콜로 모델↔도구를 오간다 — 모델이 더 이상 tool_calls를 요청하지
-    않을 때까지(최대 MAX_TOOL_ROUNDS회) 반복하고 최종 텍스트만 반환한다."""
+    않을 때까지(최대 MAX_TOOL_ROUNDS회) 반복하고 최종 텍스트만 반환한다. 상한을 넘기면
+    WRAP_UP_ROUNDS 동안 finish_tools(결과를 내는 도구)만 실행하고 마무리를 요청한다."""
     native = uses_aws_credentials(provider)
     # **호출 한 번을 잰다** — 느려졌는지·실패하는지·토큰을 얼마나 쓰는지는 여기 말고는
     # 남는 곳이 없었다(services/telemetry.py). 도구 왕복마다 한 행이고, 본문은 싣지 않는다.
@@ -205,19 +218,25 @@ def chat_completion(
     truncated = str(choice.get("finish_reason") or "").lower() in ("length", "max_tokens")
 
     tool_calls = message.get("tool_calls")
-    if tool_calls and tool_executor and _round < MAX_TOOL_ROUNDS:
+    if tool_calls and tool_executor and _round < MAX_TOOL_ROUNDS + WRAP_UP_ROUNDS:
+        wrapping = _round >= MAX_TOOL_ROUNDS
         next_messages = [*messages, message]
         for tc in tool_calls:
             fn = tc.get("function", {})
+            name = fn.get("name", "")
             try:
                 arguments = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 arguments = {}
-            result = tool_executor(fn.get("name", ""), arguments)
+            if wrapping and name not in finish_tools:
+                result = _wrap_up_note(finish_tools)
+            else:
+                result = tool_executor(name, arguments)
             next_messages.append({
                 "role": "tool", "tool_call_id": tc.get("id", ""), "content": result,
             })
-        return chat_completion(provider, next_messages, db, tools, tool_executor, _round + 1)
+        return chat_completion(provider, next_messages, db, tools, tool_executor,
+                               finish_tools=finish_tools, _round=_round + 1)
     # content가 null인 응답(길이 초과·거절·도구 호출만 있는 경우)이 있다. 호출부가
     # 문자열을 전제로 후처리하므로 여기서 빈 문자열로 떨어뜨린다 — None이 새 나가면
     # 엉뚱한 자리에서 AttributeError로 터진다.
@@ -225,6 +244,16 @@ def chat_completion(
     if truncated:
         raise LlmTruncated(text, get_settings().llm_max_output_tokens)
     return text
+
+
+def _wrap_up_note(finish_tools: Sequence[str]) -> str:
+    if not finish_tools:
+        how = "답을 글로 쓴다"
+    else:
+        default, *others = finish_tools
+        how = f"결과는 {default}로 낸다" + (f"({'·'.join(others)}가 더 맞으면 그것으로)" if others else "")
+    return ("도구 왕복 한도에 이르러 이 도구는 실행하지 않았다. 더 찾지 말고 지금까지 확인한"
+            f" 것으로 마무리하라 — {how}. 확인하지 못한 것은 확인하지 못했다고 밝힌다.")
 
 
 # 점검용 도구 하나 — **도구를 붙이는 것이 요점이다.** 대화는 늘 MCP 도구를 함께 보내는데,

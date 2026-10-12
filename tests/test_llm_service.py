@@ -57,11 +57,14 @@ def test_chat_completion_executes_tool_call_and_loops_to_final_answer(monkeypatc
 
 
 def test_chat_completion_stops_after_max_rounds(monkeypatch):
-    """모델이 계속 tool_calls만 요청해도 무한루프에 안 빠지고 라운드 상한에서 멈춘다."""
+    """모델이 계속 tool_calls만 요청해도 무한루프에 안 빠진다 — 상한 뒤 마무리 왕복까지만 돈다."""
     call_count = {"n": 0}
+    executed: list[str] = []
+    last: dict = {}
 
     def always_tool_call(url, headers, payload):
         call_count["n"] += 1
+        last["messages"] = payload["messages"]
         return {"choices": [{"message": {
             "role": "assistant", "content": None,
             "tool_calls": [{"id": "c", "function": {"name": "srv__search", "arguments": "{}"}}],
@@ -70,12 +73,44 @@ def test_chat_completion_stops_after_max_rounds(monkeypatch):
     monkeypatch.setattr(llm_service, "_post_chat", always_tool_call)
     reply = llm_service.chat_completion(
         _provider(), [{"role": "user", "content": "loop please"}],
-        tools=TOOLS, tool_executor=lambda name, args: "result",
+        tools=TOOLS, tool_executor=lambda name, args: executed.append(name) or "result",
     )
-    assert call_count["n"] == llm_service.MAX_TOOL_ROUNDS + 1
-    # 상한에 도달하면 마지막 응답의 content를 반환한다. content가 null이어도 None이
+    assert call_count["n"] == llm_service.MAX_TOOL_ROUNDS + llm_service.WRAP_UP_ROUNDS + 1
+    # 찾기 도구는 상한까지만 실행한다 — 그 뒤에는 "마무리하라"가 그 도구의 결과로 간다.
+    assert len(executed) == llm_service.MAX_TOOL_ROUNDS
+    assert "더 찾지 말고" in last["messages"][-1]["content"]
+    # 끝내 마무리하지 않으면 마지막 응답의 content를 반환한다. content가 null이어도 None이
     # 아니라 빈 문자열이다 — None이 새 나가면 호출부가 문자열로 다루다 터진다.
     assert reply == ""
+
+
+def test_round_limit_still_lets_the_model_deliver_its_result(monkeypatch):
+    """찾기만 하다 상한을 넘겨도 결과를 내는 도구(finish_tools)는 실행된다 — 예전에는 상한에서
+    빈 답으로 끝나 보고서를 띄울 차례가 오지 않았다(실측: 보고서 요청에 도구 19번, 결과 없음)."""
+    rounds = {"n": 0}
+
+    def search_then_report(url, headers, payload):
+        rounds["n"] += 1
+        if rounds["n"] <= llm_service.MAX_TOOL_ROUNDS + 1:  # 상한을 넘겨서도 한 번 더 찾으려 한다
+            name, args = "srv__search", "{}"
+        elif rounds["n"] == llm_service.MAX_TOOL_ROUNDS + 2:
+            name, args = "show_report", '{"title": "보고서"}'
+        else:
+            return {"choices": [{"message": {"content": "보고서를 띄웠습니다."}}]}
+        return {"choices": [{"message": {
+            "role": "assistant", "content": None,
+            "tool_calls": [{"id": f"c{rounds['n']}", "function": {"name": name, "arguments": args}}],
+        }}]}
+
+    executed: list[str] = []
+    monkeypatch.setattr(llm_service, "_post_chat", search_then_report)
+    reply = llm_service.chat_completion(
+        _provider(), [{"role": "user", "content": "보고서 써 줘"}],
+        tools=TOOLS, tool_executor=lambda name, args: executed.append(name) or "ok",
+        finish_tools=("show_report",),
+    )
+    assert executed == ["srv__search"] * llm_service.MAX_TOOL_ROUNDS + ["show_report"]
+    assert reply == "보고서를 띄웠습니다."
 
 
 def test_chat_completion_without_tool_executor_ignores_tool_calls(monkeypatch):
