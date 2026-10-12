@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import Async from '../../components/Async';
-import Split from '../../components/Split';
-import { api } from '../../lib/api';
-import { getEmail } from '../../lib/auth';
-import { copyText } from '../../lib/clipboard';
-import { type AsyncState, useApi, usePolling } from '../../lib/hooks';
-import { remember } from '../../lib/localfiles';
-import { cancelTask, dismissTask, runTask, type TaskHandle, useTask } from '../../lib/tasks';
-import { parseCsv, renderMarkdown } from '../../lib/markdown';
+import Async from '../components/Async';
+import Split from '../components/Split';
+import { api } from '../lib/api';
+import { getEmail } from '../lib/auth';
+import { copyText } from '../lib/clipboard';
+import { type AsyncState, useApi, usePolling } from '../lib/hooks';
+import { remember } from '../lib/localfiles';
+import { cancelTask, dismissTask, runTask, type TaskHandle, useTask } from '../lib/tasks';
+import { parseCsv, renderMarkdown } from '../lib/markdown';
 import type {
   HealthInfo,
   MailLogin,
@@ -22,8 +22,8 @@ import type {
   SmartworkSessionMessage,
   SmartworkSessionSummary,
   SmartworkWeb,
-} from '../../lib/types';
-import { FileTab, WebView } from './viewers';
+} from '../lib/types';
+import { FileTab, WebView } from './smartwork/viewers';
 
 /**
  * 스마트워크 — 왼쪽 대화·설정(에이전트·부서 워크플로·내 업무 맥락), 오른쪽 화면(에이전트·보고서).
@@ -47,7 +47,7 @@ function sessionLabel(s: SmartworkSessionSummary): string {
   return `${s.title || '(새 업무)'}${task ? ` · ${task}` : ''}${s.members > 1 ? ` · 공유 ${s.members}명` : ''}`;
 }
 
-export default function SmartworkTab() {
+export default function Smartwork() {
   const health = useApi(() => api.health());
   const agents = useApi(() => api.smartworkAgents());
   const workflows = useApi(() => api.smartworkWorkflows());
@@ -155,7 +155,7 @@ export default function SmartworkTab() {
     setBusy(true);
     setError(null);
     try {
-      const out = await runTask(`chat:${s.id}`, { label: '스마트워크 답변', to: '/workflows/smartwork' },
+      const out = await runTask(`chat:${s.id}`, { label: '스마트워크 답변', to: '/smartwork' },
         (h) => {
           h.set({ progress: content ? '답변을 만드는 중...' : '업무를 살펴보고 제안을 고르는 중...' });
           return api.sendSessionMessage(s.id, content, attachments, chosenProvider || null);
@@ -994,7 +994,7 @@ function when(iso: string | null | undefined): string {
 // 함께 올리지 않게). 창을 닫아 끊겨도 다시 고르면 남은 파일만 올라간다(manifest가 비교한다).
 const FOLDER_TASK = 'personal:folders';
 const MAIL_TASK = 'personal:mail';
-const TASK_SCREEN = '/workflows/smartwork';
+const TASK_SCREEN = '/smartwork';
 
 function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
   const [busyHere, setBusy] = useState(false);

@@ -21,9 +21,8 @@ import ServerConfig from './pages/ServerConfig';
 import Ontology from './pages/Ontology';
 import OntologyConversionTab from './pages/ontology/ConversionTab';
 import WorkflowDetail from './pages/WorkflowDetail';
+import Smartwork from './pages/Smartwork';
 import Workflows from './pages/Workflows';
-import WorkflowListTab from './pages/workflows/ListTab';
-import SmartworkTab from './pages/workflows/SmartworkTab';
 import OntologyExploreTab from './pages/ontology/ExploreTab';
 import Storage from './pages/Storage';
 import SourceDetail from './pages/SourceDetail';
@@ -66,8 +65,7 @@ export default function App() {
             </AdminOnly>
           }
         />
-        {/* 여태 이 주소였다 — 북마크를 깨지 않고 새 자리로 보낸다. */}
-        <Route path="/smartwork" element={<Navigate to="/workflows/smartwork" replace />} />
+        <Route path="/smartwork" element={<Smartwork />} />
         <Route path="/projects" element={<Projects />} />
         <Route path="/git" element={<Git />} />
         <Route path="/projects/:id" element={<ProjectDetail />}>
@@ -140,12 +138,9 @@ export default function App() {
         </Route>
         {/* 온톨로지 다음 자리 — 조직이 플랫폼 자원과 사람 작업을 엮어 돌리는 흐름.
             소속 조직의 사용자가 직접 다룬다(다른 조직 것은 서버가 404로 숨긴다). */}
-        {/* 워크플로를 짜는 자리(목록)와 돌리는 자리(스마트워크)를 한 화면의 탭으로. */}
-        <Route path="/workflows" element={<Workflows />}>
-          <Route index element={<WorkflowListTab />} />
-          <Route path="smartwork" element={<SmartworkTab />} />
-        </Route>
-        {/* 상세는 탭 밖이다 — 한 워크플로를 구성하는 동안은 그 화면만 본다. */}
+        <Route path="/workflows" element={<Workflows />} />
+        {/* 스마트워크가 잠시 워크플로 관리의 탭이었을 때의 주소 — 북마크를 깨지 않고 돌려보낸다. */}
+        <Route path="/workflows/smartwork" element={<Navigate to="/smartwork" replace />} />
         <Route path="/workflows/:id" element={<WorkflowDetail />} />
         <Route
           path="/server-config"
