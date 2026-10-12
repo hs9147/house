@@ -428,8 +428,12 @@ def _from_converse(data: dict) -> dict:
     # (services/telemetry.result_fields). Converse는 inputTokens/outputTokens로 준다.
     usage = data.get("usage") or {}
     if usage:
-        out["usage"] = {"prompt_tokens": usage.get("inputTokens") or 0,
-                        "completion_tokens": usage.get("outputTokens") or 0}
+        # Converse의 inputTokens에는 캐시로 읽고 쓴 토큰이 들어 있지 않다 — 더해야 입력 합계가 된다.
+        cached = usage.get("cacheReadInputTokens") or 0
+        out["usage"] = {"prompt_tokens": (usage.get("inputTokens") or 0) + cached
+                        + (usage.get("cacheWriteInputTokens") or 0),
+                        "completion_tokens": usage.get("outputTokens") or 0,
+                        "cached_tokens": cached}
     return out
 
 

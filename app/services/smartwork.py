@@ -27,7 +27,7 @@ from ..models import (
     WorkflowRunStatus,
 )
 from ..security import viewer_org_ids
-from . import agentreview, docready, docsearch, doctext, mcp_server, personal
+from . import agentreview, docready, docsearch, doctext, mcp_server, personal, telemetry
 from . import llm as llm_service
 from . import storage as storage_service
 from . import workflow as workflow_service
@@ -594,6 +594,83 @@ def _view_tools(agent_names: list[str], has_files: bool = False) -> list[dict]:
     return tools
 
 
+# 대화 이력에 붙은 첨부의 머리(_clean_history) — 여기서 갈라 첨부를 따로 센다.
+_ATTACH_MARK = "\n\n[첨부 "
+# 도구 접두사 → 자료 출처 이름(작업 로그의 입력 구성). 개인 자료는 내 문서·내 메일로만 —
+# 작업 로그는 관리자가 보는 화면이고 개인 업무 맥락은 그 사람만 본다.
+_SOURCES = {"graph": "온톨로지", "apis": "API 카탈로그", "code": "코드", "storage": "파일 저장소",
+            "dept": "부서 워크플로", "ops": "운영"}
+
+
+def _source_of(tool: str, args: dict) -> str:
+    prefix, sep, _ = tool.partition("__")
+    if not sep:
+        return "화면 도구"
+    if prefix == "my":
+        path = str(args.get("path") or "")
+        if not path:
+            return "내 문서·메일"
+        return "내 메일" if path.startswith(f"{personal.MAIL_DIR}/") else "내 문서"
+    if prefix == "docs":
+        store = str(args.get("source") or "").strip()
+        return f"사내 문서 · {store}" if store else "사내 문서"
+    return _SOURCES.get(prefix, prefix)
+
+
+def _history_sections(history: list[dict]) -> list[tuple[str, str]]:
+    """대화 이력을 구역으로 — 이번 요청·이전 대화·첨부 문서·여는 지시."""
+    out: list[tuple[str, str]] = []
+    last = len(history) - 1
+    for i, m in enumerate(history):
+        text = m.get("content") if isinstance(m.get("content"), str) else ""
+        if text == OPENING_PROMPT:
+            out.append(("여는 지시", text))
+            continue
+        head, *attached = text.split(_ATTACH_MARK)
+        out.append(("이번 요청" if i == last and m.get("role") == "user" else "이전 대화", head))
+        out += [("첨부 문서", _ATTACH_MARK + a) for a in attached]
+    return out
+
+
+def _outcome(view: dict, reply: str) -> str:
+    """턴이 무엇으로 끝났나 — 요청 종류의 대리 변수(작업 로그가 이것으로 나눠 비교한다)."""
+    for key, label in (("agent", "에이전트"), ("file", "파일"), ("web", "웹"), ("report", "보고서"),
+                       ("choices", "질문"), ("suggestions", "제안")):
+        if view.get(key):
+            return label
+    return "글 답" if reply.strip() else "없음"
+
+
+def _citations(reads: list[dict], view: dict, reply: str) -> list[dict]:
+    """읽은 자료가 결과에 인용됐는지 출처별로 센다 — **경로는 남기지 않는다.**
+
+    지시문이 근거 문서의 경로를 결과에 밝히라고 하므로, 경로나 파일 이름이 결과(보고서·파일·답)에
+    나오면 쓰인 것으로 본다. 읽고 쓰지 않은 자료는 입력만 불린 것이다. 같은 문서를 두 번 읽은 것은
+    한 번으로 센다.
+    """
+    out_text = "\n".join([reply, str((view.get("report") or {}).get("content") or ""),
+                          json.dumps(view.get("file") or {}, ensure_ascii=False)])
+    by: dict[str, dict] = {}
+    seen: set[tuple[str, str]] = set()
+    for r in reads:
+        path = r["path"].replace("\\", "/")
+        if (r["source"], path) in seen:
+            continue
+        seen.add((r["source"], path))
+        name = path.rsplit("/", 1)[-1]
+        stem = name[:-len(personal.CONVERTED_SUFFIX)] if name.endswith(personal.CONVERTED_SUFFIX) else name
+        cited = path in out_text or (len(stem) >= 4 and stem in out_text)
+        cell = by.setdefault(r["source"], {"source": r["source"], "reads": 0, "cited": 0,
+                                           "chars": 0, "uncited_chars": 0})
+        cell["reads"] += 1
+        cell["chars"] += r["chars"]
+        if cited:
+            cell["cited"] += 1
+        else:
+            cell["uncited_chars"] += r["chars"]
+    return list(by.values())
+
+
 # 화면을 고르지 않은 답이 이보다 길면 결과로 본다 — 확인 질문은 이만큼 길지 않다.
 FALLBACK_REPORT_CHARS = 400
 
@@ -688,16 +765,37 @@ def _target(raw) -> dict | None:
 def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
                    workflow_names: list[str], task: dict | None = None,
                    participants: list[str] | None = None) -> str:
-    lines = [
+    return "\n".join(text for _, text in _system_sections(
+        email, agent_list, has_personal, workflow_names, task, participants))
+
+
+def _system_sections(email: str, agent_list: list[dict], has_personal: bool,
+                     workflow_names: list[str], task: dict | None = None,
+                     participants: list[str] | None = None) -> list[tuple[str, str]]:
+    """지시문을 **구역마다** — 이어 붙이면 _system_prompt다.
+
+    작업 로그가 입력을 구역별로 나눠 보이려는 것이다(services/telemetry.composition): 지시문이
+    크다는 것만으로는 줄일 곳을 모른다. 기본 규칙은 거의 늘 같지만 업무 맥락·부서 워크플로·
+    에이전트 목록은 업무와 조직에 따라 크기가 달라진다.
+    """
+    sections: list[tuple[str, list[str]]] = []
+
+    def section(label: str) -> list[str]:
+        sections.append((label, []))
+        return sections[-1][1]
+
+    lines = section("기본 규칙")
+    lines += [
         "당신은 사내 업무 도우미 '스마트워크'다. 한국어로 답한다.",
         f"지금 말하는 사람: {email}",
     ]
     if participants and len(participants) > 1:
-        lines.append(
+        section("참여자").append(
             f"이 대화는 여러 사람이 함께 쓴다({', '.join(participants)}). 사용자 메시지 앞의"
             " [이메일]이 말한 사람이다. 답변은 참여자 모두에게 보인다.")
     if task:
         # 세션 = 업무 하나. 소유자가 고른 조직·워크플로가 이 대화의 주제다.
+        lines = section("업무 맥락")
         lines += ["", f"이 대화의 업무: 조직 {task['org']}"
                   + (f" / 워크플로 {task['workflow']['name']}" if task.get("workflow") else "")]
         if task.get("workflow"):
@@ -707,6 +805,7 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
             lines += [f"- 단계: {step}" for step in wf.get("steps", [])]
             lines += [f"- 규칙: {rule}" for rule in wf.get("constraints", [])]
             lines.append("제안·답변은 이 워크플로의 업무 안에서 한다.")
+    lines = section("기본 규칙")
     lines += [
         "",
         "대화와 결과:",
@@ -750,11 +849,13 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
             " 한다 — 저장은 사람이 확인한 뒤에 한다.")
     else:
         lines.append("- 지금 말하는 사람은 이 업무에 개인 업무 맥락(로컬 문서·메일)을 고르지 않았다.")
+    lines = section("부서 워크플로")
     lines += ["", "부서 워크플로:"]
     lines += [f"- {name}" for name in workflow_names] or ["(없음 — 소속 조직에 워크플로가 없다)"]
+    lines = section("에이전트 목록")
     lines += ["", "에이전트 목록:"]
     lines += [_agent_line(a) for a in agent_list] or ["(없음)"]
-    return "\n".join(lines)
+    return [(label, "\n".join(ls)) for label, ls in sections if ls]
 
 
 def _agent_line(a: dict) -> str:
@@ -857,6 +958,8 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
             registry[fn_name] = (call, t["name"])
 
     used: list[str] = []
+    # 이번 턴에 읽은 자료(출처·경로·크기) — 결과에 인용됐는지 세는 데 쓰고, 경로는 남기지 않는다.
+    reads: list[dict] = []
     view: dict = {"agent": None, "report": None, "web": None, "file": None,
                   "suggestions": [], "choices": []}
     names = {w["name"] for w in dept}
@@ -929,17 +1032,24 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
             return f"unknown tool: {fn_name}"
         call, tool_name = entry
         try:
-            return call(tool_name, args)
+            result = call(tool_name, args)
         except mcp_server.McpToolError as e:
             return f"도구 오류: {e}"
         except Exception as e:  # noqa: BLE001 — 도구 하나가 실패해도 대화는 이어진다
             return f"tool call failed: {e}"
+        if tool_name.startswith("read") and args.get("path"):
+            reads.append({"source": _source_of(fn_name, args), "path": str(args["path"]),
+                          "chars": len(result or "")})
+        return result
 
     shared = len(participants or []) > 1
-    messages = [{"role": "system", "content": _system_prompt(
-                    key.name, agent_list, mine is not None, [w["name"] for w in dept],
-                    task, participants)},
+    sections = _system_sections(key.name, agent_list, mine is not None, [w["name"] for w in dept],
+                                task, participants)
+    messages = [{"role": "system", "content": "\n".join(text for _, text in sections)},
                 *_clean_history(history, shared)]
+    # 작업 로그가 입력을 구역·출처로 나눠 보이게(services/telemetry.hints) — 이미지로 바꾸기 전에 잰다.
+    history_sections = _history_sections(messages[1:])
+    base_len = len(messages)
     if images and messages[-1]["role"] == "user":
         messages[-1] = {"role": "user", "content": [
             {"type": "text", "text": messages[-1]["content"]},
@@ -948,11 +1058,14 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
     # 맨 앞이 기본 형식이다: 다른 화면이 맞지 않으면 결과는 show_report로.
     finish = ["show_report", *(t["name"] for t in _view_tools(list(by_name), bool(files))
                                if t["name"] != "show_report")]
-    reply = llm_service.chat_completion(provider, messages, db, tools, execute, finish_tools=finish)
+    with telemetry.turn() as turn_id, telemetry.hints(
+            system=sections, history=history_sections, base_len=base_len, source_of=_source_of):
+        reply = llm_service.chat_completion(provider, messages, db, tools, execute, finish_tools=finish)
     if not any(view[k] for k in ("agent", "report", "web", "file", "suggestions", "choices")):
         reply = _fallback(reply, view, len(used))
     elif view["agent"] and not view["report"]:
         view["report"] = _agent_report(view["agent"], reply)
+    telemetry.record_turn(turn_id, _outcome(view, reply), _citations(reads, view, reply))
     # 무엇을 물었는지는 남기지 않는다 — 개인 메일·문서 내용이 감사 기록으로 새면 안 된다.
     audit.record(db, key.name, "smartwork.chat", "-", {"tools": used})
     return {"reply": reply, **view, "tools": used, "provider": provider.name}

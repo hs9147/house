@@ -13,18 +13,32 @@
 """
 import contextlib
 import contextvars
+import json
 import time
+import uuid
 from typing import Iterator
 
 from ..config import get_settings
 from ..db import SessionLocal
-from ..models import LlmCallLog
+from ..models import LlmCallDetail, LlmCallLog, LlmTurn
 
 # 지금 재고 있는 호출. 컨텍스트로 두는 이유: 호출부(chat_completion·_responses_call)마다
 # 인자를 더하면 _post_chat을 monkeypatch하는 테스트 열 곳이 함께 깨진다.
 _current: contextvars.ContextVar[dict | None] = contextvars.ContextVar("paas_llm_call", default=None)
 # 어느 화면에서 온 요청인지(미들웨어가 넣는다). 없으면 빈 문자열 — 스케줄러·CLI 경로다.
 _route: contextvars.ContextVar[str] = contextvars.ContextVar("paas_route", default="")
+# 지금의 턴 — 바깥 호출이 열고 도구 왕복이 같은 값을 쓴다(turn).
+_turn: contextvars.ContextVar[str] = contextvars.ContextVar("paas_llm_turn", default="")
+# 호출부가 아는 입력의 이름(hints) — 지시문의 구역, 대화 이력의 구역, 도구 결과의 출처.
+# 메시지만 보고는 알 수 없다(어디까지가 에이전트 목록인지, 어느 글이 첨부인지).
+_hints: contextvars.ContextVar[dict | None] = contextvars.ContextVar("paas_llm_hints", default=None)
+
+# 토큰 추정의 무게. 영문·JSON(도구 정의)은 약 4자에 1토큰, 한글은 1~2자에 1토큰이라 글자 수를
+# 그대로 비율로 쓰면 한글이 많은 구간(지시문·문서)이 작게 잡힌다. 이미지는 글자가 없어 장당
+# 어림값을 쓴다(Claude 기준 1000x1000 한 장이 약 1,300토큰).
+_ASCII_PER_TOKEN = 4.0
+_OTHER_PER_TOKEN = 1.5
+_IMAGE_TOKENS = 1_300
 
 _UNSET = object()
 _tracer_cache: object = _UNSET
@@ -54,6 +68,111 @@ def note(**fields) -> None:
         row.update(fields)
 
 
+@contextlib.contextmanager
+def turn() -> Iterator[str]:
+    """한 턴(도구 왕복 여러 번)을 묶는다. 이미 열린 턴 안이면 그것을 쓴다."""
+    if _turn.get():
+        yield _turn.get()
+        return
+    token = _turn.set(uuid.uuid4().hex)
+    try:
+        yield _turn.get()
+    finally:
+        _turn.reset(token)
+
+
+@contextlib.contextmanager
+def hints(*, system: list[tuple[str, str]] | None = None, history: list[tuple[str, str]] | None = None,
+          base_len: int = 0, source_of=None) -> Iterator[None]:
+    """입력의 이름을 알려 준다 — 그 안의 모든 호출(도구 왕복 포함)이 쓴다.
+
+    system·history는 (이름, 글) 목록이고 messages의 첫 base_len개(지시문 + 대화 이력)를 대신한다.
+    source_of(도구 이름, 인자) → 도구 결과의 출처 이름(없으면 도구 이름).
+    """
+    token = _hints.set({"system": system or [], "history": history or [], "base_len": base_len,
+                        "source_of": source_of})
+    try:
+        yield
+    finally:
+        _hints.reset(token)
+
+
+def _weight(text: str) -> float:
+    ascii_chars = sum(1 for ch in text if ord(ch) < 128)
+    return ascii_chars / _ASCII_PER_TOKEN + (len(text) - ascii_chars) / _OTHER_PER_TOKEN
+
+
+def _texts(content) -> tuple[str, int]:
+    """메시지 content → (글, 이미지 수). 이미지가 붙은 사용자 메시지는 목록 모양이다."""
+    if isinstance(content, list):
+        texts = [str(c.get("text") or "") for c in content
+                 if isinstance(c, dict) and c.get("type") == "text"]
+        images = sum(1 for c in content if isinstance(c, dict) and c.get("type") == "image_url")
+        return "\n".join(texts), images
+    return str(content or ""), 0
+
+
+def composition(messages: list[dict], tools: list[dict] | None) -> list[dict]:
+    """입력을 구간으로 나눠 크기를 잰다 — **본문은 싣지 않는다**(도구 이름과 크기뿐).
+
+    도구 결과는 그 결과를 낸 도구 이름으로 묶는다(앞의 assistant 메시지의 tool_calls id로 찾는다)
+    — 어느 도구가 입력을 불리는지가 줄일 곳을 고르는 근거다. weight는 _save가 실제 입력 토큰을
+    나눌 때 쓰는 비율이다.
+    """
+    cells: dict[tuple[str, str], dict] = {}
+
+    def add(part: str, name: str, text: str = "", images: int = 0) -> None:
+        cell = cells.setdefault((part, name), {"part": part, "name": name, "chars": 0, "weight": 0.0})
+        cell["chars"] += len(text)
+        cell["weight"] += _weight(text) + images * _IMAGE_TOKENS
+
+    hint = _hints.get() or {}
+    base_len = hint.get("base_len") or 0 if (hint.get("system") or hint.get("history")) else 0
+    source_of = hint.get("source_of")
+    for label, text in hint.get("system") or [] if base_len else []:
+        add("system", label, text)
+    for label, text in hint.get("history") or [] if base_len else []:
+        add("history", label, text)
+
+    calls: dict[str, tuple[str, dict]] = {}
+    for i, m in enumerate(messages):
+        role = m.get("role")
+        text, images = _texts(m.get("content"))
+        if images:
+            add("image", "", "", images)
+        if i < base_len:
+            continue  # 이름을 아는 구역으로 이미 셌다
+        if role == "system":
+            add("system", "", text)
+        elif role == "tool":
+            name, args = calls.get(str(m.get("tool_call_id") or ""), ("", {}))
+            add("tool_result", (source_of(name, args) if source_of else name) or name, text)
+        else:
+            add("history", "" if not base_len else "이번 턴의 중간 답", text)
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    args = {}
+                calls[str(tc.get("id") or "")] = (str(fn.get("name") or ""),
+                                                  args if isinstance(args, dict) else {})
+                add("tool_call", "", str(fn.get("arguments") or ""))
+    if tools:
+        add("tools", "", json.dumps(tools, ensure_ascii=False))
+    return [c for c in cells.values() if c["chars"] or c["weight"]]
+
+
+def _apportion(parts: list[dict], prompt_tokens: int) -> list[dict]:
+    """실제 입력 토큰을 구간의 무게 비율로 나눈다. 프로바이더가 0을 주면 무게 자체가 추정치다."""
+    total = sum(p["weight"] for p in parts)
+    out = []
+    for p in parts:
+        tokens = (prompt_tokens * p["weight"] / total) if prompt_tokens and total else p["weight"]
+        out.append({"part": p["part"], "name": p["name"], "chars": p["chars"], "tokens": round(tokens)})
+    return out
+
+
 def result_fields(data: dict) -> dict:
     """OpenAI 모양 응답에서 **셀 수 있는 것만** 뽑는다 — 본문은 건드리지 않는다.
 
@@ -62,10 +181,26 @@ def result_fields(data: dict) -> dict:
     """
     usage = data.get("usage") or {}
     message = ((data.get("choices") or [{}])[0] or {}).get("message") or {}
+    details = usage.get("prompt_tokens_details") or {}
+    choice = (data.get("choices") or [{}])[0] or {}
+    # 출력 구성 — 글 답과 도구 인자(도구 이름별). 크기만 잰다.
+    output: dict[tuple[str, str], dict] = {}
+    pieces = [("text", "", str(message.get("content") or ""))] + [
+        ("tool_args", str((tc.get("function") or {}).get("name") or ""),
+         str((tc.get("function") or {}).get("arguments") or ""))
+        for tc in message.get("tool_calls") or []]
+    for part, name, text in pieces:
+        if text:
+            cell = output.setdefault((part, name), {"part": part, "name": name, "chars": 0, "weight": 0.0})
+            cell["chars"] += len(text)
+            cell["weight"] += _weight(text)
     return {
         "prompt_tokens": int(usage.get("prompt_tokens") or 0),
         "completion_tokens": int(usage.get("completion_tokens") or 0),
+        "cached_tokens": int(details.get("cached_tokens") or usage.get("cached_tokens") or 0),
         "tool_calls": len(message.get("tool_calls") or []),
+        "output_parts": list(output.values()),
+        "finish_reason": str(choice.get("finish_reason") or "")[:32],
     }
 
 
@@ -74,7 +209,7 @@ def llm_call(provider: str, model: str, path: str, tool_round: int = 0) -> Itera
     """모델 호출 한 번을 잰다. **실패도 남긴다** — 실패율이 대시보드의 첫 숫자다."""
     row: dict = {
         "provider": provider[:64], "model": model[:128], "path": path,
-        "route": _route.get()[:128], "tool_round": tool_round,
+        "route": _route.get()[:128], "tool_round": tool_round, "turn_id": _turn.get(),
     }
     token = _current.set(row)
     started = time.monotonic()
@@ -120,12 +255,36 @@ def _annotate(span, row: dict) -> None:
 
 def _save(row: dict) -> None:
     """자기 세션으로 쓴다 — 호출부의 트랜잭션에 끼어들면 미완성 작업을 함께 커밋한다."""
+    row = dict(row)
+    parts = row.pop("parts", None) or []
+    output = row.pop("output_parts", None) or []
+    finish = row.pop("finish_reason", "") or ""
+    turn_id = row.pop("turn_id", "") or ""
+    cached = int(row.pop("cached_tokens", 0) or 0)
     try:
         with SessionLocal() as db:
-            db.add(LlmCallLog(**row))
+            call = LlmCallLog(**row)
+            db.add(call)
+            db.flush()
+            db.add(LlmCallDetail(call_id=call.id, turn_id=turn_id, cached_tokens=cached,
+                                 parts=_apportion(parts, call.prompt_tokens or 0),
+                                 output_parts=_apportion(output, call.completion_tokens or 0),
+                                 finish_reason=finish))
             db.commit()
     except Exception as e:  # noqa: BLE001 — 관측 실패가 LLM 호출을 깨뜨리면 안 된다
         print(f"[paas] 관측 기록 실패(무시): {e}")
+
+
+def record_turn(turn_id: str, outcome: str, reads: list[dict]) -> None:
+    """턴의 결과를 남긴다(models.LlmTurn) — 실패해도 대화는 그대로다."""
+    if not turn_id:
+        return
+    try:
+        with SessionLocal() as db:
+            db.add(LlmTurn(turn_id=turn_id, outcome=outcome[:32], reads=reads))
+            db.commit()
+    except Exception as e:  # noqa: BLE001
+        print(f"[paas] 턴 기록 실패(무시): {e}")
 
 
 def normalize_route(path: str) -> str:

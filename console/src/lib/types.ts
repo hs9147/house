@@ -676,6 +676,40 @@ export interface LlmTelemetry {
   by_model: LlmCallBucket[];
   by_route: LlmCallBucket[];
   daily: LlmCallBucket[];
+  /** 입력 구성 — 구간(system·tools·history·tool_call·tool_result·image)별 **추정** 토큰. */
+  composition: { key: string; tokens: number }[];
+  /** 입력의 세부 — "구간:이름"(지시문의 구역·대화의 구역·자료 출처)별 추정 토큰, 상위만. */
+  composition_detail: { key: string; tokens: number }[];
+  /** 도구 결과가 차지한 입력 — 자료 출처별(사내 문서 · 저장소, 내 문서…, 추정). */
+  tool_results: { key: string; tokens: number }[];
+  /** 출력 구성 — "글 답" 또는 도구 이름(show_report 등)별 추정 토큰. */
+  output: { key: string; tokens: number }[];
+  /** 출력 상한에 걸려 잘린 호출 수 — 그 출력은 "원래 더 길었을" 값이다. */
+  truncated_calls: number;
+  /** 결과 종류별, 읽어 들인 도구 결과 구간마다의 출력 중앙값(비교이지 인과가 아니다). */
+  outcomes: {
+    outcome: string;
+    turns: number;
+    median_input: number;
+    median_output: number;
+    bins: { label: string; turns: number; median_output: number }[];
+  }[];
+  /** 읽은 자료가 결과에 쓰였는지 — 출처별. 경로는 내려오지 않는다. */
+  citations: { source: string; reads: number; cited: number; chars: number; uncited_chars: number }[];
+  /** 최근 턴 — 도구 왕복을 묶은 한 번의 요청. round_inputs는 왕복마다의 입력 토큰. */
+  turns: {
+    at: string;
+    route: string;
+    model: string;
+    rounds: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    cached_tokens: number;
+    round_inputs: number[];
+    tool_calls: number;
+    outcome: string;
+  }[];
+  cached_tokens: number;
   failures: {
     at: string;
     model: string;

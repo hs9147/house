@@ -893,3 +893,58 @@ def test_a_turn_that_ends_without_a_result_says_why(client, monkeypatch):
     assert r.status_code == 200, r.text
     assert "결과를 내지 못했습니다 — 도구를 3번" in r.json()["reply"]
     assert "결과를 내지 못했습니다" in r.json()["message"]["content"]
+
+
+def test_a_turn_records_where_its_input_came_from_and_what_it_used(client, monkeypatch):
+    """작업 로그의 입력 구성 — 지시문 구역·대화 구역·자료 출처로 나뉘고, 읽은 자료가 결과에
+    쓰였는지 센다. 실제 호출 경로(llm.chat_completion)를 그대로 지나고 응답만 가짜다.
+    **경로·본문은 남지 않는다**(출처 이름과 크기·개수뿐)."""
+    from app.models import LlmCallDetail, LlmTurn
+
+    alice = _user(client, "alice@corp.com")
+    client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    _upload(client, alice, "work", {"plan.md": "# 계획\n\n오로라 일정".encode(),
+                                    "memo.md": "# 메모\n\n펭귄 기록".encode()})
+    sid = _session(client, alice)
+    client.put(f"{API}/smartwork/sessions/{sid}/context", json={"folders": ["work"], "mail": False},
+               headers=alice)
+    rounds: list = []
+
+    def fake_post_chat(url, headers, payload):
+        rounds.append(payload)
+        call = lambda i, name, args: {"id": f"c{i}", "function": {  # noqa: E731
+            "name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
+        if len(rounds) == 1:
+            calls = [call(1, "my__read", {"path": "work/plan.md.md"}),
+                     call(2, "my__read", {"path": "work/memo.md.md"})]
+        elif len(rounds) == 2:
+            calls = [call(3, "show_report", {"title": "요약", "content": "<p>근거: plan.md</p>"})]
+        else:
+            return {"choices": [{"message": {"content": "정리했습니다."}}],
+                    "usage": {"prompt_tokens": 3000, "completion_tokens": 10}}
+        return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": calls}}],
+                "usage": {"prompt_tokens": 1000 * len(rounds), "completion_tokens": 50}}
+
+    monkeypatch.setattr(llm, "_post_chat", fake_post_chat)
+    r = client.post(f"{API}/smartwork/sessions/{sid}/messages", json={"content": "일정 정리해 줘"},
+                    headers=alice)
+    assert r.status_code == 200, r.text
+
+    with SessionLocal() as db:
+        details = db.query(LlmCallDetail).order_by(LlmCallDetail.call_id).all()[-3:]
+        turn = db.query(LlmTurn).filter(LlmTurn.turn_id == details[0].turn_id).one()
+    assert len({d.turn_id for d in details}) == 1
+    first = {(p["part"], p["name"]) for p in details[0].parts}
+    assert {("system", "기본 규칙"), ("system", "부서 워크플로"), ("system", "에이전트 목록"),
+            ("history", "이번 요청"), ("tools", "")} <= first
+    second = {(p["part"], p["name"]) for p in details[1].parts}
+    assert ("tool_result", "내 문서") in second  # 출처 — 파일 이름이 아니다
+    assert [(p["part"], p["name"]) for p in details[1].output_parts] == [("tool_args", "show_report")]
+    assert details[2].output_parts[0]["part"] == "text"
+
+    assert turn.outcome == "보고서"
+    assert turn.reads == [{"source": "내 문서", "reads": 2, "cited": 1,
+                           "chars": turn.reads[0]["chars"], "uncited_chars": turn.reads[0]["uncited_chars"]}]
+    assert 0 < turn.reads[0]["uncited_chars"] < turn.reads[0]["chars"]
+    stored = json.dumps([d.parts for d in details] + [turn.reads], ensure_ascii=False)
+    assert "plan.md" not in stored and "오로라" not in stored and "일정 정리해 줘" not in stored

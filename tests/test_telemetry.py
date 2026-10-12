@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
 from app.main import create_app
-from app.models import LlmCallLog, LlmProvider, LlmProviderKind
+from app.models import LlmCallDetail, LlmCallLog, LlmProvider, LlmProviderKind
 from app.services import llm as llm_service
 from app.services import telemetry
 
@@ -19,10 +19,12 @@ def clean_calls():
     """기록 표를 비우고 시작한다 — 스위트가 DB 하나를 공유해서 다른 테스트의 호출이 섞인다."""
     create_app()  # 표가 없을 수 있다(create_all)
     with SessionLocal() as db:
+        db.query(LlmCallDetail).delete()
         db.query(LlmCallLog).delete()
         db.commit()
     yield
     with SessionLocal() as db:
+        db.query(LlmCallDetail).delete()
         db.query(LlmCallLog).delete()
         db.commit()
 
@@ -131,3 +133,119 @@ def test_summary_counts_on_the_server(clean_calls):
 def test_summary_is_admin_only(clean_calls):
     c = TestClient(create_app())
     assert c.get(f"{API}/telemetry/llm").status_code == 401
+
+
+def _details() -> list[LlmCallDetail]:
+    with SessionLocal() as db:
+        return db.query(LlmCallDetail).order_by(LlmCallDetail.call_id).all()
+
+
+def test_input_is_split_into_parts_without_any_text(monkeypatch, clean_calls):
+    """입력을 구간으로 나눠 실제 입력 토큰을 비율로 나눈다 — 합계는 프로바이더가 센 값, 본문은 없다."""
+    monkeypatch.setattr(llm_service, "_post_chat", lambda url, headers, payload: {
+        "choices": [{"message": {"content": "끝"}}],
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 10,
+                  "prompt_tokens_details": {"cached_tokens": 400}},
+    })
+    messages = [
+        {"role": "system", "content": "당신은 사내 업무 도우미다. " * 20},
+        {"role": "user", "content": "계약 정리"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "t1", "function": {"name": "docs__read_doc", "arguments": '{"path": "a.md"}'}}]},
+        {"role": "tool", "tool_call_id": "t1", "content": "기밀 계약서 본문 " * 2000},
+        {"role": "user", "content": [{"type": "text", "text": "이 그림도"},
+                                     {"type": "image_url", "image_url": {"url": "data:x"}}]},
+    ]
+    llm_service.chat_completion(_provider(), messages,
+                                tools=[{"type": "function", "function": {"name": "t"}}])
+    [detail] = _details()
+    parts = {(p["part"], p["name"]): p for p in detail.parts}
+    assert set(parts) == {("system", ""), ("history", ""), ("tool_call", ""),
+                          ("tool_result", "docs__read_doc"), ("image", ""), ("tools", "")}
+    assert sum(p["tokens"] for p in detail.parts) in (999, 1000, 1001)  # 반올림
+    # 도구 결과가 가장 크다 — 줄일 곳이 그것이라는 게 이 기록의 쓸모다
+    assert max(detail.parts, key=lambda p: p["tokens"])["part"] == "tool_result"
+    assert detail.cached_tokens == 400
+    assert "기밀" not in str(detail.parts) and "도우미" not in str(detail.parts)
+
+
+def test_tool_rounds_share_one_turn(monkeypatch, clean_calls):
+    """도구 왕복은 한 턴이다 — 따로 부른 호출은 다른 턴이다."""
+    calls: list = []
+
+    def fake_post_chat(url, headers, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "function": {"name": "t", "arguments": "{}"}}]}}]}
+        return {"choices": [{"message": {"content": "끝"}}]}
+
+    monkeypatch.setattr(llm_service, "_post_chat", fake_post_chat)
+    llm_service.chat_completion(_provider(), [{"role": "user", "content": "x"}],
+                                tools=[{"type": "function", "function": {"name": "t"}}],
+                                tool_executor=lambda name, args: "결과")
+    llm_service.chat_completion(_provider(), [{"role": "user", "content": "y"}])
+    first, second, other = (d.turn_id for d in _details())
+    assert first and first == second and other and other != first
+
+
+def test_summary_shows_composition_and_turns(clean_calls):
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with SessionLocal() as db:
+        rows = [LlmCallLog(created_at=now, provider="a", model="m1", route="/smartwork/x",
+                           ok=True, ms=10, prompt_tokens=p, completion_tokens=c, tool_round=i,
+                           tool_calls=t)
+                for i, (p, c, t) in enumerate([(1000, 20, 2), (5000, 30, 1), (9000, 400, 0)])]
+        db.add_all(rows)
+        db.flush()
+        for row, tool_tokens in zip(rows, (0, 4000, 8000)):
+            db.add(LlmCallDetail(call_id=row.id, turn_id="turn1", parts=[
+                {"part": "tools", "name": "", "chars": 100, "tokens": row.prompt_tokens - tool_tokens},
+                *([{"part": "tool_result", "name": "my__read", "chars": 9, "tokens": tool_tokens}]
+                  if tool_tokens else []),
+            ]))
+        db.commit()
+
+    out = TestClient(create_app()).get(f"{API}/telemetry/llm?days=7", headers=ADMIN).json()
+    assert out["composition"] == [{"key": "tool_result", "tokens": 12000},
+                                  {"key": "tools", "tokens": 3000}]
+    assert out["tool_results"] == [{"key": "my__read", "tokens": 12000}]
+    [turn] = out["turns"]
+    assert turn["rounds"] == 3 and turn["round_inputs"] == [1000, 5000, 9000]
+    assert (turn["prompt_tokens"], turn["completion_tokens"], turn["tool_calls"]) == (15000, 450, 3)
+
+
+def test_summary_compares_output_within_each_outcome_and_counts_citations(clean_calls):
+    """결과 종류마다 도구 결과 입력 구간별 출력 중앙값 — 종류를 섞으면 "원래 긴 일"이 "자료를 많이
+    읽어 길어진 것"으로 보인다. 인용은 출처별로 읽은 것·쓰인 것·쓰이지 않은 분량."""
+    from app.models import LlmTurn
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with SessionLocal() as db:
+        for i, (outcome, tool_tokens, out_tokens) in enumerate(
+                [("보고서", 5_000, 800), ("보고서", 60_000, 2000), ("보고서", 70_000, 3000), ("질문", 0, 40)]):
+            row = LlmCallLog(created_at=now, provider="a", model="m", route="/smartwork/x", ok=True,
+                             ms=1, prompt_tokens=tool_tokens + 1000, completion_tokens=out_tokens)
+            db.add(row)
+            db.flush()
+            db.add(LlmCallDetail(call_id=row.id, turn_id=f"t{i}", finish_reason="length" if i == 2 else "stop",
+                                 parts=[{"part": "tool_result", "name": "사내 문서 · contracts",
+                                         "chars": 1, "tokens": tool_tokens}],
+                                 output_parts=[{"part": "tool_args", "name": "show_report", "chars": 1,
+                                                "tokens": out_tokens}]))
+            db.add(LlmTurn(turn_id=f"t{i}", outcome=outcome, reads=[
+                {"source": "사내 문서 · contracts", "reads": 2, "cited": 1, "chars": 100,
+                 "uncited_chars": 40}] if outcome == "보고서" else []))
+        db.commit()
+
+    out = TestClient(create_app()).get(f"{API}/telemetry/llm?days=7", headers=ADMIN).json()
+    report = next(o for o in out["outcomes"] if o["outcome"] == "보고서")
+    assert report["turns"] == 3
+    assert [(b["label"], b["turns"], b["median_output"]) for b in report["bins"]] == [
+        ("1만 미만", 1, 800), ("1만~5만", 0, 0), ("5만 이상", 2, 2500)]
+    assert out["citations"] == [{"source": "사내 문서 · contracts", "reads": 6, "cited": 3,
+                                 "chars": 300, "uncited_chars": 120}]
+    assert out["output"] == [{"key": "show_report", "tokens": 5840}]
+    assert out["truncated_calls"] == 1
+    assert out["composition_detail"][0]["key"] == "tool_result:사내 문서 · contracts"
+    assert {t["outcome"] for t in out["turns"]} == {"보고서", "질문"}

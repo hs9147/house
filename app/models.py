@@ -741,6 +741,57 @@ class LlmCallLog(Base):
     trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
+class LlmCallDetail(Base):
+    """LLM 호출 한 건의 **입력 구성**과 그 호출이 속한 턴 — llm_calls 한 행에 하나.
+
+    프로바이더는 입력 토큰을 합계로만 준다. 무엇이 입력을 차지하는지(지시문·도구 정의·대화
+    이력·도구 결과) 모르면 "토큰이 많다"에 손댈 곳을 고를 수 없다. 호출할 때 구간마다 크기를
+    재 두고, 실제 입력 토큰을 그 비율로 나눈다(services/telemetry.composition) — 합계는
+    프로바이더가 센 값 그대로고 구간별 몫은 추정이다. **본문은 없다**(도구 이름과 크기뿐).
+
+    turn_id는 도구 왕복 여러 번을 묶는다 — 왕복마다 앞의 도구 결과가 다시 실려 입력이 불어나는
+    모양은 턴으로 묶어야 보인다. llm_calls에 컬럼을 더하지 않고 표를 따로 둔 것은 이미 깔린
+    DB가 마이그레이션 없이 받게 하려는 것이다(create_all이 새 표만 만든다).
+    """
+
+    __tablename__ = "llm_call_details"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    call_id: Mapped[int] = mapped_column(
+        ForeignKey("llm_calls.id", ondelete="CASCADE"), unique=True, index=True)
+    turn_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    # 프롬프트 캐시로 읽은 입력 토큰(입력 합계에 들어 있다).
+    cached_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # 입력 — [{"part": system|tools|history|tool_call|tool_result|image, "name": 구역·출처,
+    #   "chars": n, "tokens": 추정}]. system은 구역(기본 규칙·업무 맥락·에이전트 목록…), history는
+    #   이번 요청·이전 대화·첨부, tool_result는 자료 출처(사내 문서 · 저장소, 내 문서…)로 나뉜다.
+    parts: Mapped[list] = mapped_column(JSON, default=list)
+    # 출력 — [{"part": text|tool_args, "name": 도구 이름, "chars", "tokens"}]. 중간 왕복의 출력은
+    # 도구 인자라 짧고 마지막의 show_report 본문은 길다 — 한 덩어리로 세면 기여가 흐려진다.
+    output_parts: Mapped[list] = mapped_column(JSON, default=list)
+    # 출력 상한에 걸려 잘렸는지(length·max_tokens) — 잘린 출력은 "원래 더 길었을" 값이다.
+    finish_reason: Mapped[str] = mapped_column(String(32), default="")
+
+
+class LlmTurn(Base):
+    """한 턴의 **결과** — 무엇으로 끝났고, 읽은 자료가 결과에 쓰였는지.
+
+    결과 종류(보고서·에이전트·파일·질문…)는 요청 종류의 대리 변수다 — 같은 기능 경로로 들어온
+    대화를 그것으로 나눠야 "자료를 많이 읽어서 길어졌나, 원래 긴 일이었나"를 가를 수 있다.
+    reads는 읽은 자료를 출처별로 세고, 그 경로가 결과에 인용됐는지를 센다 — 읽고 쓰지 않은
+    자료는 입력만 불린 것이다. **경로·본문은 남기지 않는다**(출처 이름과 개수·크기뿐).
+    """
+
+    __tablename__ = "llm_turns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    turn_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    outcome: Mapped[str] = mapped_column(String(32), default="")
+    # [{"source": "사내 문서 · contracts", "reads": n, "cited": n, "chars": n, "uncited_chars": n}]
+    reads: Mapped[list] = mapped_column(JSON, default=list)
+
+
 class AnswerRating(Base):
     """사람이 답변 하나에 매긴 평가 — LLM·에이전트 품질의 바탕.
 

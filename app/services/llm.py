@@ -184,18 +184,28 @@ def chat_completion(
     tool_executor: Callable[[str, dict], str] | None = None,
     *,
     finish_tools: Sequence[str] = (),
-    _round: int = 0,
 ) -> str:
     """tools/tool_executor를 주면(예: 프로젝트에 바인딩된 MCP 서버) OpenAI 호환
     tool-call 프로토콜로 모델↔도구를 오간다 — 모델이 더 이상 tool_calls를 요청하지
     않을 때까지(최대 MAX_TOOL_ROUNDS회) 반복하고 최종 텍스트만 반환한다. 상한을 넘기면
-    WRAP_UP_ROUNDS 동안 finish_tools(결과를 내는 도구)만 실행하고 마무리를 요청한다."""
+    WRAP_UP_ROUNDS 동안 finish_tools(결과를 내는 도구)만 실행하고 마무리를 요청한다.
+
+    도구 왕복 전체가 **한 턴**이다(services/telemetry.turn) — 왕복마다 입력이 어떻게 불어나는지는
+    턴으로 묶어야 보인다.
+    """
+    with telemetry.turn():
+        return _completion_round(provider, messages, db, tools, tool_executor, finish_tools, 0)
+
+
+def _completion_round(provider, messages, db, tools, tool_executor, finish_tools, _round: int) -> str:
     native = uses_aws_credentials(provider)
     # **호출 한 번을 잰다** — 느려졌는지·실패하는지·토큰을 얼마나 쓰는지는 여기 말고는
     # 남는 곳이 없었다(services/telemetry.py). 도구 왕복마다 한 행이고, 본문은 싣지 않는다.
     with telemetry.llm_call(
             provider.name, provider.model,
             "bedrock.converse" if native else "chat.completions", _round):
+        # 입력의 구성 — 구간별 크기만(본문은 싣지 않는다). 실제 토큰은 응답의 usage로 나눈다.
+        telemetry.note(parts=telemetry.composition(messages, tools))
         if native:
             # Bedrock 네이티브 Converse — 키가 아니라 AWS 자격증명으로 서명한다. 응답을
             # OpenAI 모양으로 되돌려 주므로 아래 tool-call 루프는 그대로 쓴다.
@@ -235,8 +245,8 @@ def chat_completion(
             next_messages.append({
                 "role": "tool", "tool_call_id": tc.get("id", ""), "content": result,
             })
-        return chat_completion(provider, next_messages, db, tools, tool_executor,
-                               finish_tools=finish_tools, _round=_round + 1)
+        return _completion_round(provider, next_messages, db, tools, tool_executor,
+                                 finish_tools, _round + 1)
     # content가 null인 응답(길이 초과·거절·도구 호출만 있는 경우)이 있다. 호출부가
     # 문자열을 전제로 후처리하므로 여기서 빈 문자열로 떨어뜨린다 — None이 새 나가면
     # 엉뚱한 자리에서 AttributeError로 터진다.
@@ -513,7 +523,8 @@ def _responses_to_choice(data: dict) -> dict:
     usage = data.get("usage") or {}
     if usage:
         out["usage"] = {"prompt_tokens": usage.get("input_tokens") or 0,
-                        "completion_tokens": usage.get("output_tokens") or 0}
+                        "completion_tokens": usage.get("output_tokens") or 0,
+                        "cached_tokens": (usage.get("input_tokens_details") or {}).get("cached_tokens") or 0}
     return out
 
 
