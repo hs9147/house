@@ -113,6 +113,14 @@ def read_file_at_ref(workdir: Path, ref: str, rel: str) -> str | None:
     return out.stdout[:MAX_CONTEXT_FILE_BYTES]
 
 
+def files_at_ref(workdir: Path, ref: str) -> list[str]:
+    """특정 커밋에 들어 있는 파일 목록. 그 커밋이 없으면 빈 목록(read_file_at_ref와 짝)."""
+    out = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", ref], cwd=workdir, capture_output=True, **_TEXT
+    )
+    return out.stdout.splitlines() if out.returncode == 0 else []
+
+
 def read_file(workdir: Path, rel: str) -> str:
     """코드 확인 화면용 단일 파일 조회(읽기 전용). 경로 탈출·과대 파일을 차단한다."""
     root = workdir.resolve()

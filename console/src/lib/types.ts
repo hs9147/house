@@ -1114,6 +1114,30 @@ export interface SmartworkAgent {
   domain: string;
   path: string;
   reason?: string;
+  // LLM이 리포를 읽고 쓴 용도(services/agentreview) — 비었으면 아직 검토 전이다.
+  purpose?: string;
+  does?: string[];
+  does_not?: string[];
+}
+
+export interface AgentProfile {
+  git_sha: string;
+  purpose: string;
+  does: string[];
+  does_not: string[];
+  inputs: string[];
+  sources: string[];
+  provider: string;
+  model: string;
+  error: string | null;
+  reviewed_at: string;
+}
+
+/** release_sha가 비면 에이전트가 아니다(release로 떠 있지 않다). */
+export interface AgentProfileState {
+  release_sha: string;
+  stale: boolean;
+  profile: AgentProfile | null;
 }
 
 export interface DepartmentWorkflow {

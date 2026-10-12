@@ -1,5 +1,6 @@
 import { getKey, logout } from './auth';
 import type {
+  AgentProfileState,
   ApiKeyIssued,
   ApiCatalogStatus,
   ApiCategory,
@@ -604,6 +605,11 @@ export const api = {
     return URL.createObjectURL(await res.blob());
   },
   // 스마트워크
+  // 스마트워크가 이 앱을 고르는 근거 — LLM이 배포된 커밋을 읽고 쓴 용도.
+  agentProfile: (projectId: number) =>
+    request<AgentProfileState>('GET', `/projects/${projectId}/agent-profile`),
+  reviewAgentProfile: (projectId: number) =>
+    request<AgentProfileState>('POST', `/projects/${projectId}/agent-profile/review`),
   smartworkAgents: () => request<SmartworkAgent[]>('GET', '/smartwork/agents'),
   // 업무 제안의 근거 — 소속 조직(부서)의 워크플로
   smartworkWorkflows: () => request<DepartmentWorkflow[]>('GET', '/smartwork/workflows'),

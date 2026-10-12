@@ -14,6 +14,7 @@ from ..db import get_db
 from ..features import is_enabled, require_feature
 from ..git_policy import enforce_internal_git_url
 from ..models import (
+    AgentProfile,
     ApiKey,
     LlmProvider,
     AuditEvent,
@@ -55,7 +56,7 @@ from ..security import (
 from ..services import build as build_module
 from ..services import llm as llm_service
 from ..services import (
-    deploycheck, deploydiag, deployer, gitea, startscript, structure, upload,
+    agentreview, deploycheck, deploydiag, deployer, gitea, startscript, structure, upload,
     workspace,
 )
 from ..services.build import checkout
@@ -309,7 +310,7 @@ def delete_project(
         for model in (ChatMessage, PlanArtifact):
             db.execute(sa_delete(model).where(model.session_id.in_(session_ids)))
     for model in (ChatSession, Deployment, EnvVar, ModuleBinding, RedirectRule,
-                  PreviewSession, PortAllocation):
+                  PreviewSession, PortAllocation, AgentProfile):
         db.execute(sa_delete(model).where(model.project_id == project_id))
     db.delete(project)
     db.commit()
@@ -645,6 +646,52 @@ async def check_deploy_readiness(
         **result,
         **advice,
     }
+
+
+def _profile_out(row: AgentProfile | None) -> dict | None:
+    if row is None:
+        return None
+    return {"git_sha": row.git_sha, "purpose": row.purpose, "does": row.does or [],
+            "does_not": row.does_not or [], "inputs": row.inputs or [],
+            "sources": row.sources or [], "provider": row.provider, "model": row.model,
+            "error": row.error, "reviewed_at": row.reviewed_at.isoformat()}
+
+
+def _release_sha(db: Session, project_id: int) -> str:
+    """release로 떠 있는 배포의 커밋 — 없으면 에이전트가 아니다(스마트워크 목록에 없다)."""
+    return db.execute(
+        select(Deployment.git_sha).where(
+            Deployment.project_id == project_id, Deployment.profile == BuildProfile.release,
+            Deployment.status == DeploymentStatus.running,
+        ).order_by(Deployment.id.desc()).limit(1)
+    ).scalar_one_or_none() or ""
+
+
+@router.get("/{project_id}/agent-profile")
+def agent_profile(project_id: int, db: Session = Depends(get_db),
+                  _: ApiKey = Depends(require_api_key)):
+    """스마트워크가 이 앱을 고를 때 쓰는 용도 — LLM이 리포를 읽고 쓴 것(services/agentreview)."""
+    project = _get_project(db, project_id)
+    sha = _release_sha(db, project.id)
+    row = agentreview.get(db, project.id)
+    return {"release_sha": sha, "stale": bool(sha) and agentreview.stale(row, sha),
+            "profile": _profile_out(row)}
+
+
+@router.post("/{project_id}/agent-profile/review")
+async def review_agent_profile(project_id: int, db: Session = Depends(get_db),
+                               key: ApiKey = Depends(require_api_key)):
+    """지금 다시 검토한다. 읽는 것은 배포된 커밋이라 커밋이 그대로면 대개 같은 결과지만,
+    요약이 빗나갔다고 볼 때(기본 LLM을 바꿨거나 모델이 잘못 읽었을 때) 사람이 다시 돌린다."""
+    project = _get_project(db, project_id)
+    sha = _release_sha(db, project.id)
+    if not sha:
+        raise HTTPException(status_code=409,
+                            detail="release로 떠 있는 배포가 없습니다 — 에이전트는 release 배포본입니다.")
+    row = await asyncio.to_thread(agentreview.review, db, project, sha)
+    audit.record(db, key.name, "agent.review", project.name,
+                 {"git_sha": sha, "ok": row.error is None})
+    return {"release_sha": sha, "stale": False, "profile": _profile_out(row)}
 
 
 @router.post("/{project_id}/deploy/diagnose/explain",

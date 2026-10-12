@@ -23,11 +23,11 @@ from sqlalchemy.orm import Session
 
 from .. import audit
 from ..models import (
-    ApiKey, BuildProfile, Deployment, DeploymentStatus, Organization, Project, Workflow, WorkflowRun,
+    AgentProfile, ApiKey, BuildProfile, Deployment, DeploymentStatus, Organization, Project, Workflow, WorkflowRun,
     WorkflowRunStatus,
 )
 from ..security import viewer_org_ids
-from . import docready, docsearch, doctext, mcp_server, personal
+from . import agentreview, docready, docsearch, doctext, mcp_server, personal
 from . import llm as llm_service
 from . import storage as storage_service
 from . import workflow as workflow_service
@@ -129,19 +129,30 @@ def agents(db: Session, key: ApiKey) -> list[dict]:
     """이 사람이 쓸 수 있는 **에이전트** = release로 떠 있는 프로젝트 앱 중 보이는 것.
 
     보이는 범위는 코드·MCP 접근과 같은 규칙이다(관리자, 조직 미지정, 소속 조직).
+    각 에이전트에는 LLM이 리포를 읽고 쓴 용도(services/agentreview)가 붙는다 — 모델이 이름이
+    아니라 용도로 고르게. 없거나 배포 커밋이 바뀌었으면 뒤에서 검토를 걸고 이번에는 "검토 전"으로 둔다.
     """
     rows = db.execute(
-        select(Project).join(Deployment).where(
+        select(Project, Deployment.git_sha).join(Deployment).where(
             Deployment.profile == BuildProfile.release,
             Deployment.status == DeploymentStatus.running,
-        ).distinct().order_by(Project.name)
-    ).scalars().all()
+        ).order_by(Project.name, Deployment.id.desc())
+    ).all()
     org_ids = None if key.is_admin else viewer_org_ids(db, key)
+    # 복합 배포는 컴포넌트마다 행이 하나다 — 프로젝트마다 가장 최근 배포의 커밋 하나로 묶는다.
+    latest: dict[int, tuple[Project, str]] = {}
+    for project, sha in rows:
+        latest.setdefault(project.id, (project, sha or ""))
+    profiles = {p.project_id: p for p in db.execute(
+        select(AgentProfile).where(AgentProfile.project_id.in_(list(latest)))).scalars()}
     out = []
-    for project in rows:
+    for project, sha in latest.values():
         if org_ids is not None and project.organization_id is not None \
                 and project.organization_id not in org_ids:
             continue
+        profile = profiles.get(project.id)
+        if sha and agentreview.stale(profile, sha):
+            agentreview.schedule(project.id, sha)
         org = project.organization.name if project.organization else None
         out.append({
             "name": project.name,
@@ -149,6 +160,9 @@ def agents(db: Session, key: ApiKey) -> list[dict]:
             "type": project.type.value,
             "domain": domain_for(project.name, BuildProfile.release),
             "path": path_prefix_for(org, project.name, BuildProfile.release),
+            "purpose": profile.purpose if profile else "",
+            "does": list(profile.does or []) if profile else [],
+            "does_not": list(profile.does_not or []) if profile else [],
         })
     return out
 
@@ -556,19 +570,23 @@ def _view_tools(agent_names: list[str], has_files: bool = False) -> list[dict]:
             },
         })
     if agent_names:
-        tools.insert(0, {
+        # 맨 앞에 끼우지 않는다 — 목록의 첫 도구라는 자리만으로 먼저 불리는 쪽으로 기운다.
+        tools.append({
             "name": "show_agent",
             "description": (
-                "오른쪽 화면에 사내 에이전트(배포된 업무 앱)를 띄운다. 요청한 일을 맡는"
-                " 에이전트가 하나면 **다른 무엇보다 먼저** 이것을 부른다(둘 이상이면 ask_user)."
+                "오른쪽 화면에 사내 에이전트(배포된 업무 앱)를 띄운다. 에이전트 목록의 **목적·하는"
+                " 일**이 요청과 맞을 때만 부른다 — 이름이 비슷하거나 목록에 하나뿐인 것은 근거가"
+                " 아니고, '하지 않는 일'에 걸리면 부르지 않는다. 보고서·파일 같은 다른 방법으로도"
+                " 할 수 있는 요청이면 먼저 ask_user로 어느 쪽으로 할지 묻는다."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "enum": agent_names},
-                    "reason": {"type": "string", "description": "왜 이 에이전트인지 한 줄"},
+                    "reason": {"type": "string",
+                               "description": "목록의 어느 '하는 일'에 맞는지 한 줄"},
                 },
-                "required": ["name"],
+                "required": ["name", "reason"],
             },
         })
     return tools
@@ -679,7 +697,11 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
         "도구 사용 규칙:",
         "- 사내 문서·온톨로지·API·코드에 근거해 답한다. 추측하지 말고 도구로 확인한 뒤,"
         " 근거가 된 문서(저장소·경로)를 보고서에 밝힌다.",
-        "- 요청한 일을 맡는 에이전트가 아래 목록에 하나 있으면 show_agent를 먼저 부른다.",
+        "- 에이전트는 아래 목록의 목적·하는 일이 요청과 맞을 때만 show_agent로 띄운다. 이름이"
+        " 비슷하다는 것, 목록에 하나뿐이라는 것은 근거가 아니다. '하지 않는 일'에 걸리면 띄우지"
+        " 않는다. 용도 검토 전인 에이전트는 이름만으로 고르지 않는다.",
+        "- 맞는 에이전트가 있어도 보고서(show_report)·파일(make_file)로도 할 수 있는 요청이면"
+        " 고르지 말고 ask_user로 어느 쪽으로 할지 묻는다.",
         "- 업무 제안(suggest_tasks)은 진행할 업무 단위 한 건(과제·계약·구매요청 등)마다 하나다."
         " 대상은 개인 업무 맥락에서 찾고(target), 그 건에 맞는 부서 워크플로(dept__workflows)를"
         " workflow에 적어 그 워크플로의 상태·전이로 다음 할 일을 정한다. 사람 단계에서 멈춘 실행이"
@@ -702,9 +724,20 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
     lines += ["", "부서 워크플로:"]
     lines += [f"- {name}" for name in workflow_names] or ["(없음 — 소속 조직에 워크플로가 없다)"]
     lines += ["", "에이전트 목록:"]
-    lines += [f"- {a['name']} ({a['type']}, 조직 {a['org'] or '공용'})" for a in agent_list] \
-        or ["(없음)"]
+    lines += [_agent_line(a) for a in agent_list] or ["(없음)"]
     return "\n".join(lines)
+
+
+def _agent_line(a: dict) -> str:
+    head = f"- {a['name']} ({a['type']}, 조직 {a['org'] or '공용'})"
+    if not a.get("purpose"):
+        return f"{head} — 용도 검토 전: 이름만으로 고르지 않는다(필요해 보이면 ask_user로 확인)"
+    line = f"{head} — 목적: {a['purpose']}"
+    if a.get("does"):
+        line += f" / 하는 일: {'; '.join(a['does'])}"
+    if a.get("does_not"):
+        line += f" / 하지 않는 일: {'; '.join(a['does_not'])}"
+    return line
 
 
 def _clean_history(history: list[dict], shared: bool = False) -> list[dict]:

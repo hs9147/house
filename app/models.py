@@ -673,6 +673,36 @@ class AuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class AgentProfile(Base):
+    """에이전트(release로 떠 있는 프로젝트 앱)가 **무엇을 하는지** — LLM이 리포를 읽고 쓴 요약.
+
+    스마트워크가 에이전트를 고르는 근거다. 전에는 이름과 종류(streamlit)밖에 없어서, 모델이
+    이름이 조금만 스쳐도 그 에이전트를 띄웠다(실측: 협력사·구매 얘기면 무엇이든 supplier-pool).
+    "하지 않는 일"을 따로 두는 것은 경계를 그어야 고르지 않을 근거가 생기기 때문이다.
+
+    git_sha는 검토한 **배포 커밋**이다 — 배포가 바뀌면 요약도 낡은 것이 되므로 다시 검토한다.
+    sources는 LLM에 실제로 넣은 파일 목록이다(근거). 모델이 "봤다"고 말하는 것을 믿지 않고
+    서버가 넣은 것을 적는다.
+    """
+
+    __tablename__ = "agent_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), unique=True, index=True)
+    git_sha: Mapped[str] = mapped_column(String(64), default="")
+    purpose: Mapped[str] = mapped_column(String(500), default="")
+    does: Mapped[list] = mapped_column(JSON, default=list)
+    does_not: Mapped[list] = mapped_column(JSON, default=list)
+    inputs: Mapped[list] = mapped_column(JSON, default=list)
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+    provider: Mapped[str] = mapped_column(String(64), default="")
+    model: Mapped[str] = mapped_column(String(128), default="")
+    # 검토가 실패한 사유. 비어 있지 않으면 위의 요약은 이전 검토의 것이거나 비어 있다.
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class LlmCallLog(Base):
     """LLM 호출 한 건 — 대시보드·평가가 세는 바탕. **본문은 없다.**
 

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import Async from '../../components/Async';
+import AgentProfilePanel from '../../components/AgentProfilePanel';
 import AutoDeployMark from '../../components/AutoDeployMark';
 import DeployProgressModal from '../../components/DeployProgressModal';
 import { Confirm } from '../../components/Modal';
@@ -185,6 +186,7 @@ export default function OverviewTab() {
         {message && <p style={{ color: 'var(--green)' }}>{message}</p>}
         {error && <p className="error">{error}</p>}
       </div>
+      <AgentProfilePanel projectId={project.id} />
       {action && (
         <Confirm
           title={`${action.profile} ${labels[action.kind]}`}

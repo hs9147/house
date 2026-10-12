@@ -432,11 +432,15 @@ export default function SmartworkTab() {
         <Async state={agents} empty="쓸 수 있는 에이전트가 없습니다 — 운영 중(release)인 앱이 에이전트가 됩니다.">
           {(list) => (
             <table>
-              <thead><tr><th>이름</th><th>조직</th><th>종류</th><th /></tr></thead>
+              <thead><tr><th>이름</th><th>용도</th><th>조직</th><th>종류</th><th /></tr></thead>
               <tbody>
                 {list.map((a) => (
                   <tr key={a.name}>
                     <td>{a.name}</td>
+                    {/* 대화가 이 앱을 고르는 근거와 같은 글이다 — 빗나갔으면 프로젝트 개요에서 다시 검토. */}
+                    <td style={{ fontSize: 12 }} title={a.does_not?.length ? `하지 않는 일: ${a.does_not.join(' · ')}` : undefined}>
+                      {a.purpose || <span className="mutedtext">검토 전</span>}
+                    </td>
                     <td>{a.org ?? '공용'}</td>
                     <td>{a.type}</td>
                     <td>

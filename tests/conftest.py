@@ -46,6 +46,20 @@ def _disable_background_scheduler() -> None:
 _disable_background_scheduler()
 
 
+def _disable_background_agent_review() -> None:
+    """에이전트 검토(services/agentreview)도 뒤에서 돌지 않게 한다 — 스케줄러와 같은 이유다.
+
+    스마트워크가 에이전트 목록을 만들 때마다 걸리는데, 테스트의 에이전트는 가짜 git_url이라
+    뒤에서 clone을 시도하다 어느 테스트 도중에 실패를 남긴다. 검토 자체는 review()를 직접 부른다.
+    """
+    from app.services import agentreview
+
+    agentreview._submit = lambda fn, *args: None
+
+
+_disable_background_agent_review()
+
+
 @pytest.fixture
 def fresh_settings():
     """PAAS_* 환경변수를 monkeypatch한 테스트용 — 설정 캐시를 전후로 비운다."""
