@@ -346,6 +346,9 @@ pre.logbox {
 /* 스마트워크 오른쪽 화면 — 에이전트 앱·HTML 보고서를 창 높이만큼 띄운다. */
 .smartwork-frame { display: block; width: 100%; height: calc(100vh - 190px); min-height: 420px;
                    border: 1px solid var(--border-soft); border-radius: 8px; }
+/* 파일 뷰어의 시트 — 칸은 줄바꿈 없이, 열 머리(A·B·C)는 스크롤해도 위에 남는다(주소를 맞춰 보는 자리다). */
+.sheet-grid td, .sheet-grid th { white-space: nowrap; font-size: 12px; }
+.sheet-grid thead th { position: sticky; top: 0; background: var(--panel); }
 .report-md { line-height: 1.6; }
 .report-md pre { background: rgba(255, 255, 255, 0.06); padding: 10px; border-radius: 6px; overflow-x: auto; }
 .report-md blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--border-soft); color: var(--muted); }

@@ -40,6 +40,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import zipfile
 from email import policy as email_policy
 from email.parser import BytesParser
@@ -771,6 +772,40 @@ def _legacy_office_text(path: Path) -> str:
                 "LibreOffice가 텍스트를 만들지 못했습니다"
                 f"{f' — {detail[:200]}' if detail else ' (writer·calc 필터가 설치되어 있는지 확인)'}")
         return _decode(produced[0].read_bytes())
+
+
+# 미리보기 변환은 한 번에 하나, 프로필도 따로 — soffice는 두 프로세스가 같은 사용자 프로필을
+# 쓰면 뒤의 것이 아무것도 만들지 않고 끝난다. 색인 쪽 변환(_legacy_office_text)은 기본
+# 프로필을 쓰므로 이쪽이 따로 두면 서로 부딪히지 않는다.
+_PREVIEW_LOCK = threading.Lock()
+
+
+def to_pdf(path: Path) -> bytes:
+    """오피스 문서를 PDF로 — 스마트워크 파일 뷰어의 doc·docx·ppt·pptx 보기용.
+
+    브라우저에는 워드·파워포인트를 제대로 그리는 오픈소스가 없다(docx는 근사, ppt는 없다).
+    서버에 이미 있는 LibreOffice로 모양 그대로 PDF를 만들면 브라우저 내장 뷰어가 그린다.
+    """
+    exe = _soffice()
+    if exe is None:
+        raise ExtractError("서버에 LibreOffice가 없어 미리 볼 수 없습니다 — "
+                           "PAAS_SOFFICE_PATH에 soffice 실행 파일 경로를 지정하세요.")
+    profile = (Path(tempfile.gettempdir()) / "paas-soffice-preview").as_uri()
+    with _PREVIEW_LOCK, tempfile.TemporaryDirectory() as outdir:
+        try:
+            done = subprocess.run(
+                [exe, f"-env:UserInstallation={profile}", "--headless",
+                 "--convert-to", "pdf", "--outdir", outdir, str(path)],
+                capture_output=True, timeout=_SOFFICE_TIMEOUT, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise ExtractError(f"변환이 {_SOFFICE_TIMEOUT}초를 넘겼습니다.")
+        produced = list(Path(outdir).glob("*.pdf"))
+        if not produced:
+            detail = (done.stderr or done.stdout or b"").decode("utf-8", "replace").strip()
+            raise ExtractError(f"LibreOffice가 PDF를 만들지 못했습니다"
+                               f"{f' — {detail[:200]}' if detail else ''}")
+        return produced[0].read_bytes()
 
 
 def _soffice() -> str | None:

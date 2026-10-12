@@ -75,6 +75,7 @@ import type {
   SmartworkContext,
   SmartworkOrgChoice,
   SmartworkSession,
+  SmartworkSessionFile,
   SmartworkSessionSummary,
   SmartworkAttachmentIn,
   SmartworkTurn,
@@ -226,6 +227,31 @@ async function requestMultipart<T>(path: string, formData: FormData): Promise<T>
     throw new ApiError(res.status, detail);
   }
   return data as T;
+}
+
+// 본문을 그대로 보내고 바이너리(PDF 등)를 받는다 — request()는 응답을 JSON으로 읽는다.
+async function requestBlob(path: string, body: Blob, query: Record<string, string>): Promise<Blob> {
+  const res = await fetch(`${apiUrl(path)}?${new URLSearchParams(query)}`, {
+    method: 'POST',
+    headers: { 'x-api-key': getKey() },
+    body,
+  });
+  if (res.status === 401) {
+    logout();
+    window.location.hash = '#/login';
+    throw new ApiError(401, '인증이 만료되었습니다. 다시 로그인하세요.');
+  }
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && typeof data === 'object' && 'detail' in data) detail = formatDetail(data.detail);
+    } catch {
+      /* 본문 없는 응답 */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return res.blob();
 }
 
 // fetch는 올라간 바이트를 알려 주지 않는다 — 진행률이 필요한 본문 업로드만 XHR로 보낸다.
@@ -623,6 +649,11 @@ export const api = {
     uploadWithProgress<{ path: string; status: 'saved' | 'skipped' | 'failed'; error?: string }>(
       'PUT', '/smartwork/personal/folders/file', item.file,
       { folder, path: item.path, mtime: item.mtime }, onProgress),
+  // 파일 뷰어가 열 수 있는 내 문서(이 업무에 고른 폴더 안의 것) — 경로만, 내용은 PC에 있다.
+  sessionFiles: (id: number) =>
+    request<SmartworkSessionFile[]>('GET', `/smartwork/sessions/${id}/files`),
+  // doc·docx·ppt·pptx → PDF. 서버는 변환만 하고 아무것도 남기지 않는다.
+  officePreview: (name: string, file: Blob) => requestBlob('/smartwork/files/preview', file, { name }),
   personalRemoveFolder: (folder: string) =>
     request<void>('DELETE', '/smartwork/personal/folders', undefined, { folder }),
   // 메일은 브라우저가 Graph에서 읽어 온 것(lib/msgraph.ts)을 보낸다 — 토큰은 싣지 않는다.

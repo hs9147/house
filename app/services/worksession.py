@@ -247,7 +247,8 @@ def send(db: Session, key: ApiKey, provider, session_id: int, content: str,
         session_id=row.id, role="assistant", author=key.name, content=result["reply"],
         # **어느 모델이 답했는지 함께 남긴다.** 대화마다 모델을 고를 수 있어서, 나중에 보면
         # 세션 설정으로는 알 수 없다 — 평가(answer_ratings)가 이 값으로 묶인다.
-        view={**{k: result[k] for k in ("agent", "report", "suggestions", "choices", "tools")},
+        view={**{k: result[k] for k in ("agent", "report", "web", "file", "suggestions",
+                                         "choices", "tools")},
               "model": provider.model, "provider": provider.name})
     db.add(answer)
     row.updated_at = utcnow()

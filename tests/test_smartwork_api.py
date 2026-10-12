@@ -5,6 +5,8 @@ LLM은 chat_completion을 대본으로 바꿔 끼워 **도구 호출을 실제�
 읽어 보내므로 서버 쪽 시험에는 Graph가 없다.
 """
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,7 +18,7 @@ from app.models import (
     Deployment, DeploymentStatus, PersonalContext, Project, Workflow, WorkflowRun,
     WorkflowRunStatus,
 )
-from app.services import docsearch, gitea, llm, msgraph, personal, smartwork
+from app.services import docsearch, doctext, gitea, llm, msgraph, personal, smartwork
 
 ADMIN = {"x-api-key": "test-admin-key"}
 API = "/paas/api/v1"
@@ -749,3 +751,106 @@ def test_answer_rating_is_by_participants_and_the_last_press_wins(client, monkey
     # **누가 매겼는지는 내보내지 않는다** — 이름이 보이면 솔직한 평가가 줄어든다.
     assert "alice@corp.com" not in json.dumps(summary, ensure_ascii=False)
     assert client.get(f"{API}/telemetry/quality").status_code == 401
+
+
+def test_file_viewer_opens_only_my_chosen_documents_and_edits_are_proposals(client, monkeypatch):
+    """파일 뷰어는 이 업무에 고른 내 폴더의 문서만 연다 — 모델의 수정은 제안으로만 실린다.
+
+    서버에는 원본이 없다. 목록은 동기화 때 적어 둔 경로이고, 내용은 브라우저가 PC의 파일로
+    연다. 그래서 open_file이 하는 일은 "이 파일을 열어라"와 수정안을 화면에 싣는 것뿐이다.
+    """
+    alice = _user(client, "alice@corp.com")
+    bob = _user(client, "bob@corp.com")
+    client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    _upload(client, alice, "work", {"memo.txt": "단가 120원".encode(), "plan.md": b"# x"})
+    _upload(client, alice, "home", {"diary.txt": "펭귄".encode()})
+    sid = _session(client, alice)
+    files = f"{API}/smartwork/sessions/{sid}/files"
+
+    # 고르기 전에는 열 것이 없고, open_file 도구도 붙지 않는다
+    assert client.get(files, headers=alice).json() == []
+    _, script = _chat(client, alice, monkeypatch, [], sid=sid)
+    assert "open_file" not in script.tool_names
+    assert {"show_web", "make_file"} <= set(script.tool_names)
+
+    client.put(f"{API}/smartwork/sessions/{sid}/context",
+               json={"folders": ["work"], "mail": False}, headers=alice)
+    # .md는 뷰어 형식이 아니다(보고서가 맡는다) — 목록에 없다
+    assert [(f["folder"], f["path"]) for f in client.get(files, headers=alice).json()] == \
+        [("work", "memo.txt")]
+    assert client.get(files, headers=bob).status_code == 404  # 남의 세션
+
+    out, script = _chat(client, alice, monkeypatch, [
+        ("open_file", {"path": "work/memo.txt.md", "edits": [
+            {"find": "120원", "replace": "150원", "why": "새 단가"},
+            {"cell": "A1", "value": "x"},                # 글 파일에 셀 수정은 버린다
+        ]}),
+    ], sid=sid)
+    assert out["file"] == {"source": "personal", "folder": "work", "path": "memo.txt",
+                           "name": "memo.txt", "format": "txt",
+                           "edits": [{"find": "120원", "replace": "150원", "why": "새 단가"}]}
+    # 대화를 다시 열어도 그 자리의 파일이 남는다
+    last = client.get(f"{API}/smartwork/sessions/{sid}", headers=alice).json()["messages"][-1]
+    assert last["file"]["path"] == "memo.txt"
+
+
+def test_open_file_refuses_paths_outside_the_session(client, monkeypatch):
+    alice = _user(client, "alice@corp.com")
+    client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    _upload(client, alice, "work", {"memo.txt": "a".encode()})
+    _upload(client, alice, "home", {"diary.txt": "b".encode()})
+    out, script = _chat(client, alice, monkeypatch,
+                        [("open_file", {"path": "home/diary.txt"})], folders=["work"])
+    assert "고른 내 문서가 아니" in script.results["open_file"]
+    assert out["file"] is None
+
+
+def test_make_file_and_show_web_are_checked_before_they_reach_the_screen(client, monkeypatch):
+    """모델이 만든 파일은 형식·크기를 확인하고, 웹 주소는 http(s)만 — 사람 브라우저에서 열린다."""
+    alice = _user(client, "alice@corp.com")
+    out, script = _chat(client, alice, monkeypatch, [
+        ("show_web", {"url": "javascript:alert(1)", "reason": "x"}),
+        ("make_file", {"name": "a", "format": "docx", "content": "x"}),
+        ("make_file", {"name": "협력사/명단", "format": "xlsx", "sheets": [
+            {"name": "명단", "rows": [["이름", "점수"], ["가", "90"], ["나", None]]}]}),
+    ])
+    assert "http" in script.results["show_web"] and out["web"] is None
+    assert out["file"] == {"source": "generated", "name": "협력사_명단.xlsx", "format": "xlsx",
+                           "sheets": [{"name": "명단",
+                                       "rows": [["이름", "점수"], ["가", "90"], ["나", ""]]}]}
+
+    out, script = _chat(client, alice, monkeypatch, [
+        ("show_web", {"url": "https://portal.corp.com/approve?id=7", "reason": "결재 화면"}),
+        ("make_file", {"name": "초안", "format": "txt", "content": "x" * 300_000}),
+    ])
+    assert out["web"] == {"url": "https://portal.corp.com/approve?id=7", "reason": "결재 화면"}
+    assert "너무 큽니다" in script.results["make_file"] and out["file"] is None
+
+
+def test_office_preview_converts_and_keeps_nothing(client, monkeypatch, tmp_path):
+    """doc·docx·ppt·pptx는 서버의 LibreOffice로 PDF를 만들어 돌려준다 — 원본은 남지 않는다."""
+    alice = _user(client, "alice@corp.com")
+    preview = f"{API}/smartwork/files/preview"
+    seen: list = []
+
+    def fake_run(cmd, **kw):
+        source = Path(cmd[-1])
+        seen.append(source)
+        assert source.read_bytes() == b"DOCX"
+        out_dir = Path(cmd[cmd.index("--outdir") + 1])
+        (out_dir / (source.stem + ".pdf")).write_bytes(b"%PDF-1.7")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(doctext, "_soffice", lambda: "soffice")
+    monkeypatch.setattr(doctext.subprocess, "run", fake_run)
+    r = client.post(preview, params={"name": "보고서.docx"}, content=b"DOCX", headers=alice)
+    assert r.status_code == 200 and r.content == b"%PDF-1.7"
+    assert r.headers["content-type"] == "application/pdf"
+    assert not seen[0].exists()  # 임시 폴더째 지워졌다
+
+    assert client.post(preview, params={"name": "a.xlsx"}, content=b"x",
+                       headers=alice).status_code == 400  # 엑셀은 브라우저가 직접 연다
+    monkeypatch.setattr(doctext, "_soffice", lambda: None)
+    r = client.post(preview, params={"name": "a.pptx"}, content=b"x", headers=alice)
+    assert r.status_code == 503 and "LibreOffice" in r.json()["detail"]
+    assert client.post(preview, params={"name": "a.docx"}, content=b"x").status_code == 401

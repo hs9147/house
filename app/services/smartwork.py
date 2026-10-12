@@ -12,6 +12,7 @@
 import base64
 import binascii
 import json
+import re
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -45,6 +46,14 @@ _MAX_READ_CHARS = 40_000
 REPORT_FORMATS = ("html",)
 MAX_SUGGESTIONS = 6
 MAX_CHOICES = 6
+
+# 오른쪽 파일 뷰어가 여는 형식 — 개인 문서(personal.DOC_SUFFIXES) 중 브라우저가 보이거나
+# 고칠 수 있는 것만. txt·csv·xls·xlsx는 고치고, doc·docx·ppt·pptx는 PDF로 바꿔 보기만 한다.
+VIEWER_SUFFIXES = (".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".csv", ".txt")
+# 모델이 만드는 파일(make_file). 결과는 메시지에 남아 대화를 열 때마다 내려가므로 크기를 막는다.
+MAKE_FILE_FORMATS = ("txt", "csv", "xlsx")
+MAX_FILE_CHARS = 200_000
+MAX_EDITS = 50
 
 # 대화 첨부 — 이번 요청의 참고 자료. 원본은 남기지 않는다: 문서는 읽어 낸 글만 대화에 남고
 # (다음 턴에도 모델이 읽는다), 이미지는 그 턴에만 모델에게 간다.
@@ -387,7 +396,7 @@ def _first_heading(path) -> str:
 
 # --- 화면 도구 ---
 
-def _view_tools(agent_names: list[str]) -> list[dict]:
+def _view_tools(agent_names: list[str], has_files: bool = False) -> list[dict]:
     tools = [{
         "name": "suggest_tasks",
         "description": (
@@ -469,7 +478,83 @@ def _view_tools(agent_names: list[str]) -> list[dict]:
             },
             "required": ["title", "content"],
         },
+    }, {
+        "name": "show_web",
+        "description": (
+            "오른쪽 화면에 웹 페이지 주소를 올린다 — 사내 시스템·참고 사이트를 사람이 직접 보며"
+            " 일해야 할 때. 그 사람의 브라우저(그 사람의 로그인)로 열리므로 **사람이 「열기」를"
+            " 눌러야 열린다.** 페이지 내용은 당신에게 오지 않는다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "http 또는 https 주소"},
+                "reason": {"type": "string", "description": "왜 이 페이지인지 한 줄"},
+            },
+            "required": ["url", "reason"],
+        },
+    }, {
+        "name": "make_file",
+        "description": (
+            "결과를 파일로 만들어 오른쪽 파일 뷰어에 띄운다 — 사람이 고쳐서 내려받아 쓸 결과"
+            "(목록·명단·집계표·초안 글)일 때. 읽고 끝날 결과는 show_report로 낸다. txt·csv는"
+            " content에, xlsx는 sheets에 담는다. 셀 값은 글자로 쓴다(숫자는 1200처럼 그대로 —"
+            " 화면이 숫자로 바꾼다)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "확장자를 뺀 파일 이름"},
+                "format": {"type": "string", "enum": list(MAKE_FILE_FORMATS)},
+                "content": {"type": "string", "description": "txt·csv의 본문"},
+                "sheets": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "rows": {"type": "array", "items": {
+                                "type": "array", "items": {"type": "string"}}},
+                        },
+                        "required": ["name", "rows"],
+                    },
+                },
+            },
+            "required": ["name", "format"],
+        },
     }]
+    if has_files:
+        tools.append({
+            "name": "open_file",
+            "description": (
+                "이 업무에 고른 내 문서 하나를 오른쪽 파일 뷰어에 연다(doc·docx·ppt·pptx·xls·"
+                "xlsx·csv·txt). 고칠 곳이 있으면 edits로 **수정안**을 함께 낸다 — 파일에 바로"
+                " 쓰지 않고 사람이 화면에서 확인해 적용·저장한다. txt·csv는 {find, replace}"
+                "(find는 파일에 있는 문구 그대로), xls·xlsx는 {cell: '시트이름!B3', value}."
+                " doc·docx·ppt·pptx는 보기만 된다."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string",
+                             "description": "my__ 도구가 돌려준 경로(끝의 .md는 있어도 된다)"},
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "find": {"type": "string"},
+                                "replace": {"type": "string"},
+                                "cell": {"type": "string"},
+                                "value": {"type": "string"},
+                                "why": {"type": "string", "description": "왜 고치는지 한 줄"},
+                            },
+                        },
+                    },
+                },
+                "required": ["path"],
+            },
+        })
     if agent_names:
         tools.insert(0, {
             "name": "show_agent",
@@ -487,6 +572,69 @@ def _view_tools(agent_names: list[str]) -> list[dict]:
             },
         })
     return tools
+
+
+def session_files(db: Session, email: str, folders: list[str] | None) -> list[dict]:
+    """이 업무에 고른 내 폴더의 파일 중 뷰어가 여는 것 — 파일 뷰어의 목록이자 open_file의 범위.
+
+    서버에는 원본이 없다(services/personal.py) — 이 목록은 동기화 때 적어 둔 경로·크기·수정
+    시각이다. 내용은 브라우저가 PC의 파일로 연다.
+    """
+    row = personal.get(db, email)
+    chosen = set(folders or [])
+    if row is None or not chosen:
+        return []
+    out = []
+    for key, meta in sorted((row.files or {}).items()):
+        folder, _, rel = key.partition("/")
+        if folder in chosen and Path(rel).suffix.lower() in VIEWER_SUFFIXES:
+            out.append({"folder": folder, "path": rel, "size": int(meta.get("size") or 0),
+                        "mtime": float(meta.get("mtime") or 0)})
+    return out
+
+
+def _edits(raw, fmt: str) -> list[dict]:
+    """수정안 — 파일에 쓰지 않는다. 형식에 맞지 않는 것은 버린다(시트에 find, 글에 cell)."""
+    out = []
+    for e in raw[:MAX_EDITS] if isinstance(raw, list) else []:
+        if not isinstance(e, dict):
+            continue
+        why = str(e.get("why") or "")[:200]
+        if fmt in ("xls", "xlsx") and str(e.get("cell") or "").strip():
+            value = e.get("value")
+            out.append({"cell": str(e["cell"]).strip()[:64],
+                        "value": "" if value is None else str(value), "why": why})
+        elif fmt in ("txt", "csv") and str(e.get("find") or ""):
+            out.append({"find": str(e["find"]), "replace": str(e.get("replace") or ""), "why": why})
+    return out
+
+
+def _made_file(args: dict) -> dict | str:
+    """make_file의 인자를 화면에 실을 모양으로. 틀렸으면 모델에게 돌려줄 사유(문자열)."""
+    fmt = str(args.get("format") or "")
+    if fmt not in MAKE_FILE_FORMATS:
+        return f"format은 {'·'.join(MAKE_FILE_FORMATS)} 중 하나입니다."
+    # 내려받을 파일 이름이 된다 — 윈도우가 받지 않는 글자는 바꾼다.
+    name = re.sub(r'[\\/:*?"<>|]', "_", str(args.get("name") or "").strip())[:80] or "결과"
+    made: dict = {"source": "generated", "name": f"{name}.{fmt}", "format": fmt}
+    if fmt == "xlsx":
+        sheets = []
+        for s in args.get("sheets") if isinstance(args.get("sheets"), list) else []:
+            if isinstance(s, dict) and isinstance(s.get("rows"), list):
+                rows = [["" if c is None else str(c) for c in r]
+                        for r in s["rows"] if isinstance(r, list)]
+                sheets.append({"name": str(s.get("name") or f"Sheet{len(sheets) + 1}")[:31],
+                               "rows": rows})
+        if not sheets:
+            return "xlsx는 sheets에 시트를 하나 이상 담아야 합니다."
+        made["sheets"] = sheets
+        size = len(json.dumps(sheets, ensure_ascii=False))
+    else:
+        made["content"] = str(args.get("content") or "")
+        size = len(made["content"])
+    if size > MAX_FILE_CHARS:
+        return f"파일이 너무 큽니다({size}자, 상한 {MAX_FILE_CHARS}자) — 줄여서 다시 만드세요."
+    return made
 
 
 def _target(raw) -> dict | None:
@@ -537,11 +685,18 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
         " workflow에 적어 그 워크플로의 상태·전이로 다음 할 일을 정한다. 사람 단계에서 멈춘 실행이"
         " 있는 워크플로의 건을 먼저 다룬다. 대상을 찾지 못했으면 지어내지 말고 없다고 밝힌다.",
     ]
+    lines += [
+        "- 결과가 사람이 고쳐 쓸 표·글이면 make_file로 파일을 만든다(읽고 끝날 결과는 show_report).",
+        "- 사람이 사내 시스템 화면을 직접 보며 해야 하는 일이면 show_web으로 주소를 올린다.",
+    ]
     if has_personal:
         lines.append(
             "- my__ 도구는 지금 말하는 사람만의 문서·메일 중 이 업무에 고른 것이다. 개인 업무"
             " 맥락이 필요한 질문(내 일정, 내가 받은 메일, 내 문서)에 쓴다. 사내 문서와 섞어"
             " 인용할 때는 어느 쪽인지 밝힌다.")
+        lines.append(
+            "- 내 문서를 함께 보거나 고쳐야 하면 open_file로 연다. 고치는 것은 edits로 제안만"
+            " 한다 — 저장은 사람이 확인한 뒤에 한다.")
     else:
         lines.append("- 지금 말하는 사람은 이 업무에 개인 업무 맥락(로컬 문서·메일)을 고르지 않았다.")
     lines += ["", "부서 워크플로:"]
@@ -597,7 +752,9 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
                 "workflow": next((w for w in dept if w["name"] == workflow), None)}
     dept_set: Toolset = ("dept", _DEPT_TOOLS,
                          lambda n, a: json.dumps(dept, ensure_ascii=False))
-    sets = [("view", _view_tools(list(by_name)), None), dept_set, *toolsets,
+    # 파일 뷰어가 열 수 있는 내 문서 — open_file의 허용 범위이기도 하다.
+    files = {(f["folder"], f["path"]) for f in session_files(db, key.name, folders)}
+    sets = [("view", _view_tools(list(by_name), bool(files)), None), dept_set, *toolsets,
             *([mine] if mine else [])]
 
     tools: list[dict] = []
@@ -613,7 +770,8 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
             registry[fn_name] = (call, t["name"])
 
     used: list[str] = []
-    view: dict = {"agent": None, "report": None, "suggestions": [], "choices": []}
+    view: dict = {"agent": None, "report": None, "web": None, "file": None,
+                  "suggestions": [], "choices": []}
     names = {w["name"] for w in dept}
 
     def execute(fn_name: str, args: dict) -> str:
@@ -644,6 +802,34 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
                 for o in options if isinstance(o, dict) and o.get("label") and o.get("prompt")
             ][:MAX_CHOICES]
             return f"선택지 {len(view['choices'])}개를 띄웠습니다. 사람이 고를 때까지 멈춘다."
+        if fn_name == "show_web":
+            url = str(args.get("url") or "").strip()
+            # javascript:·data:·file: 따위는 받지 않는다 — 사람의 브라우저에서 열리는 주소다.
+            if not re.match(r"https?://[^\s/]", url, re.I) or len(url) > 2000:
+                return "http·https 주소만 띄울 수 있습니다."
+            view["web"] = {"url": url, "reason": str(args.get("reason") or "")[:200]}
+            return ("주소를 오른쪽 화면에 올렸습니다 — 사람이 「열기」를 누르면 그 사람의 브라우저로"
+                    " 열립니다. 페이지 내용은 당신에게 오지 않습니다.")
+        if fn_name == "open_file":
+            raw = str(args.get("path") or "").replace("\\", "/").strip("/")
+            if raw.endswith(personal.CONVERTED_SUFFIX):
+                raw = raw[:-len(personal.CONVERTED_SUFFIX)]
+            folder, _, rel = raw.partition("/")
+            if (folder, rel) not in files:
+                return ("이 업무에 고른 내 문서가 아니거나 뷰어가 열지 못하는 형식입니다 — my__ 도구가"
+                        " 돌려준 경로를 쓰세요.")
+            fmt = Path(rel).suffix.lower().lstrip(".")
+            edits = _edits(args.get("edits"), fmt)
+            view["file"] = {"source": "personal", "folder": folder, "path": rel,
+                            "name": Path(rel).name, "format": fmt, "edits": edits}
+            return (f"{Path(rel).name}을 파일 뷰어에 열었습니다"
+                    + (f" — 수정안 {len(edits)}건은 사람이 확인해 적용·저장합니다." if edits else "."))
+        if fn_name == "make_file":
+            made = _made_file(args)
+            if isinstance(made, str):
+                return made
+            view["file"] = made
+            return f"{made['name']}을 파일 뷰어에 띄웠습니다 — 사람이 고쳐 내려받습니다."
         if fn_name == "show_report":
             view["report"] = {
                 "title": str(args.get("title") or "보고서"),

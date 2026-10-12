@@ -1136,6 +1136,46 @@ export interface SmartworkReport {
   content: string;
 }
 
+/** 오른쪽 화면의 웹 페이지 — 사람의 브라우저(그 사람의 로그인)로 열린다. */
+export interface SmartworkWeb {
+  url: string;
+  reason: string;
+}
+
+/** 모델의 수정안 — 글은 find→replace, 시트는 cell(시트!B3)→value. 사람이 보고 적용한다. */
+export interface SmartworkFileEdit {
+  find?: string;
+  replace?: string;
+  cell?: string;
+  value?: string;
+  why: string;
+}
+
+export type SmartworkFileFormat = 'doc' | 'docx' | 'ppt' | 'pptx' | 'xls' | 'xlsx' | 'csv' | 'txt';
+
+/**
+ * 파일 뷰어에 띄울 것. personal = 이 업무에 고른 내 PC 문서(내용은 브라우저가 PC에서 연다),
+ * generated = 모델이 만든 결과(내용이 함께 온다).
+ */
+export interface SmartworkFile {
+  source: 'personal' | 'generated';
+  name: string;
+  format: SmartworkFileFormat;
+  folder?: string;
+  path?: string;
+  content?: string;
+  sheets?: { name: string; rows: string[][] }[];
+  edits?: SmartworkFileEdit[];
+}
+
+/** 파일 뷰어가 열 수 있는 내 문서 — 동기화 때 서버가 적어 둔 경로·크기·수정 시각. */
+export interface SmartworkSessionFile {
+  folder: string;
+  path: string;
+  size: number;
+  mtime: number;
+}
+
 export interface SmartworkSuggestion {
   title: string;
   prompt: string;
@@ -1186,6 +1226,8 @@ export interface SmartworkSessionMessage {
   content: string;
   agent?: SmartworkAgent | null;
   report?: SmartworkReport | null;
+  web?: SmartworkWeb | null;
+  file?: SmartworkFile | null;
   suggestions?: SmartworkSuggestion[];
   choices?: SmartworkChoice[];
   attachments?: SmartworkAttachment[];
@@ -1220,6 +1262,8 @@ export interface SmartworkTurn {
   reply: string;
   agent: SmartworkAgent | null;
   report: SmartworkReport | null;
+  web: SmartworkWeb | null;
+  file: SmartworkFile | null;
   suggestions: SmartworkSuggestion[];
   choices: SmartworkChoice[];
   tools: string[];

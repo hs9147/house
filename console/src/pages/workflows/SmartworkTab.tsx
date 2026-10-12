@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import Async from '../components/Async';
-import Split from '../components/Split';
-import { api } from '../lib/api';
-import { getEmail } from '../lib/auth';
-import { copyText } from '../lib/clipboard';
-import { type AsyncState, useApi, usePolling } from '../lib/hooks';
-import { parseCsv, renderMarkdown } from '../lib/markdown';
+import Async from '../../components/Async';
+import Split from '../../components/Split';
+import { api } from '../../lib/api';
+import { getEmail } from '../../lib/auth';
+import { copyText } from '../../lib/clipboard';
+import { type AsyncState, useApi, usePolling } from '../../lib/hooks';
+import { remember } from '../../lib/localfiles';
+import { parseCsv, renderMarkdown } from '../../lib/markdown';
 import type {
   HealthInfo,
   MailLogin,
@@ -13,12 +14,15 @@ import type {
   SmartworkAgent,
   SmartworkAttachmentIn,
   SmartworkContext,
+  SmartworkFile,
   SmartworkOrgChoice,
   SmartworkReport,
   SmartworkSession,
   SmartworkSessionMessage,
   SmartworkSessionSummary,
-} from '../lib/types';
+  SmartworkWeb,
+} from '../../lib/types';
+import { FileTab, WebView } from './viewers';
 
 /**
  * 스마트워크 — 왼쪽 대화·설정(에이전트·부서 워크플로·내 업무 맥락), 오른쪽 화면(에이전트·보고서).
@@ -33,7 +37,7 @@ import type {
  * 부서 워크플로와 개인 업무 맥락을 본 모델이 할 일을 버튼으로 띄운다.
  */
 
-type View = 'agent' | 'report';
+type View = 'agent' | 'report' | 'web' | 'file';
 // 공유 세션은 다른 참여자가 보낸 말을 이 간격으로 다시 읽는다.
 const SHARED_POLL_MS = 5000;
 
@@ -42,7 +46,7 @@ function sessionLabel(s: SmartworkSessionSummary): string {
   return `${s.title || '(새 업무)'}${task ? ` · ${task}` : ''}${s.members > 1 ? ` · 공유 ${s.members}명` : ''}`;
 }
 
-export default function Smartwork() {
+export default function SmartworkTab() {
   const health = useApi(() => api.health());
   const agents = useApi(() => api.smartworkAgents());
   const workflows = useApi(() => api.smartworkWorkflows());
@@ -66,6 +70,10 @@ export default function Smartwork() {
   const [sharing, setSharing] = useState(false);
   const [agent, setAgent] = useState<SmartworkAgent | null>(null);
   const [report, setReport] = useState<SmartworkReport | null>(null);
+  const [web, setWeb] = useState<SmartworkWeb | null>(null);
+  // 파일 탭 — file이 없고 browsing이면 이 업무에 고른 내 문서의 목록을 보인다.
+  const [file, setFile] = useState<SmartworkFile | null>(null);
+  const [browsing, setBrowsing] = useState(false);
   const [view, setView] = useState<View>('agent');
   const [leftTab, setLeftTab] = useState<'chat' | 'settings'>('chat');
   const opened = useRef(false);
@@ -81,11 +89,16 @@ export default function Smartwork() {
     try {
       const s = await api.getSession(id);
       setSession(s);
-      // 연 업무의 화면은 그 대화가 마지막으로 띄운 에이전트·보고서다.
-      const last = [...s.messages].reverse().find((m) => m.agent || m.report);
-      setAgent(last?.agent ?? null);
-      setReport(last?.report ?? null);
-      setView(last?.agent ? 'agent' : 'report');
+      // 연 업무의 화면은 그 대화가 마지막으로 띄운 에이전트·보고서·웹·파일이다(종류마다 가장 최근 것).
+      const latest = <K extends 'agent' | 'report' | 'web' | 'file'>(k: K) =>
+        [...s.messages].reverse().find((m) => m[k])?.[k] ?? null;
+      setAgent(latest('agent'));
+      setReport(latest('report'));
+      setWeb(latest('web'));
+      setFile(latest('file'));
+      setBrowsing(false);
+      const last = [...s.messages].reverse().find((m) => m.agent || m.report || m.web || m.file);
+      setView(last?.agent ? 'agent' : last?.file ? 'file' : last?.web ? 'web' : 'report');
     } catch (e) {
       setError((e as Error).message);
     }
@@ -128,6 +141,14 @@ export default function Smartwork() {
         setReport(out.report);
         setView('report');
       }
+      if (out.web) {
+        setWeb(out.web);
+        setView('web');
+      }
+      if (out.file) {
+        setFile(out.file);
+        setView('file');
+      }
       if (out.agent) {
         setAgent(out.agent);
         setView('agent');
@@ -140,12 +161,18 @@ export default function Smartwork() {
     }
   };
 
-  const start = async (orgId: number | null, workflowId: number | null) => {
+  const start = async (orgId: number | null, workflowId: number | null,
+                       context: SmartworkContext) => {
     setBusy(true);
     setError(null);
     let s: SmartworkSession;
     try {
       s = await api.createSession({ organization_id: orgId, workflow_id: workflowId });
+      // 맥락은 **여는 턴 전에** 저장한다 — 첫 제안은 최근 메일·문서에서 진행할 업무 단위를
+      // 찾아 내놓는 것이어서, 나중에 고르면 그 첫 제안이 "대상을 못 찾았다"로 끝난다.
+      if (context.folders.length > 0 || context.mail) {
+        s = { ...s, my_context: await api.setSessionContext(s.id, context) };
+      }
     } catch (e) {
       setError((e as Error).message);
       setBusy(false);
@@ -157,6 +184,9 @@ export default function Smartwork() {
     setSharing(false);
     setAgent(null);
     setReport(null);
+    setWeb(null);
+    setFile(null);
+    setBrowsing(false);
     sessions.reload();
     await send(s, '');
   };
@@ -181,6 +211,9 @@ export default function Smartwork() {
     setCreating(true);
     setAgent(null);
     setReport(null);
+    setWeb(null);
+    setFile(null);
+    setBrowsing(false);
     sessions.reload();
   };
 
@@ -248,7 +281,8 @@ export default function Smartwork() {
       </div>
 
       {creating && !session && (
-        <NewSession orgs={orgs.data ?? []} busy={busy} onStart={(o, w) => void start(o, w)} />
+        <NewSession orgs={orgs.data ?? []} personal={personal.data} busy={busy}
+          onStart={(o, w, ctx) => void start(o, w, ctx)} />
       )}
 
       {session && (
@@ -464,44 +498,76 @@ export default function Smartwork() {
     </>
   );
 
+  const fileOpen = !!session && (file !== null || browsing);
   const tabs: { key: View; label: string }[] = [
     ...(agent ? [{ key: 'agent' as const, label: `에이전트 · ${agent.name}` }] : []),
     ...(report ? [{ key: 'report' as const, label: `보고서 · ${report.title}` }] : []),
+    ...(web ? [{ key: 'web' as const, label: `웹 · ${web.url ? hostOf(web.url) : '새 주소'}` }] : []),
+    ...(fileOpen ? [{ key: 'file' as const, label: `파일 · ${file?.name ?? '내 문서'}` }] : []),
   ];
-  // 고른 탭이 비었으면 남은 쪽을 보인다 — 에이전트를 보고서보다 먼저.
-  const shown: View | null = view === 'report' && report ? 'report' : agent ? 'agent' : report ? 'report' : null;
+  // 고른 탭이 비었으면 남은 쪽을 보인다 — 에이전트를 먼저.
+  const shown: View | null = tabs.some((t) => t.key === view) ? view : tabs[0]?.key ?? null;
+  const close = (key: View) => {
+    if (key === 'agent') setAgent(null);
+    if (key === 'report') setReport(null);
+    if (key === 'web') setWeb(null);
+    if (key === 'file') {
+      setFile(null);
+      setBrowsing(false);
+    }
+  };
 
   const right = (
     <>
-      {tabs.length > 0 && (
-        <div className="row viewtabs" role="tablist">
-          {tabs.map((t) => (
-            <span key={t.key} className="viewtab">
-              <button
-                role="tab"
-                aria-selected={shown === t.key}
-                className={shown === t.key ? 'small' : 'small secondary'}
-                onClick={() => setView(t.key)}
-              >
-                {t.label}
-              </button>
-              <button className="small secondary" title="닫기" aria-label={`${t.label} 닫기`}
-                onClick={() => (t.key === 'agent' ? setAgent(null) : setReport(null))}>
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
+      <div className="row viewtabs" role="tablist">
+        {tabs.map((t) => (
+          <span key={t.key} className="viewtab">
+            <button
+              role="tab"
+              aria-selected={shown === t.key}
+              className={shown === t.key ? 'small' : 'small secondary'}
+              onClick={() => setView(t.key)}
+            >
+              {t.label}
+            </button>
+            <button className="small secondary" title="닫기" aria-label={`${t.label} 닫기`}
+              onClick={() => close(t.key)}>
+              ×
+            </button>
+          </span>
+        ))}
+        <span className="spacer" />
+        {/* 대화를 거치지 않고 사람이 바로 연다 — 웹은 내 로그인으로, 파일은 이 업무에 고른 내 문서에서. */}
+        {!web && (
+          <button className="small secondary" onClick={() => {
+            setWeb({ url: '', reason: '' });
+            setView('web');
+          }}>웹 열기</button>
+        )}
+        {session && !fileOpen && (
+          <button className="small secondary" onClick={() => {
+            setBrowsing(true);
+            setView('file');
+          }}>내 문서 열기</button>
+        )}
+      </div>
       {shown === 'agent' && agent ? (
         <AgentView agent={agent} health={health.data} />
       ) : shown === 'report' && report ? (
         <ReportView report={report} />
+      ) : shown === 'web' && web ? (
+        <WebView web={web} />
+      ) : shown === 'file' && session ? (
+        <FileTab sessionId={session.id} folders={session.my_context.folders} file={file}
+          onOpen={(f) => {
+            setFile(f);
+            setBrowsing(true);
+          }} />
       ) : (
         <div className="panel">
           <p className="mutedtext">
-            대화에서 에이전트나 보고서를 띄우면 여기에 나옵니다. 에이전트·부서 워크플로·내 업무
-            맥락은 왼쪽 「설정」에 있습니다.
+            대화에서 에이전트·보고서·웹 페이지·파일을 띄우면 여기에 나옵니다. 에이전트·부서
+            워크플로·내 업무 맥락은 왼쪽 「설정」에 있습니다.
           </p>
         </div>
       )}
@@ -626,13 +692,24 @@ function TaskPicker({ orgs, orgId, workflowId, disabled, onChange }: {
   );
 }
 
-function NewSession({ orgs, busy, onStart }: {
+/**
+ * 새 업무 — 조직·워크플로와 **내 업무 맥락을 함께** 고르고 시작한다.
+ *
+ * 맥락을 나중에 고를 수 있게만 두었더니 첫 제안이 늘 헛돌았다: 여는 턴은 최근 메일·문서에서
+ * 진행할 업무 단위(과제·계약·구매요청 한 건)를 찾는 일인데, 그때 맥락이 없으면 찾을 것이
+ * 없어 "대상을 못 찾았다"로 끝난다. 그래서 시작 전에 묻는다.
+ */
+function NewSession({ orgs, personal, busy, onStart }: {
   orgs: SmartworkOrgChoice[];
+  personal: PersonalStatus | null;
   busy: boolean;
-  onStart: (orgId: number | null, workflowId: number | null) => void;
+  onStart: (orgId: number | null, workflowId: number | null, context: SmartworkContext) => void;
 }) {
   const [orgId, setOrgId] = useState<number | null>(null);
   const [workflowId, setWorkflowId] = useState<number | null>(null);
+  const [context, setContext] = useState<SmartworkContext>({ folders: [], mail: false });
+  const folders = personal?.consented ? personal.folders : [];
+  const mailReady = !!personal?.consented && personal.mail.connected;
   return (
     <div className="chat-thread">
       <p className="mutedtext">
@@ -644,8 +721,34 @@ function NewSession({ orgs, busy, onStart }: {
           setOrgId(o);
           setWorkflowId(w);
         }} />
+      {(folders.length > 0 || mailReady) && (
+        <>
+          <p className="mutedtext" style={{ fontSize: 12, margin: '10px 0 4px' }}>
+            이 업무에 쓸 내 맥락(나만 씀) — 고르면 최근 메일·문서에서 진행할 건을 찾아
+            제안합니다.
+          </p>
+          <div className="row" style={{ flexWrap: 'wrap', fontSize: 12 }}>
+            {folders.map((f) => (
+              <label key={f.name}>
+                <input type="checkbox" disabled={busy} checked={context.folders.includes(f.name)}
+                  onChange={(e) => setContext((c) => ({
+                    ...c,
+                    folders: e.target.checked ? [...c.folders, f.name]
+                      : c.folders.filter((x) => x !== f.name),
+                  }))} /> {f.name}
+              </label>
+            ))}
+            {mailReady && (
+              <label>
+                <input type="checkbox" disabled={busy} checked={context.mail}
+                  onChange={(e) => setContext((c) => ({ ...c, mail: e.target.checked }))} /> 메일
+              </label>
+            )}
+          </div>
+        </>
+      )}
       <div className="row" style={{ marginTop: 8 }}>
-        <button disabled={busy} onClick={() => onStart(orgId, workflowId)}>시작</button>
+        <button disabled={busy} onClick={() => onStart(orgId, workflowId, context)}>시작</button>
       </div>
     </div>
   );
@@ -820,6 +923,14 @@ function isDocument(name: string): boolean {
   return DOC_SUFFIXES.some((s) => lower.endsWith(s));
 }
 
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 function when(iso: string | null | undefined): string {
   return iso ? new Date(iso).toLocaleString() : '-';
 }
@@ -871,6 +982,8 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
         path: f.webkitRelativePath.split('/').slice(1).join('/'),
         mtime: f.lastModified / 1000,
       }));
+    // 고른 폴더의 파일을 이 페이지 동안 기억한다 — 파일 뷰어가 폴더를 다시 고르게 하지 않고 연다.
+    remember(folder, items);
     setProgress(`${folder}: 바뀐 파일을 찾는 중...`);
     const plan = await api.personalManifest(
       folder, items.map((it) => ({ path: it.path, size: it.file.size, mtime: it.mtime })));

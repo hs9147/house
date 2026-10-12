@@ -9,7 +9,7 @@
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -19,7 +19,7 @@ from ..db import get_db
 from ..features import is_enabled
 from ..models import ApiKey, LlmProvider
 from ..security import require_api_key
-from ..services import bedrock, msgraph, personal, smartwork, worksession
+from ..services import bedrock, doctext, msgraph, personal, smartwork, worksession
 from ..services import llm as llm_service
 from . import mcp_servers as mcp
 from .llm import provider_error
@@ -190,6 +190,55 @@ def set_session_context(session_id: int, body: SessionContextIn, db: Session = D
         return worksession.set_context(db, key.name, session_id, body.folders, body.mail)
     except worksession.SessionError as e:
         raise _session_error(e)
+
+
+@router.get("/sessions/{session_id}/files")
+def session_files(session_id: int, db: Session = Depends(get_db),
+                  key: ApiKey = Depends(require_api_key)):
+    """파일 뷰어가 열 수 있는 **내** 문서 — 이 업무에 고른 폴더 안의 것만."""
+    try:
+        _, member = worksession.get(db, session_id, key.name)
+    except worksession.SessionError as e:
+        raise _session_error(e)
+    return smartwork.session_files(db, key.name, member.folders)
+
+
+# 미리보기로 받는 형식 — 나머지(txt·csv·xls·xlsx)는 브라우저가 직접 연다.
+_PREVIEW_SUFFIXES = (".doc", ".docx", ".ppt", ".pptx")
+
+
+@router.post("/files/preview")
+async def file_preview(name: str, request: Request,
+                       key: ApiKey = Depends(require_api_key)):
+    """본문으로 받은 오피스 문서 하나를 PDF로 돌려준다 — **아무것도 남기지 않는다.**
+
+    파일은 사용자 PC에 있고(서버에는 원본을 두지 않는다), 이 요청 동안만 임시 폴더에
+    있다가 폴더째 지워진다. 동기화 업로드(folder_file)와 같은 방식으로 흘려 받는다.
+    """
+    suffix = Path(name).suffix.lower()
+    if suffix not in _PREVIEW_SUFFIXES:
+        raise HTTPException(status_code=400,
+                            detail=f"미리보기는 {'·'.join(_PREVIEW_SUFFIXES)}만 합니다.")
+    limit = personal.MAX_FILE_BYTES
+    too_big = HTTPException(status_code=413,
+                            detail=f"파일이 상한({limit // (1024 * 1024)}MB)보다 큽니다.")
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise too_big
+    with tempfile.TemporaryDirectory(prefix="paas-preview-") as tmp:
+        source = Path(tmp) / ("preview" + suffix)
+        size = 0
+        with source.open("wb") as out:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > limit:
+                    raise too_big
+                out.write(chunk)
+        try:
+            pdf = await run_in_threadpool(doctext.to_pdf, source)
+        except doctext.ExtractError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+    return Response(pdf, media_type="application/pdf")
 
 
 class AttachmentIn(BaseModel):
