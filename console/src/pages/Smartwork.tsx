@@ -481,7 +481,7 @@ export default function Smartwork() {
         <Async state={agents} empty="쓸 수 있는 에이전트가 없습니다 — 운영 중(release)인 앱이 에이전트가 됩니다.">
           {(list) => (
             <table>
-              <thead><tr><th>이름</th><th>용도</th><th>조직</th><th>종류</th><th /></tr></thead>
+              <thead><tr><th>이름</th><th>용도</th><th>조직</th><th /></tr></thead>
               <tbody>
                 {list.map((a) => (
                   <tr key={a.name}>
@@ -491,7 +491,6 @@ export default function Smartwork() {
                       {a.purpose || <span className="mutedtext">검토 전</span>}
                     </td>
                     <td>{a.org ?? '공용'}</td>
-                    <td>{a.type}</td>
                     <td>
                       <button className="small secondary" onClick={() => {
                         setAgent(a);
@@ -1002,14 +1001,8 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
   const folderTask = useTask(FOLDER_TASK);
   const mailTask = useTask(MAIL_TASK);
   const busy = busyHere || folderTask?.state === 'running' || mailTask?.state === 'running';
-  // 끝난 동기화의 결과(또는 사유)가 곧 진행 표시다. 올라간 바이트 / 올릴 바이트는 서버가
-  // 변환하는 동안 100%에 머문다(그건 글로 알린다).
-  const latest = [folderTask, mailTask].filter((t) => t !== undefined)
-    .sort((a, b) => b.startedAt - a.startedAt)[0];
-  const progress = latest && latest.state !== 'failed' ? latest.progress : null;
-  const shownError = error ?? (latest?.state === 'failed' ? latest.error ?? null : null);
-  const bytes = folderTask?.state === 'running' && folderTask.total
-    ? { sent: folderTask.sent ?? 0, total: folderTask.total } : null;
+  // 진행·결과·실패 사유는 작업 트레이(components/TaskTray)가 보인다 — 여기서 또 그리지 않는다.
+  // 메일 로그인의 주소·코드만은 여기 둔다: 트레이에 없고, 승인하려면 보여야 한다.
   const mailLogin = mailTask?.state === 'running' ? (mailTask.data as MailLogin | undefined) ?? null : null;
   const picker = useRef<HTMLInputElement | null>(null);
   // 행의 「동기화」로 열었을 때 그 폴더 이름 — 브라우저는 한 번 고른 폴더를 다시 읽을 수
@@ -1204,14 +1197,6 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
               picker.current?.click();
             }}>폴더 선택(추가·다시 동기화)</button>
 
-            {/* 진행 현황은 **누른 버튼 옆**에 둔다 — 패널 맨 아래에 두었더니 메일 설정
-                아래로 밀려, 올리는 중인지 끝났는지 보려면 스크롤을 내려야 했다. */}
-            {bytes && bytes.total > 0 && (
-              <div className="progress-bar" title={`${mb(bytes.sent)} / ${mb(bytes.total)}`}>
-                <div style={{ width: `${(bytes.sent / bytes.total) * 100}%` }} />
-              </div>
-            )}
-            {progress && <p className="mutedtext">{progress}</p>}
 
             <h3 style={{ fontSize: 14, marginTop: 18 }}>아웃룩 메일</h3>
             {!s.mail.configured ? (
@@ -1277,7 +1262,7 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
           </>
         )}
       </Async>
-      {shownError && <p className="error">{shownError}</p>}
+      {error && <p className="error">{error}</p>}
     </div>
   );
 }
