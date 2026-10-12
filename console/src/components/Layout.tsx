@@ -3,6 +3,7 @@ import { api } from '../lib/api';
 import { getEmail, isAdmin, logout } from '../lib/auth';
 import { useApi } from '../lib/hooks';
 import SsoLoginNotice from './SsoLoginNotice';
+import TaskTray from './TaskTray';
 
 export default function Layout() {
   const navigate = useNavigate();
@@ -113,6 +114,7 @@ export default function Layout() {
         <SsoLoginNotice />
         <Outlet />
       </main>
+      <TaskTray />
     </div>
   );
 }

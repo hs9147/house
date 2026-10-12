@@ -6,6 +6,7 @@ import { getEmail } from '../../lib/auth';
 import { copyText } from '../../lib/clipboard';
 import { type AsyncState, useApi, usePolling } from '../../lib/hooks';
 import { remember } from '../../lib/localfiles';
+import { cancelTask, dismissTask, runTask, type TaskHandle, useTask } from '../../lib/tasks';
 import { parseCsv, renderMarkdown } from '../../lib/markdown';
 import type {
   HealthInfo,
@@ -65,7 +66,7 @@ export default function SmartworkTab() {
   const fileInput = useRef<HTMLInputElement>(null);
   // 이번 대화를 돌릴 모델 — 0 = 기본 프로바이더(서버가 고른다). 다시 시도에도 그대로 실린다.
   const [providerId, setProviderId] = useState(0);
-  const [busy, setBusy] = useState(false);
+  const [busyHere, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState(false);
   const [agent, setAgent] = useState<SmartworkAgent | null>(null);
@@ -80,6 +81,17 @@ export default function SmartworkTab() {
   // 폴링(usePolling)은 처음 받은 함수를 계속 부른다 — 지금 세션은 ref로 읽는다.
   const current = useRef<SmartworkSession | null>(null);
   current.current = session;
+  // 답을 기다리는 턴은 화면 밖(lib/tasks)에 있다 — 다른 메뉴에 다녀와도 그 턴이 아직 도는지
+  // 알아야 같은 말을 다시 보내지 않는다. busy는 이 화면이 보낸 것과 그 턴 둘 다다.
+  const chatKey = session ? `chat:${session.id}` : '';
+  const chatTask = useTask(chatKey);
+  const chatRunning = chatTask?.state === 'running';
+  const busy = busyHere || chatRunning;
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const open = async (id: number) => {
     setError(null);
@@ -128,12 +140,29 @@ export default function SmartworkTab() {
   };
   usePolling(catchUp, SHARED_POLL_MS, !!session && session.members.length > 1 && !busy);
 
+  // 다른 화면에 가 있는 사이에 끝난 턴 — 서버는 답을 남겼으니 읽어 붙이고 치운다.
+  // 이 화면이 보낸 턴(busyHere)은 send가 직접 마무리한다.
+  useEffect(() => {
+    if (!chatTask || chatTask.state === 'running' || busyHere) return;
+    if (chatTask.state === 'failed') setError(chatTask.error ?? '답변을 받지 못했습니다.');
+    else void catchUp();
+    dismissTask(chatTask.key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatTask?.state, busyHere]);
+
   const send = async (s: SmartworkSession, content: string, attachments: SmartworkAttachmentIn[] = []) => {
     setPending(content);
     setBusy(true);
     setError(null);
     try {
-      const out = await api.sendSessionMessage(s.id, content, attachments, chosenProvider || null);
+      const out = await runTask(`chat:${s.id}`, { label: '스마트워크 답변', to: '/workflows/smartwork' },
+        (h) => {
+          h.set({ progress: content ? '답변을 만드는 중...' : '업무를 살펴보고 제안을 고르는 중...' });
+          return api.sendSessionMessage(s.id, content, attachments, chosenProvider || null);
+        });
+      // 화면을 떠났다면 끝난 표시를 트레이에 남긴다(돌아오면 위의 effect가 읽어 붙이고 치운다).
+      if (!mounted.current) return;
+      dismissTask(`chat:${s.id}`);
       await catchUp();
       setPending(null);
       if (attachments.length > 0) setFiles([]);
@@ -155,7 +184,10 @@ export default function SmartworkTab() {
       }
       sessions.reload();  // 첫 요청이 제목이 된다
     } catch (e) {
-      setError((e as Error).message);
+      if (mounted.current) {
+        dismissTask(`chat:${s.id}`);
+        setError((e as Error).message);
+      }
     } finally {
       setBusy(false);
     }
@@ -227,6 +259,17 @@ export default function SmartworkTab() {
     }
   };
 
+  // 공유받은 사람의 「삭제」 자리 — 대화는 소유자의 것이라 지우지 못하고, 내 목록에서만 빠진다.
+  const quit = async () => {
+    if (!session || !window.confirm('이 업무에서 나갈까요? 내 목록에서만 빠지고, 다른 참여자의 대화는 그대로입니다.')) return;
+    try {
+      await api.removeSessionMember(session.id, me);
+      leave();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   // 전역 프로바이더와 이 업무의 조직 것만 — 서버도 같은 규칙으로 막는다.
   const usable = (providers.data ?? []).filter(
     (p) => p.organization_id == null || p.organization_id === session?.organization_id);
@@ -278,6 +321,12 @@ export default function SmartworkTab() {
           setError(null);
           setPending(null);
         }}>새 업무</button>
+        {/* 업무를 고르는 줄에 둔다 — 공유 버튼 옆에 두었더니 있는 줄을 몰랐다. */}
+        {session && (session.is_owner ? (
+          <button className="small secondary" disabled={busy} onClick={() => void remove()}>삭제</button>
+        ) : (
+          <button className="small secondary" disabled={busy} onClick={() => void quit()}>나가기</button>
+        ))}
       </div>
 
       {creating && !session && (
@@ -302,9 +351,6 @@ export default function SmartworkTab() {
             <button className="small secondary" onClick={() => setSharing(!sharing)}>
               공유{shared ? ` (${session.members.length})` : ''}
             </button>
-            {session.is_owner && (
-              <button className="small secondary" disabled={busy} onClick={() => void remove()}>삭제</button>
-            )}
           </div>
           {sharing && (
             <SharePanel session={session} me={me}
@@ -317,6 +363,9 @@ export default function SmartworkTab() {
           <div className="chat-thread">
             {messages.map((m) => <Message key={m.id} message={m} showAuthor={shared} />)}
             {pending && <div className="chat-msg user">{pending}</div>}
+            {chatRunning && !busyHere && (
+              <p className="mutedtext">답변을 만드는 중... (다른 화면에 다녀온 사이에도 이어집니다)</p>
+            )}
             {busy && pending !== null && (
               <p className="mutedtext">
                 {pending === ''
@@ -940,21 +989,46 @@ function when(iso: string | null | undefined): string {
 }
 
 // 상태는 대화 쪽(이 업무에 쓸 내 맥락 고르기)과 같은 것을 본다 — 폴더를 올리면 거기에도 바로 보인다.
+// 동기화·메일 로그인은 화면 밖에서 돈다(lib/tasks) — 대화/설정 탭을 바꾸거나 다른 메뉴로 가도
+// 이어지고, 돌아오면 진행이 그대로 보인다. 폴더 동기화는 한 번에 하나다(같은 폴더를 두 루프가
+// 함께 올리지 않게). 창을 닫아 끊겨도 다시 고르면 남은 파일만 올라간다(manifest가 비교한다).
+const FOLDER_TASK = 'personal:folders';
+const MAIL_TASK = 'personal:mail';
+const TASK_SCREEN = '/workflows/smartwork';
+
 function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState<string | null>(null);
-  // 올라간 바이트 / 올릴 바이트 — 서버가 변환하는 동안은 100%에 머문다(그건 글로 알린다).
-  const [bytes, setBytes] = useState<{ sent: number; total: number } | null>(null);
+  const [busyHere, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const folderTask = useTask(FOLDER_TASK);
+  const mailTask = useTask(MAIL_TASK);
+  const busy = busyHere || folderTask?.state === 'running' || mailTask?.state === 'running';
+  // 끝난 동기화의 결과(또는 사유)가 곧 진행 표시다. 올라간 바이트 / 올릴 바이트는 서버가
+  // 변환하는 동안 100%에 머문다(그건 글로 알린다).
+  const latest = [folderTask, mailTask].filter((t) => t !== undefined)
+    .sort((a, b) => b.startedAt - a.startedAt)[0];
+  const progress = latest && latest.state !== 'failed' ? latest.progress : null;
+  const shownError = error ?? (latest?.state === 'failed' ? latest.error ?? null : null);
+  const bytes = folderTask?.state === 'running' && folderTask.total
+    ? { sent: folderTask.sent ?? 0, total: folderTask.total } : null;
+  const mailLogin = mailTask?.state === 'running' ? (mailTask.data as MailLogin | undefined) ?? null : null;
   const picker = useRef<HTMLInputElement | null>(null);
   // 행의 「동기화」로 열었을 때 그 폴더 이름 — 브라우저는 한 번 고른 폴더를 다시 읽을 수
   // 없어서(평문 http라 showDirectoryPicker도 없다) 사람이 같은 폴더를 다시 골라야 한다.
   // 다른 폴더를 고르면 그 행을 고치려던 뜻과 달라지므로 그 자리에서 멈춘다.
   const resyncTarget = useRef<string | null>(null);
-  const [mailLogin, setMailLogin] = useState<MailLogin | null>(null);
   const [codeCopied, setCodeCopied] = useState(false);
-  const mailCancel = useRef(false);
 
+  // 화면 밖에서 끝난 작업도 상태(폴더 목록·메일 연결)에 반영한다 — 돌아왔을 때 다시 읽는다.
+  useEffect(() => {
+    if (folderTask && folderTask.state !== 'running') status.reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [folderTask?.state]);
+  useEffect(() => {
+    if (mailTask && mailTask.state !== 'running') status.reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mailTask?.state]);
+
+  // 짧은 일(동의·폴더 제거·메일 지우기)은 이 화면에서 기다린다.
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
@@ -964,12 +1038,19 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
-      setBytes(null);
       status.reload();
     }
   };
 
-  const syncFolder = (files: FileList) => run(async () => {
+  // 긴 일(동기화·메일 로그인)은 화면 밖에 건다 — 실패는 작업에 남고 진행 표시로 보인다.
+  const background = (key: string, label: string, fn: (h: TaskHandle) => Promise<void>) => {
+    setError(null);
+    dismissTask(FOLDER_TASK);
+    dismissTask(MAIL_TASK);
+    runTask(key, { label, to: TASK_SCREEN }, fn).catch(() => { /* 사유는 작업에 남는다 */ });
+  };
+
+  const syncFolder = (files: FileList) => {
     const all = Array.from(files);
     if (all.length === 0) return;
     // webkitRelativePath = "고른폴더/하위/파일" — 첫 마디가 폴더 이름이다.
@@ -977,8 +1058,16 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
     const target = resyncTarget.current;
     resyncTarget.current = null;
     if (target && folder !== target) {
-      throw new Error(`'${target}'를 다시 동기화하려는데 '${folder}'를 골랐습니다 — 같은 폴더를 고르세요.`);
+      setError(`'${target}'를 다시 동기화하려는데 '${folder}'를 골랐습니다 — 같은 폴더를 고르세요.`);
+      return;
     }
+    background(FOLDER_TASK, `폴더 동기화 · ${folder}`, (h) => uploadFolder(folder, all, h));
+  };
+
+  const uploadFolder = async (folder: string, all: File[], h: TaskHandle) => {
+    const setProgress = (progress: string) => h.set({ progress });
+    const setBytes = (b: { sent: number; total: number } | null) =>
+      h.set({ sent: b?.sent, total: b?.total });
     const items = all
       .filter((f) => isDocument(f.name) && f.size > 0)
       .map((f) => ({
@@ -1018,29 +1107,28 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
     setProgress(
       `${folder}: 문서 ${plan.files}개 — 새로 변환 ${todo.length - skipped - failed}, 그대로 ${plan.files - todo.length}` +
       `, 지움 ${plan.removed}${failed ? `, 변환 실패 ${failed}` : ''}${skipped ? `, 건너뜀 ${skipped}` : ''}`);
-  });
+  };
 
   // 서버가 Device Code 로그인을 시작하면 사람은 아래 주소에서 코드를 넣고 승인한다. 승인이
   // 끝나면 서버가 그 자리에서 메일을 받아 보관한다(토큰은 저장하지 않는다).
-  const syncMail = () => run(async () => {
+  // 다른 탭에 가 있으면 브라우저가 타이머를 늦춘다(오래 가려져 있으면 1분에 한 번) — 확인이
+  // 늦어질 뿐 멈추지는 않는다. 승인은 서버가 기다려 주지 않으므로 코드 만료 전에 끝내야 한다.
+  const syncMail = () => background(MAIL_TASK, '메일 가져오기', async (h) => {
+    h.set({ progress: '로그인 주소를 받는 중...' });
     const login = await api.mailLogin();
     setCodeCopied(false);
-    setMailLogin(login);
-    mailCancel.current = false;
-    try {
-      const deadline = Date.now() + login.expires_in * 1000;
-      while (!mailCancel.current && Date.now() < deadline) {
-        await new Promise((resolve) => window.setTimeout(resolve, login.interval * 1000));
-        if (mailCancel.current) break;
-        const out = await api.mailLoginPoll();
-        if (out.status === 'pending') continue;
-        setProgress(`메일 ${out.fetched}통 확인(${out.account}) — 새 메일 ${out.new}통`);
-        return;
-      }
-      if (!mailCancel.current) throw new Error('승인 시간이 지났습니다 — 다시 시도하세요.');
-    } finally {
-      setMailLogin(null);
+    h.set({ data: login, progress: '브라우저에서 코드를 넣고 승인하세요 — 승인하면 자동으로 이어집니다.' });
+    const deadline = Date.now() + login.expires_in * 1000;
+    while (!h.cancelled() && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, login.interval * 1000));
+      if (h.cancelled()) break;
+      const out = await api.mailLoginPoll();
+      if (out.status === 'pending') continue;
+      h.set({ data: undefined, progress: `메일 ${out.fetched}통 확인(${out.account}) — 새 메일 ${out.new}통` });
+      return;
     }
+    h.set({ data: undefined, progress: h.cancelled() ? '메일 가져오기를 취소했습니다.' : '' });
+    if (!h.cancelled()) throw new Error('승인 시간이 지났습니다 — 다시 시도하세요.');
   });
 
   return (
@@ -1173,7 +1261,7 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
                       });
                     }}>{codeCopied ? '복사됨' : '복사'}</button>
                     <span className="mutedtext">승인하면 자동으로 이어집니다.</span>
-                    <button className="small secondary" onClick={() => { mailCancel.current = true; }}>취소</button>
+                    <button className="small secondary" onClick={() => cancelTask(MAIL_TASK)}>취소</button>
                   </div>
                 )}
               </>
@@ -1189,7 +1277,7 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
           </>
         )}
       </Async>
-      {error && <p className="error">{error}</p>}
+      {shownError && <p className="error">{shownError}</p>}
     </div>
   );
 }
