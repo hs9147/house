@@ -183,3 +183,38 @@ def test_profile_api_reviews_only_release_deployments(repo, app_db, monkeypatch)
     assert out["stale"] is False and out["profile"]["does"] == ["협력사 검색", "등급 확인"]
     assert c.get(f"{API}/projects/{pid}/agent-profile", headers=ADMIN).json()["stale"] is False
     assert c.get(f"{API}/projects/{pid}/agent-profile").status_code == 401
+
+
+def test_opening_an_agent_explains_what_to_do_there(app_db, monkeypatch):
+    """맞는 에이전트는 묻지 않고 띄운다 — 결과와 그 에이전트에서 할 수 있는 일을 함께 보인다.
+
+    모델이 show_report를 빠뜨려도 설명이 빠지지 않게, 용도 검토 결과로 서버가 화면을 만든다.
+    """
+    pid = _project("supplier-pool", sha="a" * 40)
+    with SessionLocal() as db:
+        db.add(AgentProfile(project_id=pid, git_sha="a" * 40, purpose="협력사 풀을 조회한다",
+                            does=["협력사 검색", "등급 확인"], inputs=["협력사명"]))
+        db.commit()
+    monkeypatch.setattr(agentreview, "schedule", lambda pid, sha: None)
+    captured: dict = {}
+
+    def fake_chat(provider, messages, db=None, tools=None, tool_executor=None, **kw):
+        captured["system"] = messages[0]["content"]
+        tool_executor("show_agent", {"name": "supplier-pool", "reason": "협력사 등급 확인"})
+        return "A사 등급은 supplier-pool에서 확인할 수 있습니다."
+
+    monkeypatch.setattr(llm_service, "chat_completion", fake_chat)
+    with SessionLocal() as db:
+        from app.models import ApiKey
+        key = ApiKey(name="admin", is_admin=True, key_hash="x")
+        out = smartwork.chat(db, key, _provider(), [{"role": "user", "content": "A사 등급 알려 줘"}], [])
+
+    assert out["agent"]["name"] == "supplier-pool"
+    report = out["report"]
+    assert report["title"] == "supplier-pool — 할 수 있는 일" and report["format"] == "md"
+    for piece in ("A사 등급은 supplier-pool에서", "협력사 등급 확인", "협력사 풀을 조회한다",
+                  "- 협력사 검색", "- 등급 확인", "## 준비할 것", "- 협력사명"):
+        assert piece in report["content"]
+    # 맞는 에이전트가 하나면 묻지 않는다 — 보고서와 함께 띄운다
+    assert "맞는 에이전트가 있으면 묻지 않는다" in captured["system"]
+    assert "사람이 넣는 것: 협력사명" in captured["system"]

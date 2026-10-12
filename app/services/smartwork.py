@@ -163,6 +163,7 @@ def agents(db: Session, key: ApiKey) -> list[dict]:
             "purpose": profile.purpose if profile else "",
             "does": list(profile.does or []) if profile else [],
             "does_not": list(profile.does_not or []) if profile else [],
+            "inputs": list(profile.inputs or []) if profile else [],
         })
     return out
 
@@ -577,8 +578,8 @@ def _view_tools(agent_names: list[str], has_files: bool = False) -> list[dict]:
             "description": (
                 "오른쪽 화면에 사내 에이전트(배포된 업무 앱)를 띄운다. 에이전트 목록의 **목적·하는"
                 " 일**이 요청과 맞을 때만 부른다 — 이름이 비슷하거나 목록에 하나뿐인 것은 근거가"
-                " 아니고, '하지 않는 일'에 걸리면 부르지 않는다. 보고서·파일 같은 다른 방법으로도"
-                " 할 수 있는 요청이면 먼저 ask_user로 어느 쪽으로 할지 묻는다."
+                " 아니고, '하지 않는 일'에 걸리면 부르지 않는다. 띄울 때는 show_report도 함께 불러"
+                " 요청의 결과와 이 에이전트에서 이어서 할 수 있는 일을 설명한다."
             ),
             "inputSchema": {
                 "type": "object",
@@ -727,8 +728,9 @@ def _system_prompt(email: str, agent_list: list[dict], has_personal: bool,
         "- 에이전트는 아래 목록의 목적·하는 일이 요청과 맞을 때만 show_agent로 띄운다. 이름이"
         " 비슷하다는 것, 목록에 하나뿐이라는 것은 근거가 아니다. '하지 않는 일'에 걸리면 띄우지"
         " 않는다. 용도 검토 전인 에이전트는 이름만으로 고르지 않는다.",
-        "- 맞는 에이전트가 있어도 보고서(show_report)·파일(make_file)로도 할 수 있는 요청이면"
-        " 고르지 말고 ask_user로 어느 쪽으로 할지 묻는다.",
+        "- 맞는 에이전트가 있으면 묻지 않는다 — show_report에 요청의 결과(찾은 것)와 그"
+        " 에이전트에서 이어서 할 수 있는 일(목록의 하는 일·사람이 넣는 것)을 쓰고, show_agent로 그"
+        " 에이전트를 함께 띄운다. 맞는 에이전트가 둘 이상일 때만 ask_user로 어느 것인지 묻는다.",
         "- 업무 제안(suggest_tasks)은 진행할 업무 단위 한 건(과제·계약·구매요청 등)마다 하나다."
         " 대상은 개인 업무 맥락에서 찾고(target), 그 건에 맞는 부서 워크플로(dept__workflows)를"
         " workflow에 적어 그 워크플로의 상태·전이로 다음 할 일을 정한다. 사람 단계에서 멈춘 실행이"
@@ -764,7 +766,32 @@ def _agent_line(a: dict) -> str:
         line += f" / 하는 일: {'; '.join(a['does'])}"
     if a.get("does_not"):
         line += f" / 하지 않는 일: {'; '.join(a['does_not'])}"
+    if a.get("inputs"):
+        line += f" / 사람이 넣는 것: {'; '.join(a['inputs'])}"
     return line
+
+
+def _agent_report(agent: dict, reply: str) -> dict:
+    """에이전트를 띄웠는데 설명(show_report)이 없을 때 — 서버가 용도 검토 결과로 만든다.
+
+    사람이 에이전트 화면만 받으면 그 앱에서 무엇을 하면 되는지 알 수 없다. 모델이 설명을 빠뜨려도
+    같은 화면이 나오도록, 셀 수 있는 것(목적·하는 일·준비할 것)은 서버가 채운다.
+    """
+    lines = [f"# {agent['name']}", ""]
+    if reply.strip():
+        lines += [reply.strip(), ""]
+    if agent.get("reason"):
+        lines += [f"이 에이전트를 연 이유: {agent['reason']}", ""]
+    if agent.get("purpose"):
+        lines += [f"**목적** — {agent['purpose']}", ""]
+        if agent.get("does"):
+            lines += ["## 이 에이전트에서 할 수 있는 일", *(f"- {d}" for d in agent["does"]), ""]
+        if agent.get("inputs"):
+            lines += ["## 준비할 것", *(f"- {i}" for i in agent["inputs"]), ""]
+    else:
+        lines.append("이 에이전트는 아직 용도를 검토하지 않았습니다 — 오른쪽 화면에서 직접 확인하세요.")
+    return {"title": f"{agent['name']} — 할 수 있는 일", "format": "md",
+            "content": "\n".join(lines).strip()}
 
 
 def _clean_history(history: list[dict], shared: bool = False) -> list[dict]:
@@ -924,6 +951,8 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
     reply = llm_service.chat_completion(provider, messages, db, tools, execute, finish_tools=finish)
     if not any(view[k] for k in ("agent", "report", "web", "file", "suggestions", "choices")):
         reply = _fallback(reply, view, len(used))
+    elif view["agent"] and not view["report"]:
+        view["report"] = _agent_report(view["agent"], reply)
     # 무엇을 물었는지는 남기지 않는다 — 개인 메일·문서 내용이 감사 기록으로 새면 안 된다.
     audit.record(db, key.name, "smartwork.chat", "-", {"tools": used})
     return {"reply": reply, **view, "tools": used, "provider": provider.name}
