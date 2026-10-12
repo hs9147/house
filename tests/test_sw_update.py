@@ -44,7 +44,10 @@ def test_sw_update_schedules_git_pull_and_restart():
             assert "Restart-Service -Name 'paas-console'" in script
             # 콘솔은 플랫폼 자신이라 배포 파이프라인이 없다 — 여기서 빌드하지 않으면
             # 의존성이 늘었을 때 예전 dist가 조용히 계속 서빙된다(실제로 겪었다).
-            assert "npm install" in script
+            # npm ci — lockfile 그대로 설치하고 고쳐 쓰지 않는다. npm install은 서버에서
+            # lockfile을 다시 써서 다음 업데이트의 fast-forward를 막았다(실측: 50a73d2에 멈춤).
+            assert "npm ci;" in script and "npm install;" not in script
+            assert script.index("npm ci;") < script.index("npm run build")
             assert "npm run build" in script
             # 콘솔 소스나 npm이 없는 설치본에서는 건너뛴다
             assert "Test-Path" in script and "Get-Command npm" in script
@@ -70,6 +73,11 @@ def test_sw_update_schedules_git_pull_and_restart():
             # 줄 알았는데 아무것도 바뀌지 않은" 상태가 된다(실측).
             assert "fast-forward 불가" in script
             assert script.index("merge --ff-only") < script.index("-m pip install")
+            # 지난 npm이 남긴 lockfile 변경은 merge 전에 되돌린다 — 그것 하나만(사람이
+            # 고친 파일까지 덮어쓰면 안 된다).
+            assert (script.index("git checkout -- console/package-lock.json")
+                    < script.index("merge --ff-only"))
+            assert "git checkout -- ." not in script and "reset --hard" not in script
     finally:
         app.dependency_overrides.clear()
 
@@ -94,10 +102,13 @@ def test_sw_update_script_is_valid_powershell(tmp_path):
 
     script_file = tmp_path / "sw-update.ps1"
     script_file.write_text(script, encoding="utf-8")
+    # -Encoding UTF8 — Windows PowerShell 5.1은 BOM 없는 파일을 시스템 코드 페이지(한글
+    # 윈도우는 CP949)로 읽어 한글 안내문을 깨뜨리고, 깨진 바이트가 따옴표를 삼켜 멀쩡한
+    # 스크립트를 문법 오류로 보고했다. 실제 실행은 -Command 인자라 파일 인코딩을 거치지 않는다.
     check = (
         "$e = $null; "
         f"[System.Management.Automation.Language.Parser]::ParseInput("
-        f"(Get-Content -Raw '{script_file}'), [ref]$null, [ref]$e) | Out-Null; "
+        f"(Get-Content -Raw -Encoding UTF8 '{script_file}'), [ref]$null, [ref]$e) | Out-Null; "
         "if ($e.Count) { $e | ForEach-Object { $_.Message }; exit 1 }"
     )
     done = subprocess.run([pwsh, "-NoProfile", "-Command", check],
