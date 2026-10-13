@@ -77,6 +77,28 @@ def create_mcp_token(
     )
 
 
+@router.get("/mcp/tokens/servers")
+def my_mcp_servers(db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """내 토큰으로 붙을 수 있는 MCP 서버 — 설정 화면이 이 목록으로 붙여 넣을 설정을 만든다.
+
+    토큰은 **사람에게** 속한다(과제에 묶이지 않는다). 공용 서버(문서·온톨로지·코드·저장소…)는 내
+    권한으로 열리는 것만, 기획 MCP는 과제마다 주소가 달라서 내가 접근할 수 있는 과제를 따로 준다.
+    """
+    base = mcp_search.internal_base_url()
+    servers = [{"name": s["name"], "url": s["url"], "description": s["description"]}
+               for s in mcp_search.list_internal_servers(db, key) if s["url"]]
+    projects = []
+    for project in db.execute(select(Project).order_by(Project.name)).scalars():
+        try:
+            require_project_mcp_access(db, key, project)
+        except HTTPException:
+            continue  # 쓸 수 없는 과제는 주소를 만들지 않는다 — 붙여 넣고 나서 403을 보게 된다
+        projects.append({"name": project.name,
+                         "url": f"{base}/api/v1/plan/projects/{project.id}/mcp" if base else ""})
+    return {"base_url": base, "gateway_base_url": f"{base}/api/v1" if base else "",
+            "servers": servers, "projects": projects}
+
+
 @router.get("/mcp/tokens", response_model=list[McpTokenOut])
 def list_mcp_tokens(db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
     """자기 토큰만 보인다 — 남의 토큰 목록은 폐기 대상을 고르는 데 필요하지 않다."""

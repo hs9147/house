@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { getEmail, isAdmin, logout } from '../lib/auth';
 import { useApi } from '../lib/hooks';
+import McpAccessModal from './McpAccessModal';
 import SsoLoginNotice from './SsoLoginNotice';
 import TaskTray from './TaskTray';
 
@@ -9,6 +11,8 @@ export default function Layout() {
   const navigate = useNavigate();
   const admin = isAdmin();
   const email = getEmail();
+  // 토큰은 사람에게 속한다 — 과제와 무관하게 여기서 발급한다(과제 행의 「에이전트 접속」도 같은 창).
+  const [mcpOpen, setMcpOpen] = useState(false);
 
 
 
@@ -79,6 +83,10 @@ export default function Layout() {
           <span className="mutedtext" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={email || (admin ? 'admin' : 'member')}>
             {email || (admin ? 'admin' : 'member')}
           </span>
+          <button className="secondary small" title="Claude Desktop·Claude Code에 플랫폼 MCP를 등록합니다"
+            onClick={() => setMcpOpen(true)}>
+            MCP 접속
+          </button>
           <button
             className="secondary small"
             onClick={() => {
@@ -116,6 +124,7 @@ export default function Layout() {
         <Outlet />
       </main>
       <TaskTray />
+      {mcpOpen && <McpAccessModal onClose={() => setMcpOpen(false)} />}
     </div>
   );
 }

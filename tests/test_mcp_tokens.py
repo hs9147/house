@@ -279,3 +279,35 @@ def test_expired_token_stops_working_but_stays_listed(gitea_configured, monkeypa
     r = c.post(f"{API}/plan/projects/{pid}/mcp", headers={"authorization": f"Bearer {token}"},
                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     assert r.status_code == 401
+
+
+def test_token_belongs_to_the_person_and_lists_what_it_opens(gitea_configured, monkeypatch):
+    """토큰은 과제가 아니라 사람에게 속한다 — 과제 없이 발급하고, 설정 화면은 그 사람이 열 수 있는
+    서버와 기획 MCP를 붙일 수 있는 과제(내 조직 것만)를 받는다."""
+    monkeypatch.setenv("PAAS_MCP_INTERNAL_BASE_URL", "http://gpax.lge.com/paas")
+    monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "")  # 개발자 PC의 .env가 도메인을 막아 두기도 한다
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    db = SessionLocal()
+    try:
+        mine, other = Organization(name="team-a"), Organization(name="team-b")
+        db.add_all([mine, other])
+        db.commit()
+        _user(db, "a@example.com", mine)
+        _project(db, "app-a", mine, "https://git.example.com/team-a/app-a")
+        _project(db, "app-b", other, "https://git.example.com/team-b/app-b")
+    finally:
+        db.close()
+    key = c.post(f"{API}/auth/login", json={"email": "a@example.com", "password": "x"}).json()["key"]
+    me = {"x-api-key": key}
+
+    issued = c.post(f"{API}/mcp/tokens", headers=me, json={"label": "Claude Desktop"}).json()
+    assert issued["token"] and issued["url"] == ""  # 과제를 고르지 않아도 발급된다
+
+    out = c.get(f"{API}/mcp/tokens/servers", headers=me).json()
+    assert [p["name"] for p in out["projects"]] == ["app-a"]
+    assert out["projects"][0]["url"].startswith("http://gpax.lge.com/paas/api/v1/plan/projects/")
+    docs = next(s for s in out["servers"] if s["name"] == "paas-docs")
+    assert docs["url"] == "http://gpax.lge.com/paas/api/v1/mcp/docs"
+    assert out["gateway_base_url"] == "http://gpax.lge.com/paas/api/v1"
+    assert c.get(f"{API}/mcp/tokens/servers").status_code == 401

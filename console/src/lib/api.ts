@@ -703,6 +703,13 @@ export const api = {
       last_used_at: string | null; is_expired: boolean;
     }[]>('GET', '/mcp/tokens'),
   revokeMcpToken: (id: number) => request<void>('DELETE', `/mcp/tokens/${id}`),
+  // 내 토큰으로 붙을 수 있는 MCP 서버 — 공용 서버와, 기획 MCP를 붙일 수 있는 내 과제.
+  myMcpServers: () =>
+    request<{
+      base_url: string; gateway_base_url: string;
+      servers: { name: string; url: string; description: string }[];
+      projects: { name: string; url: string }[];
+    }>('GET', '/mcp/tokens/servers'),
 
   // LLM
   listProviders: () => request<LlmProviderOut[]>('GET', '/llm/providers'),
