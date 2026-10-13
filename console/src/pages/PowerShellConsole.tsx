@@ -269,7 +269,7 @@ export default function PowerShellConsole() {
           className={activeTab === 'console' ? 'primary small' : 'secondary small'}
           onClick={() => setActiveTab('console')}
         >
-          ⚡ 명령 실행 (한 줄)
+          ⚡ 명령 실행
         </button>
         {/*
           SW 업데이트·백엔드 재시작은 탭이 아니라 동작이다. 그래서 탭과 같은
