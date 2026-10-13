@@ -5,7 +5,7 @@ import { api } from '../lib/api';
 import { getEmail } from '../lib/auth';
 import { copyText } from '../lib/clipboard';
 import { type AsyncState, useApi, usePolling } from '../lib/hooks';
-import { forget, remember } from '../lib/localfiles';
+import { canKeepFolders, forget, pickFolder, type PickedFolder, remember, reopenFolder } from '../lib/localfiles';
 import { cancelTask, dismissTask, runTask, type TaskHandle, useTask } from '../lib/tasks';
 import { parseCsv, renderMarkdown } from '../lib/markdown';
 import type {
@@ -1001,8 +1001,8 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
   // 메일 로그인의 주소·코드만은 여기 둔다: 트레이에 없고, 승인하려면 보여야 한다.
   const mailLogin = mailTask?.state === 'running' ? (mailTask.data as MailLogin | undefined) ?? null : null;
   const picker = useRef<HTMLInputElement | null>(null);
-  // 행의 「동기화」로 열었을 때 그 폴더 이름 — 브라우저는 한 번 고른 폴더를 다시 읽을 수
-  // 없어서(평문 http라 showDirectoryPicker도 없다) 사람이 같은 폴더를 다시 골라야 한다.
+  // 행의 「동기화」가 폴더를 다시 고르게 됐을 때 그 폴더 이름 — 전에 고른 폴더를 다시 읽을 수
+  // 없을 때만 고른다(lib/localfiles.reopenFolder: 평문 http·다른 브라우저·폴더가 없어졌을 때).
   // 다른 폴더를 고르면 그 행을 고치려던 뜻과 달라지므로 그 자리에서 멈춘다.
   const resyncTarget = useRef<string | null>(null);
   const [codeCopied, setCodeCopied] = useState(false);
@@ -1039,31 +1039,59 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
     runTask(key, { label, to: TASK_SCREEN }, fn).catch(() => { /* 사유는 작업에 남는다 */ });
   };
 
-  const syncFolder = (files: FileList) => {
+  const startSync = (picked: PickedFolder, target: string | null) => {
+    if (target && picked.folder !== target) {
+      setError(`'${target}'를 다시 동기화하려는데 '${picked.folder}'를 골랐습니다 — 같은 폴더를 고르세요.`);
+      return;
+    }
+    background(FOLDER_TASK, `폴더 동기화 · ${picked.folder}`, (h) => uploadFolder(picked, h));
+  };
+
+  // 평문 http에서 고른 폴더(input webkitdirectory) — 이 브라우저는 폴더를 다시 읽을 수 없다.
+  const syncPicked = (files: FileList) => {
     const all = Array.from(files);
     if (all.length === 0) return;
     // webkitRelativePath = "고른폴더/하위/파일" — 첫 마디가 폴더 이름이다.
     const folder = all[0].webkitRelativePath.split('/')[0];
     const target = resyncTarget.current;
     resyncTarget.current = null;
-    if (target && folder !== target) {
-      setError(`'${target}'를 다시 동기화하려는데 '${folder}'를 골랐습니다 — 같은 폴더를 고르세요.`);
-      return;
-    }
-    background(FOLDER_TASK, `폴더 동기화 · ${folder}`, (h) => uploadFolder(folder, all, h));
+    const entries = all.map((f) => ({ file: f, path: f.webkitRelativePath.split('/').slice(1).join('/') }));
+    startSync({ folder, read: async () => entries }, target);
   };
 
-  const uploadFolder = async (folder: string, all: File[], h: TaskHandle) => {
+  // 폴더를 고른다 — 고를 수 있는 브라우저면 핸들을 남겨 다음에는 다시 고르지 않는다.
+  const choose = async (target: string | null) => {
+    if (!canKeepFolders) {
+      resyncTarget.current = target;
+      picker.current?.click();
+      return;
+    }
+    try {
+      const picked = await pickFolder();
+      if (picked) startSync(picked, target);
+    } catch (e) {
+      // 권한을 묻느라 버튼을 누른 동작이 지나가면 브라우저가 고르기 창을 막는다 — 한 번 더 누르면 된다.
+      setError(`폴더 고르기를 열지 못했습니다 — 한 번 더 누르세요. (${(e as Error).message})`);
+    }
+  };
+
+  // 행의 「동기화」 — 전에 고른 폴더를 그대로 다시 읽는다. 없어졌을 때만 고른다.
+  const resync = async (folder: string) => {
+    setError(null);
+    const again = await reopenFolder(folder);
+    if (again) startSync(again, folder);
+    else await choose(folder);
+  };
+
+  const uploadFolder = async (picked: PickedFolder, h: TaskHandle) => {
+    const { folder } = picked;
     const setProgress = (progress: string) => h.set({ progress });
     const setBytes = (b: { sent: number; total: number } | null) =>
       h.set({ sent: b?.sent, total: b?.total });
-    const items = all
-      .filter((f) => isDocument(f.name) && f.size > 0)
-      .map((f) => ({
-        file: f,
-        path: f.webkitRelativePath.split('/').slice(1).join('/'),
-        mtime: f.lastModified / 1000,
-      }));
+    setProgress(`${folder}: 폴더를 읽는 중...`);
+    const items = (await picked.read())
+      .filter((it) => isDocument(it.file.name) && it.file.size > 0)
+      .map((it) => ({ ...it, mtime: it.file.lastModified / 1000 }));
     // 고른 폴더의 파일을 이 브라우저에 남긴다 — 파일 뷰어가 폴더를 다시 고르게 하지 않고 연다.
     void remember(folder, items);
     setProgress(`${folder}: 바뀐 파일을 찾는 중...`);
@@ -1147,9 +1175,10 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
             <h3 style={{ fontSize: 14 }}>로컬 폴더</h3>
             <p className="mutedtext">
               폴더를 고르면 그 안의 문서(PDF·Office·한글·텍스트)만 올라가 텍스트·온톨로지로
-              바뀌고, 원본은 변환 직후 서버에서 지워집니다. 같은 폴더를 다시 고르면 바뀐 파일만
-              올리고, PC에서 지운 파일은 여기서도 지웁니다. 아래 표의 「동기화」는 그 폴더를
-              다시 고르게 해 같은 일을 합니다.
+              바뀌고, 원본은 변환 직후 서버에서 지워집니다. 다시 동기화하면 바뀐 파일만 올리고,
+              PC에서 지운 파일은 여기서도 지웁니다. 아래 표의 「동기화」는 전에 고른 폴더를 그대로
+              다시 읽고, 폴더가 없어졌을 때만 다시 고르게 합니다.
+              {!canKeepFolders && ' (이 주소는 https가 아니라 브라우저가 폴더를 기억하지 못해, 동기화할 때마다 폴더를 고릅니다.)'}
             </p>
             {s.folders.length > 0 && (
               <table style={{ marginBottom: 10 }}>
@@ -1161,10 +1190,8 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
                       <td>{f.files}</td>
                       <td>{when(f.synced_at)}</td>
                       <td style={{ whiteSpace: 'nowrap' }}>
-                        <button className="small" disabled={busy} onClick={() => {
-                          resyncTarget.current = f.name;
-                          picker.current?.click();
-                        }}>동기화</button>{' '}
+                        <button className="small" disabled={busy}
+                          onClick={() => void resync(f.name)}>동기화</button>{' '}
                         <button className="small secondary" disabled={busy} onClick={() => {
                           if (!window.confirm(`'${f.name}' 폴더의 텍스트와 색인을 지울까요? (PC의 원본은 그대로입니다)`)) return;
                           void run(async () => {
@@ -1187,14 +1214,11 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
                 if (el) el.setAttribute('webkitdirectory', '');
               }}
               onChange={(e) => {
-                if (e.target.files) void syncFolder(e.target.files);
+                if (e.target.files) syncPicked(e.target.files);
                 e.target.value = '';  // 같은 폴더를 다시 골라도 onChange가 오게
               }}
             />
-            <button disabled={busy} onClick={() => {
-              resyncTarget.current = null;
-              picker.current?.click();
-            }}>폴더 선택(추가·다시 동기화)</button>
+            <button disabled={busy} onClick={() => void choose(null)}>폴더 선택(추가)</button>
 
 
             <h3 style={{ fontSize: 14, marginTop: 18 }}>아웃룩 메일</h3>
