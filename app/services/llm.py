@@ -319,7 +319,15 @@ def _openai_style_call(
         if decrypted_key:
             headers["api-key"] = decrypted_key
             headers["authorization"] = f"Bearer {decrypted_key}"
-        if "openai/deployments" not in url and not url.endswith("/chat/completions"):
+        if "/openai/v1" in url:
+            # **v1 API**(Azure OpenAI·AI Foundry의 `…/openai/v1`) — OpenAI와 같은 경로다: 뒤에
+            # /chat/completions(응답 API는 /responses)만 붙이고, 배포 이름은 model로 보내며
+            # api-version을 붙이지 않는다. 예전에는 이 주소 뒤에도 옛 경로(/openai/deployments/…)를
+            # 붙여 `…/openai/v1/openai/deployments/…`가 됐고 Azure가 404(Resource not found)로 답했다.
+            if not url.endswith("/chat/completions"):
+                url = f"{url.rstrip('/')}/chat/completions"
+        elif "openai/deployments" not in url and not url.endswith("/chat/completions"):
+            # 옛 방식 — 리소스 주소 뒤에 배포 경로와 api-version을 붙인다.
             url = f"{url.rstrip('/')}/openai/deployments/{provider.model}/chat/completions?api-version=2024-02-15-preview"
     elif kind_str == "aws":
         # AWS Bedrock

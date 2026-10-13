@@ -412,3 +412,30 @@ def test_responses_api_truncation_is_not_passed_off_as_complete():
                         "content": [{"type": "output_text", "text": "반쯤 쓰다"}]}],
             "incomplete_details": {"reason": "max_output_tokens"}}
     assert llm_service._responses_to_choice(data)["choices"][0]["finish_reason"] == "length"
+
+
+def test_azure_v1_endpoint_is_called_like_openai(monkeypatch):
+    """Azure OpenAI·AI Foundry의 v1 주소(…/openai/v1)는 OpenAI와 같은 경로다 — 옛 배포 경로를 덧붙이면
+    `…/openai/v1/openai/deployments/…`가 되어 404(Resource not found)로 끝났다(실측)."""
+    from app.security import encrypt_value
+
+    seen: list = []
+    monkeypatch.setattr(llm_service, "_post_chat", lambda url, headers, payload: seen.append(
+        (url, headers, payload)) or {"choices": [{"message": {"content": "Paris"}}]})
+    v1 = LlmProvider(name="foundry", kind=LlmProviderKind.azure, model="gpt-6.1-sol",
+                     base_url="https://aif-x.services.ai.azure.com/openai/v1",
+                     api_key_encrypted=encrypt_value("azkey"))
+    assert llm_service.chat_completion(v1, [{"role": "user", "content": "capital?"}]) == "Paris"
+    url, headers, payload = seen[-1]
+    assert url == "https://aif-x.services.ai.azure.com/openai/v1/chat/completions"
+    assert "api-version" not in url and payload["model"] == "gpt-6.1-sol"
+    assert headers["api-key"] == "azkey"
+    # 응답 API로 돌아갈 때도 같은 v1 경로다
+    assert llm_service._responses_url(url) == "https://aif-x.services.ai.azure.com/openai/v1/responses"
+
+    # 옛 방식(리소스 주소)은 그대로 배포 경로와 api-version을 붙인다
+    old = LlmProvider(name="aoai", kind=LlmProviderKind.azure, model="gpt4o-dep",
+                      base_url="https://res.openai.azure.com/")
+    llm_service.chat_completion(old, [{"role": "user", "content": "x"}])
+    assert seen[-1][0].startswith(
+        "https://res.openai.azure.com/openai/deployments/gpt4o-dep/chat/completions?api-version=")
