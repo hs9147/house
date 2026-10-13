@@ -43,6 +43,7 @@ mcp 모듈의 api_key는 배포된 앱의 환경변수로도 주입되므로(ser
 import json
 import re
 import time
+from collections.abc import Callable
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -54,7 +55,7 @@ from sqlalchemy.orm import Session
 from .. import audit
 from ..config import get_settings
 from ..db import get_db
-from ..features import require_feature
+from ..features import is_enabled, require_feature
 from ..models import (
     ApiKey, AuditEvent, BuildProfile, Deployment, DeploymentStatus, Module, ModuleType,
     Project, ProjectType,
@@ -1461,3 +1462,113 @@ def _graph_call(name: str, args: dict, *, db: Session | None = None,
             f"그 노드에 붙은 관계가 없습니다: {kind}:{node_name}"
             " (find_nodes로 kind와 name을 정확히 확인하세요)")
     return _dump(found)
+
+
+# --- 통합 서버 (/mcp/hub) ---
+#
+# Claude Desktop 같은 도구에는 원격 서버를 PC의 중계(mcp-remote)로 붙인다 — 서버마다 프로세스가 하나다.
+# 서버가 열댓 개면 시작할 때 그만큼 동시에 떠서 일부가 일찍 죽었다(실측: 16개 중 8개 — 같은 콜백
+# 포트·npx 캐시가 부딪힌다). 그래서 **한 서버로 묶어** 연다: 도구 이름에 출처 접두사를 붙이고
+# (docs__search_docs …) 호출을 접두사로 갈라 각 서버의 처리기로 보낸다. 묶음은 스마트워크 대화가
+# 쓰는 것과 같다(agent_toolsets) — 같은 사람이 대화에서 쓰는 도구와 데스크톱에서 쓰는 도구가 같다.
+
+# 대화·통합 서버가 쓰는 도구는 **읽기**만 고른다. 색인 다시 돌리기·카탈로그 동기화·주기 작업 실행은
+# 대화 한 줄로 일어날 일이 아니다 — 그건 각 메뉴(또는 개별 서버)에서 사람이 한다.
+_EXCLUDED = {"reindex_docs", "sync_catalog", "run_scheduled_job"}
+
+# 저장소 서버(/mcp/storage/{저장소})는 저장소마다 따로라, 묶음에는 목록 보기 하나만 source 인자를
+# 붙여 얹는다. 검색·읽기는 docs 도구가 저장소를 가로질러 이미 한다.
+_STORAGE_LIST_TOOL = {
+    **_STORAGE_READ_TOOLS[0],
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "source": {"type": "string", "description": "저장소 이름(docs__list_sources 값)"},
+            **_STORAGE_READ_TOOLS[0]["inputSchema"]["properties"],
+        },
+        "required": ["source"],
+    },
+}
+
+
+def _read_only(tools: list[dict]) -> list[dict]:
+    return [t for t in tools if t["name"] not in _EXCLUDED]
+
+
+def _with_project(tool: dict) -> dict:
+    """기획 MCP 도구에 project 인자를 더한다 — 과제마다 따로인 서버를 묶음 하나로 부르려고."""
+    schema = tool.get("inputSchema") or {"type": "object", "properties": {}}
+    return {**tool, "inputSchema": {
+        **schema,
+        "properties": {"project": {"type": "string", "description": "과제(프로젝트) 이름"},
+                       **(schema.get("properties") or {})},
+        "required": ["project", *(schema.get("required") or [])],
+    }}
+
+
+def _plan_call(db: Session, key: ApiKey, name: str, args: dict) -> str:
+    from . import planning as planning_api  # noqa: PLC0415 — workspace 기능이 켜져 있을 때만
+
+    project = _project_by_name(db, args, discover="code__list_projects")
+    try:
+        # 과제마다의 서버와 같은 검사 — 남의 조직 과제의 작업 지시는 읽히지 않는다.
+        require_project_mcp_access(db, key, project)
+    except HTTPException as e:
+        raise mcp_server.McpToolError(str(e.detail))
+    rest = {k: v for k, v in args.items() if k != "project"}
+    return planning_api._mcp_call(db, key.name, project, name, rest)
+
+
+def agent_toolsets(db: Session, key: ApiKey) -> list[tuple[str, list[dict], Callable[[str, dict], str]]]:
+    """이 사람이 쓰는 사내 도구 묶음 — (접두사, 도구들, 호출). 스마트워크 대화와 통합 서버가 쓴다."""
+    actor = key.name
+    sets: list[tuple[str, list[dict], Callable[[str, dict], str]]] = [
+        ("docs", _read_only(_DOCS_TOOLS), lambda n, a: _docs_call(db, actor, n, a, key=key)),
+        ("graph", _GRAPH_TOOLS, lambda n, a: _graph_call(n, a, db=db, key=key)),
+        ("storage", [_STORAGE_LIST_TOOL], lambda n, a: _storage_call(
+            db, actor, _doc_source(str(a.get("source", "")), db, key), n, a)),
+        ("apis", _read_only(_APIS_TOOLS), lambda n, a: _apis_call(db, actor, n, a)),
+    ]
+    if is_enabled("workspace"):
+        # 프로젝트별 접근 검사는 코드 서버의 것을 그대로 탄다(남의 조직 코드는 안 읽힌다).
+        sets.append(("code", _CODE_TOOLS, lambda n, a: _code_dispatch(db, key, n, a)))
+    if key.is_admin and is_enabled("deploy"):
+        # 운영 도구는 조직을 가리지 않고 로그·감사를 보여 준다 — 관리자에게만 붙인다.
+        sets.append(("ops", _read_only(_OPS_TOOLS), lambda n, a: _ops_call(db, actor, n, a)))
+    return sets
+
+
+def hub_toolsets(db: Session, key: ApiKey) -> list[tuple[str, list[dict], Callable[[str, dict], str]]]:
+    """통합 서버의 묶음 — 대화의 묶음에 기획 MCP(과제 인자)를 더한다."""
+    sets = agent_toolsets(db, key)
+    if is_enabled("workspace"):
+        from . import planning as planning_api  # noqa: PLC0415
+
+        sets.append(("plan", [_with_project(t) for t in planning_api._MCP_TOOLS],
+                     lambda n, a: _plan_call(db, key, n, a)))
+    return sets
+
+
+@router.post("/mcp/hub")
+async def hub_mcp_server(
+    request: Request,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_agent_key),
+):
+    """플랫폼 MCP 전부를 한 서버로(JSON-RPC 2.0) — 문서·온톨로지·저장소 목록·API 카탈로그·코드·
+    기획(과제 인자)·운영(관리자). 권한은 각 서버의 것을 그대로 탄다."""
+    sets = hub_toolsets(db, key)
+    tools: list[dict] = []
+    route: dict[str, tuple[Callable[[str, dict], str], str]] = {}
+    for prefix, items, call in sets:
+        for t in items:
+            name = f"{prefix}__{t['name']}"
+            tools.append({**t, "name": name})
+            route[name] = (call, t["name"])
+
+    def call(name: str, args: dict) -> str:
+        fn, tool = route[name]  # dispatch가 목록에 없는 이름은 먼저 거른다
+        return fn(tool, args)
+
+    return mcp_server.dispatch(
+        await mcp_server.read_payload(request), server_name="paas", tools=tools, call=call)

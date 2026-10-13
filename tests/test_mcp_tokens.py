@@ -311,3 +311,40 @@ def test_token_belongs_to_the_person_and_lists_what_it_opens(gitea_configured, m
     assert docs["url"] == "http://gpax.lge.com/paas/api/v1/mcp/docs"
     assert out["gateway_base_url"] == "http://gpax.lge.com/paas/api/v1"
     assert c.get(f"{API}/mcp/tokens/servers").status_code == 401
+
+
+def test_hub_serves_every_platform_tool_from_one_server(gitea_configured):
+    """데스크톱 도구는 서버마다 중계 프로세스가 하나라, 열댓 개를 따로 등록하면 일부가 시작하다 죽었다
+    (실측). 통합 서버 하나가 접두사를 붙여 전부 낸다 — 권한은 각 서버의 것을 그대로 탄다."""
+    c = gitea_configured
+    db = SessionLocal()
+    try:
+        mine, other = Organization(name="team-a"), Organization(name="team-b")
+        db.add_all([mine, other])
+        db.commit()
+        _user(db, "a@example.com", mine)
+        _project(db, "app-a", mine, "https://git.example.com/team-a/app-a")
+        _project(db, "app-b", other, "https://git.example.com/team-b/app-b")
+        token = issue_mcp_token(db, "a@example.com", "desktop", is_admin=False)
+    finally:
+        db.close()
+    auth = {"authorization": f"Bearer {token}"}
+
+    def rpc(method, params=None, headers=auth):
+        return c.post(f"{API}/mcp/hub", headers=headers,
+                      json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}).json()
+
+    tools = {t["name"]: t for t in rpc("tools/list")["result"]["tools"]}
+    assert {"docs__search_docs", "graph__find_nodes", "storage__list_files", "apis__search_apis",
+            "code__list_projects", "plan__list_tasks"} <= set(tools)
+    assert not any(n.startswith("ops__") for n in tools)          # 운영 도구는 관리자에게만
+    assert "docs__reindex_docs" not in tools                      # 대화와 같은 읽기 묶음
+    assert tools["plan__list_tasks"]["inputSchema"]["required"][0] == "project"
+
+    ok = rpc("tools/call", {"name": "plan__list_tasks", "arguments": {"project": "app-a"}})
+    assert "result" in ok, ok
+    refused = rpc("tools/call", {"name": "plan__list_tasks", "arguments": {"project": "app-b"}})
+    assert "error" in refused                                     # 남의 조직 과제는 열리지 않는다
+
+    admin_tools = {t["name"] for t in rpc("tools/list", headers=ADMIN)["result"]["tools"]}
+    assert any(n.startswith("ops__") for n in admin_tools)

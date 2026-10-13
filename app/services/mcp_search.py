@@ -83,9 +83,14 @@ def _entry(server_id: str, name: str, description: str, category: str, path: str
 
 
 def list_internal_servers(db: Session, key: ApiKey | None = None) -> list[dict]:
-    """지금 열 수 있는 사내 MCP 서버 전부."""
+    """지금 열 수 있는 사내 MCP 서버 전부. 맨 앞은 그 전부를 한 서버로 묶은 통합 서버다."""
     settings = get_settings()
     entries = [_entry(
+        "paas", "paas",
+        "플랫폼 MCP 전부를 한 서버로 — 문서·온톨로지·저장소 목록·API 카탈로그·코드·기획(과제 인자)·"
+        "운영(관리자). 데스크톱 도구에는 이것 하나만 등록하면 된다",
+        "hub", "/mcp/hub",
+    ), _entry(
         "paas-ops", "paas-ops",
         "운영 조회 — 배포 상태·이력·앱 로그·라우팅·포트 사용현황·호스트·감사(읽기 전용)",
         "ops", "/mcp/ops",

@@ -8,6 +8,9 @@ import Modal from './Modal';
 
 type Target = 'desktop' | 'code' | 'gateway';
 const TARGETS: [Target, string][] = [['desktop', 'Claude Desktop'], ['code', 'Claude Code'], ['gateway', '게이트웨이']];
+// 통합 서버(/mcp/hub) — 플랫폼 MCP 전부를 한 서버로. 데스크톱 도구는 서버마다 중계 프로세스가 하나라,
+// 열댓 개를 따로 등록하면 시작할 때 일부가 일찍 죽었다(실측). 기본은 이것 하나다.
+const HUB = 'paas';
 
 /**
  * MCP 접속 — **내 토큰**으로 플랫폼의 MCP 서버에 붙을 설정을 만든다.
@@ -25,6 +28,7 @@ export default function McpAccessModal({ initialProject, onClose }: {
   const tokens = useApi(() => api.listMcpTokens());
   const catalog = useApi(() => api.myMcpServers());
   const [label, setLabel] = useState('Claude Desktop — 내 PC');
+  const [bundle, setBundle] = useState(!initialProject);  // 과제 행에서 열면 그 과제의 기획 MCP를 따로
   const [skip, setSkip] = useState<Set<string>>(new Set());          // 뺄 공용 서버
   const [plans, setPlans] = useState<Set<string>>(new Set(initialProject ? [initialProject] : []));
   const [issued, setIssued] = useState<{ token: string; servers: McpServerRef[]; gateway: string } | null>(null);
@@ -39,11 +43,13 @@ export default function McpAccessModal({ initialProject, onClose }: {
     setError('');
     try {
       const out = await api.createMcpToken(label.trim() || 'MCP 토큰');
-      const servers: McpServerRef[] = [
-        ...catalog.data.servers.filter((s) => !skip.has(s.name)),
-        ...catalog.data.projects.filter((p) => plans.has(p.name) && p.url)
-          .map((p) => ({ name: `paas-plan-${p.name}`, url: p.url })),
-      ];
+      const servers: McpServerRef[] = bundle
+        ? catalog.data.servers.filter((s) => s.name === HUB)
+        : [
+          ...catalog.data.servers.filter((s) => s.name !== HUB && !skip.has(s.name)),
+          ...catalog.data.projects.filter((p) => plans.has(p.name) && p.url)
+            .map((p) => ({ name: `paas-plan-${p.name}`, url: p.url })),
+        ];
       setIssued({ token: out.token, servers, gateway: out.gateway_base_url || catalog.data.gateway_base_url });
       tokens.reload();
     } catch (e) {
@@ -95,9 +101,25 @@ export default function McpAccessModal({ initialProject, onClose }: {
                   토큰 이름 (어느 PC·도구에 넣는지 — 폐기할 때 고릅니다)
                   <input value={label} onChange={(e) => setLabel(e.target.value)} style={{ width: '100%' }} />
                 </label>
+                <div className="row" style={{ gap: 12, fontSize: 13, margin: '8px 0 4px' }}>
+                  <label>
+                    <input type="radio" checked={bundle} onChange={() => setBundle(true)} /> 하나로 묶기(권장)
+                  </label>
+                  <label>
+                    <input type="radio" checked={!bundle} onChange={() => setBundle(false)} /> 서버별로
+                  </label>
+                </div>
+                {bundle ? (
+                  <p className="mutedtext" style={{ fontSize: 12 }}>
+                    <span className="mono">paas</span> 서버 하나에 문서·온톨로지·저장소 목록·API 카탈로그·코드·기획
+                    (과제 이름을 인자로)·운영(관리자)이 모두 들어 있습니다. 데스크톱 도구는 서버마다 중계 프로세스가
+                    하나라, 따로 등록하면 시작할 때 일부가 실패할 수 있습니다.
+                  </p>
+                ) : (
+                <>
                 <div style={{ fontSize: 13, margin: '8px 0 4px' }}>등록할 서버</div>
                 <div style={{ maxHeight: 160, overflow: 'auto', fontSize: 12 }}>
-                  {c.servers.map((s) => (
+                  {c.servers.filter((s) => s.name !== HUB).map((s) => (
                     <label key={s.name} style={{ display: 'block' }} title={s.description}>
                       <input type="checkbox" checked={!skip.has(s.name)}
                         onChange={() => toggle(skip, s.name, setSkip)} />{' '}
@@ -120,6 +142,8 @@ export default function McpAccessModal({ initialProject, onClose }: {
                       ))}
                     </div>
                   </>
+                )}
+                </>
                 )}
                 {!c.base_url && (
                   <p className="error" style={{ fontSize: 12 }}>
@@ -201,8 +225,19 @@ function Guide({ target, os }: { target: Target; os: DesktopOs }) {
             {os === 'windows' ? '%APPDATA%\\Claude\\claude_desktop_config.json' : '~/Library/Application Support/Claude/claude_desktop_config.json'}
           </span>
           을 엽니다. 이미 <span className="mono">mcpServers</span>가 있으면 그 안에 항목만 더합니다.
+          {os === 'windows' && (
+            <> Microsoft Store로 설치했으면 파일이{' '}
+              <span className="mono">%LOCALAPPDATA%\Packages\Claude_…\LocalCache\Roaming\Claude\</span> 아래에
+              있습니다 — 「설정 편집」이 여는 파일이 맞는 파일입니다.</>
+          )}
         </li>
         <li>Claude Desktop을 트레이(메뉴 막대)에서 완전히 종료한 뒤 다시 엽니다.</li>
+        <li>
+          연결되지 않으면 로그를 봅니다:{' '}
+          <span className="mono">
+            {os === 'windows' ? '%LOCALAPPDATA%\\Claude\\logs\\mcp-server-paas.log' : '~/Library/Logs/Claude/mcp-server-paas.log'}
+          </span>
+        </li>
         <li className="mutedtext">
           앱의 「커스텀 커넥터」로는 등록하지 않습니다 — 그 연결은 Anthropic 쪽에서 나가서 사내 주소에 닿지
           않고, 토큰 헤더도 받지 않습니다. 여기 설정은 PC의 mcp-remote가 중계합니다.

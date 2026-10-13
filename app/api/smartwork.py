@@ -16,7 +16,6 @@ from sqlalchemy.orm import Session
 
 from .. import audit
 from ..db import get_db
-from ..features import is_enabled
 from ..models import ApiKey, LlmProvider
 from ..security import require_api_key
 from ..services import bedrock, doctext, msgraph, personal, smartwork, worksession
@@ -45,45 +44,9 @@ def list_department_workflows(db: Session = Depends(get_db),
 
 # --- 대화 ---
 
-# 대화가 쓰는 사내 MCP 도구는 **읽기**만 고른다. 색인 다시 돌리기·카탈로그 동기화·주기
-# 작업 실행은 대화 한 줄로 일어날 일이 아니다 — 그건 각 메뉴에서 사람이 누른다.
-_EXCLUDED = {"reindex_docs", "sync_catalog", "run_scheduled_job"}
-
-# 저장소 서버(/mcp/storage/{저장소})는 저장소마다 따로라, 대화에는 목록 보기 하나만
-# source 인자를 붙여 얹는다. 검색·읽기는 docs 도구가 저장소를 가로질러 이미 한다.
-_STORAGE_LIST_TOOL = {
-    **mcp._STORAGE_READ_TOOLS[0],
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "source": {"type": "string", "description": "저장소 이름(docs__list_sources 값)"},
-            **mcp._STORAGE_READ_TOOLS[0]["inputSchema"]["properties"],
-        },
-        "required": ["source"],
-    },
-}
-
-
-def _read_only(tools: list[dict]) -> list[dict]:
-    return [t for t in tools if t["name"] not in _EXCLUDED]
-
-
 def _toolsets(db: Session, key: ApiKey) -> list[smartwork.Toolset]:
-    actor = key.name
-    sets: list[smartwork.Toolset] = [
-        ("docs", _read_only(mcp._DOCS_TOOLS), lambda n, a: mcp._docs_call(db, actor, n, a, key=key)),
-        ("graph", mcp._GRAPH_TOOLS, lambda n, a: mcp._graph_call(n, a, db=db, key=key)),
-        ("storage", [_STORAGE_LIST_TOOL], lambda n, a: mcp._storage_call(
-            db, actor, mcp._doc_source(str(a.get("source", "")), db, key), n, a)),
-        ("apis", _read_only(mcp._APIS_TOOLS), lambda n, a: mcp._apis_call(db, actor, n, a)),
-    ]
-    if is_enabled("workspace"):
-        # 프로젝트별 접근 검사는 코드 서버의 것을 그대로 탄다(남의 조직 코드는 안 읽힌다).
-        sets.append(("code", mcp._CODE_TOOLS, lambda n, a: mcp._code_dispatch(db, key, n, a)))
-    if key.is_admin and is_enabled("deploy"):
-        # 운영 도구는 조직을 가리지 않고 로그·감사를 보여 준다 — 관리자에게만 붙인다.
-        sets.append(("ops", _read_only(mcp._OPS_TOOLS), lambda n, a: mcp._ops_call(db, actor, n, a)))
-    return sets
+    # 대화가 쓰는 사내 도구 묶음 — 통합 MCP 서버(/mcp/hub)와 같은 것이다(api/mcp_servers.agent_toolsets).
+    return mcp.agent_toolsets(db, key)
 
 
 def _session_error(e: worksession.SessionError) -> HTTPException:
