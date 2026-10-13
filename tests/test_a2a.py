@@ -30,7 +30,8 @@ def test_card_normalizes_type_into_skills():
     _module(c, name="orders-db", type="database")
     card = c.get("/paas/api/v1/a2a/agents/orders-db/card", headers=ADMIN).json()
     assert card["agent_name"] == "orders-db"
-    assert card["skills"] == ["execute_query", "inspect_schema"]
+    # DB는 능력을 내세우지 않는다 — 중계할 URL이 없어 부르면 늘 실패했다(읽는 길은 /mcp/db).
+    assert card["skills"] == []
     # 분류 태그는 capabilities에 남고, 호출 가능한 verb는 skills에만 있다
     assert "capability.database" in card["capabilities"]
     assert "scope.general" in card["capabilities"]
@@ -154,15 +155,15 @@ def test_relay_attaches_target_credential_and_never_returns_it(monkeypatch):
 
 def test_build_openai_tools_exposes_one_tool_per_agent_with_skill_enum():
     cards = [
-        {"agent_name": "orders-db", "type": "database", "description": "주문 DB",
-         "skills": ["execute_query", "inspect_schema"]},
+        {"agent_name": "orders-db", "type": "database", "description": "주문 DB", "skills": []},
         {"agent_name": "mail-svc", "type": "external_api", "description": "메일",
          "skills": ["invoke_api", "fetch_data"]},
     ]
     tools, registry = a2a_service.build_openai_tools(cards)
-    assert [t["function"]["name"] for t in tools] == ["a2a__orders-db", "a2a__mail-svc"]
+    # 능력이 없는 카드는 도구가 되지 않는다 — 빈 enum은 프로바이더가 요청째 거부한다.
+    assert [t["function"]["name"] for t in tools] == ["a2a__mail-svc"]
     params = tools[0]["function"]["parameters"]
-    assert params["properties"]["capability"]["enum"] == ["execute_query", "inspect_schema"]
+    assert params["properties"]["capability"]["enum"] == ["invoke_api", "fetch_data"]
     assert params["required"] == ["capability"]
     assert registry["a2a__mail-svc"]["agent_name"] == "mail-svc"
 

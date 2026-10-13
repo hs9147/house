@@ -1167,6 +1167,15 @@ export interface AgentProfile {
   reviewed_at: string;
 }
 
+/** 이 프로젝트의 공용 DB(services/shareddb) — 비밀번호는 내려오지 않는다. */
+export interface ProjectSharedDb {
+  configured: boolean;
+  bound: boolean;
+  env_key: string;
+  common_db: string;
+  databases: { profile: string; db_name: string; common_write: boolean; created_at: string }[];
+}
+
 /** release_sha가 비면 에이전트가 아니다(release로 떠 있지 않다). */
 export interface AgentProfileState {
   release_sha: string;

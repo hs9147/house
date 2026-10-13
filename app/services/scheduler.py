@@ -39,6 +39,7 @@ DEFAULT_INTERVALS = {
     JobKind.doc_index: 900,
     JobKind.mcp_probe: 600,
     JobKind.api_probe: 600,
+    JobKind.db_backup: 86_400,
 }
 
 _lock = threading.Lock()
@@ -64,6 +65,14 @@ def _wanted(db: Session) -> list[tuple[JobKind, str]]:
             wanted.append((JobKind.mcp_probe, module.name))
         elif module.type == ModuleType.external_api:
             wanted.append((JobKind.api_probe, module.name))
+    from . import shareddb  # noqa: PLC0415
+
+    if shareddb.configured():
+        # 플랫폼이 만든 DB마다 야간 백업 — 지운 프로젝트의 DB도 남아 있는 한 백업한다(지우지 않으니까).
+        from ..models import SharedDatabase  # noqa: PLC0415
+
+        for row in db.execute(select(SharedDatabase).order_by(SharedDatabase.db_name)).scalars():
+            wanted.append((JobKind.db_backup, row.db_name))
     return wanted
 
 
@@ -141,6 +150,14 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
         result = apisearch.sync_catalog(db)
         changed = result["added"] + result["updated"] + result["removed"]
         return (JobStatus.ok if changed else JobStatus.skipped), result
+
+    if job.kind == JobKind.db_backup:
+        from . import shareddb  # noqa: PLC0415
+
+        try:
+            return JobStatus.ok, shareddb.backup(db, job.target)
+        except shareddb.SharedDbError as e:
+            return JobStatus.failed, {"error": str(e)}
 
     if job.kind == JobKind.doc_index:
         store = storage.store(job.target)

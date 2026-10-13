@@ -192,7 +192,8 @@ def resolve_env(db: Session, project: Project, profile: BuildProfile) -> dict[st
     from . import modules  # noqa: PLC0415 — 순환 import 회피
 
     env = dict(PROFILES[profile].env)
-    env.update(modules.env_for_project(db, project))  # 바인딩된 Module 자동 주입
+    # 바인딩된 Module 자동 주입 — 프로필을 넘겨야 「공용 DB」가 운영·개발 각자의 DB를 받는다.
+    env.update(modules.env_for_project(db, project, profile))
     rows = db.execute(select(EnvVar).where(EnvVar.project_id == project.id)).scalars()
     for row in rows:
         env[row.key] = decrypt_value(row.value_encrypted)  # 프로젝트 EnvVar가 최우선

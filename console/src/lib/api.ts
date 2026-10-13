@@ -1,6 +1,7 @@
 import { getKey, logout } from './auth';
 import type {
   AgentProfileState,
+  ProjectSharedDb,
   ApiKeyIssued,
   ApiCatalogStatus,
   ApiCategory,
@@ -610,6 +611,11 @@ export const api = {
     request<AgentProfileState>('GET', `/projects/${projectId}/agent-profile`),
   reviewAgentProfile: (projectId: number) =>
     request<AgentProfileState>('POST', `/projects/${projectId}/agent-profile/review`),
+  // 공용 DB — 이 앱의 DB 목록과 공용 자료 쓰기 권한(관리자).
+  projectSharedDb: (projectId: number) =>
+    request<ProjectSharedDb>('GET', `/projects/${projectId}/shared-db`),
+  setCommonWrite: (projectId: number, on: boolean) =>
+    request<ProjectSharedDb>('POST', `/projects/${projectId}/shared-db/common-write`, { on }),
   smartworkAgents: () => request<SmartworkAgent[]>('GET', '/smartwork/agents'),
   // 업무 제안의 근거 — 소속 조직(부서)의 워크플로
   smartworkWorkflows: () => request<DepartmentWorkflow[]>('GET', '/smartwork/workflows'),

@@ -114,8 +114,15 @@ def mcp_servers_for_project(db: Session, project: Project) -> list[dict]:
     return servers
 
 
-def env_for_project(db: Session, project: Project) -> dict[str, str]:
-    """프로젝트에 바인딩된 모든 모듈의 환경변수를 모은다 (배포 시 자동 주입)."""
+def env_for_project(db: Session, project: Project,
+                    profile: BuildProfile | None = None) -> dict[str, str]:
+    """프로젝트에 바인딩된 모든 모듈의 환경변수를 모은다 (배포 시 자동 주입).
+
+    profile을 주면(배포) 「공용 DB」는 이 프로젝트·프로필 전용 DB의 주소가 된다 — 없으면 그
+    자리에서 만든다(services/shareddb.provision). 주지 않으면(키 이름만 볼 때) 빈 값이다.
+    """
+    from . import shareddb  # noqa: PLC0415 — 순환 import 회피
+
     rows = db.execute(
         select(ModuleBinding, Module)
         .join(Module, ModuleBinding.module_id == Module.id)
@@ -123,6 +130,10 @@ def env_for_project(db: Session, project: Project) -> dict[str, str]:
     ).all()
     env: dict[str, str] = {}
     for binding, module in rows:
+        if shareddb.is_shared(module):
+            key = f"{binding.env_prefix.upper()}_DSN"
+            env[key] = shareddb.dsn(shareddb.provision(db, project, profile)) if profile else ""
+            continue
         env.update(binding_env(module, binding.env_prefix, db=db))
     return env
 
@@ -134,18 +145,24 @@ def available_resources(db: Session, project: Project) -> list[dict]:
     organization_id가 없는 모듈은 전역(모든 프로젝트에 노출), 있는 모듈은 같은
     조직 소속 프로젝트에만 노출된다("조직별 db" 등 조직 전용 자원).
     """
+    from . import shareddb  # noqa: PLC0415 — 순환 import 회피
+
     rows = db.execute(select(Module).order_by(Module.type, Module.category, Module.name)).scalars()
     result = []
     for m in rows:
         if m.organization_id is not None and m.organization_id != project.organization_id:
             continue
-        result.append({
+        item = {
             "id": m.id,
             "name": m.name,
             "type": m.type.value,
             "category": m.category,
             "scope": "org" if m.organization_id is not None else "global",
-        })
+        }
+        if shareddb.is_shared(m):
+            # 이름·종류만으로는 어떻게 쓰는지 모른다 — 앱을 짓는 쪽이 알아야 하는 사실을 싣는다.
+            item["usage"] = shareddb.USAGE
+        result.append(item)
     return result
 
 

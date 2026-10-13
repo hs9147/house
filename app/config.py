@@ -294,6 +294,21 @@ class Settings(BaseSettings):
     # 사람이 기다리는 요청이므로 무한정 두지는 않는다 — 콘솔의 진행 팝업에서 취소할 수 있다.
     llm_timeout_seconds: int = 600
 
+    # --- 공용 DB (services/shareddb.py · infra/postgres/README.md) ---
+    # 같은 서버에 띄운 PostgreSQL의 **관리 계정** — SQLAlchemy URL. 이 계정은 슈퍼유저가 아니라
+    # CREATEDB·CREATEROLE만 가진다(플랫폼이 할 일은 앱마다 DB와 계정을 만드는 것뿐이다).
+    # 예: postgresql+psycopg://paas_admin:...@127.0.0.1:5432/postgres
+    # 비우면 공용 DB가 꺼진다 — 「공용 DB」 모듈이 생기지 않고, 기획 에이전트에도 보이지 않는다.
+    shared_db_admin_url: str = ""
+    # 앱에 넣어 줄 접속 주소의 호스트. 비우면 관리 URL의 호스트를 쓴다 — 앱이 플랫폼과 같은
+    # 서버에서 돌면 그대로 맞다(127.0.0.1). 앱이 다른 곳(컨테이너 등)에서 돌 때만 채운다.
+    shared_db_app_host: str = ""
+    # 야간 백업(pg_dump) 자리와 DB마다 남길 개수. 비우면 work_dir/db-backups.
+    shared_db_backup_dir: str = ""
+    shared_db_backup_keep: int = 7
+    # pg_dump 실행 파일 — 비우면 PATH에서 찾는다(예: C:\Program Files\PostgreSQL\17\bin\pg_dump.exe).
+    pg_dump_path: str = ""
+
     # --- 관측 (services/telemetry.py) ---
     # OpenTelemetry 수집기(OTLP/HTTP)의 주소. **비어 있으면 내보내기를 아예 켜지 않는다** —
     # 기본값(localhost:4318)으로 켜면 수집기가 없는 환경에서 호출마다 조용히 재시도하며

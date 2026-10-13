@@ -15,7 +15,10 @@ from .modules import decrypt_config, binding_env
 # 타입별 호출 가능한 능력(verb). capability.* / scope.* 는 분류 태그일 뿐이라 여기 넣지 않는다 —
 # 도구로 노출되는 것은 이 목록뿐이다.
 SKILLS_BY_TYPE = {
-    "database": ["execute_query", "inspect_schema"],
+    # database는 능력을 내세우지 않는다 — execute_task는 모듈의 URL로 HTTP를 중계할 뿐이고 DB
+    # 모듈에는 URL이 없어, 내세운 execute_query·inspect_schema는 부르면 늘 실패했다. DB를 읽는
+    # 길은 DB 조회 MCP 서버(/mcp/db/{모듈}, SELECT 전용)다.
+    "database": [],
     "external_api": ["invoke_api", "fetch_data"],
     "llm": ["chat_completion"],
 }
@@ -152,6 +155,10 @@ def build_openai_tools(cards: list[dict]) -> tuple[list[dict], dict[str, dict]]:
     tools: list[dict] = []
     registry: dict[str, dict] = {}
     for card in cards:
+        # 부를 능력이 없는 카드(database)는 도구로 내지 않는다 — 빈 enum은 잘못된 스키마라
+        # 프로바이더가 요청 전체를 거부한다.
+        if not card["skills"]:
+            continue
         fn_name = "a2a__" + re.sub(r"[^a-zA-Z0-9_-]", "_", card["agent_name"])
         tools.append({
             "type": "function",

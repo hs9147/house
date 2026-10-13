@@ -594,7 +594,15 @@ def build_constraints(db: Session, project: Project) -> dict:
         ],
         "bound_agents": a2a_service.list_project_a2a_cards(db, project),
         "available_resources": modules_service.available_resources(db, project),
+        # 공용 DB에 이미 있는 표 — 있는 기준 정보를 다시 만들지 않고 읽어 쓰게(services/shareddb).
+        "shared_db_schema": _shared_db_schema(db, project),
     }
+
+
+def _shared_db_schema(db: Session, project: Project) -> str:
+    from . import shareddb  # noqa: PLC0415 — 순환 import 회피
+
+    return shareddb.schema_summary(db, project) if shareddb.configured() else ""
 
 
 def render_constraints_doc(constraints: dict) -> str:
@@ -626,4 +634,7 @@ def render_constraints_doc(constraints: dict) -> str:
         lines += ["", "```json", json.dumps(resources, indent=2, ensure_ascii=False), "```"]
     else:
         lines.append("- (가용 자원 없음)")
+    schema = constraints.get("shared_db_schema") or ""
+    if schema:
+        lines += ["", "## 공용 DB에 이미 있는 표 (공용 자료는 읽기만 — 다시 만들지 말고 읽어 쓴다)", schema]
     return "\n".join(lines) + "\n"

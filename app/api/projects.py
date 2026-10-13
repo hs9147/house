@@ -56,7 +56,7 @@ from ..security import (
 from ..services import build as build_module
 from ..services import llm as llm_service
 from ..services import (
-    agentreview, deploycheck, deploydiag, deployer, gitea, startscript, structure, upload,
+    agentreview, deploycheck, shareddb, deploydiag, deployer, gitea, startscript, structure, upload,
     workspace,
 )
 from ..services.build import checkout
@@ -312,6 +312,8 @@ def delete_project(
     for model in (ChatSession, Deployment, EnvVar, ModuleBinding, RedirectRule,
                   PreviewSession, PortAllocation, AgentProfile):
         db.execute(sa_delete(model).where(model.project_id == project_id))
+    # 공용 DB는 지우지 않는다 — 데이터는 되돌릴 수 없다. 주인만 비우고 이름은 남긴다.
+    shareddb.detach_project(db, project_id)
     db.delete(project)
     db.commit()
 

@@ -8,8 +8,8 @@ from starlette.staticfiles import StaticFiles
 from .api import (
     a2a_gateway, llm, mcp_servers,
     mcp_tokens, modules, oidc_provider, orgs, planning, previews, projects,
-    ontology, proxy_gateway, server, smartwork, sources, storage, system, telemetry,
-    webhooks, workflows,
+    ontology, proxy_gateway, server, shared_db, smartwork, sources, storage, system,
+    telemetry, webhooks, workflows,
 )
 from .config import get_settings
 from .db import Base, engine
@@ -48,6 +48,22 @@ def _make_console_output_safe() -> None:
             pass
 
 
+def _ensure_shared_db_module() -> None:
+    """공용 DB가 설정돼 있으면 「공용 DB」 모듈을 둔다 — 기획 에이전트의 가용 자원에 보이게.
+
+    DB 서버에 붙지는 않는다(모듈 행만 만든다) — 서버가 내려가 있어도 플랫폼은 뜬다. 실제 DB는
+    그 모듈을 바인딩한 프로젝트를 배포할 때 만든다(services/shareddb.provision).
+    """
+    from .db import SessionLocal  # noqa: PLC0415
+    from .services import shareddb  # noqa: PLC0415
+
+    try:
+        with SessionLocal() as db:
+            shareddb.ensure_module(db)
+    except Exception as e:  # noqa: BLE001
+        print(f"[paas] 공용 DB 모듈을 만들지 못했습니다(무시): {e}")
+
+
 def _warn_if_schema_is_behind() -> None:
     """빠진 컬럼을 기동할 때 이름으로 말해 준다(판정은 services/schemacheck).
 
@@ -74,6 +90,7 @@ def create_app() -> FastAPI:
     from .services.storage import bootstrap_legacy_stores  # noqa: PLC0415
     bootstrap_legacy_stores()
     _warn_if_schema_is_behind()
+    _ensure_shared_db_module()
 
     if not settings.admin_api_key:
         # 부트스트랩 편의용 — 운영에서는 PAAS_ADMIN_API_KEY를 고정할 것
@@ -125,6 +142,7 @@ def create_app() -> FastAPI:
     app.include_router(system.router, prefix=API_PREFIX)
     # 작업 로그의 숫자 — LLM 호출 기록을 모아 센다(admin 전용, system.audit_log 옆자리).
     app.include_router(telemetry.router, prefix=API_PREFIX)
+    app.include_router(shared_db.router, prefix=API_PREFIX)
     # 스마트워크 — 모든 사용자에게 열린 메뉴(대화 + 대시보드·에이전트·보고서, 개인 업무 맥락)
     app.include_router(smartwork.router, prefix=API_PREFIX)
     app.include_router(projects.router, prefix=API_PREFIX)

@@ -63,7 +63,7 @@ from ..security import (accessible_document_stores, require_agent_key,
                         require_document_store, require_project_mcp_access)
 from ..services import apisearch
 from ..services import codemap as codemap_service
-from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, workspace
+from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, shareddb, workspace
 from ..services import modules as modules_service
 from ..services import structure
 from ..services import storage as storage_service
@@ -1072,6 +1072,10 @@ async def db_mcp_server(
     allowed = {
         n.strip() for n in get_settings().mcp_db_modules.split(",") if n.strip()
     }
+    # 「공용 DB」는 목록 없이 연다 — 열리는 것은 여러 앱이 함께 쓰라고 둔 공용 자료 DB이고,
+    # 그 계정 자체가 읽기만 한다(services/shareddb.reader_url). 앱마다의 DB는 여기서 열리지 않는다.
+    if shareddb.configured() and module_name == shareddb.MODULE_NAME:
+        allowed.add(module_name)
     if module_name not in allowed:
         raise HTTPException(
             status_code=403,
@@ -1104,15 +1108,22 @@ def _require_select_only(sql: str) -> str:
     return body
 
 
-def _db_engine(module: Module):
+def _db_engine(db: Session, module: Module):
     """모듈에 등록된 DSN으로 엔진을 만든다 — 호출마다 만들고 쓰고 버린다(NullPool).
 
     드라이버(psycopg 등)는 선택 의존성이다. 없으면 무엇을 설치해야 하는지 알려 준다.
+    「공용 DB」 모듈은 등록된 DSN이 없다 — 공용 자료 DB를 읽기 전용 계정으로 연다.
     """
     from sqlalchemy import create_engine  # noqa: PLC0415
     from sqlalchemy.pool import NullPool  # noqa: PLC0415
 
-    dsn = modules_service.decrypt_config(module.config or {}).get("dsn", "")
+    if shareddb.is_shared(module):
+        try:
+            dsn = shareddb.reader_url(db)
+        except shareddb.SharedDbError as e:
+            raise mcp_server.McpToolError(str(e))
+    else:
+        dsn = modules_service.decrypt_config(module.config or {}).get("dsn", "")
     if not dsn:
         raise mcp_server.McpToolError(f"모듈 '{module.name}'에 dsn이 없습니다.")
     try:
@@ -1125,7 +1136,7 @@ def _db_engine(module: Module):
 
 
 def _db_call(db: Session, actor: str, module: Module, name: str, args: dict) -> str:
-    engine = _db_engine(module)
+    engine = _db_engine(db, module)
     try:
         if name == "list_tables":
             return _dump(sorted(sa_inspect(engine).get_table_names()))

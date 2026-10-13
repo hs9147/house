@@ -549,6 +549,7 @@ class JobKind(str, enum.Enum):
     doc_index = "doc_index"      # 문서 색인 + 온톨로지(services/docsearch.reindex)
     mcp_probe = "mcp_probe"      # mcp 모듈이 실제로 응답하는지(services/mcp_client)
     api_probe = "api_probe"      # external_api 모듈 주소가 살아 있는지
+    db_backup = "db_backup"      # 공용 DB의 DB 하나를 pg_dump로 백업(services/shareddb.backup)
 
 
 class JobStatus(str, enum.Enum):
@@ -739,6 +740,32 @@ class LlmCallLog(Base):
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # OpenTelemetry 트레이스 — 나중에 수집기를 붙이면 같은 호출을 양쪽에서 맞춰 볼 수 있다.
     trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class SharedDatabase(Base):
+    """공용 DB 서버에 플랫폼이 만든 DB 하나와 그 계정(services/shareddb).
+
+    프로젝트마다·프로필(운영·개발)마다 하나다 — database 모듈 하나로 등록하면 모든 앱이 같은 DB에
+    같은 계정으로 붙어 서로의 표를 읽고 지울 수 있다. 비밀번호는 플랫폼이 만들어 암호화해 둔다.
+
+    **지우지 않는다.** 프로젝트를 지우면 project_id만 비우고 행과 DB는 남긴다(데이터는 되돌릴 수
+    없다) — project_name이 무엇의 DB였는지 남긴다. 공용 자료 DB(paas_common)의 읽기 계정도 이 표에
+    profile="common"으로 둔다(DB 조회 MCP가 그 계정으로 읽는다).
+    """
+
+    __tablename__ = "shared_databases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    project_name: Mapped[str] = mapped_column(String(64), default="")
+    profile: Mapped[str] = mapped_column(String(16))  # release | development | common
+    db_name: Mapped[str] = mapped_column(String(63), unique=True)
+    role_name: Mapped[str] = mapped_column(String(63), unique=True)
+    password_encrypted: Mapped[str] = mapped_column(Text)
+    # 공용 자료 DB에 쓸 수 있는가 — 기본은 읽기만. 관리자가 그 자료를 맡은 프로젝트에만 켠다.
+    common_write: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class LlmCallDetail(Base):
