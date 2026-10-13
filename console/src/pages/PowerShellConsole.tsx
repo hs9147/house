@@ -10,7 +10,8 @@ export default function PowerShellConsole() {
   const me = useApi(() => api.me());
   // 돌고 있는 커밋 — SW 업데이트 직후 "정말 반영됐나"를 여기서 바로 본다.
   const health = useApi(() => api.health());
-  const [activeTab, setActiveTab] = useState<'terminal' | 'console' | 'server_logs'>('terminal');
+  // 터미널(PTY) 버튼은 숨겼다 — 처음 여는 탭은 명령 실행이다(터미널 화면 코드는 남겨 둔다).
+  const [activeTab, setActiveTab] = useState<'terminal' | 'console' | 'server_logs'>('console');
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [inputCmd, setInputCmd] = useState('');
@@ -222,7 +223,7 @@ export default function PowerShellConsole() {
             ⚡ PowerShell & 서버 로그
           </h2>
           <p className="mutedtext" style={{ margin: '4px 0 0 0', fontSize: 12 }}>
-            관리자 권한 PowerShell 프롬프트 터미널과 서버 로그를 조회합니다.
+            관리자 권한 PowerShell 명령 실행과 서버 로그를 조회합니다.
             {/* SW 업데이트가 실제로 반영됐는지는 이 값으로 확인한다 — 백엔드가 기동할 때
                 읽은 커밋이라 디스크가 아니라 돌고 있는 쪽을 말한다. */}
             {health.data?.revision && (
@@ -262,14 +263,8 @@ export default function PowerShellConsole() {
         )}
       </div>
 
-      {/* Tab Nav Selector: PowerShell 콘솔 -> 서버 로그 순서 */}
+      {/* 버튼 순서: 명령 실행 → SW 업데이트 → 백엔드 재시작 → 서버 로그. 터미널(PTY) 버튼은 숨겼다. */}
       <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', paddingBottom: 8 }}>
-        <button
-          className={activeTab === 'terminal' ? 'primary small' : 'secondary small'}
-          onClick={() => setActiveTab('terminal')}
-        >
-          ▶ 터미널
-        </button>
         <button
           className={activeTab === 'console' ? 'primary small' : 'secondary small'}
           onClick={() => setActiveTab('console')}
@@ -277,7 +272,7 @@ export default function PowerShellConsole() {
           ⚡ 명령 실행 (한 줄)
         </button>
         {/*
-          탭이 아니라 동작이다. 탭 줄에 두는 것은 자리 때문이고, 그래서 탭과 같은
+          SW 업데이트·백엔드 재시작은 탭이 아니라 동작이다. 그래서 탭과 같은
           `primary/secondary` 전환을 쓰지 않는다 — 눌린 탭처럼 보이면 안 된다.
 
           엔드포인트가 `require_admin`이라 관리자에게만 보인다. 아니면 눌러야 403을 안다.
