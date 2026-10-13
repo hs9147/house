@@ -602,6 +602,38 @@ _SOURCES = {"graph": "온톨로지", "apis": "API 카탈로그", "code": "코드
             "dept": "부서 워크플로", "ops": "운영"}
 
 
+# 도구 → 사람이 읽는 단계 이름(대화에 "진행 과정"으로 보인다). 인자 하나를 덧붙일 키.
+_STEP_LABELS = {
+    "docs__search_docs": ("사내 문서 검색", "query"), "docs__read_doc": ("사내 문서 읽기", "path"),
+    "graph__find_nodes": ("온톨로지 찾기", "query"), "apis__search_apis": ("API 카탈로그 검색", "keyword"),
+    "storage__list_files": ("파일 저장소 보기", "path"), "dept__workflows": ("부서 워크플로 확인", ""),
+    "show_report": ("결과 작성", "title"), "show_agent": ("에이전트 열기", "name"),
+    "make_file": ("파일 만들기", "name"), "ask_user": ("확인 질문 준비", ""),
+    "suggest_tasks": ("할 일 제안 정리", ""), "open_file": ("내 문서 열기", ""),
+    "show_web": ("웹 페이지 준비", "url"),
+}
+# 개인 자료 도구는 인자를 싣지 않는다 — 공유 세션에서는 다른 참여자도 진행 과정을 본다. 검색어와
+# 파일 이름이 남에게 보이면 개인 업무 맥락이 새는 것이다(개인 맥락은 그 사람만 본다).
+_PERSONAL_STEPS = {"my__search": "내 문서·메일 검색", "my__read": "내 문서 읽기",
+                   "my__recent": "최근 메일·문서 확인", "my__sources": "내 업무 맥락 확인"}
+
+
+def step_label(tool: str, args: dict) -> str:
+    """도구 호출 하나 → 진행 과정의 한 줄. 모르는 도구는 접두사의 자료 이름으로."""
+    if tool in _PERSONAL_STEPS:
+        return _PERSONAL_STEPS[tool]
+    if tool.startswith("my__"):
+        return "내 업무 맥락 확인"
+    label, key = _STEP_LABELS.get(tool, (_SOURCES.get(tool.partition("__")[0], "") or tool, ""))
+    if not key:
+        # 같은 자료의 다른 도구(코드 읽기 등) — 대상 하나만 덧붙인다
+        key = next((k for k in ("query", "path", "keyword", "name") if args.get(k)), "")
+    value = str(args.get(key) or "").strip() if key else ""
+    if key == "url" and value:
+        value = re.sub(r"^https?://([^/]+).*$", r"\1", value)  # 주소 전체가 아니라 사이트만
+    return f"{label} — {value[:60]}" if value else label
+
+
 def _source_of(tool: str, args: dict) -> str:
     prefix, sep, _ = tool.partition("__")
     if not sep:
@@ -919,7 +951,8 @@ def _clean_history(history: list[dict], shared: bool = False) -> list[dict]:
 def chat(db: Session, key: ApiKey, provider, history: list[dict],
          toolsets: list[Toolset], *, org_id: int | None = None, workflow: str = "",
          participants: list[str] | None = None, folders: list[str] | None = None,
-         mail: bool = False, images: list[str] | None = None) -> dict:
+         mail: bool = False, images: list[str] | None = None,
+         on_step: Callable[[str], None] | None = None) -> dict:
     """대화 한 턴. history의 마지막이 이번 사용자 메시지다 — 비어 있으면 여는 턴이다.
 
     세션 맥락: org_id·workflow(이름)는 소유자가 고른 업무, participants는 공유 참여자,
@@ -966,6 +999,8 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
 
     def execute(fn_name: str, args: dict) -> str:
         used.append(fn_name)
+        if on_step is not None:
+            on_step(step_label(fn_name, args))
         if fn_name == "show_agent":
             found = by_name.get(str(args.get("name", "")))
             if found is None:

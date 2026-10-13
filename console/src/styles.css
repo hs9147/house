@@ -342,6 +342,12 @@ pre.logbox {
 .chat-msg { padding: 10px 14px; border-radius: 10px; max-width: 85%; white-space: pre-wrap; }
 .chat-msg.user { align-self: flex-end; background: rgba(74, 108, 247, 0.2); }
 .chat-msg.assistant { align-self: flex-start; background: rgba(255, 255, 255, 0.06); }
+/* 답을 만드는 동안의 단계 — 답보다 작고 옅게(답과 헷갈리지 않게). */
+.chat-msg.chat-step { padding: 4px 10px; font-size: 12px; color: var(--muted); background: transparent;
+                      border: 1px dashed var(--border-soft); }
+.chat-steps { font-size: 12px; color: var(--muted); margin-bottom: 6px; white-space: normal; }
+.chat-steps summary { cursor: pointer; }
+.chat-steps ol { margin: 4px 0 0; padding-left: 18px; }
 
 /* 스마트워크 오른쪽 화면 — 에이전트 앱·HTML 보고서를 창 높이만큼 띄운다. */
 .smartwork-frame { display: block; width: 100%; height: calc(100vh - 190px); min-height: 420px;

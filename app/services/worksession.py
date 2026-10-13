@@ -6,6 +6,8 @@
 개인 맥락(폴더·메일)은 **각자 자기 것만** 이 세션에 고른다 — 소유자도 남의 선택은 못
 바꾸고, 말할 때 붙는 개인 도구는 말한 사람 자신의 저장소뿐이다(smartwork.personal_toolset).
 """
+import threading
+
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
@@ -205,6 +207,43 @@ def set_context(db: Session, email: str, session_id: int, folders: list[str], ma
     return {"folders": member.folders, "mail": member.mail}
 
 
+# 답을 만드는 동안의 진행 과정 — 세션마다(프로세스 안). 화면이 짧은 간격으로 읽어 대화에 보인다.
+# DB에 쓰지 않는다: 도구를 부를 때마다 쓰면 턴 하나에 수십 번 쓰게 되고, 끝나면 답과 함께 남긴다
+# (view.steps). 다음 턴이 시작될 때까지는 지난 턴의 것을 그대로 둔다 — 늦게 온 조회도 끝을 본다.
+_PROGRESS: dict[int, dict] = {}
+_PROGRESS_LOCK = threading.Lock()
+MAX_STEPS = 40
+
+
+def _progress_start(session_id: int, author: str) -> None:
+    with _PROGRESS_LOCK:
+        _PROGRESS[session_id] = {"running": True, "author": author, "steps": []}
+
+
+def _progress_step(session_id: int, label: str) -> None:
+    with _PROGRESS_LOCK:
+        state = _PROGRESS.get(session_id)
+        if state is not None and len(state["steps"]) < MAX_STEPS:
+            state["steps"].append({"label": label, "at": utcnow().isoformat()})
+
+
+def _progress_end(session_id: int) -> list[dict]:
+    with _PROGRESS_LOCK:
+        state = _PROGRESS.get(session_id) or {"steps": []}
+        state["running"] = False
+        return list(state["steps"])
+
+
+def progress(db: Session, session_id: int, email: str) -> dict:
+    """지금 이 세션에서 만들고 있는 답의 진행 과정 — 참여자만(남의 세션은 있는지도 모른다)."""
+    get(db, session_id, email)
+    with _PROGRESS_LOCK:
+        state = _PROGRESS.get(session_id)
+        if state is None:
+            return {"running": False, "author": "", "steps": []}
+        return {"running": state["running"], "author": state["author"], "steps": list(state["steps"])}
+
+
 def send(db: Session, key: ApiKey, provider, session_id: int, content: str,
          toolsets: list, attachments: list[dict] | None = None) -> dict:
     """한 턴 — 묻고 답한 두 줄을 **답이 나온 뒤에 함께** 남긴다. 모델이 실패하면 아무것도
@@ -232,10 +271,15 @@ def send(db: Session, key: ApiKey, provider, session_id: int, content: str,
     participants = [m.email for m in db.execute(
         select(SmartworkSessionMember).where(SmartworkSessionMember.session_id == row.id)
         .order_by(SmartworkSessionMember.id)).scalars()]
-    result = smartwork.chat(
-        db, key, provider, history, toolsets, org_id=row.organization_id,
-        workflow=row.workflow.name if row.workflow else "", participants=participants,
-        folders=member.folders or [], mail=bool(member.mail), images=images)
+    _progress_start(row.id, key.name)
+    try:
+        result = smartwork.chat(
+            db, key, provider, history, toolsets, org_id=row.organization_id,
+            workflow=row.workflow.name if row.workflow else "", participants=participants,
+            folders=member.folders or [], mail=bool(member.mail), images=images,
+            on_step=lambda label: _progress_step(row.id, label))
+    finally:
+        steps = _progress_end(row.id)
     if content:
         db.add(SmartworkSessionMessage(session_id=row.id, role="user", author=key.name,
                                        content=content,
@@ -249,7 +293,9 @@ def send(db: Session, key: ApiKey, provider, session_id: int, content: str,
         # 세션 설정으로는 알 수 없다 — 평가(answer_ratings)가 이 값으로 묶인다.
         view={**{k: result[k] for k in ("agent", "report", "web", "file", "suggestions",
                                          "choices", "tools")},
-              "model": provider.model, "provider": provider.name})
+              "model": provider.model, "provider": provider.name,
+              # 어떤 과정을 거쳐 이 답이 나왔는지 — 다시 열어도 「진행 과정」으로 보인다.
+              "steps": [s["label"] for s in steps]})
     db.add(answer)
     row.updated_at = utcnow()
     db.commit()

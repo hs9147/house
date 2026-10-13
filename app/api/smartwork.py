@@ -192,6 +192,16 @@ def set_session_context(session_id: int, body: SessionContextIn, db: Session = D
         raise _session_error(e)
 
 
+@router.get("/sessions/{session_id}/progress")
+def session_progress(session_id: int, db: Session = Depends(get_db),
+                     key: ApiKey = Depends(require_api_key)):
+    """답을 만드는 동안의 진행 과정 — 화면이 기다리는 동안 짧은 간격으로 읽는다."""
+    try:
+        return worksession.progress(db, session_id, key.name)
+    except worksession.SessionError as e:
+        raise _session_error(e)
+
+
 @router.get("/sessions/{session_id}/files")
 def session_files(session_id: int, db: Session = Depends(get_db),
                   key: ApiKey = Depends(require_api_key)):

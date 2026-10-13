@@ -41,6 +41,8 @@ import { FileTab, WebView } from './smartwork/viewers';
 type View = 'agent' | 'report' | 'web' | 'file';
 // 공유 세션은 다른 참여자가 보낸 말을 이 간격으로 다시 읽는다.
 const SHARED_POLL_MS = 5000;
+// 답을 기다리는 동안 진행 과정을 읽는 간격.
+const STEP_POLL_MS = 1500;
 
 function sessionLabel(s: SmartworkSessionSummary): string {
   const task = s.workflow ?? s.organization;
@@ -92,6 +94,18 @@ export default function Smartwork() {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
+  // 답을 만드는 동안 거친 단계 — 기다리는 동안 짧은 간격으로 읽어 대화에 차례로 보인다(빈 화면에
+  // "답변을 만드는 중"만 수십 초 떠 있으면 멈춘 줄 안다). 답이 오면 그 답의 「진행 과정」으로 남는다.
+  const [liveSteps, setLiveSteps] = useState<string[]>([]);
+  usePolling(async () => {
+    const s = current.current;
+    if (!s) return;
+    const p = await api.sessionProgress(s.id);
+    if (current.current?.id === s.id) setLiveSteps(p.steps.map((x) => x.label));
+  }, STEP_POLL_MS, chatRunning && !!session);
+  useEffect(() => {
+    if (!chatRunning) setLiveSteps([]);
+  }, [chatRunning]);
 
   const open = async (id: number) => {
     setError(null);
@@ -363,6 +377,9 @@ export default function Smartwork() {
           <div className="chat-thread">
             {messages.map((m) => <Message key={m.id} message={m} showAuthor={shared} />)}
             {pending && <div className="chat-msg user">{pending}</div>}
+            {liveSteps.map((label, i) => (
+              <div key={i} className="chat-msg assistant chat-step">{label}</div>
+            ))}
             {chatRunning && !busyHere && (
               <p className="mutedtext">답변을 만드는 중... (다른 화면에 다녀온 사이에도 이어집니다)</p>
             )}
@@ -653,6 +670,12 @@ function Message({ message: m, showAuthor }: { message: SmartworkSessionMessage;
     <div className={`chat-msg ${m.role}`}>
       {showAuthor && m.role === 'user' && (
         <div className="mutedtext" style={{ fontSize: 11, marginBottom: 4 }}>{m.author}</div>
+      )}
+      {m.role === 'assistant' && m.steps && m.steps.length > 0 && (
+        <details className="chat-steps">
+          <summary>진행 과정 {m.steps.length}단계</summary>
+          <ol>{m.steps.map((label, i) => <li key={i}>{label}</li>)}</ol>
+        </details>
       )}
       {m.content}
       {m.attachments && m.attachments.length > 0 && (

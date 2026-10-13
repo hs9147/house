@@ -650,6 +650,10 @@ export const api = {
     provider_id: number | null = null) =>
     request<SmartworkTurn>('POST', `/smartwork/sessions/${id}/messages`,
       { content, attachments, provider_id }),
+  // 답을 만드는 동안의 진행 과정 — 기다리는 동안 짧은 간격으로 읽어 대화에 보인다.
+  sessionProgress: (id: number) =>
+    request<{ running: boolean; author: string; steps: { label: string; at: string }[] }>(
+      'GET', `/smartwork/sessions/${id}/progress`),
   // 답변 하나에 좋음(+1)·아쉬움(-1) — 그 세션 참여자만, 다시 누르면 덮어쓴다.
   rateAnswer: (messageId: number, score: number, reason = '') =>
     request<{ message_id: number; score: number; reason: string }>(

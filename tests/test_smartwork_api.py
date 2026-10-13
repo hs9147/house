@@ -948,3 +948,30 @@ def test_a_turn_records_where_its_input_came_from_and_what_it_used(client, monke
     assert 0 < turn.reads[0]["uncited_chars"] < turn.reads[0]["chars"]
     stored = json.dumps([d.parts for d in details] + [turn.reads], ensure_ascii=False)
     assert "plan.md" not in stored and "오로라" not in stored and "일정 정리해 줘" not in stored
+
+
+def test_the_steps_taken_while_answering_are_shown_and_kept(client, monkeypatch):
+    """답을 만드는 동안의 도구 호출이 진행 과정으로 보이고, 답에도 남는다.
+
+    개인 자료 도구는 검색어·파일 이름을 싣지 않는다 — 공유 세션에서는 다른 참여자도 진행 과정을 본다.
+    """
+    alice = _user(client, "alice@corp.com")
+    bob = _user(client, "bob@corp.com")
+    client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    _upload(client, alice, "work", {"plan.md": "# 계획\n\n오로라".encode()})
+    sid = _session(client, alice)
+    out, _ = _chat(client, alice, monkeypatch, [
+        ("docs__search_docs", {"query": "계약 단가"}),
+        ("my__search", {"query": "급여 명세"}),
+        ("show_report", {"title": "단가 비교", "content": "<p>x</p>"}),
+    ], sid=sid, folders=["work"])
+    assert out["message"]["steps"] == ["사내 문서 검색 — 계약 단가", "내 문서·메일 검색", "결과 작성 — 단가 비교"]
+
+    progress = client.get(f"{API}/smartwork/sessions/{sid}/progress", headers=alice).json()
+    assert progress["running"] is False and progress["author"] == "alice@corp.com"
+    assert [s["label"] for s in progress["steps"]] == out["message"]["steps"]
+    assert "급여" not in json.dumps(progress, ensure_ascii=False)
+    assert client.get(f"{API}/smartwork/sessions/{sid}/progress", headers=bob).status_code == 404
+    # 다시 열어도 그 답의 진행 과정이 남는다
+    last = client.get(f"{API}/smartwork/sessions/{sid}", headers=alice).json()["messages"][-1]
+    assert last["steps"] == out["message"]["steps"]

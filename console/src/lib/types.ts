@@ -1342,6 +1342,8 @@ export interface SmartworkSessionMessage {
   provider?: string;
   // 내가 매긴 평가(+1 좋음 / -1 아쉬움 / 0 아직). 남이 매긴 것은 내려오지 않는다.
   my_rating?: number;
+  // 이 답을 만들며 거친 단계(도구 호출 하나가 한 줄) — 「진행 과정」으로 접어 보인다.
+  steps?: string[];
   created_at: string;
 }
 
