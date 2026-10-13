@@ -266,10 +266,12 @@ async def post_plan_message(
         )
 
     # 역할 → 기획·구현 원칙(플랫폼 표준 문서) → 이번 단계 지시 순으로 쌓는다.
+    # DB를 바인딩한 과제면 개발원칙 단계 지시에 DB 사용 원칙이 붙는다.
+    uses_db, shared_db = planning_service.db_usage(db, project)
     system_prompt = "\n\n".join(filter(None, [
         planning_service.PLANNING_SYSTEM_PROMPT,
         llm_service.agent_principles_prompt(),
-        planning_service.stage_prompt(plan_stage),
+        planning_service.stage_prompt(plan_stage, uses_db, shared_db),
     ]))
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
 

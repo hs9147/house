@@ -1900,6 +1900,45 @@ def test_dev_principles_prompt_carries_the_commit_convention():
     assert "짐작하지 않는다" in prompt
 
 
+def test_dev_principles_add_db_rules_only_for_projects_that_bind_a_database():
+    """DB 사용 원칙은 DB를 쓰는 과제의 개발원칙에만 — 안 쓰는 과제에 붙이면 쓰지도 않을 DB를 설계한다."""
+    from app.models import PlanStage
+    from app.services import planning as planning_service
+
+    plain = planning_service.stage_prompt(PlanStage.principles)
+    assert "DB 사용 원칙" not in plain
+    general = planning_service.stage_prompt(PlanStage.principles, uses_db=True)
+    assert "DB 사용 원칙" in general and "{PREFIX}_DSN" in general and "마이그레이션으로만" in general
+    assert "공용 DB" not in general
+    shared = planning_service.stage_prompt(PlanStage.principles, uses_db=True, shared_db=True)
+    assert "COMMENT ON TABLE" in shared and "같은 조직의 다른 과제는" in shared
+    # 다른 단계에는 붙지 않는다
+    assert "DB 사용 원칙" not in planning_service.stage_prompt(PlanStage.spec, uses_db=True, shared_db=True)
+
+
+def test_db_usage_follows_the_bound_modules():
+    """바인딩된 database 모듈로 판단한다 — 솔루션 구성에서 정해진 것이 개발원칙에 이어진다."""
+    from app.db import SessionLocal
+    from app.models import Module, ModuleBinding, ModuleType, Project
+    from app.services import planning as planning_service
+
+    c = _client()
+    pid, _ = _project_and_provider(c)
+    with SessionLocal() as db:
+        project = db.get(Project, pid)
+        assert planning_service.db_usage(db, project) == (False, False)
+        orders = Module(name="orders-db", type=ModuleType.database, config={})
+        shared = Module(name="dept-data", type=ModuleType.database, config={"shared": True})
+        db.add_all([orders, shared])
+        db.flush()
+        db.add(ModuleBinding(project_id=pid, module_id=orders.id, env_prefix="ORDERS"))
+        db.commit()
+        assert planning_service.db_usage(db, project) == (True, False)
+        db.add(ModuleBinding(project_id=pid, module_id=shared.id, env_prefix="DB"))
+        db.commit()
+        assert planning_service.db_usage(db, project) == (True, True)
+
+
 def test_task_numbers_are_per_project_and_start_at_one(monkeypatch, fresh_settings, tmp_path):
     """작업 번호는 사람이 커밋 메시지에 적는 값이다 — 프로젝트 안에서 읽혀야 한다.
 

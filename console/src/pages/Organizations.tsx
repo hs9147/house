@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import Async from '../components/Async';
+import SharedDbPolicyPanel from '../components/SharedDbPolicyPanel';
 import { api } from '../lib/api';
 import { isAdmin } from '../lib/auth';
 import { fmtDate } from '../lib/format';
@@ -54,6 +55,7 @@ export default function Organizations() {
   };
 
   return (
+    <>
     <div className="panel">
       <div className="row" style={{ marginBottom: 4 }}>
         <h2 style={{ margin: 0 }}>조직 (사내 Git 작업공간)</h2>
@@ -162,5 +164,8 @@ export default function Organizations() {
         )}
       </Async>
     </div>
+    {/* 공용 DB를 쓰는 설치본에서만 보인다 — 부서마다 "어느 부서와 함께 쓰나"(관리자). */}
+    {isAdmin() && <SharedDbPolicyPanel />}
+    </>
   );
 }

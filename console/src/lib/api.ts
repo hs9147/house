@@ -1,6 +1,8 @@
 import { getKey, logout } from './auth';
 import type {
   AgentProfileState,
+  DataGrantOut,
+  OrgDataPolicyRow,
   ProjectSharedDb,
   ApiKeyIssued,
   ApiCatalogStatus,
@@ -611,11 +613,17 @@ export const api = {
     request<AgentProfileState>('GET', `/projects/${projectId}/agent-profile`),
   reviewAgentProfile: (projectId: number) =>
     request<AgentProfileState>('POST', `/projects/${projectId}/agent-profile/review`),
-  // 공용 DB — 이 앱의 DB 목록과 공용 자료 쓰기 권한(관리자).
+  // 공용 DB — 이 과제의 스키마·읽을 수 있는 표·준 권한. 권한을 주고 거두는 것은 관리자만.
   projectSharedDb: (projectId: number) =>
     request<ProjectSharedDb>('GET', `/projects/${projectId}/shared-db`),
-  setCommonWrite: (projectId: number, on: boolean) =>
-    request<ProjectSharedDb>('POST', `/projects/${projectId}/shared-db/common-write`, { on }),
+  createDataGrant: (body: { schema_name: string; table: string; project_id: number; privilege: string;
+    expires_at: string | null }) => request<DataGrantOut>('POST', '/shared-db/grants', body),
+  deleteDataGrant: (id: number) => request<void>('DELETE', `/shared-db/grants/${id}`),
+  // 부서의 공유 단위(관리자) — 비우면 자기 부서, 분리는 공유 단위에만.
+  sharedDbPolicies: () =>
+    request<{ configured: boolean; policies: OrgDataPolicyRow[] }>('GET', '/shared-db/policies'),
+  setSharedDbPolicy: (orgId: number, body: { share_with_org_id: number | null; isolated: boolean }) =>
+    request<OrgDataPolicyRow[]>('PUT', `/shared-db/policies/${orgId}`, body),
   smartworkAgents: () => request<SmartworkAgent[]>('GET', '/smartwork/agents'),
   // 업무 제안의 근거 — 소속 조직(부서)의 워크플로
   smartworkWorkflows: () => request<DepartmentWorkflow[]>('GET', '/smartwork/workflows'),

@@ -1167,13 +1167,51 @@ export interface AgentProfile {
   reviewed_at: string;
 }
 
-/** 이 프로젝트의 공용 DB(services/shareddb) — 비밀번호는 내려오지 않는다. */
+/** 공용 DB의 표 하나 — 이름·설명·주인 과제(행은 읽지 않는다). */
+export interface SharedDbTable {
+  schema: string;
+  table: string;
+  comment: string;
+  project_id: number | null;
+  project_name: string;
+  unit_id: number | null;
+  db_name: string;
+  privilege?: string;
+}
+
+/** 부서의 공용 DB 공유 단위(관리자 설정) — 기본은 자기 부서, 다른 부서를 지정하면 그 부서와 함께 쓴다. */
+export interface OrgDataPolicyRow {
+  organization_id: number;
+  name: string;
+  share_with_org_id: number | null;
+  isolated: boolean;
+  unit_id: number | null;
+  unit_name: string;
+  db_name: string;
+  schemas: number;
+}
+
+export interface DataGrantOut {
+  id: number;
+  schema: string;
+  table: string;
+  project_id: number;
+  project_name: string;
+  privilege: string;
+  expires_at: string | null;
+  granted_by: string;
+  created_at: string;
+}
+
+/** 이 과제의 공용 DB(services/shareddb) — 비밀번호는 내려오지 않는다. */
 export interface ProjectSharedDb {
   configured: boolean;
   bound: boolean;
   env_key: string;
-  common_db: string;
-  databases: { profile: string; db_name: string; common_write: boolean; created_at: string }[];
+  schemas: { profile: string; schema: string; db_name: string }[];
+  tables: { own: SharedDbTable[]; unit: SharedDbTable[]; granted: SharedDbTable[]; requestable: SharedDbTable[] };
+  given: DataGrantOut[];
+  error: string;
 }
 
 /** release_sha가 비면 에이전트가 아니다(release로 떠 있지 않다). */

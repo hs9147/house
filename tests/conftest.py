@@ -21,6 +21,10 @@ os.environ.setdefault("PAAS_GIT_INTERNAL_ONLY", "false")
 # 업로드가 색인을 바로 갱신하게 되면서 그런 테스트가 부쩍 늘었다. 개별 픽스처가
 # tmp_path로 덮는 것과 별개로, 아무도 안 덮었을 때의 바닥을 여기서 옮긴다.
 os.environ.setdefault("PAAS_DOC_INDEX_DIR", tempfile.mkdtemp(prefix="paas-test-index-"))
+# 공용 DB는 기본으로 끈다 — 개발자 PC의 .env에 켜져 있으면 create_app이 「공용 DB」 모듈을 만들어,
+# 모듈 목록을 세는 시험들(기획의 가용 자원·스케줄러 작업)이 그 PC에서만 깨진다. 환경변수가 .env보다
+# 앞선다. 공용 DB 시험(test_shareddb)은 직접 켠다.
+os.environ.setdefault("PAAS_SHARED_DB_ADMIN_URL", "")
 
 import pytest  # noqa: E402
 

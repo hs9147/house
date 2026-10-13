@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import audit
-from ..models import LlmProvider, Module, ModuleBinding, PlanConstraint, PlanStage, Project
+from ..models import LlmProvider, Module, ModuleBinding, ModuleType, PlanConstraint, PlanStage, Project
 from . import a2a as a2a_service
 from . import gitea as gitea_service
 from . import llm as llm_service
@@ -218,8 +218,55 @@ def stage_repo_path(stage: PlanStage) -> str:
     return f"{ARTIFACT_DIR}/{STAGES[stage]['filename']}"
 
 
-def stage_prompt(stage: PlanStage) -> str:
-    return STAGES[stage]["prompt"]
+# 개발원칙에 붙이는 DB 사용 원칙 — **DB 모듈을 바인딩한 과제에만**(솔루션 구성에서 정해진다).
+# 모든 과제에 붙이면 DB를 쓰지 않는 과제의 문서에 쓸모없는 절이 생기고, 모델이 쓰지도 않을 DB를
+# 설계하려 든다.
+DB_PRINCIPLES_GUIDE = (
+    "- 이 프로젝트는 DB를 쓴다. '스키마 및 의사결정사항'에 **DB 사용 원칙** 절을 두고 아래를 이 "
+    "프로젝트에 맞게 구체적으로 적어라(어느 마이그레이션 도구, 어느 표):\n"
+    "  - 접속 정보는 배포 때 주입되는 환경변수 `{PREFIX}_DSN`에서만 읽는다. 코드·설정 파일·문서에 "
+    "접속 정보를 적지 않는다.\n"
+    "  - 스키마는 **마이그레이션으로만** 바꾼다(도구를 정해 적는다 — Alembic·Prisma·Flyway 등). 앱이 "
+    "기동할 때 적용하고, 되돌리는 방법(downgrade)을 함께 둔다. 손으로 SQL을 실행해 바꾸지 않는다.\n"
+    "  - 표 목록을 표로 남긴다: 표·주요 열·무엇을 담나·누가 쓰고 누가 읽나.\n"
+    "  - 트랜잭션은 짧게, 질의에는 시간 제한을, 연결 풀은 작게 둔다(여러 앱이 같은 서버를 쓴다).\n"
+    "  - 시험 자료는 마이그레이션의 초기 데이터나 스크립트로 만든다 — 운영 자료를 복사해 쓰지 않는다."
+)
+SHARED_DB_PRINCIPLES_GUIDE = (
+    "\n- 이 프로젝트는 **공용 DB**(shared-db)를 쓴다. DB 사용 원칙에 다음도 적어라 — 플랫폼의 "
+    "규칙이라 문서와 다르게 구현하면 배포 후 권한 오류로 드러난다:\n"
+    "  - 앱은 공용 DB의 **자기 스키마**를 쓴다. 검색 경로가 자기 스키마로 잡혀 있어 표 이름만 쓰면 "
+    "거기 만들어진다 — 코드에 스키마 이름을 박지 않는다. 개발 배포는 개발 스키마에 쓰고, 운영 "
+    "자료는 읽기만 한다.\n"
+    "  - 표마다 `COMMENT ON TABLE`로 무엇을 담는지 적는다. 다른 과제와 기획 에이전트가 그 설명으로 "
+    "표를 찾는다.\n"
+    "  - **같은 조직의 다른 과제는 이 과제의 운영 표를 기본으로 읽는다.** 개인정보·민감 정보는 따로 "
+    "표로 떼어 두고, 어느 표가 그런지 문서에 표시한다.\n"
+    "  - 다른 과제의 표는 `스키마.표`로 읽는다. 쓰기는 권한을 받은 표만 할 수 있다. 다른 조직의 표가 "
+    "필요하면 '가용 모듈 제약'의 '신청하면 쓸 수 있는 표'에서 골라, 표·읽기/쓰기·사유를 문서에 적어 "
+    "관리자에게 신청한다(권한은 관리자가 표 단위로 준다).\n"
+    "  - 슈퍼유저 작업·확장 설치·다른 스키마의 구조 변경은 할 수 없다. 백업은 플랫폼이 매일 한다 — "
+    "앱이 따로 덤프를 만들지 않는다. 대량 삭제·변경은 되돌릴 수 없으니 기능으로 만들 때 확인 절차를 둔다."
+)
+
+
+def stage_prompt(stage: PlanStage, uses_db: bool = False, shared_db: bool = False) -> str:
+    """단계 지시. 개발원칙 단계에서 DB를 쓰는 과제면 DB 사용 원칙을 덧붙인다(db_usage)."""
+    prompt = STAGES[stage]["prompt"]
+    if stage == PlanStage.principles and uses_db:
+        prompt += "\n" + DB_PRINCIPLES_GUIDE + (SHARED_DB_PRINCIPLES_GUIDE if shared_db else "")
+    return prompt
+
+
+def db_usage(db: Session, project: Project) -> tuple[bool, bool]:
+    """(DB를 쓰나, 공용 DB를 쓰나) — 바인딩된 database 모듈로 판단한다(솔루션 구성에서 정해진다)."""
+    from . import shareddb  # noqa: PLC0415 — 순환 import 회피
+
+    modules = db.execute(
+        select(Module).join(ModuleBinding, ModuleBinding.module_id == Module.id)
+        .where(ModuleBinding.project_id == project.id, Module.type == ModuleType.database)
+    ).scalars().all()
+    return bool(modules), any(shareddb.is_shared(m) for m in modules)
 
 
 def stage_request(stage: PlanStage) -> str:
@@ -636,5 +683,5 @@ def render_constraints_doc(constraints: dict) -> str:
         lines.append("- (가용 자원 없음)")
     schema = constraints.get("shared_db_schema") or ""
     if schema:
-        lines += ["", "## 공용 DB에 이미 있는 표 (공용 자료는 읽기만 — 다시 만들지 말고 읽어 쓴다)", schema]
+        lines += ["", "## 공용 DB의 표 (이미 있는 것은 다시 만들지 말고 읽어 쓴다 — 쓰기는 자기 표와 권한을 받은 표만)", schema]
     return "\n".join(lines) + "\n"

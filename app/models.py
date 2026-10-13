@@ -549,7 +549,8 @@ class JobKind(str, enum.Enum):
     doc_index = "doc_index"      # 문서 색인 + 온톨로지(services/docsearch.reindex)
     mcp_probe = "mcp_probe"      # mcp 모듈이 실제로 응답하는지(services/mcp_client)
     api_probe = "api_probe"      # external_api 모듈 주소가 살아 있는지
-    db_backup = "db_backup"      # 공용 DB의 DB 하나를 pg_dump로 백업(services/shareddb.backup)
+    db_backup = "db_backup"      # 공용 DB를 pg_dump로 백업(services/shareddb.backup)
+    db_grants = "db_grants"      # 공용 DB의 표 권한을 권한 표에 맞춤(services/shareddb.reconcile)
 
 
 class JobStatus(str, enum.Enum):
@@ -742,29 +743,71 @@ class LlmCallLog(Base):
     trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
-class SharedDatabase(Base):
-    """공용 DB 서버에 플랫폼이 만든 DB 하나와 그 계정(services/shareddb).
+class OrgDataPolicy(Base):
+    """부서의 공용 DB 공유 단위 — 관리자가 정한다(services/shareddb).
 
-    프로젝트마다·프로필(운영·개발)마다 하나다 — database 모듈 하나로 등록하면 모든 앱이 같은 DB에
-    같은 계정으로 붙어 서로의 표를 읽고 지울 수 있다. 비밀번호는 플랫폼이 만들어 암호화해 둔다.
+    기본(행이 없거나 share_with_org_id가 비면)은 **자기 부서가 공유 단위**다. 다른 부서(상위 부서)를
+    지정하면 그 부서와 같은 단위가 되어, 그 단위의 과제끼리 서로의 운영 표를 읽는다. 상하 관계를
+    조직 구조에 들이지 않고 "이 부서는 어느 부서와 함께 쓰나" 하나만 둔다.
 
-    **지우지 않는다.** 프로젝트를 지우면 project_id만 비우고 행과 DB는 남긴다(데이터는 되돌릴 수
-    없다) — project_name이 무엇의 DB였는지 남긴다. 공용 자료 DB(paas_common)의 읽기 계정도 이 표에
-    profile="common"으로 둔다(DB 조회 MCP가 그 계정으로 읽는다).
+    isolated는 공유 단위(다른 부서를 지정하지 않은 부서)에만 의미가 있다 — 켜면 그 단위만 자기 DB를
+    쓴다(표 이름도 다른 부서에 보이지 않게). 자료가 생긴 뒤에는 DB가 바뀌는 설정을 받지 않는다.
     """
 
-    __tablename__ = "shared_databases"
+    __tablename__ = "org_data_policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), unique=True, index=True)
+    share_with_org_id: Mapped[int | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True)
+    isolated: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class DataSchema(Base):
+    """공용 DB에 플랫폼이 만든 스키마 하나와 그 계정(services/shareddb).
+
+    과제마다·프로필(운영·개발)마다 하나다. db_name은 그 스키마가 있는 DB(기본 paas_data, 분리된 공유
+    단위면 그 단위의 DB)다. unit_id는 마지막으로 반영한 공유 단위 — 단위가 바뀌면 이전 단위의 읽기를
+    거두려고 적어 둔다. 비밀번호는 플랫폼이 만들어 암호화해 둔다.
+
+    **지우지 않는다.** 과제를 지우면 project_id만 비우고 행과 스키마는 남긴다(데이터는 되돌릴 수
+    없다) — project_name이 무엇의 스키마였는지 남긴다.
+    """
+
+    __tablename__ = "data_schemas"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int | None] = mapped_column(
         ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
     project_name: Mapped[str] = mapped_column(String(64), default="")
-    profile: Mapped[str] = mapped_column(String(16))  # release | development | common
-    db_name: Mapped[str] = mapped_column(String(63), unique=True)
+    db_name: Mapped[str] = mapped_column(String(63), default="paas_data")
+    unit_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    profile: Mapped[str] = mapped_column(String(16))  # release | development
+    schema_name: Mapped[str] = mapped_column(String(63), unique=True)
     role_name: Mapped[str] = mapped_column(String(63), unique=True)
     password_encrypted: Mapped[str] = mapped_column(Text)
-    # 공용 자료 DB에 쓸 수 있는가 — 기본은 읽기만. 관리자가 그 자료를 맡은 프로젝트에만 켠다.
-    common_write: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DataGrant(Base):
+    """다른 과제의 표 하나에 대한 권한 — **권한의 원천**이다(PostgreSQL 권한은 그 반영).
+
+    같은 공유 단위 과제끼리는 이것 없이 서로의 운영 표를 읽는다. 단위 밖의 표는 관리자가 여기에 적어
+    준다(읽기/쓰기, 만료일) — 같은 DB 안에서만(분리된 단위의 표는 밖으로 나가지 않는다). services/shareddb.reconcile이 주기적으로 DB를 이 표에 맞춘다 — 손으로 준
+    권한과 만료된 권한은 거둔다. 개발 계정은 쓰기를 받아도 읽기만 한다.
+    """
+
+    __tablename__ = "data_grants"
+    __table_args__ = (UniqueConstraint("schema_name", "table_name", "project_id", name="uq_data_grant"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    schema_name: Mapped[str] = mapped_column(String(63), index=True)
+    table_name: Mapped[str] = mapped_column(String(63))
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    privilege: Mapped[str] = mapped_column(String(8))  # read | write
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    granted_by: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

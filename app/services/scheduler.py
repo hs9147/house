@@ -40,6 +40,8 @@ DEFAULT_INTERVALS = {
     JobKind.mcp_probe: 600,
     JobKind.api_probe: 600,
     JobKind.db_backup: 86_400,
+    # 만료된 권한을 거두는 주기이기도 하다 — 만료일이 지나고 최대 한 시간 안에 거둔다.
+    JobKind.db_grants: 3_600,
 }
 
 _lock = threading.Lock()
@@ -68,11 +70,13 @@ def _wanted(db: Session) -> list[tuple[JobKind, str]]:
     from . import shareddb  # noqa: PLC0415
 
     if shareddb.configured():
-        # 플랫폼이 만든 DB마다 야간 백업 — 지운 프로젝트의 DB도 남아 있는 한 백업한다(지우지 않으니까).
-        from ..models import SharedDatabase  # noqa: PLC0415
+        from ..models import DataSchema  # noqa: PLC0415
 
-        for row in db.execute(select(SharedDatabase).order_by(SharedDatabase.db_name)).scalars():
-            wanted.append((JobKind.db_backup, row.db_name))
+        # 자료 DB마다 야간 백업(기본 DB와 분리된 DB들), 권한 대조는 하나. 스키마가 하나라도 생긴 뒤에만
+        # 돈다(설정만 해 두고 아무도 쓰지 않는 동안 빈 DB를 백업하고 대조할 이유가 없다).
+        if db.execute(select(DataSchema.id).limit(1)).first() is not None:
+            wanted += [(JobKind.db_backup, name) for name in shareddb.backup_targets(db)]
+            wanted.append((JobKind.db_grants, ""))
     return wanted
 
 
@@ -151,11 +155,18 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
         changed = result["added"] + result["updated"] + result["removed"]
         return (JobStatus.ok if changed else JobStatus.skipped), result
 
-    if job.kind == JobKind.db_backup:
+    if job.kind in (JobKind.db_backup, JobKind.db_grants):
         from . import shareddb  # noqa: PLC0415
 
         try:
-            return JobStatus.ok, shareddb.backup(db, job.target)
+            if job.kind == JobKind.db_backup:
+                return JobStatus.ok, shareddb.backup(db, job.target)
+            result = shareddb.reconcile(db)
+            changed = result["granted"] + result["revoked"] + result["expired"] + result["units_changed"]
+            if result["blocked"]:
+                # DB가 바뀌어야 하는 과제 — 플랫폼이 옮기지 않는다. 실패로 띄워 사람이 보게 한다.
+                return JobStatus.failed, {**result, "error": "공유 단위의 DB가 바뀐 과제가 있습니다(수동 이전 필요)"}
+            return (JobStatus.ok if changed else JobStatus.skipped), result
         except shareddb.SharedDbError as e:
             return JobStatus.failed, {"error": str(e)}
 

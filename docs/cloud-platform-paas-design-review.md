@@ -396,6 +396,7 @@ LLM 채팅 → diff 제안 → 승인(`POST /changes/{id}/apply`)으로만 가�
 | external_api | 결제 API, CHO-FAM 메일 API | `{PREFIX}_URL`, `{PREFIX}_API_KEY` |
 | internal_api | 플랫폼에 배포된 다른 프로젝트 | `{PREFIX}_URL` — 1차: Caddy 도메인, 2차: K8s Service DNS로 자동 해석 |
 | database | PostgreSQL, SQLite | `{PREFIX}_DSN` |
+| database(공용 DB `shared-db`) | 같은 서버의 PostgreSQL 자료 DB `paas_data` — 과제마다 스키마 | `{PREFIX}_DSN`(과제·프로필 전용 계정) |
 | ~~file_storage~~ | 로컬 볼륨, SeaweedFS | (폐기 — 아래 주 참고) |
 
 > **file_storage 타입은 폐기됐다.** 저장소 경로는 모듈로 등록하는 것이 아니라
@@ -405,6 +406,11 @@ LLM 채팅 → diff 제안 → 승인(`POST /changes/{id}/apply`)으로만 가�
 > 사실이지 콘솔에서 등록할 일이 아니었고, 모듈로 두면 같은 폴더가 이름만 달리 두 번
 > 등록되거나 존재하지 않는 경로가 등록돼도 열어 보기 전까지 아무도 모른다. 따라서
 > 저장소는 바인딩 대상이 아니며 `{PREFIX}_URL`·`{PREFIX}_BUCKET` 주입도 없다.
+
+> **공용 DB.** 등록된 접속 정보 하나를 모든 과제에 넣는 database 모듈과 달리, 「공용 DB」는
+> 바인딩한 과제마다 자기 스키마와 계정을 만들어 준다(운영·개발 따로). 같은 조직의 과제는 서로의
+> 운영 표를 읽고, 다른 조직의 표는 관리자가 표 단위로 준다(읽기/쓰기, 만료일). 설치·운영은
+> [infra/postgres/README.md](../infra/postgres/README.md), 구현은 `app/services/shareddb.py`.
 
 - 자격증명은 전부 기존 EnvVar 암호화 경로 재사용 — 새 보안 표면을 만들지 않는다.
 - internal_api 모듈은 **서비스 디스커버리를 겸한다**: 프로젝트 간 호출을 도메인 하드코딩 없이
