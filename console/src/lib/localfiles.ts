@@ -3,17 +3,75 @@
  *
  * 서버에는 원본이 없다(services/personal.py). 콘솔이 평문 http라 브라우저의 파일 시스템
  * API(showDirectoryPicker)도 없어서, 한 번 고른 폴더를 다시 읽을 수도 PC의 원본에 바로 쓸
- * 수도 없다. 그래서 동기화할 때 고른 폴더의 File을 여기 남겨 두고, 없으면 같은 폴더를 다시
+ * 수도 없다. 그래서 동기화할 때 고른 폴더의 File을 남겨 두고, 없을 때만 같은 폴더를 다시
  * 고르게 한다. 고친 결과는 내려받기로 저장한다.
+ *
+ * 남겨 두는 곳은 둘이다 — 이 페이지의 메모리와, 새로 고쳐도 남도록 **이 브라우저의 IndexedDB**.
+ * IndexedDB는 File을 그 순간의 사본으로 담는다(이 PC의 브라우저 안 — 서버로 가지 않는다). 그래서
+ * 다시 동기화하면 그 폴더의 사본을 통째로 바꾸고, 폴더를 제거하거나 동의를 철회하면 지운다.
  */
 const remembered = new Map<string, File>();
 
-export function remember(folder: string, items: { path: string; file: File }[]): void {
-  for (const it of items) remembered.set(`${folder}/${it.path}`, it.file);
+const DB_NAME = 'paas-localfiles';
+const STORE = 'files';
+
+function openDb(): Promise<IDBDatabase> | null {
+  if (typeof indexedDB === 'undefined') return null;
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
 }
 
-export function lookup(folder: string, path: string): File | undefined {
-  return remembered.get(`${folder}/${path}`);
+/** 한 트랜잭션 — 끝나면 닫는다. IndexedDB가 없거나(시험 환경) 실패하면 메모리만 쓴다. */
+async function withStore<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T> | void): Promise<T | undefined> {
+  const opening = openDb();
+  if (!opening) return undefined;
+  const db = await opening;
+  try {
+    return await new Promise<T | undefined>((resolve, reject) => {
+      const tx = db.transaction(STORE, mode);
+      const req = fn(tx.objectStore(STORE));
+      tx.oncomplete = () => resolve(req ? req.result : undefined);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+const folderRange = (folder: string) => IDBKeyRange.bound(`${folder}/`, `${folder}/￿`);
+
+/** 동기화할 때 고른 폴더의 파일 — 그 폴더의 이전 사본은 통째로 바꾼다(지운 파일이 남지 않게). */
+export async function remember(folder: string, items: { path: string; file: File }[]): Promise<void> {
+  for (const key of [...remembered.keys()]) if (key.startsWith(`${folder}/`)) remembered.delete(key);
+  for (const it of items) remembered.set(`${folder}/${it.path}`, it.file);
+  await withStore('readwrite', (s) => {
+    s.delete(folderRange(folder));
+    for (const it of items) s.put(it.file, `${folder}/${it.path}`);
+  }).catch(() => { /* 저장 공간이 모자라면 이 페이지 동안만 기억한다 */ });
+}
+
+export async function lookup(folder: string, path: string): Promise<File | undefined> {
+  const key = `${folder}/${path}`;
+  const hit = remembered.get(key);
+  if (hit) return hit;
+  const stored = await withStore<File>('readonly', (s) => s.get(key)).catch(() => undefined);
+  if (stored) remembered.set(key, stored);
+  return stored;
+}
+
+/** 폴더 제거(folder)·동의 철회(없음) — 이 브라우저에 남긴 사본도 지운다. */
+export async function forget(folder?: string): Promise<void> {
+  for (const key of [...remembered.keys()]) {
+    if (folder === undefined || key.startsWith(`${folder}/`)) remembered.delete(key);
+  }
+  await withStore('readwrite', (s) => {
+    if (folder === undefined) s.clear(); else s.delete(folderRange(folder));
+  }).catch(() => undefined);
 }
 
 export interface DecodedText {

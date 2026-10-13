@@ -88,7 +88,7 @@ def list_internal_servers(db: Session, key: ApiKey | None = None) -> list[dict]:
     entries = [_entry(
         "paas", "paas",
         "플랫폼 MCP 전부를 한 서버로 — 문서·온톨로지·저장소 목록·API 카탈로그·코드·기획(과제 인자)·"
-        "운영(관리자). 데스크톱 도구에는 이것 하나만 등록하면 된다",
+        "업무 앱 찾기·MCP 모듈·운영(관리자). 데스크톱 도구에는 이것 하나만 등록하면 된다",
         "hub", "/mcp/hub",
     ), _entry(
         "paas-ops", "paas-ops",

@@ -5,7 +5,7 @@ import { api } from '../lib/api';
 import { getEmail } from '../lib/auth';
 import { copyText } from '../lib/clipboard';
 import { type AsyncState, useApi, usePolling } from '../lib/hooks';
-import { remember } from '../lib/localfiles';
+import { forget, remember } from '../lib/localfiles';
 import { cancelTask, dismissTask, runTask, type TaskHandle, useTask } from '../lib/tasks';
 import { parseCsv, renderMarkdown } from '../lib/markdown';
 import type {
@@ -23,7 +23,7 @@ import type {
   SmartworkSessionSummary,
   SmartworkWeb,
 } from '../lib/types';
-import { FileTab, WebView } from './smartwork/viewers';
+import { FileView, WebView } from './smartwork/viewers';
 
 /**
  * 스마트워크 — 왼쪽 대화·설정(에이전트·부서 워크플로·내 업무 맥락), 오른쪽 화면(에이전트·보고서).
@@ -74,9 +74,7 @@ export default function Smartwork() {
   const [agent, setAgent] = useState<SmartworkAgent | null>(null);
   const [report, setReport] = useState<SmartworkReport | null>(null);
   const [web, setWeb] = useState<SmartworkWeb | null>(null);
-  // 파일 탭 — file이 없고 browsing이면 이 업무에 고른 내 문서의 목록을 보인다.
   const [file, setFile] = useState<SmartworkFile | null>(null);
-  const [browsing, setBrowsing] = useState(false);
   const [view, setView] = useState<View>('agent');
   const [leftTab, setLeftTab] = useState<'chat' | 'settings'>('chat');
   const opened = useRef(false);
@@ -122,7 +120,6 @@ export default function Smartwork() {
       setReport(latest('report'));
       setWeb(latest('web'));
       setFile(latest('file'));
-      setBrowsing(false);
       const last = [...s.messages].reverse().find((m) => m.agent || m.report || m.web || m.file);
       setView(last?.agent ? 'agent' : last?.file ? 'file' : last?.web ? 'web' : 'report');
     } catch (e) {
@@ -232,7 +229,6 @@ export default function Smartwork() {
     setReport(null);
     setWeb(null);
     setFile(null);
-    setBrowsing(false);
     sessions.reload();
     await send(s, '');
   };
@@ -259,7 +255,6 @@ export default function Smartwork() {
     setReport(null);
     setWeb(null);
     setFile(null);
-    setBrowsing(false);
     sessions.reload();
   };
 
@@ -567,12 +562,11 @@ export default function Smartwork() {
     </>
   );
 
-  const fileOpen = !!session && (file !== null || browsing);
   const tabs: { key: View; label: string }[] = [
     ...(agent ? [{ key: 'agent' as const, label: `에이전트 · ${agent.name}` }] : []),
     ...(report ? [{ key: 'report' as const, label: `보고서 · ${report.title}` }] : []),
     ...(web ? [{ key: 'web' as const, label: `웹 · ${web.url ? hostOf(web.url) : '새 주소'}` }] : []),
-    ...(fileOpen ? [{ key: 'file' as const, label: `파일 · ${file?.name ?? '내 문서'}` }] : []),
+    ...(session && file ? [{ key: 'file' as const, label: `파일 · ${file.name}` }] : []),
   ];
   // 고른 탭이 비었으면 남은 쪽을 보인다 — 에이전트를 먼저.
   const shown: View | null = tabs.some((t) => t.key === view) ? view : tabs[0]?.key ?? null;
@@ -580,10 +574,7 @@ export default function Smartwork() {
     if (key === 'agent') setAgent(null);
     if (key === 'report') setReport(null);
     if (key === 'web') setWeb(null);
-    if (key === 'file') {
-      setFile(null);
-      setBrowsing(false);
-    }
+    if (key === 'file') setFile(null);
   };
 
   const right = (
@@ -605,20 +596,6 @@ export default function Smartwork() {
             </button>
           </span>
         ))}
-        <span className="spacer" />
-        {/* 대화를 거치지 않고 사람이 바로 연다 — 웹은 내 로그인으로, 파일은 이 업무에 고른 내 문서에서. */}
-        {!web && (
-          <button className="small secondary" onClick={() => {
-            setWeb({ url: '', reason: '' });
-            setView('web');
-          }}>웹 열기</button>
-        )}
-        {session && !fileOpen && (
-          <button className="small secondary" onClick={() => {
-            setBrowsing(true);
-            setView('file');
-          }}>내 문서 열기</button>
-        )}
       </div>
       {shown === 'agent' && agent ? (
         <AgentView agent={agent} health={health.data} />
@@ -626,12 +603,8 @@ export default function Smartwork() {
         <ReportView report={report} />
       ) : shown === 'web' && web ? (
         <WebView web={web} />
-      ) : shown === 'file' && session ? (
-        <FileTab sessionId={session.id} folders={session.my_context.folders} file={file}
-          onOpen={(f) => {
-            setFile(f);
-            setBrowsing(true);
-          }} />
+      ) : shown === 'file' && file ? (
+        <FileView key={`${file.source}:${file.folder}/${file.path ?? file.name}`} file={file} />
       ) : (
         <div className="panel">
           <p className="mutedtext">
@@ -1091,8 +1064,8 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
         path: f.webkitRelativePath.split('/').slice(1).join('/'),
         mtime: f.lastModified / 1000,
       }));
-    // 고른 폴더의 파일을 이 페이지 동안 기억한다 — 파일 뷰어가 폴더를 다시 고르게 하지 않고 연다.
-    remember(folder, items);
+    // 고른 폴더의 파일을 이 브라우저에 남긴다 — 파일 뷰어가 폴더를 다시 고르게 하지 않고 연다.
+    void remember(folder, items);
     setProgress(`${folder}: 바뀐 파일을 찾는 중...`);
     const plan = await api.personalManifest(
       folder, items.map((it) => ({ path: it.path, size: it.file.size, mtime: it.mtime })));
@@ -1194,7 +1167,10 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
                         }}>동기화</button>{' '}
                         <button className="small secondary" disabled={busy} onClick={() => {
                           if (!window.confirm(`'${f.name}' 폴더의 텍스트와 색인을 지울까요? (PC의 원본은 그대로입니다)`)) return;
-                          void run(() => api.personalRemoveFolder(f.name));
+                          void run(async () => {
+                            await api.personalRemoveFolder(f.name);
+                            await forget(f.name);
+                          });
                         }}>제거</button>
                       </td>
                     </tr>
@@ -1279,7 +1255,10 @@ function PersonalPanel({ status }: { status: AsyncState<PersonalStatus> }) {
               <span className="spacer" />
               <button className="small secondary" disabled={busy} onClick={() => {
                 if (!window.confirm('동의를 철회할까요? 보관한 문서·메일 텍스트와 색인이 모두 지워집니다.')) return;
-                void run(() => api.personalRevoke());
+                void run(async () => {
+                  await api.personalRevoke();
+                  await forget();
+                });
               }}>동의 철회</button>
             </div>
           </>

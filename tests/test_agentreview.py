@@ -215,6 +215,6 @@ def test_opening_an_agent_explains_what_to_do_there(app_db, monkeypatch):
     for piece in ("A사 등급은 supplier-pool에서", "협력사 등급 확인", "협력사 풀을 조회한다",
                   "- 협력사 검색", "- 등급 확인", "## 준비할 것", "- 협력사명"):
         assert piece in report["content"]
-    # 맞는 에이전트가 하나면 묻지 않는다 — 보고서와 함께 띄운다
-    assert "맞는 에이전트가 있으면 묻지 않는다" in captured["system"]
+    # 에이전트는 보고서 곁에 뜬다 — 걸치는 것이 하나면 묻지 않는다
+    assert "걸치는 에이전트가 하나면 묻지 않고 띄운다" in captured["system"]
     assert "사람이 넣는 것: 협력사명" in captured["system"]

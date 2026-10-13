@@ -764,25 +764,25 @@ def test_file_viewer_opens_only_my_chosen_documents_and_edits_are_proposals(clie
     연다. 그래서 open_file이 하는 일은 "이 파일을 열어라"와 수정안을 화면에 싣는 것뿐이다.
     """
     alice = _user(client, "alice@corp.com")
-    bob = _user(client, "bob@corp.com")
     client.post(f"{API}/smartwork/personal/consent", headers=alice)
     _upload(client, alice, "work", {"memo.txt": "단가 120원".encode(), "plan.md": b"# x"})
     _upload(client, alice, "home", {"diary.txt": "펭귄".encode()})
     sid = _session(client, alice)
-    files = f"{API}/smartwork/sessions/{sid}/files"
 
     # 고르기 전에는 열 것이 없고, open_file 도구도 붙지 않는다
-    assert client.get(files, headers=alice).json() == []
+    with SessionLocal() as db:
+        assert smartwork.session_files(db, "alice@corp.com", []) == []
     _, script = _chat(client, alice, monkeypatch, [], sid=sid)
     assert "open_file" not in script.tool_names
     assert {"show_web", "make_file"} <= set(script.tool_names)
 
     client.put(f"{API}/smartwork/sessions/{sid}/context",
                json={"folders": ["work"], "mail": False}, headers=alice)
-    # .md는 뷰어 형식이 아니다(보고서가 맡는다) — 목록에 없다
-    assert [(f["folder"], f["path"]) for f in client.get(files, headers=alice).json()] == \
-        [("work", "memo.txt")]
-    assert client.get(files, headers=bob).status_code == 404  # 남의 세션
+    # .md는 뷰어 형식이 아니다(보고서가 맡는다) — 목록에 없다. 목록은 사람에게 내보내지 않는다.
+    with SessionLocal() as db:
+        assert [(f["folder"], f["path"]) for f in smartwork.session_files(db, "alice@corp.com", ["work"])] == \
+            [("work", "memo.txt")]
+    assert client.get(f"{API}/smartwork/sessions/{sid}/files", headers=alice).status_code in (404, 405)
 
     out, script = _chat(client, alice, monkeypatch, [
         ("open_file", {"path": "work/memo.txt.md", "edits": [

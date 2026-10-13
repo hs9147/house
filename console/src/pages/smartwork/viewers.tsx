@@ -1,15 +1,13 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import type { WorkBook } from 'xlsx';
-import Async from '../../components/Async';
 import { api } from '../../lib/api';
-import { useApi } from '../../lib/hooks';
 import {
   applyTextEdit, decodeText, editedName, encodeText, lookup, parseCell, remember,
 } from '../../lib/localfiles';
 import { parseCsv } from '../../lib/markdown';
 import { bookFromRows, writeCell } from '../../lib/sheets';
 import type {
-  SmartworkFile, SmartworkFileFormat, SmartworkSessionFile, SmartworkWeb,
+  SmartworkFile, SmartworkFileFormat, SmartworkWeb,
 } from '../../lib/types';
 
 /**
@@ -95,10 +93,6 @@ function familyOf(format: SmartworkFileFormat): Family {
   return 'office';
 }
 
-function formatOf(name: string): SmartworkFileFormat {
-  return name.slice(name.lastIndexOf('.') + 1).toLowerCase() as SmartworkFileFormat;
-}
-
 function download(data: BlobPart, name: string, type: string) {
   const url = URL.createObjectURL(new Blob([data], { type }));
   const a = document.createElement('a');
@@ -108,71 +102,30 @@ function download(data: BlobPart, name: string, type: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-/** 파일 탭 — 연 파일이 없으면 이 업무에 고른 내 문서의 목록을 보인다. */
-export function FileTab({ sessionId, folders, file, onOpen }: {
-  sessionId: number;
-  folders: string[];
-  file: SmartworkFile | null;
-  onOpen: (file: SmartworkFile | null) => void;
-}) {
-  if (file) {
-    return <FileView key={`${file.source}:${file.folder}/${file.path ?? file.name}`} file={file}
-      onBack={() => onOpen(null)} />;
-  }
-  return <FileBrowser sessionId={sessionId} folders={folders} onOpen={onOpen} />;
-}
-
-function FileBrowser({ sessionId, folders, onOpen }: {
-  sessionId: number;
-  folders: string[];
-  onOpen: (file: SmartworkFile) => void;
-}) {
-  const list = useApi(() => api.sessionFiles(sessionId), [sessionId, folders.join('|')]);
-  return (
-    <div className="panel">
-      <h2 style={{ marginTop: 0 }}>내 문서</h2>
-      <p className="mutedtext" style={{ fontSize: 12 }}>
-        이 업무에 고른 내 폴더의 문서입니다(doc·docx·ppt·pptx는 보기, xls·xlsx·csv·txt는 고치기).
-        원본은 내 PC에 있어 이 브라우저가 엽니다 — 고친 것은 사본으로 내려받습니다.
-      </p>
-      <Async state={list}>
-        {(rows: SmartworkSessionFile[]) => (rows.length === 0 ? (
-          <p className="mutedtext">
-            열 수 있는 문서가 없습니다 — 대화 위 「이 업무에 쓸 내 맥락」에서 폴더를 고르세요.
-          </p>
-        ) : (
-          <table>
-            <thead><tr><th>폴더</th><th>파일</th><th>크기</th></tr></thead>
-            <tbody>
-              {rows.map((f) => (
-                <tr key={`${f.folder}/${f.path}`}>
-                  <td>{f.folder}</td>
-                  <td>
-                    <button className="small secondary" onClick={() => onOpen({
-                      source: 'personal', folder: f.folder, path: f.path,
-                      name: f.path.split('/').pop() ?? f.path, format: formatOf(f.path), edits: [],
-                    })}>{f.path}</button>
-                  </td>
-                  <td className="mono" style={{ fontSize: 11 }}>{Math.ceil(f.size / 1024)}KB</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ))}
-      </Async>
-    </div>
-  );
-}
-
-function FileView({ file, onBack }: { file: SmartworkFile; onBack: () => void }) {
+/**
+ * 파일 탭 — 대화(open_file·make_file)가 띄운 파일 하나를 연다. 고를 수 있는 문서 목록은 사람에게
+ * 보이지 않는다 — 어느 문서를 열지는 스마트워크가 이 업무에 고른 폴더 안에서 정한다.
+ */
+export function FileView({ file }: { file: SmartworkFile }) {
   const personal = file.source === 'personal';
-  // PC 파일은 이 페이지가 쥐고 있을 때만 열린다(lib/localfiles) — 없으면 그 폴더를 다시 고른다.
-  const [blob, setBlob] = useState<File | null>(
-    () => (personal ? lookup(file.folder ?? '', file.path ?? '') ?? null : null));
+  // PC 파일은 동기화 때 고른 폴더의 것을 연다(lib/localfiles) — 없을 때만 그 폴더를 다시 고른다.
+  const [blob, setBlob] = useState<File | null>(null);
+  const [looking, setLooking] = useState(personal);
   const [error, setError] = useState<string | null>(null);
   const picker = useRef<HTMLInputElement | null>(null);
 
-  const pick = (list: FileList) => {
+  useEffect(() => {
+    if (!personal) return;
+    let live = true;
+    void lookup(file.folder ?? '', file.path ?? '').then((found) => {
+      if (!live) return;
+      setBlob(found ?? null);
+      setLooking(false);
+    });
+    return () => { live = false; };
+  }, [personal, file.folder, file.path]);
+
+  const pick = async (list: FileList) => {
     const all = Array.from(list);
     if (all.length === 0) return;
     const folder = all[0].webkitRelativePath.split('/')[0];
@@ -180,8 +133,8 @@ function FileView({ file, onBack }: { file: SmartworkFile; onBack: () => void })
       setError(`'${file.folder}' 폴더를 골라야 합니다 — '${folder}'를 골랐습니다.`);
       return;
     }
-    remember(folder, all.map((f) => ({ path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f })));
-    const found = lookup(folder, file.path ?? '');
+    await remember(folder, all.map((f) => ({ path: f.webkitRelativePath.split('/').slice(1).join('/'), file: f })));
+    const found = await lookup(folder, file.path ?? '');
     if (!found) {
       setError(`그 폴더에 ${file.path}가 없습니다 — 옮기거나 지웠다면 다시 동기화하세요.`);
       return;
@@ -192,12 +145,15 @@ function FileView({ file, onBack }: { file: SmartworkFile; onBack: () => void })
 
   const family = familyOf(file.format);
   let body;
-  if (personal && !blob) {
+  if (personal && looking) {
+    body = <p className="mutedtext">동기화한 파일을 찾는 중...</p>;
+  } else if (personal && !blob) {
     body = (
       <>
         <p>
-          이 파일은 내 PC에 있습니다. 브라우저는 한 번 고른 폴더를 다시 읽지 못해서, 이 화면을
-          새로 연 뒤에는 <b>{file.folder}</b> 폴더를 한 번 더 골라야 합니다(서버로 올라가지 않습니다).
+          이 파일은 내 PC에 있는데, 이 브라우저에는 동기화 때 고른 사본이 없습니다(다른 브라우저·PC에서
+          동기화했거나 브라우저 저장소를 지웠을 때). <b>{file.folder}</b> 폴더를 한 번 골라 주세요
+          (서버로 올라가지 않습니다).
         </p>
         <input type="file" multiple style={{ display: 'none' }}
           ref={(el) => {
@@ -205,7 +161,7 @@ function FileView({ file, onBack }: { file: SmartworkFile; onBack: () => void })
             if (el) el.setAttribute('webkitdirectory', '');
           }}
           onChange={(e) => {
-            if (e.target.files) pick(e.target.files);
+            if (e.target.files) void pick(e.target.files);
             e.target.value = '';
           }} />
         <button onClick={() => picker.current?.click()}>‘{file.folder}’ 폴더 고르기</button>
@@ -230,7 +186,6 @@ function FileView({ file, onBack }: { file: SmartworkFile; onBack: () => void })
           {personal ? `내 PC · ${file.folder}/${file.path}` : '대화가 만든 파일'}
         </span>
         <span className="spacer" />
-        {personal && <button className="small secondary" onClick={onBack}>목록</button>}
       </div>
       {error && <p className="error">{error}</p>}
       {body}

@@ -112,7 +112,7 @@ export default function McpAccessModal({ initialProject, onClose }: {
                 {bundle ? (
                   <p className="mutedtext" style={{ fontSize: 12 }}>
                     <span className="mono">paas</span> 서버 하나에 문서·온톨로지·저장소 목록·API 카탈로그·코드·기획
-                    (과제 이름을 인자로)·운영(관리자)이 모두 들어 있습니다. 데스크톱 도구는 서버마다 중계 프로세스가
+                    (과제 이름을 인자로)·업무 앱 찾기·MCP 모듈·운영(관리자)이 모두 들어 있습니다. 데스크톱 도구는 서버마다 중계 프로세스가
                     하나라, 따로 등록하면 시작할 때 일부가 실패할 수 있습니다.
                   </p>
                 ) : (

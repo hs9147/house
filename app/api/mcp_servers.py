@@ -61,7 +61,7 @@ from ..models import (
     Project, ProjectType,
 )
 from ..security import (accessible_document_stores, require_agent_key,
-                        require_document_store, require_project_mcp_access)
+                        require_document_store, require_project_mcp_access, viewer_org_ids)
 from ..services import apisearch
 from ..services import codemap as codemap_service
 from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, shareddb, workspace
@@ -1538,14 +1538,131 @@ def agent_toolsets(db: Session, key: ApiKey) -> list[tuple[str, list[dict], Call
     return sets
 
 
+# 배포된 업무 앱 찾기 — 앱이 몇 개든 도구는 하나다(검색어·개수 상한으로 결과도 막는다).
+_AGENT_FIND_LIMIT = 20
+_AGENT_TOOLS = [{
+    "name": "find",
+    "description": (
+        "플랫폼에 배포된 업무 앱(에이전트)을 찾는다 — 이름·목적·하는 일에 검색어가 걸리는 것만, 내가 쓸 수"
+        " 있는 앱만. 결과마다 목적·하는 일·하지 않는 일·준비할 것과 주소를 준다. 앱은 사람이 브라우저로"
+        " 쓰는 화면이다 — 맞는 앱이 있으면 주소를 안내한다(도구로 앱을 조작하지는 못한다)."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "비우면 전부(상한까지)"},
+            "limit": {"type": "integer", "description": f"기본·최대 {_AGENT_FIND_LIMIT}"},
+        },
+    },
+}]
+
+# 모듈로 등록된 MCP 서버 — **도구를 펼치지 않고 셋으로 연다**(목록·도구 보기·실행). 펼치면 모듈 수 ×
+# 도구 수만큼의 정의가 대화 턴마다 입력에 실리고(작업 로그에서 도구 정의가 입력의 큰 몫이었다),
+# 도구 목록을 낼 때마다 모든 모듈에 차례로 묻게 되어 죽은 모듈 하나가 시작을 30초씩 붙든다. 셋으로
+# 열면 모듈이 몇 개든 도구 수가 같고, 쓰지 않는 모듈에는 묻지도 않는다 — 대가는 모델이 도구 형식을
+# 한 번 더 물어야 한다는 것이다.
+_MODULE_TOOLS = [
+    {
+        "name": "list",
+        "description": "내가 쓸 수 있는 MCP 모듈(외부·사내 MCP 서버) 목록 — 이름·분류. 도구는 modules__tools로 본다.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "tools",
+        "description": "모듈 하나의 도구 목록(이름·설명·인자 형식). modules__call로 부르기 전에 형식을 본다.",
+        "inputSchema": {"type": "object", "properties": {"module": {"type": "string"}},
+                        "required": ["module"]},
+    },
+    {
+        "name": "call",
+        "description": "모듈의 도구 하나를 실행한다. 인자는 modules__tools가 보여 준 형식대로.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "module": {"type": "string"},
+                "tool": {"type": "string"},
+                "arguments": {"type": "object"},
+            },
+            "required": ["module", "tool"],
+        },
+    },
+]
+
+
+def _agents_call(db: Session, key: ApiKey, args: dict) -> str:
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    from ..services import smartwork  # noqa: PLC0415 — 에이전트 목록은 대화와 같은 규칙으로
+
+    query = str(args.get("query") or "").strip().lower()
+    limit = _int_arg(args, "limit", _AGENT_FIND_LIMIT, _AGENT_FIND_LIMIT)
+    scheme = urlparse(get_settings().platform_public_url).scheme or "http"
+    found = []
+    for a in smartwork.agents(db, key):
+        text = " ".join([a["name"], a.get("purpose") or "", *(a.get("does") or [])]).lower()
+        if query and query not in text:
+            continue
+        found.append({"name": a["name"], "org": a["org"] or "공용", "type": a["type"],
+                      "purpose": a.get("purpose") or "(용도 검토 전)", "does": a.get("does") or [],
+                      "does_not": a.get("does_not") or [], "inputs": a.get("inputs") or [],
+                      "url": f"{scheme}://{a['domain']}{a['path']}"})
+    return _dump({"total": len(found), "truncated": len(found) > limit, "agents": found[:limit]})
+
+
+def _user_mcp_modules(db: Session, key: ApiKey) -> dict[str, Module]:
+    """이 사람이 쓸 수 있는 mcp 모듈 — 전역과 소속 조직의 것(관리자는 전부). 플랫폼 자신의 MCP
+    서버를 모듈로 등록해 둔 것은 뺀다 — 통합 서버가 이미 그 도구를 낸다(자기 자신을 다시 부르지 않게)."""
+    from ..services import mcp_search  # noqa: PLC0415 — 순환 import 회피
+
+    orgs = None if key.is_admin else viewer_org_ids(db, key)
+    out = {}
+    for m in db.execute(select(Module).where(Module.type == ModuleType.mcp).order_by(Module.name)).scalars():
+        if orgs is not None and m.organization_id is not None and m.organization_id not in orgs:
+            continue
+        url = modules_service.decrypt_config(m.config or {}).get("url", "")
+        if url and not mcp_search.is_internal_server_url(url):
+            out[m.name] = m
+    return out
+
+
+def _modules_call(db: Session, key: ApiKey, name: str, args: dict) -> str:
+    from ..services import mcp_client  # noqa: PLC0415
+
+    found = _user_mcp_modules(db, key)
+    if name == "list":
+        return _dump([{"module": m.name, "category": m.category or "기타"} for m in found.values()])
+    module = found.get(_str_arg(args, "module"))
+    if module is None:
+        raise mcp_server.McpToolError("쓸 수 있는 모듈이 아닙니다 — modules__list의 이름을 쓰세요.")
+    cfg = modules_service.decrypt_config(module.config or {})
+    if name == "tools":
+        tools = mcp_client.cached_list_tools(cfg.get("url", ""), cfg.get("api_key"))
+        if tools is None:
+            raise mcp_server.McpToolError(f"'{module.name}'이 응답하지 않습니다(잠시 뒤 다시).")
+        return _dump([{"name": t.get("name"), "description": t.get("description", ""),
+                       "inputSchema": t.get("inputSchema") or {}} for t in tools])
+    tool = _str_arg(args, "tool")
+    arguments = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
+    try:
+        # 모듈의 접속 정보는 플랫폼이 쥐고 있다 — 사람 PC에 그 비밀을 둘 필요가 없다.
+        out = mcp_client.call_tool(cfg.get("url", ""), cfg.get("api_key"), tool, arguments)
+    except Exception as e:  # noqa: BLE001 — 모듈 하나의 장애가 대화를 끊으면 안 된다
+        raise mcp_server.McpToolError(f"'{module.name}' 호출 실패: {str(e)[:300]}")
+    # 무엇을 물었는지(인자)는 남기지 않는다 — 모듈·도구 이름만.
+    audit.record(db, key.name, "mcp.hub.module_call", module.name, {"tool": tool})
+    return out
+
+
 def hub_toolsets(db: Session, key: ApiKey) -> list[tuple[str, list[dict], Callable[[str, dict], str]]]:
-    """통합 서버의 묶음 — 대화의 묶음에 기획 MCP(과제 인자)를 더한다."""
+    """통합 서버의 묶음 — 대화의 묶음에 기획 MCP(과제 인자)·업무 앱 찾기·MCP 모듈을 더한다."""
     sets = agent_toolsets(db, key)
     if is_enabled("workspace"):
         from . import planning as planning_api  # noqa: PLC0415
 
         sets.append(("plan", [_with_project(t) for t in planning_api._MCP_TOOLS],
                      lambda n, a: _plan_call(db, key, n, a)))
+    sets.append(("agents", _AGENT_TOOLS, lambda n, a: _agents_call(db, key, a)))
+    sets.append(("modules", _MODULE_TOOLS, lambda n, a: _modules_call(db, key, n, a)))
     return sets
 
 

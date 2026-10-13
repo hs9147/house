@@ -348,3 +348,65 @@ def test_hub_serves_every_platform_tool_from_one_server(gitea_configured):
 
     admin_tools = {t["name"] for t in rpc("tools/list", headers=ADMIN)["result"]["tools"]}
     assert any(n.startswith("ops__") for n in admin_tools)
+
+
+def test_hub_finds_apps_and_opens_modules_through_three_tools(gitea_configured, monkeypatch):
+    """배포 앱·MCP 모듈이 늘어도 통합 서버의 도구 수는 그대로다 — 앱은 찾기 하나(상한), 모듈은
+    목록·도구 보기·실행 셋. 남의 조직 앱·모듈은 보이지도 불리지도 않는다."""
+    from app.models import Deployment, DeploymentStatus, Module, ModuleType
+    from app.services import agentreview, mcp_client
+
+    monkeypatch.setattr(agentreview, "schedule", lambda *a, **k: None)
+    c = gitea_configured
+    db = SessionLocal()
+    try:
+        mine, other = Organization(name="team-a"), Organization(name="team-b")
+        db.add_all([mine, other])
+        db.commit()
+        _user(db, "a@example.com", mine)
+        for name, org in [("leave-app", mine), ("other-app", other)]:
+            p = _project(db, name, org, f"https://git.example.com/x/{name}")
+            db.add(Deployment(project_id=p.id, git_sha="a" * 40, image_tag="",
+                              profile="release", status=DeploymentStatus.running))
+        db.add_all([
+            Module(name="jira", type=ModuleType.mcp, config={"url": "http://jira.test/mcp"}),
+            Module(name="hr", type=ModuleType.mcp, organization_id=other.id,
+                   config={"url": "http://hr.test/mcp"}),
+        ])
+        db.commit()
+        token = issue_mcp_token(db, "a@example.com", "desktop", is_admin=False)
+    finally:
+        db.close()
+    auth = {"authorization": f"Bearer {token}"}
+
+    def call(name, arguments=None):
+        out = c.post(f"{API}/mcp/hub", headers=auth, json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}}}).json()
+        return json.loads(out["result"]["content"][0]["text"]) if "result" in out else out
+
+    listed = {t["name"] for t in c.post(f"{API}/mcp/hub", headers=auth, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()["result"]["tools"]}
+    assert {"agents__find", "modules__list", "modules__tools", "modules__call"} <= listed
+    assert not any(n.startswith("jira__") for n in listed)       # 모듈 도구를 펼치지 않는다
+
+    found = call("agents__find")
+    assert [a["name"] for a in found["agents"]] == ["leave-app"]
+    assert found["agents"][0]["url"].endswith("/leave-app/")
+    assert call("agents__find", {"query": "없는말"})["total"] == 0
+
+    assert [m["module"] for m in call("modules__list")] == ["jira"]
+    seen = []
+    monkeypatch.setattr(mcp_client, "cached_list_tools",
+                        lambda url, key=None: [{"name": "search", "description": "이슈 검색"}])
+    monkeypatch.setattr(mcp_client, "call_tool",
+                        lambda url, key, name, args: seen.append((url, name, args)) or "결과")
+    assert call("modules__tools", {"module": "jira"})[0]["name"] == "search"
+    out = c.post(f"{API}/mcp/hub", headers=auth, json={
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "modules__call",
+                   "arguments": {"module": "jira", "tool": "search", "arguments": {"q": "x"}}}}).json()
+    assert out["result"]["content"][0]["text"] == "결과"
+    assert seen == [("http://jira.test/mcp", "search", {"q": "x"})]
+    assert "error" in call("modules__call", {"module": "hr", "tool": "search"})   # 남의 조직 모듈
+    assert seen == [("http://jira.test/mcp", "search", {"q": "x"})]

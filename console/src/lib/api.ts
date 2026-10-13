@@ -79,7 +79,6 @@ import type {
   SmartworkContext,
   SmartworkOrgChoice,
   SmartworkSession,
-  SmartworkSessionFile,
   SmartworkSessionSummary,
   SmartworkAttachmentIn,
   SmartworkTurn,
@@ -673,9 +672,6 @@ export const api = {
     uploadWithProgress<{ path: string; status: 'saved' | 'skipped' | 'failed'; error?: string }>(
       'PUT', '/smartwork/personal/folders/file', item.file,
       { folder, path: item.path, mtime: item.mtime }, onProgress),
-  // 파일 뷰어가 열 수 있는 내 문서(이 업무에 고른 폴더 안의 것) — 경로만, 내용은 PC에 있다.
-  sessionFiles: (id: number) =>
-    request<SmartworkSessionFile[]>('GET', `/smartwork/sessions/${id}/files`),
   // doc·docx·ppt·pptx → PDF. 서버는 변환만 하고 아무것도 남기지 않는다.
   officePreview: (name: string, file: Blob) => requestBlob('/smartwork/files/preview', file, { name }),
   personalRemoveFolder: (folder: string) =>

@@ -1274,13 +1274,6 @@ export interface SmartworkFile {
 }
 
 /** 파일 뷰어가 열 수 있는 내 문서 — 동기화 때 서버가 적어 둔 경로·크기·수정 시각. */
-export interface SmartworkSessionFile {
-  folder: string;
-  path: string;
-  size: number;
-  mtime: number;
-}
-
 export interface SmartworkSuggestion {
   title: string;
   prompt: string;
