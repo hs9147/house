@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import type { ReactNode } from 'react';
 import Async from '../components/Async';
 import Split from '../components/Split';
 import Tabs from '../components/Tabs';
@@ -57,7 +56,7 @@ export default function ServerConfig() {
 
   const site = state.data?.sites.find((x) => `${x.project_id}-${x.profile}` === picked);
 
-  // 좌: 동작(고른 경로에 대해 실제로 누르는 것) · 우: 현황(경로 목록·표).
+  // 좌: 동작(고른 경로에 대해 실제로 누르는 것) · 우: 현황(표 카드, 경로 목록 카드).
   // 표 안에 버튼을 심지 않는 이유는 폭이다 — 동작 열 하나가 280px을 먹어 주소와 상태가
   // 밀렸다. 동작을 한 자리에 모으면 "무엇에 대해 무엇을 하는지"도 한 번에 읽힌다.
   const actions = (
@@ -131,14 +130,6 @@ export default function ServerConfig() {
         (백엔드)·나머지(프론트엔드)로 자동 라우팅됩니다 — 아래 다이어그램에서
         컴포넌트별 상태를 볼 수 있습니다.
       </p>
-      {/* 같은 정보를 경로 목록(그림)과 표로 — 같은 자리에서 바꿔 본다. 기본은 그림이다:
-          "어떤 경로가 어디로 가나"는 모양으로 먼저 읽힌다. */}
-      <Tabs tabs={[
-        { key: 'routes', label: '경로 목록', content: (
-          state.data ? <TopologyDiagram cfg={state.data} /> : null
-        ) },
-        { key: 'table', label: '표', content: (
-          <>
       <Async state={state} empty="등록된 프로젝트가 없습니다.">
         {(cfg) => (
           <table>
@@ -182,17 +173,29 @@ export default function ServerConfig() {
           </table>
         )}
       </Async>
-          </>
+    </div>
+  );
+
+  // 경로 목록 — 그림(어떤 경로가 어디로 가나)과 진단용 목록 둘(nssm 서비스·프록시에만 있는 라우트)을
+  // 한 카드의 탭으로. 이상 징후(슬롯 중복·잔여 서비스·미등록 라우트)가 있으면 탭 이름에 ⚠로 보인다 —
+  // 탭 뒤에 숨어도 볼 것이 있다는 것은 알 수 있게.
+  const svc = state.data?.windows_services ?? [];
+  const loose = state.data?.unregistered ?? [];
+  const svcWarn = svc.some((w) => w.duplicate_slot || w.project_name === null);
+  const routes = (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>경로 목록</h3>
+      <Tabs tabs={[
+        { key: 'routes', label: '경로 목록', content: (
+          state.data ? <TopologyDiagram cfg={state.data} /> : null
         ) },
-      ]} />
-      {state.data && state.data.windows_services.length > 0 && (
-        <Section
-          title="등록된 Windows Service"
-          count={state.data.windows_services.length}
-          // 슬롯 중복·잔여 서비스가 있으면 펼친 채로 연다 — 접어서 감출 내용이 아니다.
-          defaultOpen={state.data.windows_services.some((w) => w.duplicate_slot || w.project_name === null)}
-          description="nssm에 실제로 등록돼 있는 서비스입니다. 배포마다 -a / -b 슬롯을 번갈아 쓰므로 프로젝트·프로필당 하나만 있는 것이 정상입니다."
-        >
+        { key: 'services', label: `등록 서비스 (${svc.length})${svcWarn ? ' ⚠' : ''}`, content: (
+          <>
+          <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
+            nssm에 실제로 등록돼 있는 서비스입니다. 배포마다 -a / -b 슬롯을 번갈아 쓰므로 프로젝트·프로필당
+            하나만 있는 것이 정상입니다.
+          </p>
+          {svc.length === 0 ? <p className="mutedtext" style={{ fontSize: 12 }}>등록된 서비스가 없습니다.</p> : (
           <table>
             <thead>
               <tr>
@@ -204,7 +207,7 @@ export default function ServerConfig() {
               </tr>
             </thead>
             <tbody>
-              {state.data.windows_services.map((w) => (
+              {svc.map((w) => (
                 <tr key={w.name}>
                   <td className="mono">{w.name}</td>
                   <td><StatusPill value={w.state} /></td>
@@ -221,14 +224,16 @@ export default function ServerConfig() {
               ))}
             </tbody>
           </table>
-        </Section>
-      )}
-      {state.data && state.data.unregistered.length > 0 && (
-        <Section
-          title="미등록 라우트"
-          count={state.data.unregistered.length}
-          description="프록시 설정(web.config)에는 있으나 프로젝트로 등록되지 않은 항목입니다 — 이름과 rewrite 대상 주소만 표시합니다."
-        >
+          )}
+          </>
+        ) },
+        { key: 'unregistered', label: `미등록 라우트 (${loose.length})${loose.length ? ' ⚠' : ''}`, content: (
+          <>
+          <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
+            프록시 설정(web.config)에는 있으나 프로젝트로 등록되지 않은 항목입니다 — 이름과 rewrite 대상
+            주소만 표시합니다.
+          </p>
+          {loose.length === 0 ? <p className="mutedtext" style={{ fontSize: 12 }}>미등록 라우트가 없습니다.</p> : (
           <table>
             <thead>
               <tr>
@@ -237,7 +242,7 @@ export default function ServerConfig() {
               </tr>
             </thead>
             <tbody>
-              {state.data.unregistered.map((u) => (
+              {loose.map((u) => (
                 <tr key={u.name}>
                   <td className="mono">{u.name}</td>
                   <td className="mono">
@@ -247,14 +252,16 @@ export default function ServerConfig() {
               ))}
             </tbody>
           </table>
-        </Section>
-      )}
+          )}
+          </>
+        ) },
+      ]} />
     </div>
   );
 
   return (
     <>
-      <Split leftLabel="동작" left={actions} right={status} leftWidth={360} />
+      <Split leftLabel="동작" left={actions} right={<>{status}{routes}</>} leftWidth={360} />
           {rulesFor && (
             <RedirectRulesModal
               projectId={rulesFor.id}
@@ -276,41 +283,6 @@ export default function ServerConfig() {
             />
           )}
     </>
-  );
-}
-
-/**
- * 접었다 펼 수 있는 진단용 목록 구역(등록 서비스·미등록 라우트).
- *
- * 기본은 접힘이다 — 평소에는 위쪽 사이트 표만 보면 되고, 이 둘은 뭔가 이상할 때만
- * 들여다본다. 대신 제목에 건수를 붙여, 접힌 채로도 볼 것이 있는지는 알 수 있게 한다.
- * 이상 징후가 있는 구역은 defaultOpen으로 펼친 채 연다(접어서 감출 내용이 아니다).
- */
-function Section({
-  title, count, description, defaultOpen = false, children,
-}: {
-  title: string;
-  count: number;
-  description: string;
-  defaultOpen?: boolean;
-  children: ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div style={{ marginTop: 18 }}>
-      <div className="row" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
-        <h3 style={{ margin: 0 }}>{title} ({count})</h3>
-        <button className="small secondary" onClick={() => setOpen((v) => !v)}>
-          {open ? '접기' : '펼치기'}
-        </button>
-      </div>
-      {open && (
-        <>
-          <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>{description}</p>
-          {children}
-        </>
-      )}
-    </div>
   );
 }
 
