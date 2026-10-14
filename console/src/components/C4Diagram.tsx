@@ -5,6 +5,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import Async from './Async';
+import CodeGraph from './CodeGraph';
 import CodeStructure from './CodeStructure';
 import { codeLevel } from '../lib/codelevel';
 import { api } from '../lib/api';
@@ -265,6 +266,8 @@ const NODE_TYPES = { c4node: C4NodeView, c4group: C4GroupView };
 
 function CodeLevel({ projectId }: { projectId: number }) {
   const codemap = useApi(() => api.projectCodemap(projectId), [projectId]);
+  // 기본은 지식 그래프(온톨로지 조회와 같은 둘러보기) — 상자 그림은 리포 전체를 한 장에 보고 싶을 때.
+  const [view, setView] = useState<'graph' | 'boxes'>('graph');
   return (
     <Async state={codemap}>
       {(data) => {
@@ -280,14 +283,22 @@ function CodeLevel({ projectId }: { projectId: number }) {
         }
         return (
           <>
-            <div className="mutedtext" style={{ fontSize: 12, marginBottom: 6 }}>
-              리포 전체 · 파일 {files.length}개 · 선언{' '}
-              {files.reduce((n, f) => n + f.children.length, 0)}개 — 파일이 경계,
-              클래스·함수가 노드, 선은 상속입니다
+            <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 6 }}>
+              <span className="mutedtext" style={{ fontSize: 12 }}>
+                리포 전체 · 파일 {files.length}개 · 선언{' '}
+                {files.reduce((n, f) => n + f.children.length, 0)}개 —{' '}
+                {view === 'graph' ? '리포에서 폴더·파일·클래스로 한 걸음씩 펼칩니다. 선은 포함·정의·상속입니다'
+                  : '파일이 경계, 클래스가 노드, 선은 상속입니다'}
+              </span>
+              <span className="spacer" />
+              <button className={view === 'graph' ? 'small' : 'small secondary'} onClick={() => setView('graph')}>지식 그래프</button>
+              <button className={view === 'boxes' ? 'small' : 'small secondary'} onClick={() => setView('boxes')}>상자 그림</button>
             </div>
-            {/* 다른 레벨과 **같은 캔버스**를 쓴다 — 레벨마다 다른 엔진을 두면 확대·축소
-                동작이 레벨별로 미묘하게 달라진다. */}
-            <LevelCanvas level="code" data={codeLevel(files, '리포 전체')} />
+            {view === 'graph' ? <CodeGraph files={files} /> : (
+              /* 상자 그림은 다른 레벨과 **같은 캔버스**를 쓴다 — 레벨마다 다른 엔진을 두면 확대·축소
+                 동작이 레벨별로 미묘하게 달라진다. */
+              <LevelCanvas level="code" data={codeLevel(files, '리포 전체')} />
+            )}
             {/* 그림은 무엇이 있고 무엇을 상속하는지를 말한다. 메서드 시그니처와 설명은
                 박스에 담을 수 없으니 접어서 함께 둔다 — 정보를 잃지 않는다. */}
             <details style={{ marginTop: 8 }}>
