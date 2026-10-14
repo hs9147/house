@@ -8,7 +8,7 @@ import type { CodeMapFile, CodeMapNode } from './types';
 // 검색어 노드를 둘러싼다.
 //
 // 선은 정적 파싱이 확실히 아는 것만 — 포함(폴더·파일), 정의(파일의 선언), 상속. 호출 관계는 없다
-// (없는 관계를 그리면 그림으로 설계를 잘못 판단하게 된다 — lib/codelevel.ts와 같은 규칙).
+// (없는 관계를 그리면 그 그림으로 설계를 잘못 판단하게 된다).
 
 export type CodeKind = 'root' | 'dir' | 'file' | 'class' | 'function' | 'external' | 'query';
 export type CodeRel = 'contains' | 'defines' | 'inherits' | 'match';
