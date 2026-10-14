@@ -62,6 +62,7 @@ export default function Layout() {
           {admin && <NavLink to="/">대시보드</NavLink>}
           {admin && <NavLink to="/accounts">계정 관리</NavLink>}
           {admin && <NavLink to="/orgs">조직 관리</NavLink>}
+          <NavLink to="/workflows">워크플로 관리</NavLink>
           <NavLink to="/projects">프로젝트 관리</NavLink>
           {has('workspace') && <NavLink to="/planning">에이전트 기획</NavLink>}
           {admin && has('workspace') && <NavLink to="/providers">LLM 관리</NavLink>}
@@ -69,7 +70,6 @@ export default function Layout() {
           {admin && <NavLink to="/storage">파일 관리</NavLink>}
           {admin && <NavLink to="/sources">데이터 수집</NavLink>}
           {admin && <NavLink to="/ontology">온톨로지 관리</NavLink>}
-          <NavLink to="/workflows">워크플로 관리</NavLink>
           {admin && has('deploy') && <NavLink to="/server-config">서버구성</NavLink>}
           {admin && <NavLink to="/powershell">서버연결</NavLink>}
           {admin && <NavLink to="/audit">작업 로그</NavLink>}
