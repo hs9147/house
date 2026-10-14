@@ -210,7 +210,38 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
     }
   };
 
+  const upload = async (file: File | undefined) => {
+    if (!file) return;
+    setBusy(true);
+    setError('');
+    try {
+      const out = await api.uploadSourceRecording(row.id, file);
+      setScreens(out.screens);
+      setSaved(true);
+      onChange(await api.getSource(row.id));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const unused = candidates.filter((c) => !(screens ?? []).some((s) => s.url === c.url));
+  // 지난 수집에서 막힌 화면 — 고칠 길을 물을 수 있다(그 자리에 실제로 있던 것 중에서 고른다)
+  const blocked = (row.scan?.collected ?? []).filter((c) => c.repair);
+  const [fixes, setFixes] = useState<Record<string, Awaited<ReturnType<typeof api.repairSourceQuery>>>>({});
+  const askRepair = async (url: string) => {
+    setBusy(true);
+    setError('');
+    try {
+      const out = await api.repairSourceQuery(row.id, url);
+      setFixes((prev) => ({ ...prev, [url]: out }));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="panel">
@@ -220,6 +251,12 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
         <b>행마다 상세의 첨부파일</b>을 받습니다. 날짜는 <span className="mono">@today</span>·
         <span className="mono">@today-7d</span>·<span className="mono">@today-1m</span>처럼 쓰면 북마크를 누른 날로
         바뀝니다. 기간처럼 칸이 둘이면 같은 칸 이름을 두 번(시작, 끝 순서) 넣습니다.
+      </p>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        화면을 여는 길: ① 그 화면을 열어 둔 채 북마크를 누르면 그 자리에서, ② 「녹화」나 메뉴 탐색이 찾은 길이
+        있으면 메뉴를 다시 눌러서, ③ 아니면 주소로 엽니다. 메뉴로만 열리는 화면(주소로 열면 다른 화면이 뜬다)은
+        북마크의 「녹화」로 메뉴 → 조건 → 조회 → 첫 행의 상세 → 첨부를 한 번 보여 주고, 내려받은 파일을 아래
+        「녹화 올리기」에 올리세요.
       </p>
       <Async state={state}>
         {() => (
@@ -241,7 +278,33 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
                     <button className="small secondary" onClick={() => edit((screens ?? []).filter((_, j) => j !== i))}>빼기</button>
                   </div>
                   <div className="mono mutedtext" style={{ fontSize: 10, wordBreak: 'break-all' }}>{s.url}</div>
+                  <div className="mutedtext" style={{ fontSize: 11 }}>
+                    {s.path?.length
+                      ? `가는 길: ${s.path.map((p) => p.target.text || p.target.tag).join(' → ')}`
+                      : '가는 길 없음 — 열어 둔 화면이나 주소로 엽니다'}
+                    {s.detail && ` · 상세는 ${s.detail.col + 1}번째 칸`}
+                  </div>
                   {s.why && <div className="mutedtext" style={{ fontSize: 11 }}>{s.why}</div>}
+                  {blocked.filter((b) => b.url === s.url).map((b) => {
+                    const fix = fixes[s.url];
+                    return (
+                      <div key={b.url} style={{ fontSize: 11, margin: '4px 0', padding: 4, border: '1px dashed var(--border)', borderRadius: 4 }}>
+                        <span className="status warn">막힘</span> {b.notes[0] ?? '지난 수집에서 막혔습니다'}
+                        {!fix ? (
+                          <button className="small secondary" style={{ marginLeft: 6 }} disabled={busy}
+                            onClick={() => void askRepair(s.url)}>고칠 길 제안</button>
+                        ) : (
+                          <div style={{ marginTop: 4 }}>
+                            제안({fix.via === 'llm' ? 'LLM' : '비슷한 글자'}): <b>{fix.change}</b>
+                            {fix.reason && <span className="mutedtext"> — {fix.reason}</span>}
+                            <button className="small" style={{ marginLeft: 6 }}
+                              onClick={() => setScreen(i, { ...fix.screen, why: s.why })}>적용</button>
+                            <span className="mutedtext"> (적용한 뒤 저장)</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                   {s.conditions.map((c, k) => (
                     <div key={k} className="row" style={{ gap: 4, marginTop: 4 }}>
                       {fields.length ? (
@@ -271,7 +334,12 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
               <select value="" aria-label="화면 더하기" style={{ marginBottom: 6 }}
                 onChange={(e) => {
                   const c = candidates.find((x) => x.url === e.target.value);
-                  if (c) edit([...(screens ?? []), { screen: c.title || c.url, url: c.url, conditions: [] }]);
+                  if (c) {
+                    edit([...(screens ?? []), {
+                      screen: c.title || c.url, url: c.url, conditions: [],
+                      ...(c.path ? { path: c.path, start: c.start, frame: c.frame } : {}),
+                    }]);
+                  }
                 }}>
                 <option value="">+ 화면 더하기</option>
                 {unused.map((c) => <option key={c.url} value={c.url}>{c.title || c.url} ({c.fields.join(', ')})</option>)}
@@ -282,6 +350,11 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
                 {busy ? '…' : 'LLM 제안'}
               </button>
               <button className="small" disabled={busy || screens === null} onClick={save}>저장</button>
+              <label className="small secondary" style={{ cursor: busy ? 'default' : 'pointer', fontSize: 12 }}>
+                녹화 올리기{' '}
+                <input type="file" accept=".json,application/json" disabled={busy} style={{ width: 160 }}
+                  onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ''; }} />
+              </label>
               {saved && <span className="mutedtext" style={{ fontSize: 11 }}>
                 저장했습니다 — 북마크를 다시 끌어다 놓아야 바뀐 조건으로 돕니다.
               </span>}
@@ -365,11 +438,13 @@ function BrowserScanPanel({ row, onChange }: { row: SourceOut; onChange: (r: Sou
           <span className="mono">{row.url}</span>에 로그인하고, 읽힐 화면(메뉴를 펼친 상태, 보고 싶은 탭)을 엽니다.
         </li>
         <li>
-          북마크를 누르면 메뉴와 열린 화면을 읽어{' '}
-          <span className="mono">gpax-scan-{row.id}-*.json</span>을 내려받습니다.
+          북마크를 누르면 오른쪽 위에 창이 뜹니다. 「스캔·수집」은 메뉴와 열린 화면을 읽고(「메뉴 탐색」을 켜 두면
+          스크립트로 여는 메뉴를 숨긴 틀에서 눌러 조회 화면과 그리로 가는 길을 찾습니다) 수집 조건대로 받아{' '}
+          <span className="mono">gpax-scan-{row.id}-*.json</span>을, 「녹화」는 한 번 보여 준 길을{' '}
+          <span className="mono">gpax-record-{row.id}-*.json</span>으로 내려받습니다.
         </li>
         <li>
-          그 파일을 올립니다:{' '}
+          스캔 파일은 여기에, 녹화 파일은 아래 「수집 조건」의 「녹화 올리기」에 올립니다:{' '}
           <input type="file" accept=".json,application/json" disabled={busy || row.status === 'scanning'}
                  onChange={(e) => { upload(e.target.files?.[0]); e.target.value = ''; }} />
         </li>

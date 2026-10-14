@@ -603,6 +603,16 @@ export const api = {
   sourceQueries: (id: number) => request<SourceQueries>('GET', `/sources/${id}/queries`),
   saveSourceQueries: (id: number, screens: SourceQueryScreen[]) =>
     request<SourceQueries>('PUT', `/sources/${id}/queries`, { screens }),
+  // 북마크의 「녹화」가 내려받은 JSON — 수집 조건의 화면 하나가 된다
+  uploadSourceRecording: (id: number, file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return requestMultipart<SourceQueries>(`/sources/${id}/queries/recording`, fd);
+  },
+  // 막힌 화면의 고칠 길 — 저장하지 않는다(적용 후 저장)
+  repairSourceQuery: (id: number, url: string) =>
+    request<{ kind: 'step' | 'fields'; change: string; reason: string; via: 'llm' | 'similar'; screen: SourceQueryScreen }>(
+      'POST', `/sources/${id}/queries/repair`, { url }),
   // LLM 제안 — 저장하지 않는다
   suggestSourceQueries: (id: number) =>
     request<{ screens: SourceQueryScreen[]; notes: string[] }>('POST', `/sources/${id}/queries/suggest`),

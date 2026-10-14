@@ -62,10 +62,21 @@ class QueryScreen(BaseModel):
     screen: str = ""
     url: str
     conditions: list[QueryCondition] = []
+    # 녹화·메뉴 탐색이 남긴 길과 버튼 — 서버가 모양을 다시 자른다(infosource._route_in)
+    path: list[dict] = []
+    start: str = ""
+    frame: list[dict] = []
+    search: dict | None = None
+    export: dict | None = None
+    detail: dict | None = None
 
 
 class SourceQueries(BaseModel):
     screens: list[QueryScreen]
+
+
+class RepairRequest(BaseModel):
+    url: str
 
 
 def _host(url: str) -> str:
@@ -281,6 +292,40 @@ def put_queries(source_id: int, body: SourceQueries, db: Session = Depends(get_d
                  {"screens": [{"url": _host(s["url"]), "fields": [c["field"] for c in s["conditions"]]}
                               for s in screens]})
     return get_queries(source_id, db)
+
+
+@router.post("/sources/{source_id}/queries/recording")
+def upload_recording(source_id: int, file: UploadFile = File(...), db: Session = Depends(get_db),
+                     admin: ApiKey = Depends(require_admin)):
+    """북마크의 「녹화」가 내려받은 JSON — 화면으로 가는 길·조건·상세 칸을 수집 조건의 화면 하나로."""
+    row = _row_or_404(db, source_id)
+    raw = file.file.read(1_000_001)
+    if len(raw) > 1_000_000:
+        raise HTTPException(status_code=413, detail="녹화 파일이 너무 큽니다(1MB 이하).")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="JSON 파일이 아닙니다.")
+    try:
+        screen = infosource.accept_recording(db, row, payload, admin.name)
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # 값은 남기지 않는다 — 녹화한 조회어에 무엇이 들어 있을지 모른다.
+    audit.record(db, admin.name, "source.recording", row.name,
+                 {"origin": _host(row.url), "steps": len(screen.get("path") or []),
+                  "fields": [c["field"] for c in screen["conditions"]]})
+    return get_queries(source_id, db)
+
+
+@router.post("/sources/{source_id}/queries/repair")
+def repair_query(source_id: int, body: RepairRequest, db: Session = Depends(get_db),
+                 _: ApiKey = Depends(require_admin)):
+    """막힌 화면의 고칠 길 — 저장하지 않는다. 화면이 보여 주고 사람이 적용·저장한다."""
+    row = _row_or_404(db, source_id)
+    try:
+        return infosource.suggest_repair(db, row, body.url)
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/sources/{source_id}/queries/suggest")

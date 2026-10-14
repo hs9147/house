@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
+import difflib
 import hashlib
 import importlib.util
 import json
@@ -41,7 +43,7 @@ import threading
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
 import httpx
@@ -865,6 +867,7 @@ def _web_result(scan: dict, data: dict) -> tuple[dict, list[str]]:
             "tables": p["tables"], "headings": p["headings"], "fields": p["fields"],
             "requires_login": p["requires_login"], "text": p["text"], "depth": p.get("depth", 0),
             **({"shot": p["shot"]} if p.get("shot") is not None else {}),
+            **{k: p[k] for k in ("path", "start", "frame") if p.get(k)},
         })
     notes = [f"LLM이 낸 주소 중 받지 않은 것을 버렸습니다: {', '.join(sorted(set(dropped))[:5])}"
              ] if dropped else []
@@ -1256,21 +1259,82 @@ def _menu_in(items, origin: str, budget: list[int], depth: int = 0) -> list[dict
     return out
 
 
-def from_browser(row: InfoSource, payload) -> dict:
-    """북마크릿 결과 → _crawl과 같은 모양. 다른 사이트의 결과·모르는 파일은 받지 않는다."""
+def _check_payload(row: InfoSource, payload, agent: str, what: str) -> str:
+    """북마크가 만든 파일인지 — 이 출처의 북마크·이 사이트에서 만든 것만. 출처(origin)를 돌려준다."""
     if row.kind != "web":
         raise SourceError("브라우저 스캔은 웹사이트 출처에만 씁니다.")
-    if not isinstance(payload, dict) or payload.get("agent") != BROWSER_AGENT:
-        raise SourceError("브라우저 스캔 결과 파일이 아닙니다(콘솔의 북마크릿으로 만든 파일을 올리세요).")
+    if not isinstance(payload, dict) or payload.get("agent") != agent:
+        raise SourceError(f"{what} 파일이 아닙니다(콘솔의 북마크릿으로 만든 파일을 올리세요).")
     # 북마크는 출처마다 하나다 — 같은 사이트에 출처가 여럿이어도 다른 출처의 파일은 받지 않는다.
     source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
     if source.get("id") != row.id:
         raise SourceError(f"다른 출처의 북마크로 만든 파일입니다: {_s(source.get('name'), 64) or '알 수 없음'} "
-                          f"(이 출처는 {row.name}) — 이 화면의 북마크로 다시 스캔하세요.")
+                          f"(이 출처는 {row.name}) — 이 화면의 북마크로 다시 하세요.")
     origin = _origin(row.url)
     if _origin(_s(payload.get("origin"), 300)) != origin:
         raise SourceError(f"다른 사이트에서 만든 파일입니다: {_s(payload.get('origin'), 100)} "
                           f"(이 출처는 {origin})")
+    return origin
+
+
+# 화면으로 가는 길(녹화·메뉴 탐색) — 누른 요소의 특징과 그 요소가 있던 틀의 경로(scanAgent.js 「위치 찾기」).
+# 북마크가 다시 밟는 것이라 모양·길이만 자르고, 주소는 같은 출처의 경로만 둔다.
+MAX_PATH_STEPS = 20
+_LOC_KEYS = {"tag": 16, "text": 120, "id": 120, "name": 120, "title": 120, "code": 200, "href": 300,
+             "cls": 120, "xpath": 300}
+
+
+def _loc_in(d) -> dict | None:
+    if not isinstance(d, dict):
+        return None
+    loc = {k: _s(d.get(k), cap) for k, cap in _LOC_KEYS.items() if _s(d.get(k), cap)}
+    if not loc.get("href", "/").startswith("/"):
+        loc.pop("href")
+    return loc if re.fullmatch(r"[a-z][a-z0-9]{0,15}", loc.get("tag", "")) and len(loc) > 1 else None
+
+
+def _frames_in(items) -> list[dict]:
+    out = []
+    for f in (items if isinstance(items, list) else [])[:4]:
+        if not isinstance(f, dict):
+            return []
+        src = _s(f.get("src"), 300)
+        index = f.get("index")
+        out.append({"id": _s(f.get("id"), 120), "name": _s(f.get("name"), 120),
+                    "src": src if src.startswith("/") else "",
+                    "index": index if isinstance(index, int) and 0 <= index < 100 else -1})
+    return out
+
+
+def _route_in(s: dict, origin: str) -> dict:
+    """화면으로 가는 길(path·start·frame)과 녹화가 보여 준 버튼(search·export)·상세 칸(detail)."""
+    out: dict = {}
+    steps = []
+    for st in (s.get("path") if isinstance(s.get("path"), list) else [])[:MAX_PATH_STEPS]:
+        target = _loc_in(st.get("target")) if isinstance(st, dict) else None
+        if target is None:   # 길 하나가 깨지면 그 길은 밟을 수 없다
+            steps = []
+            break
+        steps.append({"frame": _frames_in(st.get("frame")), "target": target})
+    start = _same(s.get("start"), origin)
+    if steps and start:
+        out.update(path=steps, start=start)
+    if s.get("frame"):
+        out["frame"] = _frames_in(s.get("frame"))
+    for key in ("search", "export"):
+        loc = _loc_in(s.get(key))
+        if loc:
+            out[key] = loc
+    d = s.get("detail")
+    if (isinstance(d, dict) and isinstance(d.get("col"), int) and 0 <= d["col"] < 50
+            and re.fullmatch(r"[a-z][a-z0-9]{0,15}", str(d.get("tag") or ""))):
+        out["detail"] = {"col": d["col"], "tag": d["tag"]}
+    return out
+
+
+def from_browser(row: InfoSource, payload) -> dict:
+    """북마크릿 결과 → _crawl과 같은 모양. 다른 사이트의 결과·모르는 파일은 받지 않는다."""
+    origin = _check_payload(row, payload, BROWSER_AGENT, "브라우저 스캔 결과")
     pages, seen = [], set()
     for p in (payload.get("pages") if isinstance(payload.get("pages"), list) else [])[:MAX_PAGES * 2]:
         url = _same(p.get("url"), origin) if isinstance(p, dict) else ""
@@ -1286,6 +1350,8 @@ def from_browser(row: InfoSource, payload) -> dict:
             "tables": [t for t in (_strs(t, 40, 80) for t in tables[:10]) if t],
             "fields": _strs(p.get("fields"), 30, 80), "requires_login": bool(p.get("requires_login")),
             "links": links, "text": _s(p.get("text"), TEXT_CAP), "depth": 0,
+            # 메뉴 탐색이 찾은 화면 — 주소로는 열리지 않아 누른 메뉴(길)로 간다
+            **{k: v for k, v in _route_in(p, origin).items() if k in ("path", "start", "frame")},
         })
     if not pages:
         raise SourceError("파일에 이 출처의 화면이 없습니다.")
@@ -1303,9 +1369,29 @@ def _collected_in(items, origin: str) -> list[dict]:
             continue
         counts = {k: c[k] if isinstance(c.get(k), int) and c[k] >= 0 else 0
                   for k in ("rows", "details", "files")}
+        via = c.get("via") if c.get("via") in ("open", "path", "url") else ""
+        repair = _repair_in(c.get("repair"))
         out.append({"screen": _s(c.get("screen"), 200), "url": _same(c.get("url"), origin),
-                    **counts, "notes": _strs(c.get("notes"), 10, 200)})
+                    **counts, "notes": _strs(c.get("notes"), 10, 200), "via": via,
+                    **({"repair": repair} if repair else {})})
     return out
+
+
+def _repair_in(r) -> dict | None:
+    """막힌 곳의 보고 — 못 찾은 단계와 그 자리에 실제로 있던 요소들, 또는 못 찾은 조건 칸과 있던 칸들."""
+    if not isinstance(r, dict):
+        return None
+    if r.get("kind") == "step" and isinstance(r.get("step"), int) and 0 <= r["step"] < MAX_PATH_STEPS:
+        target = _loc_in(r.get("target"))
+        raw = r.get("candidates") if isinstance(r.get("candidates"), list) else []
+        if target:
+            return {"kind": "step", "step": r["step"], "target": target, "frame": _frames_in(r.get("frame")),
+                    "candidates": [c for c in (_loc_in(x) for x in raw[:MAX_CANDIDATES]) if c]}
+    if r.get("kind") == "fields":
+        missing, seen = _strs(r.get("missing"), MAX_CONDITIONS, 80), _strs(r.get("seen"), 40, 80)
+        if missing:
+            return {"kind": "fields", "missing": missing, "seen": seen}
+    return None
 
 
 def _collected_notes(collected: list[dict]) -> list[str]:
@@ -1424,7 +1510,8 @@ def query_candidates(row: InfoSource) -> list[dict]:
     """조건을 채울 수 있는 화면 — 스캔에서 조회 칸이 보인 화면(로그인 화면은 뺀다)."""
     return [{"url": p["url"], "title": p.get("title") or "", "kind": p.get("kind") or "",
              "info": p.get("info") or "", "fields": p.get("fields") or [],
-             "tables": (p.get("tables") or [])[:3]}
+             "tables": (p.get("tables") or [])[:3],
+             **{k: p[k] for k in ("path", "start", "frame") if p.get(k)}}
             for p in (row.scan or {}).get("pages") or []
             if p.get("fields") and p.get("kind") != "login" and not p.get("requires_login")]
 
@@ -1439,7 +1526,7 @@ def clean_screens(row: InfoSource, screens) -> list[dict]:
         raise SourceError("수집 조건은 화면 목록입니다.")
     if len(screens) > MAX_QUERY_SCREENS:
         raise SourceError(f"수집할 화면은 {MAX_QUERY_SCREENS}개까지입니다.")
-    origin, titles = _origin(row.url), {c["url"]: c["title"] for c in query_candidates(row)}
+    origin, known = _origin(row.url), {c["url"]: c for c in query_candidates(row)}
     out, seen = [], set()
     for s in screens:
         if not isinstance(s, dict):
@@ -1455,9 +1542,139 @@ def clean_screens(row: InfoSource, screens) -> list[dict]:
             field = _s(c.get("field"), 80) if isinstance(c, dict) else ""
             if field:
                 conditions.append({"field": field, "value": _s(c.get("value"), 200)})
-        out.append({"screen": _s(s.get("screen"), 200) or titles.get(url) or url, "url": url,
-                    "conditions": conditions})
+        route = _route_in(s, origin)
+        if "path" not in route and url in known:   # 사람이 보낸 것에 길이 없으면 스캔(탐색)이 찾은 길로
+            route = {**_route_in(known[url], origin), **route}
+        out.append({"screen": _s(s.get("screen"), 200) or (known.get(url) or {}).get("title") or url, "url": url,
+                    "conditions": conditions, **route})
     return out
+
+
+RECORD_AGENT = "gpax-record/1"
+MAX_CANDIDATES = 150
+
+REPAIR_PROMPT = """사내 업무 사이트에서 저장해 둔 길을 다시 밟다가 막혔다. 화면이 조금 바뀐 것이다. 아래 '지금 화면에
+있는 것' 중에서만 골라 고친다 — 목록에 없는 것을 지어내지 마라. 맞는 것이 없으면 고르지 않는다.
+출력은 JSON 객체 하나다(설명·코드펜스 없이).
+
+{kind_rule}
+
+화면: {screen}
+막힌 곳:
+{facts}
+"""
+_STEP_RULE = ('{"pick": 후보 번호(0부터) 또는 null, "reason": "고른 이유 한 문장"} — 찾던 요소와 같은 일을 하는'
+              ' 후보(메뉴 이름이 조금 바뀌었거나 위치가 옮겨진 것)를 고른다. 무언가를 바꾸는 버튼(저장·삭제·승인)은 고르지 않는다.')
+_FIELDS_RULE = ('{"fields": {"못 찾은 칸": "지금 있는 칸"}, "reason": "한 문장"} — 같은 뜻의 칸만 잇는다(이름이 바뀐 것).'
+                ' 모르는 칸은 넣지 않는다.')
+
+
+def _similar(a: str, b: str) -> float:
+    """글자만 견준다 — 띄어쓰기·괄호·기호는 빼고(공지조회(구) ≈ 공지 조회)."""
+    def bare(t: str) -> str:
+        return re.sub(r"[\W_]+", "", t or "")
+    return difflib.SequenceMatcher(None, bare(a), bare(b)).ratio()
+
+
+def _pick_similar(target: dict, candidates: list[dict]) -> int | None:
+    """LLM 없이 — 글자가 가장 비슷한 후보(충분히 비슷할 때만). 스크립트(onclick)는 같은 함수를 부르는
+    메뉴끼리 다 비슷해서 글자를 이기면 엉뚱한 메뉴를 고른다 — 동점을 가르는 데만 조금 쓴다."""
+    best, top = None, 0.6
+    for i, c in enumerate(candidates):
+        if c.get("tag") != target.get("tag"):
+            continue
+        text = _similar(target.get("text", ""), c.get("text", ""))
+        code = difflib.SequenceMatcher(None, target.get("code", ""), c.get("code", "")).ratio()             if target.get("code") and c.get("code") else 0
+        if text >= 0.6 and text + 0.05 * code > top:
+            best, top = i, text + 0.05 * code
+    return best
+
+
+def suggest_repair(db: Session, row: InfoSource, url: str) -> dict:
+    """막힌 화면의 고칠 길 — 지난 스캔이 보고한 막힌 곳과 그 자리의 실제 요소로. 저장하지 않는다(사람이 적용)."""
+    screen = next((s for s in query_screens(row) if s["url"] == url), None)
+    if screen is None:
+        raise SourceError("수집 조건에 없는 화면입니다.")
+    report = next((c.get("repair") for c in (row.scan or {}).get("collected") or []
+                   if c.get("url") == url and c.get("repair")), None)
+    if report is None:
+        raise SourceError("지난 스캔에서 이 화면이 막힌 기록이 없습니다 — 북마크로 다시 스캔·수집한 뒤 하세요.")
+    provider = llm.default_provider(db)
+    fixed, via, reason = copy.deepcopy(screen), "similar", ""
+    if report["kind"] == "step":
+        if report["step"] >= len(fixed.get("path") or []):
+            raise SourceError("막힌 단계가 지금 저장된 길에 없습니다 — 길이 바뀌었으면 다시 스캔하세요.")
+        cands = report["candidates"]
+        if not cands:
+            raise SourceError("막힌 자리의 틀이 보이지 않아 고를 것이 없습니다 — 다시 녹화하세요.")
+        pick = None
+        if provider is not None:
+            facts = json.dumps({"찾던 요소": report["target"],
+                                "지금 화면에 있는 것": [{"번호": i, **c} for i, c in enumerate(cands)]},
+                               ensure_ascii=False)[:30000]
+            try:
+                data = _parse(llm.chat_completion(provider, [{"role": "user", "content": REPAIR_PROMPT.format(
+                    kind_rule=_STEP_RULE, screen=screen["screen"], facts=facts)}], db))
+                if isinstance(data.get("pick"), int) and 0 <= data["pick"] < len(cands):
+                    pick, via, reason = data["pick"], "llm", _s(data.get("reason"), 300)
+            except Exception as e:  # noqa: BLE001 — 비슷한 것으로라도 제안한다
+                reason = f"LLM 실패 — 비슷한 글자로 골랐습니다: {str(e)[:100]}"
+        if pick is None:
+            pick = _pick_similar(report["target"], cands)
+            via = "similar"
+        if pick is None:
+            raise SourceError("고칠 요소를 고르지 못했습니다 — 메뉴가 크게 바뀌었으면 다시 녹화하세요.")
+        old = fixed["path"][report["step"]]["target"]
+        fixed["path"][report["step"]]["target"] = cands[pick]
+        change = (f"{report['step'] + 1}번째 단계: '{old.get('text') or old.get('tag')}' → "
+                  f"'{cands[pick].get('text') or cands[pick].get('tag')}'")
+    else:
+        mapping: dict[str, str] = {}
+        if provider is not None:
+            facts = json.dumps({"못 찾은 칸": report["missing"], "지금 있는 칸": report["seen"]}, ensure_ascii=False)
+            try:
+                data = _parse(llm.chat_completion(provider, [{"role": "user", "content": REPAIR_PROMPT.format(
+                    kind_rule=_FIELDS_RULE, screen=screen["screen"], facts=facts)}], db))
+                raw = data.get("fields") if isinstance(data.get("fields"), dict) else {}
+                mapping = {k: v for k, v in raw.items() if k in report["missing"] and v in report["seen"]}
+                if mapping:
+                    via, reason = "llm", _s(data.get("reason"), 300)
+            except Exception as e:  # noqa: BLE001
+                reason = f"LLM 실패 — 비슷한 이름으로 골랐습니다: {str(e)[:100]}"
+        if not mapping:
+            for m in report["missing"]:
+                near = difflib.get_close_matches(m, report["seen"], n=1, cutoff=0.6)
+                if near:
+                    mapping[m] = near[0]
+            via = "similar"
+        if not mapping:
+            raise SourceError("바뀐 칸을 짝짓지 못했습니다 — 수집 조건에서 칸을 직접 고르세요.")
+        fixed["conditions"] = [{**c, "field": mapping.get(c["field"], c["field"])} for c in fixed["conditions"]]
+        change = ", ".join(f"'{k}' → '{v}'" for k, v in mapping.items())
+    return {"kind": report["kind"], "change": change, "reason": reason, "via": via,
+            "screen": clean_screens(row, [fixed])[0]}
+
+
+def accept_recording(db: Session, row: InfoSource, payload, actor: str) -> dict:
+    """녹화 하나를 수집 조건의 화면 하나로 — 같은 화면(주소·이름이 같다)이면 바꾸고, 아니면 더한다."""
+    origin = _check_payload(row, payload, RECORD_AGENT, "녹화")
+    recipe = payload.get("recipe") if isinstance(payload.get("recipe"), dict) else {}
+    url = _same(recipe.get("url"), origin)
+    if not url:
+        raise SourceError("녹화에 이 출처의 화면 주소가 없습니다.")
+    name = _s(recipe.get("screen"), 200) or url
+    screens = query_screens(row)
+    kept = [s for s in screens if not (s["url"].split("#")[0] == url and s["screen"] == name)]
+    # 메뉴를 POST로 여는 사이트는 화면마다 주소가 같다 — 이름을 붙여 가른다(북마크는 # 앞만 연다).
+    if any(s["url"] == url for s in kept):
+        url = f"{url}#{quote(name)}"
+    cleaned = clean_screens(row, [{**recipe, "screen": name, "url": url,
+                                   "conditions": recipe.get("conditions") or []}])[0]
+    screens = [s for s in kept if s["url"] != cleaned["url"]] + [cleaned]
+    if len(screens) > MAX_QUERY_SCREENS:
+        raise SourceError(f"수집할 화면은 {MAX_QUERY_SCREENS}개까지입니다 — 쓰지 않는 화면을 빼고 다시 올리세요.")
+    set_queries(db, row, screens, actor)
+    return cleaned
 
 
 def set_queries(db: Session, row: InfoSource, screens: list[dict], actor: str) -> list[dict]:
@@ -1518,10 +1735,12 @@ def suggest_queries(db: Session, row: InfoSource) -> dict:
                 continue
             conditions.append({"field": field, "value": _s(c.get("value"), 200)})
         screens.append({"screen": page["title"] or page["url"], "url": page["url"],
-                        "conditions": conditions[:MAX_CONDITIONS], "why": _s(s.get("why"), 300)})
+                        "conditions": conditions[:MAX_CONDITIONS], "why": _s(s.get("why"), 300),
+                        **{k: page[k] for k in ("path", "start", "frame") if page.get(k)}})
     if not screens:
         screens = [{"screen": p["title"] or p["url"], "url": p["url"],
-                    "conditions": _date_guess(p["fields"]), "why": ""}
+                    "conditions": _date_guess(p["fields"]), "why": "",
+                    **{k: p[k] for k in ("path", "start", "frame") if p.get(k)}}
                    for p in pages if _date_guess(p["fields"]) or p.get("kind") == "list"]
     if dropped:
         notes.append(f"화면에 없는 칸을 버렸습니다: {', '.join(sorted(set(f for f in dropped if f))[:5])}")

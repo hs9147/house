@@ -1,12 +1,15 @@
 /* GPAX 브라우저 스캔 — 사용자가 로그인한 탭에서 북마크릿으로 돈다(pages/SourceDetail.tsx).
  *
- * 하는 일: 화면에 그려진 메뉴 트리, 열려 있는 화면(같은 출처의 iframe 포함)의 제목·표 머리글·
- * 조회 조건, 메뉴의 GET 링크 몇 장, 같은 출처의 문서·표·발표 파일(GET)을 읽고, 수집 조건이 있으면
- * 그 화면을 조회해 결과 파일과 행마다 상세의 첨부를 받아(아래 「수집」) JSON 파일로 내려받는다.
+ * 누르면 할 일을 고른다.
+ *  - 스캔·수집: 화면에 그려진 메뉴 트리, 열려 있는 화면(같은 출처의 iframe 포함)의 제목·표 머리글·
+ *    조회 조건, 메뉴의 GET 링크 몇 장, 같은 출처의 문서·표·발표 파일(GET)을 읽고, 스크립트로 여는 메뉴는
+ *    숨긴 틀에서 눌러 조회 화면과 그리로 가는 길을 찾는다(「메뉴 탐색」). 수집 조건이 있으면 그 화면을
+ *    조회해 결과 파일과 행마다 상세의 첨부를 받아(「수집」) JSON 파일로 내려받는다.
+ *  - 녹화: 사람이 한 번 보여 주는 길(메뉴 → 조건 → 조회 → 첫 행의 상세 → 첨부)을 적어 JSON으로 내려받는다.
  * 하지 않는 일: gpax로 보내기(운영 콘솔이 http라 https 페이지가 부를 수 없다), 쿠키 읽기,
  * 입력값 읽기(이름·라벨만 — 수집 조건을 채울 뿐이다), 저장·삭제·승인 같은 버튼 누르기, 로그아웃·삭제 링크 열기.
  * 바깥 파일을 불러오지 않는다 — 북마크에 이 코드가 통째로 들어간다(외부 의존 금지).
- * 북마크는 출처마다 하나다 — 콘솔이 __GPAX_SOURCE__ 자리에 {id, name, origin}을 넣는다.
+ * 북마크는 출처마다 하나다 — 콘솔이 __GPAX_SOURCE__ 자리에 {id, name, origin, queries}를 넣는다.
  */
 (function (SOURCE) {
   var AGENT = 'gpax-scan/1';
@@ -21,10 +24,11 @@
   var NAV_ROLES = { navigation: 1, menu: 1, menubar: 1, tree: 1, tablist: 1 };
   var origin = location.origin;
 
-  /* 진행 창 — 지금 하는 일, 지나온 기록(실시간), 그리고 도는 동안 바꿀 수 있는 것: 상세를 열 행 수(조회
-   * 한도)와 멈추기. 한도는 다음 행부터 바로 반영되고, 멈추면 지금 하던 일까지 하고 받은 것을 내려받는다. */
+  /* 진행 창 — 처음에는 할 일(스캔·수집 / 녹화)을 고르고, 도는 동안에는 지금 하는 일·지나온 기록(실시간)과
+   * 바꿀 수 있는 것: 상세를 열 행 수(조회 한도)와 멈추기. 한도는 다음 행부터 바로 반영되고, 멈추면 지금
+   * 하던 일까지 하고 받은 것을 내려받는다. */
   var MAX_ROWS = 100;
-  var ctl = { rows: 20, stop: false };
+  var ctl = { rows: 20, stop: false, explore: true };
   var box = document.createElement('div');
   box.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;background:#1f2937;width:380px;' +
     'color:#fff;padding:10px 14px;border-radius:6px;font:13px sans-serif;box-shadow:0 2px 8px #0006';
@@ -52,9 +56,35 @@
     stopBtn.disabled = true;
     log('멈추는 중 — 지금 하던 일까지 하고 받은 것을 내려받습니다');
   };
-  bar.appendChild(document.createTextNode('상세 열 행'));
-  bar.appendChild(rowsIn);
-  bar.appendChild(stopBtn);
+  function button(text, onclick) {
+    var b = document.createElement('button');
+    b.textContent = text;
+    b.onclick = onclick;
+    return b;
+  }
+  function controls() {
+    bar.textContent = '';
+    bar.appendChild(document.createTextNode('상세 열 행'));
+    bar.appendChild(rowsIn);
+    bar.appendChild(stopBtn);
+  }
+  function choose() {
+    var exp = document.createElement('input'), lab = document.createElement('label');
+    exp.type = 'checkbox';
+    exp.checked = true;
+    lab.appendChild(exp);
+    lab.appendChild(document.createTextNode(' 메뉴 탐색'));
+    lab.title = '주소 없이 스크립트로 여는 메뉴를 숨긴 틀에서 눌러 보고 조회 화면과 그리로 가는 길을 찾습니다(최대 40개)';
+    bar.textContent = '';
+    bar.appendChild(button('스캔·수집', function () {
+      ctl.explore = exp.checked;
+      controls();
+      run().catch(function (e) { say('실패 — ' + (e && e.message)); finish(); });
+    }));
+    bar.appendChild(button('녹화', startRecording));
+    bar.appendChild(lab);
+    say('무엇을 할까요? 스캔·수집 — 화면을 읽고 수집 조건대로 받기 · 녹화 — 조회 화면까지 가는 길을 한 번 보여 주기');
+  }
   box.appendChild(head);
   box.appendChild(status);
   box.appendChild(logBox);
@@ -280,10 +310,15 @@
   }
 
   /* ---------------- 수집 — 저장한 조건으로 조회하고, 결과 파일과 행마다 상세의 첨부를 받는다 ----------------
-   * 화면은 숨긴 틀(iframe)에 따로 연다 — 사이트가 화면을 옮겨도(상세로 이동) 이 북마크는 살아 있고,
-   * 사람이 보던 화면은 그대로다. 누르는 것은 조회·상세·첨부·엑셀 버튼뿐이다:
+   * 화면을 여는 길은 셋이다(앞의 것부터):
+   *  ① 사람이 열어 둔 화면 — 탭·프레임 안에 그 화면이 떠 있으면 그 자리에서 한다(메뉴로만 열리는 사이트).
+   *  ② 녹화·탐색이 남긴 길 — 숨긴 틀에 시작 화면을 열고 메뉴 누름을 다시 밟는다(아래 「위치 찾기」).
+   *  ③ 주소 — 숨긴 틀에 그 주소를 연다. 껍데기 화면이면 그 안의 틀까지 내려가 조건 칸을 찾는다.
+   * 숨긴 틀은 sandbox다 — 사이트가 틀을 벗어나려 해도(top.location) 이 북마크와 사람의 화면은 그대로다.
+   * 누르는 것은 화면으로 가는 메뉴와 조회·상세·첨부·엑셀 버튼뿐이다:
    *  - 이름(짧은 버튼 글자)이나 스크립트(onclick·href)에 저장·삭제·승인 같은 말이 걸리면 누르지 않는다.
-   *  - 사이트가 묻는 창(confirm)에는 늘 '아니오', 알림(alert)은 띄우지 않고 메모로 남긴다.
+   *  - 사이트가 묻는 창(confirm)에는 늘 '아니오', 알림(alert)은 띄우지 않고 메모로 남긴다. 사람의 화면에
+   *    건 것은 끝나면 되돌린다(그대로 두면 사람이 누른 저장의 확인 창까지 '아니오'가 된다).
    *  - 첨부·엑셀을 누를 때는 이동·새 창·폼 전송을 막고 같은 요청으로 파일을 받는다(사람 PC에 내려받지 않는다). */
   var MAX_ATTACH = 10, SETTLE_MS = 700, WAIT_MS = 12000, CATCH_MS = 3000;
   var MUTATE_TEXT = /저장|삭제|등록|수정|승인|반려|결재|상신|전송|제출|발송|취소|확정|신청|반영|초기화|로그아웃|save|delete|remove|insert|update|modify|edit|approve|reject|submit|send|cancel|reset|logout|sign ?out/i;
@@ -295,12 +330,25 @@
   var ATTACH = /첨부|다운로드|내려받기|download|파일/i;
   var FILE_NAME = /\.(pdf|docx?|hwpx?|txt|xlsx?|csv|pptx?)(\s|\(|\[|$)/i;
   var CLOSE = /^(닫기|close|×|x|✕)$/i;
-  var mode = 'pass', caught = [], notes = null;
+  var CLICKABLE = 'a,button,input[type=button],input[type=submit],input[type=image],[role=button],[onclick]';
+  var mode = 'pass', caught = [], notes = null, armed = [];
+  /* 길이 막힌 곳 — 무엇을 찾다 못 찾았고, 그 자리에 실제로 무엇이 있었는지. 결과 파일에 실려 콘솔이
+   * LLM에게 고칠 길을 묻는다(services/infosource.suggest_repair — 고르는 것은 여기 실린 것 중에서만). */
+  var repair = null;
+  /* 고를 수 있는 것만 — 글자가 있고, 무언가를 바꾸지 않고, 같은 글자의 누를 것을 품은 껍데기(li)는 빼고. */
+  function candidatesOf(doc) {
+    return Array.prototype.slice.call(doc.querySelectorAll(CLICKABLE + ',li')).filter(function (el) {
+      var t = labelOf(el);
+      if (box.contains(el) || !t || risky(el)) return false;
+      return !Array.prototype.some.call(el.querySelectorAll(CLICKABLE), function (c) { return labelOf(c) === t; });
+    }).slice(0, 150).map(locOf);
+  }
   /* 수집 메모 — 결과 파일에 실리고(콘솔의 스캔 메모), 진행 창에도 바로 보인다. */
   function note(t) { if (notes) notes.push(t); log('! ' + t); }
 
   function sleep(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }
   function docOf(frame) { try { return frame.contentDocument; } catch (e) { return null; } }
+  function winOf(frame) { try { return frame.contentWindow; } catch (e) { return null; } }
   function labelOf(el) {
     var img = el.querySelector && el.querySelector('img[alt]');
     return clean(el.innerText || el.textContent || el.value || el.getAttribute('title') ||
@@ -312,15 +360,15 @@
     var t = labelOf(el);
     return (t.length <= 6 && MUTATE_TEXT.test(t)) || MUTATE_CODE.test(codeOf(el)) || DANGER.test(codeOf(el));
   }
-  function clickables(doc) {
-    return Array.prototype.slice.call(doc.querySelectorAll(
-      'a,button,input[type=button],input[type=submit],input[type=image],[role=button],[onclick]'));
-  }
+  function clickables(doc) { return Array.prototype.slice.call(doc.querySelectorAll(CLICKABLE)); }
   function visible(el) { return el.offsetParent !== null || el.getClientRects().length > 0; }
+  function ours(f) { return /^gpax-/.test(f.name || ''); }
 
   function makeFrame(name) {
     var f = document.createElement('iframe');
     f.name = name;
+    /* allow-top-navigation이 없다 — 틀을 벗어나려는 사이트(if (top !== self) top.location = …)를 막는다. */
+    f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
     f.style.cssText = 'position:fixed;left:-10000px;top:0;width:1280px;height:900px;border:0;opacity:0;pointer-events:none';
     document.body.appendChild(f);
     return f;
@@ -359,12 +407,22 @@
     await wait;
     await settle(frame);
   }
+  async function until(fn, ms) {
+    for (var t0 = Date.now(); Date.now() - t0 < (ms || WAIT_MS); await sleep(200)) {
+      var v = fn();
+      if (v) return v;
+    }
+    return null;
+  }
 
-  /* 틀 안 화면의 손잡이 — 새 문서가 뜰 때마다 다시 건다(이동하면 전역이 새로 생긴다). */
+  /* 틀 안 화면의 손잡이 — 새 문서가 뜰 때마다 다시 건다(이동하면 전역이 새로 생긴다). disarm이 되돌린다. */
   function arm(frame) {
-    var w;
-    try { w = frame.contentWindow; if (!w || !w.document || w.__gpaxArmed) return; } catch (e) { return; }
-    w.__gpaxArmed = true;
+    var w = winOf(frame);
+    try { if (!w || !w.document || w.__gpaxArmed) return; } catch (e) { return; }
+    var saved = { alert: w.alert, confirm: w.confirm, prompt: w.prompt, open: w.open,
+                  submit: w.HTMLFormElement.prototype.submit, aclick: w.HTMLAnchorElement.prototype.click };
+    w.__gpaxArmed = saved;
+    armed.push(w);
     w.alert = function (m) { note('사이트 알림: ' + clean(m, 120)); };
     w.confirm = function () { return false; };
     w.prompt = function () { return null; };
@@ -374,32 +432,49 @@
       if (url) caught.push({ kind: 'get', url: new URL(url, w.location.href).href, popup: true });
       return popup;
     };
-    var submit = w.HTMLFormElement.prototype.submit;
+    var submit = saved.submit;
+    /* 이 화면 안의 틀 이름인가 — 탭 껍데기는 메뉴 폼을 화면 안의 탭(iframe)으로 보낸다(새 창이 아니다). */
+    function inPage(name) {
+      try {
+        for (var x = w; x; x = x === x.parent ? null : x.parent) if (x.frames[name]) return true;
+      } catch (e) { /* 다른 출처 */ }
+      return false;
+    }
     function take(form) {
-      var target = (form.getAttribute('target') || '').toLowerCase();
-      /* 상세를 열 때는 같은 틀로 가는 전송은 그대로 둔다(틀이 상세로 바뀐다) — 새 창으로 가는 것만 잡는다. */
-      if (mode === 'detail' && (!target || target === '_self' || target === '_parent' || target === '_top')) return false;
+      var raw = form.getAttribute('target') || '', target = raw.toLowerCase();
+      /* 상세를 열 때는 같은 틀·화면 안의 틀로 가는 전송은 그대로 둔다 — 새 창으로 가는 것만 잡는다. */
+      if (mode === 'detail' && (!target || target === '_self' || target === '_parent' || target === '_top' || inPage(raw))) return false;
       caught.push({ kind: 'form', form: form, submit: submit });
       return true;
     }
     w.HTMLFormElement.prototype.submit = function () {
       if (mode === 'pass' || !take(this)) return submit.call(this);
     };
-    w.document.addEventListener('submit', function (e) {
-      if (mode !== 'pass' && take(e.target)) e.preventDefault();
-    }, true);
+    saved.onSubmit = function (e) { if (mode !== 'pass' && take(e.target)) e.preventDefault(); };
+    w.document.addEventListener('submit', saved.onSubmit, true);
+    /* 새 창으로 여는 링크(target=_blank·이름) — 상세·파일을 누를 때만 잡는다. */
+    saved.onClick = function (e) {
+      if (mode === 'pass') return;
+      var a = e.target && e.target.closest && e.target.closest('a[href][target]');
+      var t = a ? a.getAttribute('target').toLowerCase() : '';
+      if (!a || !t || t === '_self' || t === '_parent' || t === '_top' || /^\s*javascript:/i.test(a.getAttribute('href'))) return;
+      e.preventDefault();
+      caught.push({ kind: 'get', url: a.href, popup: true });
+    };
+    w.document.addEventListener('click', saved.onClick, true);
     /* 파일을 누를 때는 이 틀의 이동도 막는다 — location.href로 내려받는 사이트가 많다(크롬·엣지). */
     if (w.navigation) {
-      w.navigation.addEventListener('navigate', function (e) {
+      saved.onNav = function (e) {
         if (mode !== 'file' || !e.cancelable) return;
         e.preventDefault();
         var url = e.destination.url;
         caught.push(e.formData ? { kind: 'post', url: url, body: e.formData }
           : { kind: 'get', url: url, early: /^blob:/.test(url) ? fetch(url) : null });
-      });
+      };
+      w.navigation.addEventListener('navigate', saved.onNav);
     }
     /* 화면에 붙이지 않은 링크로 내려받는 경우(스크립트가 만든 blob) — 곧 지워지므로 바로 받는다. */
-    var aclick = w.HTMLAnchorElement.prototype.click;
+    var aclick = saved.aclick;
     w.HTMLAnchorElement.prototype.click = function () {
       if (mode === 'file' && this.href && (/^blob:/.test(this.href) || this.hasAttribute('download'))) {
         caught.push({ kind: 'get', url: this.href, name: this.getAttribute('download') || '',
@@ -409,11 +484,144 @@
       return aclick.call(this);
     };
   }
+  function disarmAll() {
+    armed.splice(0).forEach(function (w) {
+      try {
+        var s = w.__gpaxArmed;
+        if (!s) return;
+        w.alert = s.alert; w.confirm = s.confirm; w.prompt = s.prompt; w.open = s.open;
+        w.HTMLFormElement.prototype.submit = s.submit;
+        w.HTMLAnchorElement.prototype.click = s.aclick;
+        w.document.removeEventListener('submit', s.onSubmit, true);
+        w.document.removeEventListener('click', s.onClick, true);
+        if (s.onNav) w.navigation.removeEventListener('navigate', s.onNav);
+        delete w.__gpaxArmed;
+      } catch (e) { /* 이미 다른 화면으로 간 창 */ }
+    });
+  }
 
   function press(el) {
     var w = el.ownerDocument.defaultView;
     if (el.tagName === 'TR' && el.getAttribute('ondblclick')) el.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true }));
     else el.click();
+  }
+
+  /* ---------------- 위치 찾기 — 녹화·탐색이 남긴 요소와 틀을 다시 찾는다 ----------------
+   * 요소 하나를 여러 특징(태그·글자·id·name·title·onclick·href·class·XPath)으로 적어 두고, 다시 찾을 때는
+   * 같은 태그의 후보마다 맞는 특징의 점수를 더해 가장 비슷한 것을 고른다(Similo·ROBULA+의 생각 — 화면이
+   * 조금 바뀌어도 한 특징에 매달리지 않는다). 틀(iframe)은 위에서부터 차례로 이름·id·주소로 고른다. */
+  function pathOnly(u) {
+    if (!u || /^\s*(javascript:|#)/i.test(u)) return '';
+    try { var x = new URL(u, location.href); return x.origin === origin ? x.pathname + x.search : ''; } catch (e) { return ''; }
+  }
+  function xpathOf(el) {
+    var parts = [];
+    for (var cur = el; cur && cur.nodeType === 1 && cur.tagName !== 'HTML'; cur = cur.parentElement) {
+      var i = 1;
+      for (var s = cur.previousElementSibling; s; s = s.previousElementSibling) if (s.tagName === cur.tagName) i++;
+      parts.unshift(cur.tagName.toLowerCase() + '[' + i + ']');
+    }
+    return '/html/' + parts.join('/');
+  }
+  function clsOf(el) { return clean(typeof el.className === 'string' ? el.className : '', 120); }
+  function locOf(el) {
+    return { tag: el.tagName.toLowerCase(), text: clean(labelOf(el), 120), id: clean(el.id, 120),
+             name: clean(el.getAttribute('name'), 120), title: clean(el.getAttribute('title'), 120),
+             code: clean(el.getAttribute('onclick'), 200), href: pathOnly(el.getAttribute('href')),
+             cls: clsOf(el), xpath: xpathOf(el) };
+  }
+  function scoreOf(el, loc) {
+    return (loc.id && el.id === loc.id ? 5 : 0) + (loc.text && labelOf(el) === loc.text ? 4 : 0) +
+      (loc.name && el.getAttribute('name') === loc.name ? 3 : 0) +
+      (loc.code && clean(el.getAttribute('onclick'), 200) === loc.code ? 3 : 0) +
+      (loc.title && el.getAttribute('title') === loc.title ? 2 : 0) +
+      (loc.href && pathOnly(el.getAttribute('href')) === loc.href ? 2 : 0) +
+      (loc.xpath && xpathOf(el) === loc.xpath ? 2 : 0) + (loc.cls && clsOf(el) === loc.cls ? 1 : 0);
+  }
+  /* 점수 4 이상(글자 하나가 같거나 id가 같거나…)만 — 그보다 못하면 엉뚱한 것을 누르느니 못 찾았다고 한다. */
+  function locate(doc, loc) {
+    var best = null, top = 3;
+    Array.prototype.forEach.call(doc.getElementsByTagName(loc.tag || '*'), function (el) {
+      if (box.contains(el)) return;
+      var s = scoreOf(el, loc);
+      if (s > top) { top = s; best = el; }
+    });
+    return best;
+  }
+  function frameLoc(f) {
+    return { id: clean(f.id, 120), name: clean(f.name, 120), src: pathOnly(f.getAttribute('src')),
+             index: Array.prototype.indexOf.call(f.ownerDocument.querySelectorAll('iframe,frame'), f) };
+  }
+  /* win이 root 창에서 몇 겹 아래 틀인가 — 위에서부터의 틀 특징 목록. */
+  function framePathOf(win, rootWin) {
+    var out = [];
+    try {
+      for (var w = win; w && w !== rootWin && w.frameElement; w = w.parent) out.unshift(frameLoc(w.frameElement));
+    } catch (e) { /* 다른 출처 */ }
+    return out;
+  }
+  function resolveFrame(root, path) {
+    var cur = root;
+    for (var i = 0; i < (path || []).length; i++) {
+      var doc = docOf(cur), best = null, top = 0, p = path[i];
+      if (!doc) return null;
+      Array.prototype.forEach.call(doc.querySelectorAll('iframe,frame'), function (f, k) {
+        var s = (p.id && f.id === p.id ? 5 : 0) + (p.name && f.name === p.name ? 4 : 0) +
+          (p.src && pathOnly(f.getAttribute('src')) === p.src ? 3 : 0) + (k === p.index ? 1 : 0);
+        if (s > top) { top = s; best = f; }
+      });
+      if (!best) return null;
+      cur = best;
+    }
+    return cur;
+  }
+  /* 틀 아래의 모든 틀(자기 포함) — 탐색이 누르기 전과 뒤를 비교한다. */
+  function frameTree(frame, depth, out) {
+    out = out || [];
+    out.push(frame);
+    var d = docOf(frame);
+    if (d && (depth || 0) < 4) {
+      Array.prototype.forEach.call(d.querySelectorAll('iframe,frame'), function (f) { frameTree(f, (depth || 0) + 1, out); });
+    }
+    return out;
+  }
+  /* 새 창으로 연 것(window.open·새 창 폼)을 그 틀에 연다 — 메뉴·상세가 팝업인 사이트. */
+  async function follow(c, frame) {
+    if (c.kind === 'form') {
+      var wait = loaded(frame);
+      c.form.setAttribute('target', frame.name);
+      c.submit.call(c.form);
+      await wait;
+      await settle(frame);
+    } else if (same(c.url)) await load(frame, c.url);
+  }
+  /* 녹화·탐색이 남긴 길을 밟는다 — 단계마다 그 틀에서 요소를 찾아(뜰 때까지 기다린다) 누른다. */
+  async function walkPath(root, steps) {
+    for (var i = 0; i < steps.length; i++) {
+      var s = steps[i], fr = null;
+      var el = await until(function () {
+        fr = s.frame && s.frame.length ? resolveFrame(root, s.frame) : root;
+        var d = fr && docOf(fr);
+        return d && d.body ? locate(d, s.target) : null;
+      });
+      if (!el) {
+        var fd = fr && docOf(fr);
+        repair = { kind: 'step', step: i, target: s.target, frame: s.frame || [], candidates: fd ? candidatesOf(fd) : [] };
+        return '화면으로 가는 ' + (i + 1) + '번째 단계(' + (s.target.text || s.target.tag) + ')를 찾지 못했습니다' +
+          (fd ? '' : ' — 그 단계의 틀도 보이지 않습니다');
+      }
+      if (risky(el)) return (i + 1) + '번째 단계는 무언가를 바꾸는 버튼이라 누르지 않았습니다: ' + labelOf(el);
+      log('화면으로 가는 길 ' + (i + 1) + '/' + steps.length + ' · ' + (labelOf(el) || s.target.tag));
+      arm(fr);
+      mode = 'detail';
+      caught = [];
+      press(el);
+      await settle(fr);
+      mode = 'pass';
+      if (caught.length) await follow(caught[0], root);
+      caught = [];
+    }
+    return '';
   }
 
   /* 상대 날짜(@today-1m)를 그 칸의 모양으로 — 지금 값·안내 글이 2024.01.01이면 점으로, 20240101이면 붙여서. */
@@ -431,6 +639,23 @@
     if (sep) return y + sep[1] + mo + sep[1] + da;
     if (/^\d{8}$/.test(cur) || /^[yY]{4}[mM]{2}[dD]{2}$/.test(cur)) return y + mo + da;
     return y + '-' + mo + '-' + da;
+  }
+  /* 녹화한 날짜 값을 상대 날짜로 — 다시 돌 때 그날만큼 함께 옮겨 간다(오늘 → @today, 한 달 전 → @today-1m). */
+  function relDate(v) {
+    var m = /^(\d{4})[.\-\/]?(\d{2})[.\-\/]?(\d{2})$/.exec(String(v).trim());
+    if (!m) return v;
+    var d = new Date(+m[1], +m[2] - 1, +m[3]), t = new Date();
+    t.setHours(0, 0, 0, 0);
+    var days = Math.round((t - d) / 86400000);
+    if (days === 0) return '@today';
+    if (days < 0) return '@today+' + (-days) + 'd';
+    var months = Math.round(days / 30.44), years = Math.round(days / 365.25), back = new Date(t);
+    back.setFullYear(t.getFullYear() - years);
+    if (years > 0 && back.getTime() === d.getTime()) return '@today-' + years + 'y';
+    back = new Date(t);
+    back.setMonth(t.getMonth() - months);
+    if (months > 0 && back.getTime() === d.getTime()) return '@today-' + months + 'm';
+    return '@today-' + days + 'd';
   }
   function setValue(el, value) {
     var w = el.ownerDocument.defaultView;
@@ -464,6 +689,35 @@
     var map = fieldMap(doc);
     return q.conditions.length > 0 && q.conditions.every(function (c) { return map[c.field]; });
   }
+  /* 이 틀에 그 화면이 떠 있는가 — 조건이 있으면 조건 칸이 다 있는지, 없으면 주소가 같은지. */
+  function matches(frame, q) {
+    var d = docOf(frame);
+    if (!d || !d.body) return false;
+    if (q.conditions.length) return hasFields(d, q);
+    try { return winOf(frame).location.href.split('#')[0] === q.url.split('#')[0]; } catch (e) { return false; }
+  }
+  /* 껍데기 화면(탭·프레임셋) 안까지 — 그 화면이 떠 있는 틀. */
+  function frameWithFields(frame, q) {
+    var all = frameTree(frame, 0);
+    for (var i = 0; i < all.length; i++) if (matches(all[i], q)) return all[i];
+    return null;
+  }
+  /* 사람이 열어 둔 화면 — 이 창의 틀 중 그 화면이 떠 있는 것(맨 위 창은 뺀다: 상세로 이동하면 북마크가 끊긴다). */
+  function liveFrame(q) {
+    var tops = Array.prototype.filter.call(document.querySelectorAll('iframe,frame'), function (f) { return !ours(f); });
+    for (var i = 0; i < tops.length; i++) {
+      var hit = frameWithFields(tops[i], q);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  /* 조건 칸을 못 찾았을 때 무엇이 열렸는지 — 다음 시도에서 원인을 바로 안다. */
+  function describe(frame) {
+    var d = docOf(frame), names = d ? Object.keys(fieldMap(d)).slice(0, 8) : [], where = '?';
+    try { where = winOf(frame).location.pathname; } catch (e) { /* 다른 출처 */ }
+    return '열린 화면 ' + where + ' "' + clean(d && d.title, 40) + '" · 칸 ' + (names.join(', ') || '없음') +
+      ' · 안의 틀 ' + (d ? d.querySelectorAll('iframe,frame').length : 0) + '개';
+  }
   function findSearch(doc) {
     var hits = clickables(doc).filter(function (el) { return SEARCH.test(labelOf(el)) && !risky(el); });
     return hits.filter(visible)[0] || hits[0] || null;
@@ -493,8 +747,15 @@
   function attachments(doc) {
     return clickables(doc).filter(function (el) { return isAttachment(el) && !risky(el); });
   }
-  function detailOf(tr) {
-    var els = clickables(tr).filter(function (el) { return !risky(el) && !isAttachment(el); });
+  /* 행의 상세 — 녹화가 보여 준 칸(몇 번째 칸의 어떤 요소)이 먼저, 없으면 글자·모양으로 고른다. */
+  function detailOf(tr, hint) {
+    var ok = function (el) { return !risky(el) && !isAttachment(el); };
+    if (hint && hint.col >= 0) {
+      var cell = tr.children[hint.col];
+      var pick = cell && (cell.matches && cell.matches(hint.tag) ? cell : cell.querySelector(hint.tag));
+      if (pick && ok(pick)) return pick;
+    }
+    var els = clickables(tr).filter(ok);
     var named = els.filter(function (el) { return DETAIL.test(labelOf(el)); })[0];
     if (named) return named;
     var title = els.filter(function (el) { return el.tagName === 'A' && labelOf(el).length > 1; })[0];
@@ -504,7 +765,11 @@
     /* 행 클릭을 스크립트로 단 그리드 — 제목 칸을 눌러 본다(아무 일도 없으면 그뿐이다). */
     return tr.querySelectorAll('td')[1] || null;
   }
-  function exportButton(doc, rows) {
+  function exportButton(doc, rows, q) {
+    if (q.export) {
+      var known = locate(doc, q.export);
+      if (known && !risky(known)) return known;
+    }
     return clickables(doc).filter(function (el) {
       var t = labelOf(el);
       return t.length <= 20 && EXPORT.test(t) && !NOT_EXPORT.test(t) && !risky(el) &&
@@ -560,11 +825,46 @@
     return got;
   }
 
+  /* 그 화면을 연다(위 ①②③). 이미 떠 있으면 그대로, 상세로 옮겨 갔으면 뒤로 한 번 — 그래도 아니면 다시 연다. */
+  async function openScreen(q, t) {
+    if (t.frame && matches(t.frame, q)) return '';
+    if (t.frame) {
+      try { winOf(t.frame).history.back(); } catch (e) { /* 뒤로 갈 곳이 없다 */ }
+      await settle(t.frame);
+      if (matches(t.frame, q)) return '';
+      if (t.live) return '상세에서 원래 화면으로 돌아오지 못했습니다 — 화면을 다시 열어 두고 북마크를 누르세요';
+    }
+    if (q.path && q.path.length) {
+      log(q.screen + ' — 녹화·탐색한 길로 화면을 여는 중');
+      await load(t.root, q.start || q.url.split('#')[0]);
+      var why = await walkPath(t.root, q.path);
+      if (why) return why;
+      t.frame = await until(function () {
+        var f = q.frame && q.frame.length ? resolveFrame(t.root, q.frame) : null;
+        return f && matches(f, q) ? f : frameWithFields(t.root, q);
+      });
+      if (!t.frame) {
+        var last = (q.frame && q.frame.length && resolveFrame(t.root, q.frame)) || t.root;
+        return '길을 밟았지만 조건 칸이 보이지 않습니다 — ' + describe(last);
+      }
+      return '';
+    }
+    await load(t.root, t.url);
+    t.frame = frameWithFields(t.root, q);
+    if (!t.frame) {
+      if (!docOf(t.root) || !docOf(t.root).body) return '화면을 틀 안에 열지 못했습니다(사이트가 막아 두었을 수 있음)';
+      return (q.conditions.length ? '조건 칸을 찾지 못했습니다: ' + q.conditions.map(function (c) { return c.field; }).join(', ') + ' — '
+        : '그 화면이 아닙니다 — ') + describe(t.root) +
+        '. 메뉴로만 열리는 화면이면 화면을 열어 둔 채 북마크를 누르거나, 「녹화」로 가는 길을 보여 주세요';
+    }
+    return '';
+  }
+
   /* 조건을 채우고 조회한다 — 실패하면 그 까닭을 돌려준다. */
-  async function search(q, url, work) {
-    await load(work, url);
-    var doc = docOf(work);
-    if (!doc || !doc.body) return '화면을 틀 안에 열지 못했습니다(사이트가 막아 두었을 수 있음)';
+  async function search(q, t) {
+    var why = await openScreen(q, t);
+    if (why) return why;
+    var doc = docOf(t.frame);
     var map = fieldMap(doc), used = {}, missing = [];
     q.conditions.forEach(function (c) {
       var n = used[c.field] || 0, el = (map[c.field] || [])[n];
@@ -572,20 +872,26 @@
       if (!el || !c.value) { if (!el) missing.push(c.field); return; }
       if (!setValue(el, c.value)) missing.push(c.field + '=' + c.value);
     });
-    if (missing.length && missing.length === q.conditions.length) return '조건 칸을 찾지 못했습니다: ' + missing.join(', ');
+    if (missing.length) {
+      repair = { kind: 'fields', missing: missing.filter(function (m) { return m.indexOf('=') < 0; }),
+                 seen: Object.keys(map).slice(0, 40) };
+    }
+    if (missing.length && missing.length === q.conditions.length) {
+      return '조건 칸을 찾지 못했습니다: ' + missing.join(', ') + ' — ' + describe(t.frame);
+    }
     if (missing.length) note('채우지 못한 조건: ' + missing.join(', '));
-    var btn = findSearch(doc);
-    if (!btn) return '조회 버튼을 찾지 못했습니다';
-    arm(work);
+    var btn = (q.search && locate(doc, q.search)) || findSearch(doc);
+    if (!btn || risky(btn)) return '조회 버튼을 찾지 못했습니다 — ' + describe(t.frame);
+    arm(t.frame);
     mode = 'pass';
     press(btn);
-    await settle(work);
+    await settle(t.frame);
     return '';
   }
 
   /* 결과 파일 — 엑셀 버튼이 있으면 그것으로, 없거나 받지 못하면 결과 표를 CSV로. */
   async function exportResult(q, work, files, budget) {
-    var doc = docOf(work), rows = resultRows(doc), btn = exportButton(doc, rows);
+    var doc = docOf(work), rows = resultRows(doc), btn = exportButton(doc, rows, q);
     var meta = { text: q.screen + ' — 결과', page: q.url.split('#')[0] };
     if (btn && await grab(btn, work, files, budget, meta)) return;
     if (!rows.length) return;
@@ -605,7 +911,7 @@
   /* 한 행의 상세 — 새 창으로 열면 상세 틀에, 같은 틀이 바뀌면 그 화면에서, 같은 화면에 뜨면(팝업 레이어)
    * 누르기 전에 없던 첨부만 받는다. 같은 틀이 바뀌었으면 돌아와 다시 조회해야 한다(navigated). */
   async function openDetail(tr, q, work, detail, files, budget) {
-    var trigger = detailOf(tr);
+    var trigger = detailOf(tr, q.detail);
     if (!trigger) return { opened: false, navigated: false };
     var doc = tr.ownerDocument, label = rowLabel(tr), before = attachments(doc);
     arm(work);
@@ -618,14 +924,7 @@
     caught = [];
     var navigated = docOf(work) !== doc, target = null, frame = work;
     if (popups.length) {
-      var c = popups[0];
-      if (c.kind === 'form') {
-        var wait = loaded(detail);
-        c.form.setAttribute('target', detail.name);
-        c.submit.call(c.form);
-        await wait;
-        await settle(detail);
-      } else if (same(c.url)) await load(detail, c.url);
+      await follow(popups[0], detail);
       frame = detail;
       target = docOf(detail);
     } else target = docOf(work);
@@ -649,45 +948,50 @@
     return { opened: opened, navigated: navigated };
   }
 
-  /* 조건을 채울 화면 — 지금 열려 있는 틀 중 조건 칸이 다 있는 화면의 주소가 먼저(탭마다 iframe인 사이트는
-   * 저장한 주소가 껍데기 화면이다), 없으면 저장한 주소. */
-  function screenUrl(q) {
-    var open = frames(window, 0, []).filter(function (f) { return f.doc.body && hasFields(f.doc, q); })[0];
-    return open ? open.win.location.href : q.url.split('#')[0];
-  }
-
   async function collectScreen(q, work, detail, files, budget) {
-    var rep = { screen: q.screen, url: q.url, rows: 0, details: 0, files: 0, notes: [] };
+    var rep = { screen: q.screen, url: q.url, rows: 0, details: 0, files: 0, notes: [], via: '' };
     notes = rep.notes;
-    var url = screenUrl(q), start = files.length;
+    repair = null;
+    var live = liveFrame(q), start = files.length;
+    /* 맨 위 창에 그 화면이 떠 있으면(틀 없는 사이트) 그 주소를 숨긴 틀에 연다. */
+    var t = { root: work, live: !!live, frame: live,
+              url: !live && hasFieldsTop(q) ? location.href.split('#')[0] : q.url.split('#')[0] };
+    rep.via = live ? 'open' : q.path && q.path.length ? 'path' : 'url';
+    log(q.screen + ' — ' + (live ? '열려 있는 화면에서' : rep.via === 'path' ? '녹화·탐색한 길로' : '주소로') + ' 수집합니다');
     say(q.screen + ' — 조건을 채우고 조회하는 중');
-    var why = await search(q, url, work);
+    var why = await search(q, t);
+    if (repair) rep.repair = repair;
     if (why) { note(why); notes = null; return rep; }
-    var rows = resultRows(docOf(work));
+    var rows = resultRows(docOf(t.frame));
     rep.rows = rows.length;
     log(q.screen + ' — 결과 ' + rows.length + '행');
-    await exportResult(q, work, files, budget);
+    await exportResult(q, t.frame, files, budget);
     /* 한도(ctl.rows)는 도는 동안 바뀔 수 있다 — 행마다 다시 본다. */
     var i = 0;
     for (; i < Math.min(rep.rows, ctl.rows) && !ctl.stop; i++) {
       if (files.length >= MAX_FILES || budget.left <= 0) { note('파일 상한에 닿아 멈췄습니다'); break; }
-      rows = docOf(work) ? resultRows(docOf(work)) : [];
+      rows = docOf(t.frame) && matches(t.frame, q) ? resultRows(docOf(t.frame)) : [];
       if (rows.length <= i) {
-        why = await search(q, url, work);
-        rows = why ? [] : resultRows(docOf(work));
+        why = await search(q, t);
+        rows = why ? [] : resultRows(docOf(t.frame));
+        if (why) note(why);
       }
       if (rows.length <= i) { note((i + 1) + '번째 행을 다시 찾지 못해 멈췄습니다'); break; }
       say(q.screen + ' — 상세 ' + (i + 1) + '/' + Math.min(rep.rows, ctl.rows) + ' · ' + rowLabel(rows[i]));
-      var got = await openDetail(rows[i], q, work, detail, files, budget);
+      var got = await openDetail(rows[i], q, t.frame, detail, files, budget);
       if (got.opened) rep.details++;
-      if (got.navigated) await search(q, url, work);
     }
     if (ctl.stop) note('사람이 멈췄습니다 — 결과 ' + rep.rows + '행 중 ' + i + '행까지 봤습니다');
     else if (rep.rows > i) note('결과 ' + rep.rows + '행 중 앞 ' + i + '행만 상세를 열었습니다(조회 한도)');
+    /* 사람의 화면에서 했으면 상세에 머물지 않게 원래 화면으로 — 마지막 행이 화면을 옮겼을 수 있다. */
+    if (t.live && !matches(t.frame, q)) {
+      try { winOf(t.frame).history.back(); } catch (e) { /* 뒤로 갈 곳이 없다 */ }
+    }
     rep.files = files.length - start;
     notes = null;
     return rep;
   }
+  function hasFieldsTop(q) { return q.conditions.length > 0 && hasFields(document, q); }
 
   async function collect(files, budget) {
     var queries = SOURCE.queries || [], out = [];
@@ -696,15 +1000,209 @@
     try {
       for (var i = 0; i < queries.length && !ctl.stop; i++) out.push(await collectScreen(queries[i], work, detail, files, budget));
     } finally {
+      disarmAll();
       work.remove();
       detail.remove();
     }
     return out;
   }
 
+  /* ---------------- 메뉴 탐색 — 스크립트로 여는 메뉴를 숨긴 틀에서 눌러 보고, 조회 화면과 그리로 가는 길을 적는다 ----------------
+   * 상태 탐색 크롤링(Crawljax·crawlergo)의 생각을 좁게 쓴다: 누르는 것은 메뉴 트리의 잎 항목 중 주소가 없는 것
+   * (스크립트·POST로 여는 메뉴 — 주소가 있는 메뉴는 위에서 GET으로 이미 읽는다)이고, 무언가를 바꾸는 글자는 뺀다.
+   * 누른 뒤 새로 뜨거나 바뀐 틀에 조회 칸·표가 있으면 그 화면을 길(누른 메뉴·그 화면의 틀)과 함께 남긴다.
+   * 한 번에 MAX_EXPLORE개, 하나씩 가라앉기를 기다리며. */
+  var MAX_EXPLORE = 40;
+  function menuLeaves(doc) {
+    var out = [];
+    doc.querySelectorAll('nav,[role],[id],[class]').forEach(function (nav) {
+      if (!isNav(nav) || inNav(nav.parentElement)) return;
+      nav.querySelectorAll('li').forEach(function (li) {
+        if (li.querySelector('ul,ol')) return;
+        var a = ownAnchor(li), el = a || li;
+        var href = a ? a.getAttribute('href') || '' : '';
+        if (same(href) && !/^\s*#/.test(href)) return;
+        if (!el.getAttribute('onclick') && !(a && /^\s*(javascript:|#)/i.test(href)) && !li.getAttribute('onclick')) return;
+        if (!labelOf(el) || risky(el) || out.indexOf(el) >= 0) return;
+        out.push(el);
+      });
+    });
+    return out;
+  }
+  async function explore(pages, seen) {
+    var root = makeFrame('gpax-explore'), probe = null;
+    try {
+      await load(root, location.href.split('#')[0]);
+      var leaves = [];
+      frameTree(root, 0).forEach(function (f) {
+        var d = docOf(f);
+        if (d) menuLeaves(d).forEach(function (el) { leaves.push({ el: el, frame: framePathOf(d.defaultView, winOf(root)) }); });
+      });
+      if (!leaves.length) { log('탐색 · 스크립트로 여는 메뉴가 없습니다'); return 0; }
+      var found = 0, n = Math.min(leaves.length, MAX_EXPLORE);
+      for (var i = 0; i < n && !ctl.stop; i++) {
+        var leaf = leaves[i], fr = leaf.frame.length ? resolveFrame(root, leaf.frame) : root;
+        var d = fr && docOf(fr);
+        var el = d && locate(d, locOf(leaf.el));
+        if (!el) continue;
+        var step = { frame: leaf.frame, target: locOf(el) };
+        say('메뉴 탐색 ' + (i + 1) + '/' + n + ' · ' + labelOf(el));
+        var before = frameTree(root, 0).map(function (f) { return { f: f, d: docOf(f) }; });
+        arm(fr);
+        mode = 'detail';
+        caught = [];
+        press(el);
+        await settle(fr);
+        mode = 'pass';
+        var opened = caught.splice(0), changed;
+        if (opened.length) {
+          /* 새 창으로 여는 메뉴 — 따로 둔 틀에 열어 읽는다. 다시 밟을 때도 그 창을 숨긴 틀에 연다(walkPath). */
+          probe = probe || makeFrame('gpax-probe');
+          await follow(opened[0], probe);
+          changed = [probe];
+        } else {
+          await sleep(300);
+          changed = frameTree(root, 0).filter(function (f) {
+            var old = before.filter(function (b) { return b.f === f; })[0];
+            return !old || old.d !== docOf(f);
+          });
+        }
+        var screen = changed.filter(function (f) { var x = docOf(f); return x && x.body && Object.keys(fieldMap(x)).length; })[0] ||
+          changed.filter(function (f) { var x = docOf(f); return x && x.body && x.querySelector('table th'); })[0];
+        if (!screen) continue;
+        var sw = winOf(screen), p = readDoc(docOf(screen), same(sw.location.href) || location.href.split('#')[0], sw);
+        var name = p.title || p.headings[0] || labelOf(el);
+        if (!p.title || p.title === document.title) p.title = labelOf(el);
+        if (seen[p.url + '|' + p.title]) continue;
+        seen[p.url + '|' + p.title] = 1;
+        if (seen[p.url]) p.url += '#' + encodeURIComponent(p.title || name);
+        seen[p.url] = 1;
+        p.path = [step];
+        p.start = location.href.split('#')[0];
+        p.frame = screen === root || screen === probe ? [] : framePathOf(sw, winOf(root));
+        pages.push(p);
+        found++;
+        log('탐색 · ' + labelOf(el) + ' → ' + p.title + ' (조회 칸 ' + p.fields.length + '개)');
+      }
+      return found;
+    } finally {
+      disarmAll();
+      root.remove();
+      if (probe) probe.remove();
+    }
+  }
+
+  /* ---------------- 녹화 — 사람이 한 번 보여 준 길(메뉴 → 조건 → 조회 → 첫 행의 상세 → 첨부)을 적는다 ----------------
+   * 프로그래밍 바이 데모(Rousillon·WebRobot)의 생각: 사람이 한 번 하면 첫 행에 한 일을 '모든 행'으로 넓힌다.
+   * 적는 것은 누른 요소의 특징·그 요소가 있던 틀의 경로, 그리고 조회를 누른 순간의 조건 칸 값뿐이다(비밀번호
+   * 칸은 읽지 않는다). 녹화 중에는 아무것도 막지 않는다 — 사람이 실제로 하는 일이다. 다시 밟을 때 무언가를
+   * 바꾸는 버튼은 빼고 밟는다. 결과는 JSON 파일로 내려받아 콘솔의 수집 조건에 올린다. */
+  var RECORD_AGENT = 'gpax-record/1';
+  var rec = null;
+  function recAttach() {
+    if (!rec) return;
+    frames(window, 0, []).forEach(function (f) {
+      try {
+        if (f.doc.__gpaxRec || (f.win.frameElement && ours(f.win.frameElement))) return;
+        f.doc.__gpaxRec = true;
+        f.doc.addEventListener('click', function (e) { recClick(f.win, e); }, true);
+      } catch (e) { /* 다른 출처 */ }
+    });
+  }
+  function snapshot(doc) {
+    var out = [], map = fieldMap(doc);
+    Object.keys(map).forEach(function (label) {
+      map[label].forEach(function (el) {
+        var v = el.tagName === 'SELECT' ? clean(el.options[el.selectedIndex] && el.options[el.selectedIndex].text, 80)
+          : clean(el.value, 200);
+        if (v) out.push({ field: label, value: relDate(v) });
+      });
+    });
+    return out;
+  }
+  function recClick(win, e) {
+    if (!rec || box.contains(e.target)) return;
+    var el = (e.target.closest && e.target.closest(CLICKABLE + ',li,td')) || e.target;
+    var cell = el.closest && el.closest('td,th'), tr = el.closest && el.closest('tr');
+    var inRow = !!(tr && tr.querySelectorAll('td').length >= 2 && resultRows(win.document).indexOf(tr) >= 0);
+    var t = labelOf(el);
+    rec.steps.push({
+      frame: framePathOf(win, window), target: locOf(el), label: t, url: win.location.href.split('#')[0],
+      title: clean(win.document.title, 120), risky: risky(el), attach: isAttachment(el),
+      search: SEARCH.test(t), export: t.length <= 20 && EXPORT.test(t) && !NOT_EXPORT.test(t),
+      row: inRow ? { col: Array.prototype.indexOf.call(tr.children, cell), tag: el.tagName.toLowerCase() } : null,
+      fields: Object.keys(fieldMap(win.document)).length ? snapshot(win.document) : null,
+    });
+    log('녹화 · ' + (t || el.tagName.toLowerCase()) + (risky(el) ? ' (다시 밟을 때 뺌)' : ''));
+  }
+  function sameFrame(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+  /* 녹화를 수집 조건 하나로 — 조회를 누른 곳이 그 화면, 그 앞의 다른 틀 누름이 화면으로 가는 길. */
+  function recipeOf(steps) {
+    var detailAt = -1, si = -1, i;
+    for (i = 0; i < steps.length; i++) {
+      if (steps[i].search && !steps[i].risky && detailAt < 0) si = i;
+      if (si >= 0 && i > si && steps[i].row && !steps[i].attach && !steps[i].search && !steps[i].export) { detailAt = i; break; }
+    }
+    if (si < 0) {
+      /* 조회 글자가 없는 버튼(아이콘) — 상세를 누르기 바로 전에 조건 칸이 있던 화면에서 누른 것. */
+      for (i = 0; i < steps.length; i++) if (steps[i].row && !steps[i].attach) { detailAt = i; break; }
+      for (i = detailAt - 1; i >= 0 && si < 0; i--) if (steps[i].fields && !steps[i].row && !steps[i].risky) si = i;
+    }
+    if (si < 0) return null;
+    var s = steps[si];
+    var nav = steps.slice(0, si).filter(function (x) { return !x.risky && !sameFrame(x.frame, s.frame); });
+    var path = nav.map(function (x) { return { frame: x.frame, target: x.target }; });
+    var after = steps.slice(si + 1);
+    var exp = after.filter(function (x) { return x.export && !x.row && !x.risky && sameFrame(x.frame, s.frame); })[0];
+    return {
+      /* 화면 이름은 마지막으로 누른 메뉴 — 껍데기 사이트는 화면마다 제목(title)이 같다. */
+      screen: (nav.length && nav[nav.length - 1].label) || s.title || s.url, url: s.url, start: rec.start, frame: s.frame, path: path,
+      conditions: s.fields || [], search: s.target,
+      detail: detailAt >= 0 ? steps[detailAt].row : null, export: exp ? exp.target : null,
+      shown: { detail: detailAt >= 0, attach: after.some(function (x) { return x.attach; }) },
+    };
+  }
+  function startRecording() {
+    rec = { start: location.href.split('#')[0], steps: [], timer: setInterval(recAttach, 500) };
+    recAttach();
+    bar.textContent = '';
+    var end = document.createElement('button'), cancel = document.createElement('button');
+    end.textContent = '녹화 끝';
+    cancel.textContent = '취소';
+    end.onclick = finishRecording;
+    cancel.onclick = function () { clearInterval(rec.timer); rec = null; say('녹화를 취소했습니다'); finish(); };
+    bar.appendChild(end);
+    bar.appendChild(cancel);
+    say('녹화 중 — 메뉴를 눌러 화면을 열고, 조건을 넣고, 조회 → 첫 행의 상세 → 첨부를 누른 뒤 「녹화 끝」');
+  }
+  function finishRecording() {
+    clearInterval(rec.timer);
+    var recipe = recipeOf(rec.steps), n = rec.steps.length;
+    rec = null;
+    if (!recipe) {
+      say('조회를 누른 화면을 찾지 못했습니다(누름 ' + n + '번) — 다시 녹화하세요');
+      finish();
+      return;
+    }
+    var out = { agent: RECORD_AGENT, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
+                at: new Date().toISOString(), recipe: recipe };
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(out)], { type: 'application/json' }));
+    a.download = 'gpax-record-' + SOURCE.id + '-' + String(SOURCE.name).replace(/[\\/:*?"<>|\s]+/g, '_') + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    say('녹화 끝 — 「' + recipe.screen + '」 가는 길 ' + recipe.path.length + '단계, 조건 ' + recipe.conditions.length +
+        '개' + (recipe.shown.detail ? ', 상세' : '') + (recipe.shown.attach ? '·첨부' : '') +
+        '. 내려받은 파일을 GPAX 콘솔 → ' + SOURCE.name + ' → 수집 조건 → 「녹화 올리기」에 올리세요.');
+    finish();
+  }
+
   async function run() {
     var pages = [], seen = {}, menu = [], menuN = 0;
+    box.remove();   /* 열린 화면을 읽는 동안 이 창의 글이 섞이지 않게 — 다음 say가 다시 붙인다 */
     frames(window, 0, []).forEach(function (f) {
+      if (f.win.frameElement && ours(f.win.frameElement)) return;
       var m = domMenu(f.doc); var d = dhxMenu(f.win);
       if (count(d) > count(m)) m = d;
       if (count(m) > menuN) { menu = m; menuN = count(m); }
@@ -757,6 +1255,10 @@
         if (got.ok) await addFile(files, got, f, budget);
       } catch (e) { /* 받지 못한 파일은 건너뛴다 */ }
     }
+    if (ctl.explore && !ctl.stop) {
+      var explored = await explore(pages, seen);
+      log('메뉴 탐색 — 조회 화면 ' + explored + '개를 찾았습니다');
+    }
     var collected = await collect(files, budget);
     var out = { agent: AGENT, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
                 url: location.href.split('#')[0], at: new Date().toISOString(), menu: menu, pages: pages,
@@ -790,5 +1292,5 @@
     dismiss();
     return;
   }
-  run().catch(function (e) { say('실패 — ' + (e && e.message)); finish(); });
+  choose();
 })(__GPAX_SOURCE__);

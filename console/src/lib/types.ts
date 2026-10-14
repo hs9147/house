@@ -1065,6 +1065,11 @@ export interface SourceScan {
   sitemap?: number;
   browser?: boolean;
   via?: 'browser';
+  // 수집 결과 — 화면마다 결과 행·연 상세·받은 파일, 어떻게 열었는지, 막혔으면 막힌 곳의 보고
+  collected?: {
+    screen: string; url: string; rows: number; details: number; files: number; notes: string[];
+    via: 'open' | 'path' | 'url' | ''; repair?: { kind: 'step' | 'fields' };
+  }[];
   // api
   openapi?: string;
   title?: string;
@@ -1120,17 +1125,40 @@ export interface SourceQueryCondition {
   value: string;
 }
 
+// 녹화·메뉴 탐색이 남긴 요소 — 북마크가 여러 특징으로 다시 찾는다(lib/scanAgent.js 「위치 찾기」)
+export interface SourceLocator {
+  tag: string;
+  text?: string;
+  id?: string;
+  name?: string;
+  title?: string;
+  code?: string;
+  href?: string;
+  cls?: string;
+  xpath?: string;
+}
+
 export interface SourceQueryScreen {
   screen: string;
   url: string;
   conditions: SourceQueryCondition[];
   why?: string;
+  // 화면으로 가는 길 — 시작 화면에서 누른 메뉴들(주소로는 열리지 않는 화면)
+  path?: { frame: unknown[]; target: SourceLocator }[];
+  start?: string;
+  frame?: unknown[];
+  search?: SourceLocator;
+  export?: SourceLocator;
+  detail?: { col: number; tag: string };
 }
 
 export interface SourceQueries {
   screens: SourceQueryScreen[];
   // 조건을 채울 수 있는 화면 — 스캔에서 조회 칸이 보인 화면
-  candidates: { url: string; title: string; kind: string; info: string; fields: string[] }[];
+  candidates: {
+    url: string; title: string; kind: string; info: string; fields: string[];
+    path?: SourceQueryScreen['path']; start?: string; frame?: unknown[];
+  }[];
   updated_by: string;
   updated_at: string | null;
 }

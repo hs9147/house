@@ -612,7 +612,7 @@ def test_collection_files_and_summary_arrive_with_the_browser_scan(client, monke
     scan = client.get(f"{API}/sources/{made['id']}", headers=ADMIN).json()["scan"]
     assert len(scan["files"]) == 25 and scan["files"][0]["name"] == "붙임0.pdf"
     assert scan["collected"][1] == {"screen": "남의 것", "url": "", "rows": 0, "details": 0,
-                                    "files": 0, "notes": []}
+                                    "files": 0, "notes": [], "via": ""}
     assert any(n.startswith("수집 · 공지 조회: 결과 30행 중 상세 20건, 파일 25개") for n in scan["notes"])
 
 
@@ -627,3 +627,118 @@ def test_scan_progress_streams_while_scanning(client):
     # 이어 받기 — after 뒤의 것만
     rest = client.get(f"{API}/sources/{made['id']}/progress", headers=ADMIN, params={"after": out["total"]}).json()
     assert rest["steps"] == [] and rest["total"] == out["total"]
+
+
+_STEP = {"frame": [], "target": {"tag": "a", "text": "공지 조회", "code": "openMenu('notice');return false",
+                                 "href": "javascript:evil()", "xpath": "/html/body[1]/div[1]/ul[1]/li[1]/a[1]"}}
+
+
+def _recording(sid, **over):
+    recipe = {"screen": "공지 조회", "url": "https://intra.test/screen", "start": "https://intra.test/main",
+              "frame": [{"id": "tab_notice", "name": "tab_notice", "src": "", "index": 0}], "path": [_STEP],
+              "conditions": [{"field": "DATE_FROM_VALUE", "value": "@today-1m"}],
+              "search": {"tag": "a", "text": "조회"}, "detail": {"col": 1, "tag": "a"}, "export": None, **over}
+    payload = {"agent": "gpax-record/1", "source": {"id": sid, "name": "인사 포털"},
+               "origin": "https://intra.test", "recipe": recipe}
+    return {"file": ("gpax-record.json", json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json")}
+
+
+def test_recording_becomes_a_screen_with_its_route(client, monkeypatch):
+    """녹화 — 메뉴로만 열리는 화면은 주소로 못 간다. 누른 메뉴(길)·그 화면의 틀·상세 칸을 수집 조건에 둔다."""
+    sid = _notice_scan(client, monkeypatch)
+    url = f"{API}/sources/{sid}/queries/recording"
+    res = client.post(url, headers=ADMIN, files=_recording(sid))
+    assert res.status_code == 200, res.text
+    screen = res.json()["screens"][0]
+    assert screen["path"][0]["target"]["text"] == "공지 조회"
+    assert "href" not in screen["path"][0]["target"]          # 같은 출처의 경로만 — 스크립트 주소는 버린다
+    assert screen["start"] == "https://intra.test/main" and screen["frame"][0]["id"] == "tab_notice"
+    assert screen["detail"] == {"col": 1, "tag": "a"} and screen["search"]["text"] == "조회"
+    # 다시 올리면 바꾸고, 같은 주소의 다른 화면(POST 탭)은 이름을 붙여 더한다
+    assert len(client.post(url, headers=ADMIN, files=_recording(sid)).json()["screens"]) == 1
+    screens = client.post(url, headers=ADMIN, files=_recording(sid, screen="클레임 조회")).json()["screens"]
+    assert [s["url"] for s in screens] == ["https://intra.test/screen",
+                                           "https://intra.test/screen#%ED%81%B4%EB%A0%88%EC%9E%84%20%EC%A1%B0%ED%9A%8C"]
+    # 북마크가 길을 싣는다 — 출처 응답의 queries에 그대로
+    assert client.get(f"{API}/sources/{sid}", headers=ADMIN).json()["queries"][1]["path"]
+    # 깨진 길은 통째로 버린다(밟다 엉뚱한 것을 누르느니 주소로 간다)
+    broken = client.post(url, headers=ADMIN, files=_recording(sid, screen="깨진 길", path=[{"target": "x"}])).json()
+    assert "path" not in broken["screens"][-1]
+    # 다른 사이트·다른 출처의 녹화는 받지 않는다
+    other = _recording(sid, url="https://other.test/screen")
+    assert client.post(url, headers=ADMIN, files=other).status_code == 400
+
+
+def test_explored_screens_keep_their_route_into_candidates_and_conditions(client, monkeypatch):
+    """메뉴 탐색이 찾은 화면은 길과 함께 남고, 그 화면을 수집 조건에 넣으면 길이 따라온다."""
+    monkeypatch.setattr(infosource, "_submit_result", infosource._result_job)
+    made = _create(client, headers="")
+    pages = [{"url": "https://intra.test/main", "title": "GPS", "links": []},
+             {"url": "https://intra.test/screen", "title": "공지 조회", "fields": ["DATE_FROM_VALUE"], "links": [],
+              "path": [_STEP], "start": "https://intra.test/main", "frame": [{"id": "tab_notice", "index": 0}]}]
+    res = client.post(f"{API}/sources/{made['id']}/browser-result", headers=ADMIN,
+                      files=_browser_file(made["id"], pages=pages))
+    assert res.status_code == 202, res.text
+    cand = client.get(f"{API}/sources/{made['id']}/queries", headers=ADMIN).json()["candidates"][0]
+    assert cand["path"][0]["target"]["text"] == "공지 조회" and cand["start"] == "https://intra.test/main"
+    saved = client.put(f"{API}/sources/{made['id']}/queries", headers=ADMIN, json={"screens": [
+        {"url": "https://intra.test/screen", "conditions": [{"field": "DATE_FROM_VALUE", "value": "@today"}]}]})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["screens"][0]["path"] == cand["path"]
+
+
+def _blocked_scan(client, sid, repair):
+    collected = [{"screen": "공지 조회", "url": "https://intra.test/screen", "rows": 0, "via": "path",
+                  "notes": ["화면으로 가는 1번째 단계(공지 조회)를 찾지 못했습니다"], "repair": repair}]
+    res = client.post(f"{API}/sources/{sid}/browser-result", headers=ADMIN,
+                      files=_browser_file(sid, collected=collected))
+    assert res.status_code == 202, res.text
+
+
+def test_blocked_route_gets_a_repair_chosen_only_from_what_was_on_screen(client, monkeypatch):
+    """길이 막히면 북마크가 그 자리에 실제로 있던 요소를 함께 보고한다 — 고칠 길은 그중에서만 고른다."""
+    sid = _notice_scan(client, monkeypatch)
+    client.post(f"{API}/sources/{sid}/queries/recording", headers=ADMIN, files=_recording(sid))
+    url = f"{API}/sources/{sid}/queries/repair"
+    body = {"url": "https://intra.test/screen"}
+    assert client.post(url, headers=ADMIN, json=body).status_code == 400      # 막힌 기록이 없다
+
+    cands = [{"tag": "a", "text": "로그아웃", "code": "logout()"},
+             {"tag": "a", "text": "공지사항 조회", "code": "openMenu('notice2');return false"}]
+    _blocked_scan(client, sid, {"kind": "step", "step": 0, "target": _STEP["target"], "frame": [],
+                                "candidates": cands})
+    # LLM 없이 — 글자가 가장 비슷한 것
+    out = client.post(url, headers=ADMIN, json=body).json()
+    assert out["via"] == "similar" and out["screen"]["path"][0]["target"]["text"] == "공지사항 조회"
+    assert "공지 조회" in out["change"] and "공지사항 조회" in out["change"]
+    # 제안은 저장하지 않는다
+    assert client.get(f"{API}/sources/{sid}/queries", headers=ADMIN).json()["screens"][0]["path"][0][
+        "target"]["text"] == "공지 조회"
+
+    # LLM이 목록 밖의 번호를 내면 버리고 비슷한 것으로
+    monkeypatch.setattr(llm, "default_provider", lambda db: object())
+    monkeypatch.setattr(llm, "chat_completion", lambda *a, **k: json.dumps({"pick": 7, "reason": "x"}))
+    assert client.post(url, headers=ADMIN, json=body).json()["via"] == "similar"
+    monkeypatch.setattr(llm, "chat_completion", lambda *a, **k: json.dumps({"pick": 1, "reason": "이름이 바뀜"}))
+    out = client.post(url, headers=ADMIN, json=body).json()
+    assert out["via"] == "llm" and out["reason"] == "이름이 바뀜"
+
+
+def test_renamed_condition_fields_are_paired_back(client, monkeypatch):
+    sid = _notice_scan(client, monkeypatch)
+    client.post(f"{API}/sources/{sid}/queries/recording", headers=ADMIN, files=_recording(sid))
+    _blocked_scan(client, sid, {"kind": "fields", "missing": ["DATE_FROM_VALUE"],
+                                "seen": ["DATE_FROM_VAL", "KEYWORD"]})
+    out = client.post(f"{API}/sources/{sid}/queries/repair", headers=ADMIN,
+                      json={"url": "https://intra.test/screen"}).json()
+    assert out["screen"]["conditions"][0]["field"] == "DATE_FROM_VAL"
+    assert out["screen"]["path"]                    # 길은 그대로
+
+
+def test_similar_pick_goes_by_menu_text_not_by_the_shared_menu_function():
+    """회귀: 같은 함수(openMenu)를 부르는 메뉴는 스크립트가 다 비슷해서, 스크립트로 견주면 엉뚱한 메뉴를 골랐다."""
+    target = {"tag": "a", "text": "공지조회(구)", "code": "openMenu('old');return false"}
+    cands = [{"tag": "a", "text": "공지 조회", "code": "openMenu('notice');return false"},
+             {"tag": "a", "text": "클레임 조회", "code": "openMenu('claim');return false"}]
+    assert infosource._pick_similar(target, cands) == 0
+    assert infosource._pick_similar({"tag": "a", "text": "전혀 다른 것"}, cands) is None
