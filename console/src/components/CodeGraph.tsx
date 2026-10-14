@@ -4,6 +4,7 @@ import {
 } from '../lib/codegraph';
 import type { CodeMapFile } from '../lib/types';
 import { fmt, VIZ } from '../lib/viz';
+import CodeStructure from './CodeStructure';
 import ForceGraph, { type GraphLink, type GraphNode } from './ForceGraph';
 
 // 종류마다 색·표식 — 온톨로지 조회(pages/ontology/ExploreTab)와 같은 팔레트·같은 읽는 법이다.
@@ -108,7 +109,7 @@ export default function CodeGraph({ files }: { files: CodeMapFile[] }) {
   );
 }
 
-/** 고른 노드의 상세 — 그래프에 담을 수 없는 시그니처·설명·메서드를 여기에. */
+/** 고른 노드의 상세 — 그래프에 담을 수 없는 시그니처·설명·메서드를 여기에(파일이면 그 파일 전체, 선언이면 그것 하나). */
 function Detail({ info }: { info: CodeInfo }) {
   const k = kindOf(info.kind);
   const node = info.node;
@@ -122,30 +123,20 @@ function Detail({ info }: { info: CodeInfo }) {
       {info.path && <div className="mono mutedtext" style={{ fontSize: 11 }}>{info.path}{node ? `:${node.lineno}` : ''}</div>}
       {info.kind === 'dir' && <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>아래 파일 {fmt(info.weight)}개</p>}
       {info.kind === 'file' && info.file && (
-        <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
-          {info.file.lang} · 클래스 {info.file.children.filter((c) => c.kind === 'class').length} ·
-          함수 {info.file.children.filter((c) => c.kind !== 'class').length}
-          {info.file.summary && ` — ${info.file.summary}`}
-        </p>
+        <>
+          <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 4px' }}>
+            클래스 {info.file.children.filter((c) => c.kind === 'class').length} ·
+            함수 {info.file.children.filter((c) => c.kind !== 'class').length}
+          </p>
+          <CodeStructure files={[info.file]} open />
+        </>
       )}
       {info.kind === 'external' && (
         <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
           이 리포 밖의 상위 클래스 — 이 리포에서 상속하는 클래스 {fmt(info.weight)}개
         </p>
       )}
-      {node && (
-        <>
-          <div className="mono" style={{ fontSize: 12, overflowWrap: 'anywhere' }}>{node.signature}</div>
-          {node.doc && <p className="mutedtext" style={{ fontSize: 12, margin: '2px 0' }}>{node.doc}</p>}
-          {node.children.length > 0 && (
-            <ul className="mono" style={{ fontSize: 11, margin: '4px 0 0 18px', maxHeight: 160, overflow: 'auto' }}>
-              {node.children.map((m) => (
-                <li key={`${m.name}:${m.lineno}`} title={m.doc}>{m.signature}</li>
-              ))}
-            </ul>
-          )}
-        </>
-      )}
+      {node && info.file && <CodeStructure files={[{ ...info.file, children: [node] }]} open />}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { codeLevel } from '../lib/codelevel';
+import { codeLevel, pickedFiles } from '../lib/codelevel';
 import type { CodeMapFile, CodeMapNode } from '../lib/types';
 
 // code 레벨은 문서가 아니라 **리포**가 원천이다(services/codemap의 정적 파싱). 그림이
@@ -115,5 +115,23 @@ describe('codeLevel', () => {
     expect(level.stage).toBe('repo');
     expect(level.confirmed).toBe(true);
     expect(level.title).toBe('c');
+  });
+});
+
+describe('pickedFiles', () => {
+  // 상세는 고른 것만 — 리포 전체를 늘어놓으면 수백 개 파일 사이에서 고른 것을 다시 찾아야 한다.
+  const files = [
+    file('app/pay.py', [node('class', 'Pay', { lineno: 3 }), node('function', 'run', { lineno: 9 })]),
+    file('app/user.py', [node('class', 'User')]),
+  ];
+
+  it('파일 상자는 그 파일 전체, 클래스 상자는 그 클래스 하나', () => {
+    const level = codeLevel(files, 'r');
+    const pay = level.elements.find((e) => e.label === 'app/pay.py')!.alias;
+    const cls = level.elements.find((e) => e.label === 'Pay')!.alias;
+    expect(pickedFiles(files, pay)).toEqual([files[0]]);
+    expect(pickedFiles(files, cls)[0].children.map((c) => c.name)).toEqual(['Pay']);
+    expect(pickedFiles(files, null)).toEqual([]);
+    expect(pickedFiles(files, 'x:BaseModel')).toEqual([]);
   });
 });

@@ -9,7 +9,7 @@ const KIND_LABEL: Record<CodeMapNode['kind'], string> = {
   method: 'fn',
 };
 
-function NodeItem({ node }: { node: CodeMapNode }) {
+function NodeItem({ node, open = false }: { node: CodeMapNode; open?: boolean }) {
   const label = (
     <>
       <span className="status dim" style={{ fontSize: 10 }}>{KIND_LABEL[node.kind]}</span>{' '}
@@ -21,7 +21,7 @@ function NodeItem({ node }: { node: CodeMapNode }) {
     return <div className="codemap-leaf">{label}</div>;
   }
   return (
-    <details className="codemap-node">
+    <details className="codemap-node" open={open}>
       <summary>{label}</summary>
       <div className="codemap-children">
         {node.children.map((c) => (
@@ -32,14 +32,15 @@ function NodeItem({ node }: { node: CodeMapNode }) {
   );
 }
 
-export default function CodeStructure({ files }: { files: CodeMapFile[] }) {
+/** open — 고른 항목 하나를 보일 때 펼쳐 둔다(접혀 있으면 한 번 더 눌러야 한다). */
+export default function CodeStructure({ files, open = false }: { files: CodeMapFile[]; open?: boolean }) {
   if (files.length === 0) {
     return <p className="mutedtext">파싱 가능한 코드 파일이 없습니다 (Python·JS/TS 대상).</p>;
   }
   return (
     <div className="codemap">
       {files.map((f) => (
-        <details key={f.path} className="codemap-file">
+        <details key={f.path} className="codemap-file" open={open}>
           <summary>
             <span className="mono">{f.path}</span>
             <span className="status info" style={{ fontSize: 10, marginLeft: 8 }}>{f.lang}</span>
@@ -51,7 +52,7 @@ export default function CodeStructure({ files }: { files: CodeMapFile[] }) {
             {f.children.length === 0 ? (
               <div className="mutedtext" style={{ fontSize: 12 }}>최상위 클래스·함수 없음</div>
             ) : (
-              f.children.map((c) => <NodeItem key={`${c.name}-${c.lineno}`} node={c} />)
+              f.children.map((c) => <NodeItem key={`${c.name}-${c.lineno}`} node={c} open={open && f.children.length === 1} />)
             )}
           </div>
         </details>

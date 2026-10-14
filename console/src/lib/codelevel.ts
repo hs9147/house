@@ -118,3 +118,18 @@ export function codeLevel(files: CodeMapFile[], title: string): C4Level {
   // 문서가 아니라 리포가 원천이므로 '확정' 개념이 없다 — 항상 지금의 코드다.
   return { stage: 'repo', confirmed: true, title, elements, relations };
 }
+
+/**
+ * 상자 그림에서 누른 상자 → 상세에 보일 범위. 파일 상자면 그 파일 전체, 클래스 상자면 그 파일에서 그
+ * 클래스 하나만. 외부 클래스·빈 자리는 비운다(보일 코드가 없다).
+ */
+export function pickedFiles(files: CodeMapFile[], alias: string | null): CodeMapFile[] {
+  if (!alias) return [];
+  const file = files.find((f) => alias === fileAlias(f.path));
+  if (file) return [file];
+  for (const f of files) {
+    const node = f.children.find((n) => alias === nodeAlias(f.path, n));
+    if (node) return [{ ...f, children: [node] }];
+  }
+  return [];
+}

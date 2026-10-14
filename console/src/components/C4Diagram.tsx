@@ -7,7 +7,7 @@ import '@xyflow/react/dist/style.css';
 import Async from './Async';
 import CodeGraph from './CodeGraph';
 import CodeStructure from './CodeStructure';
-import { codeLevel } from '../lib/codelevel';
+import { codeLevel, pickedFiles } from '../lib/codelevel';
 import { api } from '../lib/api';
 import { layoutElements, layoutFlow } from '../lib/c4layout';
 import { useApi } from '../lib/hooks';
@@ -146,9 +146,11 @@ interface CanvasProps {
   // React Flow를 다시 마운트할 key에만 쓰인다 — code 레벨도 같은 캔버스를 쓴다.
   level: Level;
   data: C4Level;
+  // 상자를 누르면 그 alias, 빈 자리를 누르면 null — code 레벨이 고른 것의 상세를 보인다.
+  onSelect?: (alias: string | null) => void;
 }
 
-function LevelCanvas({ level, data }: CanvasProps) {
+function LevelCanvas({ level, data, onSelect }: CanvasProps) {
   const { nodes, edges } = useMemo(() => {
     const shown = data.elements;
     const aliases = new Set(shown.map((e) => e.alias));
@@ -208,6 +210,8 @@ function LevelCanvas({ level, data }: CanvasProps) {
         minZoom={0.2}
         maxZoom={2}
         nodesConnectable={false}
+        onNodeClick={onSelect && ((_, node) => onSelect(node.id))}
+        onPaneClick={onSelect && (() => onSelect(null))}
       >
         <Background gap={20} />
         {/* 노드 색은 CSS(.c4-node)에 있어 미니맵이 읽지 못한다 — 여기서 직접 준다. */}
@@ -268,6 +272,7 @@ function CodeLevel({ projectId }: { projectId: number }) {
   const codemap = useApi(() => api.projectCodemap(projectId), [projectId]);
   // 기본은 지식 그래프(온톨로지 조회와 같은 둘러보기) — 상자 그림은 리포 전체를 한 장에 보고 싶을 때.
   const [view, setView] = useState<'graph' | 'boxes'>('graph');
+  const [picked, setPicked] = useState<string | null>(null);
   return (
     <Async state={codemap}>
       {(data) => {
@@ -294,19 +299,22 @@ function CodeLevel({ projectId }: { projectId: number }) {
               <button className={view === 'graph' ? 'small' : 'small secondary'} onClick={() => setView('graph')}>지식 그래프</button>
               <button className={view === 'boxes' ? 'small' : 'small secondary'} onClick={() => setView('boxes')}>상자 그림</button>
             </div>
+            {/* 시그니처·설명은 그림에 담을 수 없어 아래에 둔다 — **고른 것만**. 리포 전체를 늘어놓으면
+                수백 개 파일 사이에서 고른 것을 다시 찾아야 한다. 그래프는 고른 노드의 상세를 스스로 보인다. */}
             {view === 'graph' ? <CodeGraph files={files} /> : (
-              /* 상자 그림은 다른 레벨과 **같은 캔버스**를 쓴다 — 레벨마다 다른 엔진을 두면 확대·축소
-                 동작이 레벨별로 미묘하게 달라진다. */
-              <LevelCanvas level="code" data={codeLevel(files, '리포 전체')} />
+              <>
+                {/* 상자 그림은 다른 레벨과 **같은 캔버스**를 쓴다 — 레벨마다 다른 엔진을 두면 확대·축소
+                    동작이 레벨별로 미묘하게 달라진다. */}
+                <LevelCanvas level="code" data={codeLevel(files, '리포 전체')} onSelect={setPicked} />
+                <div style={{ marginTop: 8 }}>
+                  {pickedFiles(files, picked).length
+                    ? <CodeStructure files={pickedFiles(files, picked)} open />
+                    : <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+                        파일·클래스 상자를 누르면 그 상세(시그니처·설명)가 여기에 나옵니다.
+                      </p>}
+                </div>
+              </>
             )}
-            {/* 그림은 무엇이 있고 무엇을 상속하는지를 말한다. 메서드 시그니처와 설명은
-                박스에 담을 수 없으니 접어서 함께 둔다 — 정보를 잃지 않는다. */}
-            <details style={{ marginTop: 8 }}>
-              <summary style={{ fontSize: 12, cursor: 'pointer' }}>
-                파일별 상세 (시그니처·설명)
-              </summary>
-              <CodeStructure files={files} />
-            </details>
           </>
         );
       }}
