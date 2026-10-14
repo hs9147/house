@@ -99,14 +99,15 @@ main:has(.split), main:has(.plan-grid) { max-width: none; }
 /* 에이전트 기획의 2단 — 패널을 **옮기지 않고** 자리만 적는다(className). JSX를 줄 단위로
    자르다 세 번 깨뜨린 뒤의 선택이다: 격자는 DOM 순서와 무관하게 칸을 정할 수 있다.
      진행단계  — 위에 전체 폭(얇은 단계 버튼 줄이다)
-     작업 영역 — 왼쪽, 두 줄에 걸친다(대화와 산출물이 가장 길다)
-     C4·빌드  — 오른쪽 위아래(그림과 기록) */
+     작업 영역 — 왼쪽 위(대화와 산출물이 가장 길다)
+     빌드 모니터링 — 왼쪽, 작업 영역 아래(커밋·검증은 작업 지시와 함께 본다)
+     C4        — 오른쪽, 두 줄에 걸친다(그림) */
 .plan-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
              gap: 12px; align-items: start; }
 .plan-grid > .plan-stages { grid-column: 1 / -1; grid-row: 1; }
-.plan-grid > .plan-main   { grid-column: 1; grid-row: 2 / span 2; }
-.plan-grid > .plan-aside:nth-of-type(2) { grid-column: 2; grid-row: 2; }
-.plan-grid > .plan-aside:nth-of-type(4) { grid-column: 2; grid-row: 3; }
+.plan-grid > .plan-main   { grid-column: 1; grid-row: 2; }
+.plan-grid > .plan-aside:nth-of-type(2) { grid-column: 2; grid-row: 2 / span 2; }
+.plan-grid > .plan-aside:nth-of-type(4) { grid-column: 1; grid-row: 3; }
 
 @media (max-width: 1180px) {
   /* 좁은 화면에서는 한 단으로 쌓는다. 왼쪽이 먼저다 — 할 일이 먼저 보여야 한다. */

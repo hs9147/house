@@ -691,7 +691,7 @@ export default function AgentPlanning() {
       </div>
 
       {session && (
-        <div className="plan-grid">{/* 좌: 단계 대화·산출물 · 우: 그림·빌드 기록(콘솔 2단 규약) */}
+        <div className="plan-grid">{/* 좌: 단계 대화·산출물·빌드 모니터링 · 우: 그림(콘솔 2단 규약) */}
           {/* 진행단계 표시 */}
           <div className="panel plan-stages">
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
