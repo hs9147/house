@@ -527,3 +527,103 @@ def test_browser_scan_carries_files(client, monkeypatch):
     assert "https://other.test/a.pdf" not in reasons   # 다른 출처는 아예 받지 않는다
     scans = client.get(f"{API}/sources/{made['id']}/scans", headers=ADMIN).json()
     assert scans[0]["via"] == "browser" and scans[0]["files"] == 1
+
+
+def _notice_scan(client, monkeypatch):
+    """조회 칸이 보인 화면이 있는 브라우저 스캔 — 수집 조건을 정할 화면이 생긴다."""
+    monkeypatch.setattr(infosource, "_submit_result", infosource._result_job)
+    made = _create(client, headers="")
+    pages = [{"url": "https://intra.test/notice", "title": "공지 조회", "fields": ["등록일", "구분"],
+              "tables": [["번호", "제목"]], "links": []},
+             {"url": "https://intra.test/main", "title": "메인", "links": []}]
+    res = client.post(f"{API}/sources/{made['id']}/browser-result", headers=ADMIN,
+                      files=_browser_file(made["id"], pages=pages))
+    assert res.status_code == 202, res.text
+    return made["id"]
+
+
+def test_query_conditions_are_saved_for_the_bookmark_and_values_stay_out_of_audit(client, monkeypatch):
+    """수집 조건은 사람이 확정한다 — 이 출처의 화면만 받고, 북마크가 싣도록 출처 응답에 실린다."""
+    sid = _notice_scan(client, monkeypatch)
+    url = f"{API}/sources/{sid}/queries"
+    got = client.get(url, headers=ADMIN).json()
+    assert got["screens"] == [] and [c["url"] for c in got["candidates"]] == ["https://intra.test/notice"]
+
+    bad = {"screens": [{"url": "https://other.test/x", "conditions": []}]}
+    assert client.put(url, headers=ADMIN, json=bad).status_code == 400
+    body = {"screens": [{"url": "https://intra.test/notice", "conditions": [
+        {"field": "등록일", "value": "@today-1m"}, {"field": "등록일", "value": "@today"},
+        {"field": "구분", "value": "비밀-프로젝트"}, {"field": "", "value": "버림"}]}]}
+    res = client.put(url, headers=ADMIN, json=body)
+    assert res.status_code == 200, res.text
+    screen = res.json()["screens"][0]
+    assert screen["screen"] == "공지 조회"            # 이름을 비우면 스캔한 화면 제목
+    assert [c["field"] for c in screen["conditions"]] == ["등록일", "등록일", "구분"]
+    detail = client.get(f"{API}/sources/{sid}", headers=ADMIN).json()
+    assert detail["queries"] == res.json()["screens"]
+
+    from app.db import SessionLocal
+    from app.models import AuditEvent
+
+    with SessionLocal() as s:
+        event = s.query(AuditEvent).filter(AuditEvent.action == "source.queries").one()
+        assert "비밀-프로젝트" not in json.dumps(event.detail, ensure_ascii=False)
+    # 출처를 지우면 조건도 함께 지워진다
+    assert client.delete(f"{API}/sources/{sid}", headers=ADMIN).status_code == 204
+
+
+def test_query_suggestion_keeps_only_real_screens_and_fields(client, monkeypatch):
+    sid = _notice_scan(client, monkeypatch)
+    url = f"{API}/sources/{sid}/queries/suggest"
+    # LLM 없이 — 날짜 칸만 최근 한 달로(한 칸 이름의 기간은 시작·끝 두 번)
+    out = client.post(url, headers=ADMIN).json()
+    assert out["screens"][0]["conditions"] == [{"field": "등록일", "value": "@today-1m"},
+                                               {"field": "등록일", "value": "@today"}]
+
+    monkeypatch.setattr(llm, "default_provider", lambda db: object())
+    monkeypatch.setattr(llm, "chat_completion", lambda provider, messages, db=None, **kw: json.dumps({
+        "screens": [{"url": "https://intra.test/notice", "why": "최근 공지",
+                     "conditions": [{"field": "등록일", "value": "@today-7d"},
+                                    {"field": "지어낸 칸", "value": "x"}]},
+                    {"url": "https://intra.test/made-up", "conditions": []}]}, ensure_ascii=False))
+    out = client.post(url, headers=ADMIN).json()
+    assert [s["url"] for s in out["screens"]] == ["https://intra.test/notice"]
+    assert out["screens"][0]["conditions"] == [{"field": "등록일", "value": "@today-7d"}]
+    assert any("지어낸 칸" in n for n in out["notes"])
+    # 제안은 저장하지 않는다
+    assert client.get(f"{API}/sources/{sid}/queries", headers=ADMIN).json()["screens"] == []
+
+
+def test_collection_files_and_summary_arrive_with_the_browser_scan(client, monkeypatch):
+    """수집은 파일이 많다(결과 파일 + 행마다 첨부) — 예전 상한(20개)을 넘어 받고, 화면마다 요약이 메모로."""
+    import base64
+
+    monkeypatch.setattr(infosource, "_submit_result", infosource._result_job)
+    made = _create(client, headers="")
+    files = [{"url": f"https://intra.test/download.do#{i}%20%2F%20붙임.pdf", "name": f"붙임{i}.pdf",
+              "text": f"{i} · 공지", "type": "application/octet-stream",
+              "data": base64.b64encode(f"%PDF-1.4 {i}".encode()).decode()} for i in range(25)]
+    collected = [{"screen": "공지 조회", "url": "https://intra.test/notice", "rows": 30, "details": 20,
+                  "files": 25, "notes": ["결과 30행 중 앞 20행만 상세를 열었습니다(조회 한도)"]},
+                 {"screen": "남의 것", "url": "https://other.test/x", "rows": "많음"}]
+    res = client.post(f"{API}/sources/{made['id']}/browser-result", headers=ADMIN,
+                      files=_browser_file(made["id"], files=files, collected=collected))
+    assert res.status_code == 202, res.text
+    scan = client.get(f"{API}/sources/{made['id']}", headers=ADMIN).json()["scan"]
+    assert len(scan["files"]) == 25 and scan["files"][0]["name"] == "붙임0.pdf"
+    assert scan["collected"][1] == {"screen": "남의 것", "url": "", "rows": 0, "details": 0,
+                                    "files": 0, "notes": []}
+    assert any(n.startswith("수집 · 공지 조회: 결과 30행 중 상세 20건, 파일 25개") for n in scan["notes"])
+
+
+def test_scan_progress_streams_while_scanning(client):
+    made = _create(client)
+    client.post(f"{API}/sources/{made['id']}/scan", headers=ADMIN)
+    out = client.get(f"{API}/sources/{made['id']}/progress", headers=ADMIN).json()
+    texts = [s["text"] for s in out["steps"]]
+    assert out["running"] is False and texts[0] == "스캔을 시작합니다"
+    assert any(t.startswith("화면 1/") for t in texts)
+    assert any("LLM" in t for t in texts)
+    # 이어 받기 — after 뒤의 것만
+    rest = client.get(f"{API}/sources/{made['id']}/progress", headers=ADMIN, params={"after": out["total"]}).json()
+    assert rest["steps"] == [] and rest["total"] == out["total"]

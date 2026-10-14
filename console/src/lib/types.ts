@@ -1111,6 +1111,34 @@ export interface SourceOut {
   counts: { pages: number; endpoints: number; tools: number; files: number };
   scan?: SourceScan | null;
   proposal?: SourceProposal | null;
+  // 수집 조건 — 북마크가 싣는다(lib/scanAgent.js)
+  queries?: SourceQueryScreen[];
+}
+
+export interface SourceQueryCondition {
+  field: string;
+  value: string;
+}
+
+export interface SourceQueryScreen {
+  screen: string;
+  url: string;
+  conditions: SourceQueryCondition[];
+  why?: string;
+}
+
+export interface SourceQueries {
+  screens: SourceQueryScreen[];
+  // 조건을 채울 수 있는 화면 — 스캔에서 조회 칸이 보인 화면
+  candidates: { url: string; title: string; kind: string; info: string; fields: string[] }[];
+  updated_by: string;
+  updated_at: string | null;
+}
+
+export interface SourceProgress {
+  running: boolean;
+  total: number;
+  steps: { at: string; text: string }[];
 }
 
 export interface SourceCapabilities {

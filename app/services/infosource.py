@@ -37,6 +37,7 @@ import os
 import re
 import shutil
 import ssl
+import threading
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -48,7 +49,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import InfoSource, InfoSourceScan
+from ..models import InfoSource, InfoSourceQuery, InfoSourceScan
 from ..security import decrypt_value, encrypt_value
 from . import docsearch, jobs, llm, mcp_client, storage
 
@@ -373,8 +374,9 @@ def _file_ext(url: str, ctype: str = "") -> str:
     return _FILE_CTYPES.get(ctype.split(";")[0].strip().lower(), "")
 
 
-def _crawl(start: str, headers: dict, known: dict | None = None) -> dict:
-    """같은 출처 안을 돈다. known은 지난 스캔의 주소별 결과(scan_history) — 범위를 정하는 데 쓴다."""
+def _crawl(start: str, headers: dict, known: dict | None = None, step=lambda _t: None) -> dict:
+    """같은 출처 안을 돈다. known은 지난 스캔의 주소별 결과(scan_history) — 범위를 정하는 데 쓴다.
+    step은 진행 기록(progress) — 화면이 스캔하는 동안 실시간으로 보인다."""
     origin = _origin(start)
     known = known or {}
     robots, sitemap_hint = _robots(origin, headers)
@@ -420,6 +422,7 @@ def _crawl(start: str, headers: dict, known: dict | None = None) -> dict:
             skipped.append({"url": url, "reason": f"HTML 아님({ctype.split(';')[0] or '?'})"})
             continue
         page = _read_page(final, _decode(body, ctype))
+        step(f"화면 {len(pages) + 1}/{MAX_PAGES} · {page['title'] or final}")
         # 로그인 화면으로 돌려보내졌으면 그 페이지는 로그인 페이지다 — 헤더(쿠키)가 필요하다.
         if final != url and re.search(r"login|signin|sso|auth", final, re.I):
             page["requires_login"] = True
@@ -469,14 +472,16 @@ def _file_name(url: str, text: str, ext: str) -> str:
     return _folder_name(stem or "file")[:80] + ext
 
 
-def _download(downloads: list[dict], headers: dict, origin: str) -> tuple[list[dict], list[dict]]:
+def _download(downloads: list[dict], headers: dict, origin: str,
+              limit: int = MAX_FILES, step=lambda _t: None) -> tuple[list[dict], list[dict]]:
     """모은 내려받기 링크를 받는다 — (받은 것[data 포함], 받지 않은 것)."""
     got, skipped = [], []
-    for d in downloads[MAX_FILES:]:
-        skipped.append({"url": d["url"], "reason": f"파일 수 상한({MAX_FILES}개)을 넘음"})
-    for d in downloads[:MAX_FILES]:
+    for d in downloads[limit:]:
+        skipped.append({"url": d["url"], "reason": f"파일 수 상한({limit}개)을 넘음"})
+    for d in downloads[:limit]:
         body, ctype = d.get("body"), d.get("ctype", "")
         if body is None:
+            step(f"파일 받는 중 · {d.get('text') or Path(urlsplit(d['url']).path).name or d['url']}")
             try:
                 status, final, ctype, body = _http_get(d["url"], headers, origin, limit=MAX_FILE_BYTES)
             except (httpx.HTTPError, SourceError) as e:
@@ -977,9 +982,13 @@ def scan(db: Session, row: InfoSource) -> None:
     """스캔 한 번 — 결과·제안을 행에 쓴다. 작업 큐에서 돈다(start_scan)."""
     headers = _headers(row)
     notes: list[str] = []
+
+    def step(text: str) -> None:
+        progress_step(row.id, text)
+
     if row.kind == "web":
-        result = _crawl(row.url, headers, known_urls(db, row, "server"))
-        got, missed = _download(result.pop("downloads"), headers, result["origin"])
+        result = _crawl(row.url, headers, known_urls(db, row, "server"), step)
+        got, missed = _download(result.pop("downloads"), headers, result["origin"], step=step)
         result["files"], stage_notes = _stage(row.id, got)
         result["skipped"] = (result["skipped"] + missed)[:80]
         notes += stage_notes
@@ -992,6 +1001,7 @@ def scan(db: Session, row: InfoSource) -> None:
                     link["url"] for link in result["pages"][0]["links"] if link["nav"]
                     and _origin(link["url"]) == result["origin"]
                     and not _DANGEROUS_LINK.search(f"{link['url']} {link['text']}")]
+                step("브라우저로 화면을 그려 캡처하는 중")
                 rendered = _browse(row.id, list(dict.fromkeys(targets)), headers, result["origin"])
                 by_url = {p["url"]: p for p in result["pages"]}
                 for r in rendered["pages"]:
@@ -1015,10 +1025,12 @@ def scan(db: Session, row: InfoSource) -> None:
         else:
             result["browser"] = False
     elif row.kind == "api":
+        step("OpenAPI 문서를 찾는 중")
         result = _scan_api(row.url, headers)
         if not result["endpoints"] and result.get("sample_shape") is None:
             raise SourceError("OpenAPI 문서도, JSON 응답도 찾지 못했습니다.")
     else:
+        step("도구 목록을 읽는 중")
         result = _scan_mcp(row.url, headers)
     _finish(db, row, result, notes)
 
@@ -1097,6 +1109,7 @@ def _finish(db: Session, row: InfoSource, result: dict, notes: list[str]) -> Non
     """수집한 것을 정리·제안해 행에 쓴다 — 서버 스캔과 브라우저 스캔이 같은 길로 끝난다."""
     started = row.scanned_at   # 스캔 중에는 시작 시각이다(start_scan)
     visible = storage.visible_stores()
+    progress_step(row.id, "LLM이 메뉴·화면을 정리하고 저장 위치를 고르는 중")
     data, llm_notes = _ask_llm(db, row, result, [s.name for s in visible])
     notes += llm_notes
     if row.kind == "web":
@@ -1146,6 +1159,44 @@ def _scan_job(source_id: int) -> None:
             scan(session, row)
         except Exception as e:  # noqa: BLE001 — 실패 이유는 화면에 그대로 보인다
             _fail(session, source_id, e, "server")
+        finally:
+            progress_end(source_id)
+
+
+# 스캔하는 동안의 진행 기록 — 출처마다(프로세스 안). 화면이 짧은 간격으로 읽어 실시간으로 보인다.
+# DB에 쓰지 않는다: 화면 하나 받을 때마다 쓰면 스캔 하나에 수십 번 쓰게 된다. 끝난 결과는 scan에 남고,
+# 다음 스캔이 시작될 때까지는 지난 기록을 그대로 둔다(늦게 온 조회도 끝을 본다).
+_PROGRESS: dict[int, dict] = {}
+_PROGRESS_LOCK = threading.Lock()
+MAX_STEPS = 200
+
+
+def progress_start(source_id: int, text: str) -> None:
+    with _PROGRESS_LOCK:
+        _PROGRESS[source_id] = {"running": True, "steps": []}
+    progress_step(source_id, text)
+
+
+def progress_step(source_id: int, text: str) -> None:
+    with _PROGRESS_LOCK:
+        state = _PROGRESS.get(source_id)
+        if state is not None:
+            state["steps"] = (state["steps"] + [{"at": datetime.now(timezone.utc).isoformat(),
+                                                 "text": text[:300]}])[-MAX_STEPS:]
+
+
+def progress_end(source_id: int) -> None:
+    with _PROGRESS_LOCK:
+        if source_id in _PROGRESS:
+            _PROGRESS[source_id]["running"] = False
+
+
+def progress(source_id: int, after: int = 0) -> dict:
+    """after를 주면 그 뒤의 기록만 — 화면이 이어 받는다(total은 지금까지 쌓인 수)."""
+    with _PROGRESS_LOCK:
+        state = _PROGRESS.get(source_id) or {"running": False, "steps": []}
+        return {"running": state["running"], "total": len(state["steps"]),
+                "steps": state["steps"][after:]}
 
 
 def _refuse_if_running(row: InfoSource) -> None:
@@ -1160,6 +1211,7 @@ def start_scan(db: Session, row: InfoSource) -> None:
     row.status, row.error = "scanning", None
     row.scanned_at = datetime.now(timezone.utc)   # 스캔 중에는 시작 시각이다
     db.commit()
+    progress_start(row.id, "스캔을 시작합니다")
     _submit(row.id)
 
 
@@ -1171,9 +1223,10 @@ def start_scan(db: Session, row: InfoSource) -> None:
 # (혼합 콘텐츠). 올라온 것은 **남이 만든 입력**으로 다룬다 — 출처가 같은지 보고, 모양·길이를 자른다.
 
 BROWSER_AGENT = "gpax-scan/1"
-# 북마크릿이 받은 파일까지 싣는다(scanAgent.js: 파일 20개, 하나 10MB, 합 50MB) — base64로 4/3배가 된다.
+# 북마크릿이 받은 파일까지 싣는다(scanAgent.js: 파일 60개, 하나 10MB, 합 50MB) — base64로 4/3배가 된다.
+# 파일 수는 수집(조회 결과 파일 + 행마다 상세의 첨부, 화면마다 20행)이 채운다.
 MAX_UPLOAD_BYTES = 80_000_000
-MAX_BROWSER_FILES = 20
+MAX_BROWSER_FILES = 60
 
 
 def _s(value, cap: int) -> str:
@@ -1239,7 +1292,29 @@ def from_browser(row: InfoSource, payload) -> dict:
     downloads, skipped = _browser_files(payload.get("files"), origin)
     return {"origin": origin, "pages": pages, "skipped": skipped, "sitemap": 0, "browser": False,
             "via": "browser", "menu_dom": _menu_in(payload.get("menu"), origin, [400]),
-            "downloads": downloads}
+            "downloads": downloads, "collected": _collected_in(payload.get("collected"), origin)}
+
+
+def _collected_in(items, origin: str) -> list[dict]:
+    """수집 결과(화면마다 결과 행·연 상세·받은 파일 수, 막힌 까닭) — 스캔 메모로 보인다."""
+    out = []
+    for c in (items if isinstance(items, list) else [])[:MAX_QUERY_SCREENS]:
+        if not isinstance(c, dict):
+            continue
+        counts = {k: c[k] if isinstance(c.get(k), int) and c[k] >= 0 else 0
+                  for k in ("rows", "details", "files")}
+        out.append({"screen": _s(c.get("screen"), 200), "url": _same(c.get("url"), origin),
+                    **counts, "notes": _strs(c.get("notes"), 10, 200)})
+    return out
+
+
+def _collected_notes(collected: list[dict]) -> list[str]:
+    notes = []
+    for c in collected:
+        line = (f"수집 · {c['screen'] or c['url']}: 결과 {c['rows']}행 중 상세 {c['details']}건, "
+                f"파일 {c['files']}개")
+        notes.append(line + (f" — {' / '.join(c['notes'][:3])}" if c["notes"] else ""))
+    return notes
 
 
 def _browser_files(items, origin: str) -> tuple[list[dict], list[dict]]:
@@ -1288,6 +1363,8 @@ def _result_job(source_id: int, result: dict) -> None:
                 *result.pop("stage_notes", [])])
         except Exception as e:  # noqa: BLE001
             _fail(session, source_id, e, "browser")
+        finally:
+            progress_end(source_id)
 
 
 def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
@@ -1295,14 +1372,160 @@ def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
     _refuse_if_running(row)
     result = from_browser(row, payload)
     # 받은 파일은 지금 둔다 — 큐로 넘길 결과에 수십 MB의 본문을 싣지 않는다.
-    got, missed = _download(result.pop("downloads"), {}, result["origin"])
+    got, missed = _download(result.pop("downloads"), {}, result["origin"], limit=MAX_BROWSER_FILES)
     result["files"], result["stage_notes"] = _stage(row.id, got)
+    result["stage_notes"] = _collected_notes(result["collected"]) + result["stage_notes"]
     result["skipped"] += missed
     row.status, row.error = "scanning", None
     row.scanned_at = datetime.now(timezone.utc)
     db.commit()
+    progress_start(row.id, f"브라우저 스캔 결과를 받았습니다 — 화면 {len(result['pages'])}장, "
+                           f"파일 {len(result['files'])}개")
     _submit_result(row.id, result)
     return {"pages": len(result["pages"]), "menu": len(result["menu_dom"]), "files": len(result["files"])}
+
+
+# ---------------------------------------------------------------- 수집 조건(사람이 확정)
+#
+# 사이트에서 모으는 것은 **조회 결과를 내려받은 파일과 첨부파일**이다. 화면마다 조회 조건을 정해
+# 두면 북마크릿이 그 화면에 채우고 조회한 뒤, 결과 파일(엑셀 버튼 — 없으면 결과 표를 CSV로)과
+# 행마다 상세를 열어 첨부를 받는다(scanAgent.js). 조건은 LLM이 스캔한 조회 항목을 보고 제안하고,
+# 사람이 고쳐 확정한다 — 확정한 조건이 북마크에 실린다.
+
+MAX_QUERY_SCREENS = 10
+MAX_CONDITIONS = 15
+_DATE_FIELD = re.compile(r"일자|날짜|일시|기간|등록일|작성일|date|day", re.I)
+_FROM_FIELD = re.compile(r"시작|부터|from|start|begin|~$", re.I)
+_TO_FIELD = re.compile(r"종료|까지|to$|end", re.I)
+
+QUERY_PROMPT = """사내 업무 사이트의 조회 화면마다 조회 조건을 정한다. 목적은 그 화면의 **조회 결과를
+내려받은 파일과 행마다 상세의 첨부파일**을 모으는 것이다 — 결과가 너무 많지 않고(20건 안팎) 최근
+것이 오도록 정한다. 출력은 JSON 객체 하나다(설명·코드펜스 없이).
+
+{{"screens": [{{"url": "아래 화면의 url 그대로", "conditions": [{{"field": "칸 이름", "value": "값"}}],
+               "why": "이 조건을 고른 이유 한 문장"}}]}}
+
+규칙:
+- 조회할 가치가 있는 화면만(목록·조회 화면). 로그인·메인·설정·입력(등록) 화면은 뺀다.
+- field는 그 화면의 fields에 있는 이름 그대로 쓴다. 비워 둘 칸은 넣지 않는다.
+- 날짜·기간 칸은 상대 날짜로 쓴다: @today, @today-7d, @today-1m, @today-1y. 한 항목에 시작·끝 칸이
+  둘이면(기간) 같은 field를 두 번 쓴다 — 시작, 끝 순서로.
+- 목록에서 고르는 칸의 값을 모르면 쓰지 않는다(화면 기본값 그대로 둔다). 지어낸 코드값을 쓰지 마라.
+
+출처 이름: {name}
+출처 메모: {note}
+
+조회 화면:
+{pages}
+"""
+
+
+def query_candidates(row: InfoSource) -> list[dict]:
+    """조건을 채울 수 있는 화면 — 스캔에서 조회 칸이 보인 화면(로그인 화면은 뺀다)."""
+    return [{"url": p["url"], "title": p.get("title") or "", "kind": p.get("kind") or "",
+             "info": p.get("info") or "", "fields": p.get("fields") or [],
+             "tables": (p.get("tables") or [])[:3]}
+            for p in (row.scan or {}).get("pages") or []
+            if p.get("fields") and p.get("kind") != "login" and not p.get("requires_login")]
+
+
+def query_screens(row: InfoSource) -> list[dict]:
+    return list(row.query.screens or []) if row.query else []
+
+
+def clean_screens(row: InfoSource, screens) -> list[dict]:
+    """사람이 보낸 조건 — 이 출처의 화면 주소만, 칸·값은 길이만 자른다(값은 사람이 정한다)."""
+    if not isinstance(screens, list):
+        raise SourceError("수집 조건은 화면 목록입니다.")
+    if len(screens) > MAX_QUERY_SCREENS:
+        raise SourceError(f"수집할 화면은 {MAX_QUERY_SCREENS}개까지입니다.")
+    origin, titles = _origin(row.url), {c["url"]: c["title"] for c in query_candidates(row)}
+    out, seen = [], set()
+    for s in screens:
+        if not isinstance(s, dict):
+            continue
+        url = _same(s.get("url"), origin)
+        if not url:
+            raise SourceError(f"이 출처의 화면 주소가 아닙니다: {_s(s.get('url'), 100) or '(비어 있음)'}")
+        if url in seen:
+            raise SourceError(f"같은 화면이 두 번 있습니다: {url}")
+        seen.add(url)
+        conditions = []
+        for c in (s.get("conditions") if isinstance(s.get("conditions"), list) else [])[:MAX_CONDITIONS]:
+            field = _s(c.get("field"), 80) if isinstance(c, dict) else ""
+            if field:
+                conditions.append({"field": field, "value": _s(c.get("value"), 200)})
+        out.append({"screen": _s(s.get("screen"), 200) or titles.get(url) or url, "url": url,
+                    "conditions": conditions})
+    return out
+
+
+def set_queries(db: Session, row: InfoSource, screens: list[dict], actor: str) -> list[dict]:
+    if row.query is None:
+        row.query = InfoSourceQuery(screens=[])
+    row.query.screens = screens
+    row.query.updated_by = actor
+    row.query.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return screens
+
+
+def _date_guess(fields: list[str]) -> list[dict]:
+    """LLM 없이 — 날짜 칸만 최근 한 달로(시작 칸은 한 달 전, 끝 칸은 오늘)."""
+    out = []
+    for f in fields:
+        if not _DATE_FIELD.search(f):
+            continue
+        if _TO_FIELD.search(f):
+            out.append({"field": f, "value": "@today"})
+        elif _FROM_FIELD.search(f):
+            out.append({"field": f, "value": "@today-1m"})
+        else:  # 한 칸 이름에 시작·끝이 함께 있다(기간) — 같은 이름을 두 번, 시작·끝 순서로
+            out += [{"field": f, "value": "@today-1m"}, {"field": f, "value": "@today"}]
+    return out
+
+
+def suggest_queries(db: Session, row: InfoSource) -> dict:
+    """조건 제안 — 저장하지 않는다(사람이 보고 고쳐 저장한다). 지어낸 화면·칸은 버린다."""
+    pages = query_candidates(row)
+    if not pages:
+        return {"screens": [], "notes": [
+            "조회 칸이 보인 화면이 없습니다 — 조회 화면을 연 상태로 브라우저 스캔을 하고 다시 받으세요."]}
+    by_url = {p["url"]: p for p in pages}
+    provider = llm.default_provider(db)
+    notes: list[str] = []
+    picked: list[dict] = []
+    if provider is not None:
+        text = QUERY_PROMPT.format(name=row.name, note=(row.note or "(없음)")[:500],
+                                   pages=json.dumps(pages, ensure_ascii=False)[:30000])
+        try:
+            data = _parse(llm.chat_completion(provider, [{"role": "user", "content": text}], db))
+            picked = data.get("screens") if isinstance(data.get("screens"), list) else []
+        except Exception as e:  # noqa: BLE001 — 제안이 없을 뿐, 사람이 직접 정하면 된다
+            notes.append(f"LLM 제안 실패 — 날짜 칸만 최근 한 달로 채웠습니다: {str(e)[:200]}")
+    else:
+        notes.append("기본 LLM 프로바이더가 없어 날짜 칸만 최근 한 달로 채웠습니다.")
+    screens, dropped = [], []
+    for s in picked:
+        page = by_url.get(str(s.get("url") or "")) if isinstance(s, dict) else None
+        if page is None:
+            continue
+        conditions = []
+        for c in s.get("conditions") if isinstance(s.get("conditions"), list) else []:
+            field = _s(c.get("field"), 80) if isinstance(c, dict) else ""
+            if field not in page["fields"]:
+                dropped.append(field)
+                continue
+            conditions.append({"field": field, "value": _s(c.get("value"), 200)})
+        screens.append({"screen": page["title"] or page["url"], "url": page["url"],
+                        "conditions": conditions[:MAX_CONDITIONS], "why": _s(s.get("why"), 300)})
+    if not screens:
+        screens = [{"screen": p["title"] or p["url"], "url": p["url"],
+                    "conditions": _date_guess(p["fields"]), "why": ""}
+                   for p in pages if _date_guess(p["fields"]) or p.get("kind") == "list"]
+    if dropped:
+        notes.append(f"화면에 없는 칸을 버렸습니다: {', '.join(sorted(set(f for f in dropped if f))[:5])}")
+    return {"screens": screens[:MAX_QUERY_SCREENS], "notes": notes}
 
 
 # ---------------------------------------------------------------- 저장(admin 결정)

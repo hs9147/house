@@ -1032,6 +1032,8 @@ class InfoSource(Base):
 
     scans: Mapped[list["InfoSourceScan"]] = relationship(
         back_populates="source", cascade="all, delete-orphan")
+    query: Mapped["InfoSourceQuery | None"] = relationship(
+        back_populates="source", cascade="all, delete-orphan", uselist=False)
 
 
 class InfoSourceScan(Base):
@@ -1057,6 +1059,27 @@ class InfoSourceScan(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     source: Mapped[InfoSource] = relationship(back_populates="scans")
+
+
+class InfoSourceQuery(Base):
+    """출처의 수집 조건 — 화면마다 조회 조건. 북마크릿이 그 화면에 채우고 조회한 뒤, 결과 파일과
+    행마다 상세의 첨부를 받는다(console/src/lib/scanAgent.js).
+
+    스캔 결과(scan)와 따로 둔다 — 다시 스캔하면 scan은 바뀌어도 사람이 확정한 조건은 그대로다.
+    screens: [{"screen": 화면 이름, "url": 화면 주소, "conditions": [{"field": 칸 이름, "value": 값}]}]
+    값의 @today·@today-1m 같은 상대 날짜는 북마크를 누른 날로 바뀐다.
+    """
+
+    __tablename__ = "info_source_queries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("info_sources.id", ondelete="CASCADE"), unique=True, index=True)
+    screens: Mapped[list] = mapped_column(JSON, default=list)
+    updated_by: Mapped[str] = mapped_column(String(255), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    source: Mapped[InfoSource] = relationship(back_populates="query")
 
 
 class PersonalContext(Base):

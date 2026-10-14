@@ -53,6 +53,21 @@ class SourceSave(BaseModel):
     targets: dict[str, SaveTarget]
 
 
+class QueryCondition(BaseModel):
+    field: str
+    value: str = ""
+
+
+class QueryScreen(BaseModel):
+    screen: str = ""
+    url: str
+    conditions: list[QueryCondition] = []
+
+
+class SourceQueries(BaseModel):
+    screens: list[QueryScreen]
+
+
 def _host(url: str) -> str:
     # 감사에는 주소의 출처만 — 경로·쿼리에 무엇이 실려 있을지 모른다.
     return infosource._origin(url)
@@ -69,6 +84,8 @@ def _out(row: InfoSource, *, full: bool = False) -> dict:
     if full:
         data["scan"] = row.scan
         data["proposal"] = row.proposal
+        # 북마크가 싣는 수집 조건 — 화면이 북마크 코드를 만들 때 쓴다.
+        data["queries"] = infosource.query_screens(row)
     return data
 
 
@@ -229,6 +246,50 @@ def save_source(source_id: int, body: SourceSave, db: Session = Depends(get_db),
         "created": [s["root"] for s in result["stores"] if s["created"]],
     })
     return {**result, "source": _out(row, full=True)}
+
+
+@router.get("/sources/{source_id}/progress")
+def scan_progress(source_id: int, after: int = 0, db: Session = Depends(get_db),
+                  _: ApiKey = Depends(require_admin)):
+    """스캔하는 동안의 진행 기록 — 화면이 짧은 간격으로 이어 받는다(after 뒤의 것만)."""
+    _row_or_404(db, source_id)
+    return infosource.progress(source_id, max(0, after))
+
+
+@router.get("/sources/{source_id}/queries")
+def get_queries(source_id: int, db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """수집 조건과, 조건을 채울 수 있는 화면(스캔에서 조회 칸이 보인 화면)."""
+    row = _row_or_404(db, source_id)
+    return {"screens": infosource.query_screens(row), "candidates": infosource.query_candidates(row),
+            "updated_by": row.query.updated_by if row.query else "",
+            "updated_at": row.query.updated_at if row.query else None}
+
+
+@router.put("/sources/{source_id}/queries")
+def put_queries(source_id: int, body: SourceQueries, db: Session = Depends(get_db),
+                admin: ApiKey = Depends(require_admin)):
+    row = _row_or_404(db, source_id)
+    if row.kind != "web":
+        raise HTTPException(status_code=400, detail="수집 조건은 웹사이트 출처에만 둡니다.")
+    try:
+        screens = infosource.clean_screens(row, [s.model_dump() for s in body.screens])
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    infosource.set_queries(db, row, screens, admin.name)
+    # 값은 남기지 않는다 — 조회어에 무엇이 들어 있을지 모른다. 화면과 칸 이름만.
+    audit.record(db, admin.name, "source.queries", row.name,
+                 {"screens": [{"url": _host(s["url"]), "fields": [c["field"] for c in s["conditions"]]}
+                              for s in screens]})
+    return get_queries(source_id, db)
+
+
+@router.post("/sources/{source_id}/queries/suggest")
+def suggest_queries(source_id: int, db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """조건 제안 — 저장하지 않는다. 화면이 보여 주고 사람이 고쳐 저장한다."""
+    row = _row_or_404(db, source_id)
+    if row.kind != "web":
+        raise HTTPException(status_code=400, detail="수집 조건은 웹사이트 출처에만 둡니다.")
+    return infosource.suggest_queries(db, row)
 
 
 @router.get("/sources/{source_id}/scans")

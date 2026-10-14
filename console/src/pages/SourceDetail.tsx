@@ -8,7 +8,7 @@ import { useApi, usePolling } from '../lib/hooks';
 import scanAgent from '../lib/scanAgent.js?raw';
 import type {
   SourceCapabilities, SourceCategory, SourceChange, SourceFile, SourceMenuItem, SourceOut, SourcePage,
-  OrgOut, SourceSaveResult, SourceSaveTarget, SourceTarget, StorageStore,
+  OrgOut, SourceQueryScreen, SourceSaveResult, SourceSaveTarget, SourceTarget, StorageStore,
 } from '../lib/types';
 import { kindLabel, SourceStatus } from './Sources';
 
@@ -84,10 +84,12 @@ export default function SourceDetail() {
             {row.status === 'scanning' ? '스캔 중…' : row.scan ? '다시 스캔' : '스캔'}
           </button>
         </div>
+        <ScanProgress id={row.id} running={row.status === 'scanning'} />
         {row.status === 'failed' && row.error && <p className="error">{row.error}</p>}
         {error && <p className="error">{error}</p>}
       </div>
       {row.kind === 'web' && <BrowserScanPanel row={row} onChange={setRow} />}
+      {row.kind === 'web' && <QueryPanel row={row} onChange={setRow} />}
       <HeadersPanel row={row} onChange={setRow} />
       {/* 유형별 제안 전에 스캔한 출처(proposal에 targets가 없다)는 다시 스캔해야 저장할 수 있다. */}
       {row.scan && row.proposal?.targets && row.status !== 'scanning' && (
@@ -121,12 +123,184 @@ function Means({ caps, kind }: { caps: SourceCapabilities | null; kind: SourceOu
   );
 }
 
+/**
+ * 스캔 진행 — 스캔하는 동안 서버가 남기는 기록을 이어 받아 보인다(services/infosource.progress).
+ * 끝난 뒤에도 마지막 기록은 남겨 둔다 — 무엇을 받고 어디서 막혔는지 바로 읽게.
+ */
+function ScanProgress({ id, running }: { id: number; running: boolean }) {
+  const [steps, setSteps] = useState<{ at: string; text: string }[]>([]);
+  const seen = useRef(0);
+  const box = useRef<HTMLDivElement>(null);
+
+  usePolling(async () => {
+    const out = await api.sourceProgress(id, seen.current);
+    if (out.total < seen.current) {   // 새 스캔이 시작됐다 — 처음부터 다시
+      seen.current = 0;
+      setSteps([]);
+      return;
+    }
+    seen.current = out.total;
+    if (out.steps.length) setSteps((prev) => [...prev, ...out.steps].slice(-200));
+  }, 1000, running);
+
+  useEffect(() => { box.current?.scrollTo({ top: box.current.scrollHeight }); }, [steps]);
+
+  if (!steps.length) return null;
+  return (
+    <div ref={box} className="mono" style={{
+      maxHeight: 180, overflow: 'auto', fontSize: 11, marginTop: 8, padding: '4px 6px',
+      background: 'var(--bg-subtle, #0b1220)', borderRadius: 4,
+    }}>
+      {steps.map((s, i) => (
+        <div key={i}>{new Date(s.at).toLocaleTimeString()} {s.text}</div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 수집 조건 — 사이트에서 모으는 것은 **조회 결과 파일과 첨부파일**이다. 화면마다 조회 조건을 정해
+ * 두면 북마크가 그 화면에 채우고 조회한 뒤, 결과 파일(엑셀 — 없으면 결과 표를 CSV로)과 행마다
+ * 상세의 첨부를 받는다. 조건은 LLM이 스캔한 조회 칸을 보고 제안하고, 사람이 고쳐 저장한다 —
+ * 저장한 조건이 북마크에 실린다.
+ */
+function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut) => void }) {
+  const state = useApi(() => api.sourceQueries(row.id), [row.id, row.scanned_at]);
+  const [screens, setScreens] = useState<SourceQueryScreen[] | null>(null);
+  const [notes, setNotes] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { if (state.data) setScreens(state.data.screens); }, [state.data]);
+
+  const candidates = state.data?.candidates ?? [];
+  const fieldsOf = (url: string) => candidates.find((c) => c.url === url)?.fields ?? [];
+  const edit = (next: SourceQueryScreen[]) => { setScreens(next); setSaved(false); };
+  const setScreen = (i: number, s: SourceQueryScreen) => edit((screens ?? []).map((x, j) => (j === i ? s : x)));
+
+  const suggest = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const out = await api.suggestSourceQueries(row.id);
+      edit(out.screens);
+      setNotes(out.notes);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = async () => {
+    if (!screens) return;
+    setBusy(true);
+    setError('');
+    try {
+      const out = await api.saveSourceQueries(row.id, screens.map(({ why: _why, ...s }) => s));
+      setScreens(out.screens);
+      setSaved(true);
+      // 북마크 코드가 조건을 싣는다 — 출처를 다시 읽어 북마크를 새로 만든다.
+      onChange(await api.getSource(row.id));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unused = candidates.filter((c) => !(screens ?? []).some((s) => s.url === c.url));
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>수집 조건</h3>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        화면마다 조회 조건을 정하면 북마크가 그 화면을 조회해 <b>결과 파일</b>(엑셀 버튼, 없으면 결과 표를 CSV로)과{' '}
+        <b>행마다 상세의 첨부파일</b>을 받습니다. 날짜는 <span className="mono">@today</span>·
+        <span className="mono">@today-7d</span>·<span className="mono">@today-1m</span>처럼 쓰면 북마크를 누른 날로
+        바뀝니다. 기간처럼 칸이 둘이면 같은 칸 이름을 두 번(시작, 끝 순서) 넣습니다.
+      </p>
+      <Async state={state}>
+        {() => (
+          <>
+            {(screens ?? []).length === 0 && (
+              <p className="mutedtext" style={{ fontSize: 12 }}>
+                {candidates.length
+                  ? '아직 조건이 없습니다 — 「LLM 제안」으로 받거나 아래에서 화면을 더하세요.'
+                  : '조회 칸이 보인 화면이 없습니다 — 조회 화면을 연 상태로 브라우저 스캔을 하세요.'}
+              </p>
+            )}
+            {(screens ?? []).map((s, i) => {
+              const fields = fieldsOf(s.url);
+              return (
+                <div key={s.url} style={{ border: '1px solid var(--border)', borderRadius: 4, padding: 6, marginBottom: 6 }}>
+                  <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+                    <input value={s.screen} style={{ flex: 1 }} aria-label="화면 이름"
+                      onChange={(e) => setScreen(i, { ...s, screen: e.target.value })} />
+                    <button className="small secondary" onClick={() => edit((screens ?? []).filter((_, j) => j !== i))}>빼기</button>
+                  </div>
+                  <div className="mono mutedtext" style={{ fontSize: 10, wordBreak: 'break-all' }}>{s.url}</div>
+                  {s.why && <div className="mutedtext" style={{ fontSize: 11 }}>{s.why}</div>}
+                  {s.conditions.map((c, k) => (
+                    <div key={k} className="row" style={{ gap: 4, marginTop: 4 }}>
+                      {fields.length ? (
+                        <select value={c.field} aria-label="칸"
+                          onChange={(e) => setScreen(i, { ...s, conditions: s.conditions.map((x, m) => (m === k ? { ...x, field: e.target.value } : x)) })}>
+                          {!fields.includes(c.field) && <option value={c.field}>{c.field}</option>}
+                          {fields.map((f) => <option key={f} value={f}>{f}</option>)}
+                        </select>
+                      ) : (
+                        <input value={c.field} placeholder="칸 이름" aria-label="칸"
+                          onChange={(e) => setScreen(i, { ...s, conditions: s.conditions.map((x, m) => (m === k ? { ...x, field: e.target.value } : x)) })} />
+                      )}
+                      <input value={c.value} placeholder="값 (예: @today-1m)" aria-label="값" style={{ flex: 1 }}
+                        onChange={(e) => setScreen(i, { ...s, conditions: s.conditions.map((x, m) => (m === k ? { ...x, value: e.target.value } : x)) })} />
+                      <button className="small secondary"
+                        onClick={() => setScreen(i, { ...s, conditions: s.conditions.filter((_, m) => m !== k) })}>×</button>
+                    </div>
+                  ))}
+                  <button className="small secondary" style={{ marginTop: 4 }}
+                    onClick={() => setScreen(i, { ...s, conditions: [...s.conditions, { field: fields[0] ?? '', value: '' }] })}>
+                    조건 더하기
+                  </button>
+                </div>
+              );
+            })}
+            {unused.length > 0 && (
+              <select value="" aria-label="화면 더하기" style={{ marginBottom: 6 }}
+                onChange={(e) => {
+                  const c = candidates.find((x) => x.url === e.target.value);
+                  if (c) edit([...(screens ?? []), { screen: c.title || c.url, url: c.url, conditions: [] }]);
+                }}>
+                <option value="">+ 화면 더하기</option>
+                {unused.map((c) => <option key={c.url} value={c.url}>{c.title || c.url} ({c.fields.join(', ')})</option>)}
+              </select>
+            )}
+            <div className="row" style={{ gap: 8 }}>
+              <button className="small secondary" disabled={busy || !candidates.length} onClick={suggest}>
+                {busy ? '…' : 'LLM 제안'}
+              </button>
+              <button className="small" disabled={busy || screens === null} onClick={save}>저장</button>
+              {saved && <span className="mutedtext" style={{ fontSize: 11 }}>
+                저장했습니다 — 북마크를 다시 끌어다 놓아야 바뀐 조건으로 돕니다.
+              </span>}
+            </div>
+            {notes.map((n) => <p key={n} className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>{n}</p>)}
+          </>
+        )}
+      </Async>
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
 // 북마크에 통째로 들어간다 — 주석과 들여쓰기만 덜어 낸다(코드에 줄 주석 //는 쓰지 않았다).
 const SCAN_CODE = scanAgent.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\n\s+/g, '\n').trim();
 
 // 북마크는 출처마다 하나 — 이름으로 구분하고, 다른 사이트에서 누르면 읽지 않는다.
 function scanCode(row: SourceOut): string {
-  const source = { id: row.id, name: row.name, origin: new URL(row.url).origin };
+  const source = { id: row.id, name: row.name, origin: new URL(row.url).origin, queries: row.queries ?? [] };
   return SCAN_CODE.replace('__GPAX_SOURCE__', JSON.stringify(source));
 }
 
@@ -175,7 +349,7 @@ function BrowserScanPanel({ row, onChange }: { row: SourceOut; onChange: (r: Sou
       <h3 style={{ marginTop: 0 }}>브라우저에서 스캔</h3>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         사내 SSO로 로그인하는 사이트는 서버가 들어갈 수 없습니다. 로그인한 내 브라우저에서 읽어 옵니다 —
-        세션은 브라우저 밖으로 나가지 않고, 입력값·쿠키는 읽지 않습니다.
+        세션은 브라우저 밖으로 나가지 않고, 입력값·쿠키는 읽지 않습니다(입력칸은 수집 조건을 채울 때만 씁니다).
       </p>
       <ol style={{ fontSize: 12, paddingLeft: 18, margin: '6px 0' }}>
         <li>
@@ -202,8 +376,10 @@ function BrowserScanPanel({ row, onChange }: { row: SourceOut; onChange: (r: Sou
       </ol>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         메뉴의 GET 링크는 최대 25곳까지 더 열어 보고(로그아웃·삭제는 건너뜀), 스크립트로만 여는 메뉴는
-        지금 열려 있는 화면만 읽습니다. 화면에 걸린 문서·표·발표 파일은 20개(하나 10MB, 모두 50MB)까지
-        함께 받습니다. 화면 캡처는 없습니다.
+        지금 열려 있는 화면만 읽습니다. 수집 조건이 있으면 그 화면을 숨긴 틀에서 조회해 결과 파일과 행마다
+        상세의 첨부를 받습니다 — 조회·상세·첨부·엑셀 버튼만 누르고, 저장·삭제·승인 같은 버튼은 누르지 않으며
+        사이트가 묻는 창에는 '아니오'로 답합니다. 파일은 60개(하나 10MB, 모두 50MB)까지 받습니다. 도는 동안
+        화면 오른쪽 위 창에 진행이 실시간으로 보이고, 상세를 열 행 수(기본 20)를 바꾸거나 멈출 수 있습니다.
       </p>
       {busy && <p className="mutedtext" style={{ fontSize: 12 }}>올리는 중…</p>}
       {error && <p className="error">{error}</p>}

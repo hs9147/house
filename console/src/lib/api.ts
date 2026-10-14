@@ -67,6 +67,9 @@ import type {
   SourceCategory,
   SourceKind,
   SourceOut,
+  SourceProgress,
+  SourceQueries,
+  SourceQueryScreen,
   SourceSaveResult,
   SourceSaveTarget,
   SourceScanRecord,
@@ -594,6 +597,15 @@ export const api = {
   saveSource: (id: number, targets: Partial<Record<SourceCategory, SourceSaveTarget>>) =>
     request<SourceSaveResult>('POST', `/sources/${id}/save`, { targets }),
   sourceScans: (id: number) => request<SourceScanRecord[]>('GET', `/sources/${id}/scans`),
+  // 스캔하는 동안의 진행 기록 — after 뒤의 것만 이어 받는다
+  sourceProgress: (id: number, after: number) =>
+    request<SourceProgress>('GET', `/sources/${id}/progress`, undefined, { after }),
+  sourceQueries: (id: number) => request<SourceQueries>('GET', `/sources/${id}/queries`),
+  saveSourceQueries: (id: number, screens: SourceQueryScreen[]) =>
+    request<SourceQueries>('PUT', `/sources/${id}/queries`, { screens }),
+  // LLM 제안 — 저장하지 않는다
+  suggestSourceQueries: (id: number) =>
+    request<{ screens: SourceQueryScreen[]; notes: string[] }>('POST', `/sources/${id}/queries/suggest`),
   // 북마크릿이 사용자 브라우저에서 내려받은 JSON 파일
   uploadBrowserScan: (id: number, file: File) => {
     const fd = new FormData();
