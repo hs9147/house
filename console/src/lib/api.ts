@@ -876,6 +876,9 @@ export const api = {
     request<{ name: string; email: string; key: string; is_admin: boolean }>('POST', '/auth/register', body),
 
   // PowerShell 터미널 & 서버 로그
+  // 터미널 버튼을 보일지 — ConPTY(Server 2019 이상)나 POSIX pty가 있는 서버만
+  terminalSupport: () =>
+    request<{ supported: boolean; build: number | null; reason: string }>('GET', '/system/terminal/support'),
   terminalPreflight: () =>
     request<{
       shell: string;

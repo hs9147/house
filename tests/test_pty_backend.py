@@ -113,3 +113,31 @@ class TestProbeReasonCodes:
         assert info["ok"] is True
         assert info["reason"] == ""
         assert info["exit_status"] is None
+
+
+@pytest.mark.parametrize("build,supported", [
+    (9600, False),     # Server 2012 R2
+    (14393, False),    # Server 2016 — ConPTY 없음, winpty로만 열린다
+    (17762, False),
+    (17763, True),     # Server 2019
+    (20348, True),     # Server 2022
+])
+def test_terminal_button_only_where_conpty_exists(build, supported):
+    """서버 연결 화면의 터미널 버튼 — Server 2016 이하에서는 감추고 까닭을 함께 준다."""
+    name_patch, ver_patch = _windows(build)
+    with name_patch, ver_patch:
+        out = pty_terminal.support()
+    assert out["supported"] is supported and out["build"] == build
+    assert bool(out["reason"]) is not supported
+
+
+def test_terminal_button_off_windows_and_when_build_is_unknown():
+    with patch.object(pty_terminal.os, "name", "posix"):
+        assert pty_terminal.support()["supported"] is True
+
+    def boom():
+        raise OSError("no version")
+
+    with patch.object(pty_terminal.os, "name", "nt"), \
+            patch.object(pty_terminal.sys, "getwindowsversion", boom, create=True):
+        assert pty_terminal.support()["supported"] is False

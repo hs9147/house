@@ -549,6 +549,14 @@ WS_KEY_PREFIX = "paas-key."
 SHORT_SESSION_SECONDS = 3.0
 
 
+@router.get("/system/terminal/support")
+def terminal_support(_: ApiKey = Depends(require_admin)):
+    """터미널 버튼을 보일지 — 셸을 띄워 보지 않고 OS·빌드만 본다(화면을 열 때마다 부른다)."""
+    from ..services import pty_terminal  # noqa: PLC0415
+
+    return pty_terminal.support()
+
+
 @router.get("/system/terminal/preflight")
 def terminal_preflight(_: ApiKey = Depends(require_admin)):
     """터미널이 안 열릴 때 원인을 서버 쪽에서 먼저 가른다.

@@ -10,7 +10,9 @@ export default function PowerShellConsole() {
   const me = useApi(() => api.me());
   // 돌고 있는 커밋 — SW 업데이트 직후 "정말 반영됐나"를 여기서 바로 본다.
   const health = useApi(() => api.health());
-  // 터미널(PTY) 버튼은 숨겼다 — 처음 여는 탭은 명령 실행이다(터미널 화면 코드는 남겨 둔다).
+  // 터미널(PTY)은 지원하는 서버에만 — Windows Server 2016 이하(ConPTY 없음)는 버튼을 감춘다
+  // (services/pty_terminal.support). 처음 여는 탭은 늘 명령 실행이다.
+  const terminal = useApi(() => api.terminalSupport());
   const [activeTab, setActiveTab] = useState<'terminal' | 'console' | 'server_logs'>('console');
   const [connected, setConnected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
@@ -263,7 +265,7 @@ export default function PowerShellConsole() {
         )}
       </div>
 
-      {/* 버튼 순서: 명령 실행 → SW 업데이트 → 백엔드 재시작 → 서버 로그. 터미널(PTY) 버튼은 숨겼다. */}
+      {/* 버튼 순서: 명령 실행 → 터미널(지원하는 서버만) → SW 업데이트 → 백엔드 재시작 → 서버 로그. */}
       <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', paddingBottom: 8 }}>
         <button
           className={activeTab === 'console' ? 'primary small' : 'secondary small'}
@@ -271,6 +273,14 @@ export default function PowerShellConsole() {
         >
           ⚡ 명령 실행
         </button>
+        {terminal.data?.supported && (
+          <button
+            className={activeTab === 'terminal' ? 'primary small' : 'secondary small'}
+            onClick={() => setActiveTab('terminal')}
+          >
+            ▶ 터미널
+          </button>
+        )}
         {/*
           SW 업데이트·백엔드 재시작은 탭이 아니라 동작이다. 그래서 탭과 같은
           `primary/secondary` 전환을 쓰지 않는다 — 눌린 탭처럼 보이면 안 된다.
@@ -313,7 +323,7 @@ export default function PowerShellConsole() {
       </div>
 
       {/* TAB 0: PTY 터미널 — 되묻는 명령·Ctrl+C·실시간 출력이 되는 쪽 */}
-      {activeTab === 'terminal' && <PtyTerminal />}
+      {activeTab === 'terminal' && terminal.data?.supported && <PtyTerminal />}
 
       {/* TAB 1: 한 줄 실행 — PTY 백엔드(pywinpty)가 없는 서버를 위한 경로로도 남긴다 */}
       {activeTab === 'console' && (

@@ -68,6 +68,28 @@ def default_backend_code() -> int | None:
     return BACKENDS["winpty"] if build < CONPTY_MIN_BUILD else None
 
 
+def support() -> dict:
+    """서버 연결 화면에 터미널 버튼을 보일지 — **ConPTY나 POSIX pty가 있는 서버만.**
+
+    지원 기준은 윈도우 빌드 17763(10 1809 / Server 2019)이다. 그 아래(Server 2016 = 14393 이하)에는
+    ConPTY가 없어 winpty로만 열리는데, winpty는 콘솔 API를 흉내 내 화면을 긁어 오는 방식이라 최신
+    PowerShell의 줄 편집·한글 입력·창 크기 바꾸기가 어긋난다 — 그런 서버에서는 터미널을 내놓지 않고
+    명령 실행(한 줄)을 쓴다. 빌드를 읽지 못하면 ConPTY가 있다고 볼 수 없으니 감춘다.
+    """
+    if os.name != "nt":
+        return {"supported": True, "build": None, "reason": ""}
+    try:
+        build = sys.getwindowsversion().build  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return {"supported": False, "build": None,
+                "reason": "윈도우 빌드를 읽지 못해 ConPTY가 있는지 알 수 없습니다 — 명령 실행을 쓰세요."}
+    if build >= CONPTY_MIN_BUILD:
+        return {"supported": True, "build": build, "reason": ""}
+    return {"supported": False, "build": build,
+            "reason": f"Windows 빌드 {build}(Server 2016 이하)에는 ConPTY가 없어 터미널을 제공하지 않습니다"
+                      " — 명령 실행을 쓰세요. 터미널은 Windows Server 2019(빌드 17763) 이상에서 됩니다."}
+
+
 def backend_code(name: str) -> int | None:
     """설정값 → pywinpty backend 코드. 비었으면 이 OS에 맞는 기본값을 고른다."""
     name = (name or "").strip().lower()
