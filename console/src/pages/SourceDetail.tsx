@@ -373,7 +373,8 @@ const SCAN_CODE = scanAgent.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\n\s+/g, '
 
 // 북마크는 출처마다 하나 — 이름으로 구분하고, 다른 사이트에서 누르면 읽지 않는다.
 function scanCode(row: SourceOut): string {
-  const source = { id: row.id, name: row.name, origin: new URL(row.url).origin, queries: row.queries ?? [] };
+  const source = { id: row.id, name: row.name, origin: new URL(row.url).origin, queries: row.queries ?? [],
+                   version: row.queries_version ?? '' };
   return SCAN_CODE.replace('__GPAX_SOURCE__', JSON.stringify(source));
 }
 
@@ -421,6 +422,11 @@ function BrowserScanPanel({ row, onChange }: { row: SourceOut; onChange: (r: Sou
     <div className="panel">
       <h3 style={{ marginTop: 0 }}>브라우저에서 스캔</h3>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        순서: ① 북마크 끌어다 놓기 → ② 사이트에서 「스캔·수집」(메뉴 탐색) → 결과 올리기 → ③ 아래 「수집 조건」
+        저장(또는 녹화 올리기) → ④ <b>북마크 다시 끌어다 놓기</b> → ⑤ 「스캔·수집」 → 결과 올리기(파일이 받아짐) →
+        ⑥ 맨 아래 저장.
+      </p>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         사내 SSO로 로그인하는 사이트는 서버가 들어갈 수 없습니다. 로그인한 내 브라우저에서 읽어 옵니다 —
         세션은 브라우저 밖으로 나가지 않고, 입력값·쿠키는 읽지 않습니다(입력칸은 수집 조건을 채울 때만 씁니다).
       </p>
@@ -433,6 +439,13 @@ function BrowserScanPanel({ row, onChange }: { row: SourceOut; onChange: (r: Sou
           {' '}을 북마크바로 끌어다 놓습니다. 이 출처 전용입니다 — 다른 사이트에서 누르면 읽지 않습니다(또는{' '}
           <button className="small secondary" onClick={copy}>{copied ? '복사됨' : '코드 복사'}</button>
           {' '}후 개발자 도구 Console에 붙여 넣기).
+          <div className="mutedtext" style={{ fontSize: 11, marginTop: 2 }}>
+            지금 끌어다 놓으면 실리는 수집 조건: {row.queries?.length
+              ? `화면 ${row.queries.length}개 (${row.queries.map((q) => q.screen).join(', ')})`
+              : '없음 — 스캔만 합니다'}.{' '}
+            <b>수집 조건을 저장하거나 녹화·고칠 길을 적용한 뒤에는 북마크를 다시 끌어다 놓으세요</b> — 옛 북마크로
+            돌면 결과를 올릴 때 스캔 메모에 알립니다.
+          </div>
         </li>
         <li>
           <span className="mono">{row.url}</span>에 로그인하고, 읽힐 화면(메뉴를 펼친 상태, 보고 싶은 탭)을 엽니다.

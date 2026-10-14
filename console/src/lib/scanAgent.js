@@ -29,35 +29,48 @@
    * 하던 일까지 하고 받은 것을 내려받는다. */
   var MAX_ROWS = 100;
   var ctl = { rows: 20, stop: false, explore: true };
-  var box = document.createElement('div');
-  box.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;background:#1f2937;width:380px;' +
-    'color:#fff;padding:10px 14px;border-radius:6px;font:13px sans-serif;box-shadow:0 2px 8px #0006';
-  var head = document.createElement('div'), status = document.createElement('div'), logBox = document.createElement('div');
-  var bar = document.createElement('div'), rowsIn = document.createElement('input'), stopBtn = document.createElement('button');
+  /* 창의 모양은 요소마다 직접 못 박는다(all:initial 뒤에 색·글꼴) — 이 창은 남의 사이트 안에 뜬다. 사이트의
+   * div·button·input 규칙(div{color:#333}, button{background:#fff;color:#fff} 같은)은 물려받은 색보다
+   * 이겨서, 못 박지 않으면 어두운 바탕에 어두운 글자·흰 바탕에 흰 글자가 된다.
+   * 대비(WCAG): 창 #f9fafb/#1f2937 ≈ 15:1, 기록 #d1d5db/#111827 ≈ 12:1, 버튼 #f9fafb/#374151 ≈ 9:1,
+   * 주 버튼 #fff/#2563eb ≈ 5:1. */
+  var FONT = 'font:13px/1.45 "Malgun Gothic","Apple SD Gothic Neo",sans-serif;';
+  var INK = 'all:initial;box-sizing:border-box;' + FONT + 'color:#f9fafb;';
+  function paint(el, css) { el.style.cssText = INK + css; return el; }
+  var box = paint(document.createElement('div'), 'display:block;position:fixed;top:12px;right:12px;' +
+    'z-index:2147483647;background:#1f2937;width:380px;padding:10px 14px;border-radius:6px;box-shadow:0 2px 8px #0006');
+  var head = paint(document.createElement('div'), 'display:block;font-weight:700;color:#fff;margin-bottom:4px');
+  var status = paint(document.createElement('div'), 'display:block;margin-bottom:6px;word-break:break-all');
+  var logBox = paint(document.createElement('div'), 'display:block;max-height:180px;overflow:auto;' +
+    'background:#111827;padding:4px 6px;border-radius:4px;scrollbar-color:#4b5563 #111827');
+  var bar = paint(document.createElement('div'), 'display:flex;gap:6px;align-items:center;flex-wrap:wrap;' +
+    'margin-top:6px;font-size:12px');
+  var rowsIn = paint(document.createElement('input'), 'appearance:auto;display:inline-block;width:56px;' +
+    'font-size:12px;color:#111827;background:#fff;border:1px solid #9ca3af;border-radius:3px;padding:1px 4px');
+  var stopBtn = button('멈추기', null);
   head.textContent = 'GPAX 스캔 · ' + SOURCE.name;
-  head.style.cssText = 'font-weight:bold;margin-bottom:4px';
-  status.style.cssText = 'margin-bottom:6px';
-  logBox.style.cssText = 'max-height:180px;overflow:auto;font:11px/1.5 monospace;background:#111827;padding:4px 6px;border-radius:4px';
-  bar.style.cssText = 'margin-top:6px;display:flex;gap:6px;align-items:center;font-size:12px';
   rowsIn.type = 'number';
   rowsIn.min = '1';
   rowsIn.max = String(MAX_ROWS);
   rowsIn.value = String(ctl.rows);
   rowsIn.setAttribute('aria-label', 'GPAX 상세 열 행 수');
-  rowsIn.style.cssText = 'width:56px;color:#000';
   rowsIn.oninput = function () {
     var n = parseInt(rowsIn.value, 10);
     if (n >= 1 && n <= MAX_ROWS && n !== ctl.rows) { ctl.rows = n; log('조회 한도를 ' + n + '행으로 바꿨습니다'); }
   };
-  stopBtn.textContent = '멈추기';
   stopBtn.onclick = function () {
     if (ctl.stop) return;
     ctl.stop = true;
     stopBtn.disabled = true;
+    stopBtn.style.opacity = '0.5';
     log('멈추는 중 — 지금 하던 일까지 하고 받은 것을 내려받습니다');
   };
-  function button(text, onclick) {
-    var b = document.createElement('button');
+  /* primary — 그 자리에서 먼저 누를 것(스캔·수집, 녹화 끝) */
+  function button(text, onclick, primary) {
+    var b = paint(document.createElement('button'), 'display:inline-block;font-size:12px;cursor:pointer;' +
+      'padding:3px 10px;border-radius:4px;' + (primary ? 'color:#fff;background:#2563eb;border:1px solid #1d4ed8'
+        : 'color:#f9fafb;background:#374151;border:1px solid #4b5563'));
+    b.type = 'button';
     b.textContent = text;
     b.onclick = onclick;
     return b;
@@ -69,7 +82,9 @@
     bar.appendChild(stopBtn);
   }
   function choose() {
-    var exp = document.createElement('input'), lab = document.createElement('label');
+    var exp = paint(document.createElement('input'), 'appearance:auto;display:inline-block;width:14px;height:14px;' +
+      'margin:0 4px 0 0;accent-color:#2563eb;cursor:pointer');
+    var lab = paint(document.createElement('label'), 'display:inline-flex;align-items:center;font-size:12px;cursor:pointer');
     exp.type = 'checkbox';
     exp.checked = true;
     lab.appendChild(exp);
@@ -80,7 +95,7 @@
       ctl.explore = exp.checked;
       controls();
       run().catch(function (e) { say('실패 — ' + (e && e.message)); finish(); });
-    }));
+    }, true));
     bar.appendChild(button('녹화', startRecording));
     bar.appendChild(lab);
     say('무엇을 할까요? 스캔·수집 — 화면을 읽고 수집 조건대로 받기 · 녹화 — 조회 화면까지 가는 길을 한 번 보여 주기');
@@ -92,7 +107,8 @@
   /* 열린 화면을 다 읽은 뒤에 붙인다 — 먼저 붙이면 이 안내문이 화면 글에 섞인다. */
   function show() { if (!box.parentNode) document.body.appendChild(box); }
   function log(t) {
-    var line = document.createElement('div');
+    var line = paint(document.createElement('div'), 'display:block;font:11px/1.5 Consolas,"D2Coding",monospace;' +
+      'color:#d1d5db;white-space:pre-wrap;word-break:break-all');
     line.textContent = new Date().toTimeString().slice(0, 8) + ' ' + t;
     logBox.appendChild(line);
     while (logBox.childNodes.length > 300) logBox.removeChild(logBox.firstChild);
@@ -1166,11 +1182,8 @@
     rec = { start: location.href.split('#')[0], steps: [], timer: setInterval(recAttach, 500) };
     recAttach();
     bar.textContent = '';
-    var end = document.createElement('button'), cancel = document.createElement('button');
-    end.textContent = '녹화 끝';
-    cancel.textContent = '취소';
-    end.onclick = finishRecording;
-    cancel.onclick = function () { clearInterval(rec.timer); rec = null; say('녹화를 취소했습니다'); finish(); };
+    var end = button('녹화 끝', finishRecording, true);
+    var cancel = button('취소', function () { clearInterval(rec.timer); rec = null; say('녹화를 취소했습니다'); finish(); });
     bar.appendChild(end);
     bar.appendChild(cancel);
     say('녹화 중 — 메뉴를 눌러 화면을 열고, 조건을 넣고, 조회 → 첫 행의 상세 → 첨부를 누른 뒤 「녹화 끝」');
@@ -1215,6 +1228,8 @@
       seen[p.url] = 1;
       pages.push(p);
     });
+    /* 다 읽었으면 바로 창을 다시 붙인다 — 다음 일(메뉴 탐색 등)이 화면을 여는 몇 초 동안 창이 비면 멈춘 줄 안다. */
+    say('열린 화면 ' + pages.length + '장을 읽었습니다' + (menuN ? ' · 메뉴 ' + menuN + '개' : ''));
     var targets = [];
     (function walk(items) {
       items.forEach(function (m) { if (m.url) targets.push({ url: m.url, text: m.label }); walk(m.children || []); });
@@ -1262,7 +1277,7 @@
     var collected = await collect(files, budget);
     var out = { agent: AGENT, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
                 url: location.href.split('#')[0], at: new Date().toISOString(), menu: menu, pages: pages,
-                files: files, collected: collected };
+                files: files, collected: collected, queries_version: SOURCE.version || '' };
     var a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(out)], { type: 'application/json' }));
     a.download = 'gpax-scan-' + SOURCE.id + '-' + String(SOURCE.name).replace(/[\\/:*?"<>|\s]+/g, '_') + '.json';
@@ -1276,10 +1291,7 @@
   /* 끝나면 기록은 남겨 둔다(읽을 수 있게) — 닫기로 치운다. */
   function finish() {
     bar.textContent = '';
-    var close = document.createElement('button');
-    close.textContent = '닫기';
-    close.onclick = function () { box.remove(); };
-    bar.appendChild(close);
+    bar.appendChild(button('닫기', function () { box.remove(); }));
   }
   function dismiss() {
     box.onclick = function () { box.remove(); };

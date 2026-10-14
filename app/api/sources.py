@@ -95,8 +95,9 @@ def _out(row: InfoSource, *, full: bool = False) -> dict:
     if full:
         data["scan"] = row.scan
         data["proposal"] = row.proposal
-        # 북마크가 싣는 수집 조건 — 화면이 북마크 코드를 만들 때 쓴다.
+        # 북마크가 싣는 수집 조건과 그 판 — 화면이 북마크 코드를 만들 때 쓴다.
         data["queries"] = infosource.query_screens(row)
+        data["queries_version"] = infosource.queries_version(row)
     return data
 
 

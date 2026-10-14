@@ -1116,8 +1116,9 @@ export interface SourceOut {
   counts: { pages: number; endpoints: number; tools: number; files: number };
   scan?: SourceScan | null;
   proposal?: SourceProposal | null;
-  // 수집 조건 — 북마크가 싣는다(lib/scanAgent.js)
+  // 수집 조건과 그 판 — 북마크가 싣는다(lib/scanAgent.js). 옛 판의 북마크로 돌면 올릴 때 알린다.
   queries?: SourceQueryScreen[];
+  queries_version?: string;
 }
 
 export interface SourceQueryCondition {

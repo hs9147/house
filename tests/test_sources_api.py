@@ -742,3 +742,22 @@ def test_similar_pick_goes_by_menu_text_not_by_the_shared_menu_function():
              {"tag": "a", "text": "클레임 조회", "code": "openMenu('claim');return false"}]
     assert infosource._pick_similar(target, cands) == 0
     assert infosource._pick_similar({"tag": "a", "text": "전혀 다른 것"}, cands) is None
+
+
+def test_old_bookmark_is_flagged_when_conditions_changed_since(client, monkeypatch):
+    """북마크는 수집 조건을 싣고 다닌다 — 조건을 저장한 뒤 다시 끌어다 놓지 않으면 옛 조건으로 돈다. 알린다."""
+    sid = _notice_scan(client, monkeypatch)
+    scan = client.get(f"{API}/sources/{sid}", headers=ADMIN).json()["scan"]
+    assert not any("옛 북마크" in n for n in scan["notes"])            # 조건이 없고 북마크도 비었다
+    client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [
+        {"url": "https://intra.test/notice", "conditions": [{"field": "등록일", "value": "@today"}]}]})
+    version = client.get(f"{API}/sources/{sid}", headers=ADMIN).json()["queries_version"]
+    assert version
+
+    def upload(**over):
+        res = client.post(f"{API}/sources/{sid}/browser-result", headers=ADMIN, files=_browser_file(sid, **over))
+        assert res.status_code == 202, res.text
+        return client.get(f"{API}/sources/{sid}", headers=ADMIN).json()["scan"]["notes"]
+
+    assert any("옛 북마크로 돌았습니다" in n for n in upload())                 # 조건 저장 전의 북마크
+    assert not any("옛 북마크" in n for n in upload(queries_version=version))  # 다시 끌어다 놓은 북마크

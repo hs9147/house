@@ -1358,7 +1358,8 @@ def from_browser(row: InfoSource, payload) -> dict:
     downloads, skipped = _browser_files(payload.get("files"), origin)
     return {"origin": origin, "pages": pages, "skipped": skipped, "sitemap": 0, "browser": False,
             "via": "browser", "menu_dom": _menu_in(payload.get("menu"), origin, [400]),
-            "downloads": downloads, "collected": _collected_in(payload.get("collected"), origin)}
+            "downloads": downloads, "collected": _collected_in(payload.get("collected"), origin),
+            "queries_version": _s(payload.get("queries_version"), 32)}
 
 
 def _collected_in(items, origin: str) -> list[dict]:
@@ -1461,6 +1462,12 @@ def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
     got, missed = _download(result.pop("downloads"), {}, result["origin"], limit=MAX_BROWSER_FILES)
     result["files"], result["stage_notes"] = _stage(row.id, got)
     result["stage_notes"] = _collected_notes(result["collected"]) + result["stage_notes"]
+    current = queries_version(row)
+    if result.pop("queries_version") != current:
+        result["stage_notes"].insert(0, (
+            "옛 북마크로 돌았습니다 — 수집 조건이 바뀐 뒤 북마크를 다시 끌어다 놓지 않았습니다. 북마크를 다시 "
+            "끌어다 놓고 다시 하세요." if current else
+            "북마크에 지금은 없는 수집 조건이 실려 있었습니다(조건을 지운 뒤 북마크를 바꾸지 않았습니다)."))
     result["skipped"] += missed
     row.status, row.error = "scanning", None
     row.scanned_at = datetime.now(timezone.utc)
@@ -1518,6 +1525,15 @@ def query_candidates(row: InfoSource) -> list[dict]:
 
 def query_screens(row: InfoSource) -> list[dict]:
     return list(row.query.screens or []) if row.query else []
+
+
+def queries_version(row: InfoSource) -> str:
+    """수집 조건의 판 — 내용의 해시. 북마크가 이 값을 싣고 다닌다: 조건을 저장한 뒤 북마크를 다시 끌어다
+    놓지 않으면 옛 판으로 돌고, 그 결과를 올릴 때 알린다(accept_browser_result). 비었으면 ""."""
+    screens = query_screens(row)
+    if not screens:
+        return ""
+    return hashlib.sha256(json.dumps(screens, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def clean_screens(row: InfoSource, screens) -> list[dict]:
