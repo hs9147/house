@@ -307,3 +307,47 @@ def test_previously_registered_addresses_are_still_recognised(monkeypatch, fresh
     assert mcp_search.is_internal_server_url("http://localhost:7000/paas/api/v1/mcp/docs")
     # 사외 서버는 그대로 거부한다 — 발급한 키가 그 주소로 전송되기 때문이다
     assert not mcp_search.is_internal_server_url("https://mcp.example.com/api/v1/mcp/docs")
+
+
+def test_storage_module_key_opens_its_own_store_only(monkeypatch, tmp_path, fresh_settings):
+    """회귀: 저장소 서버를 모듈로 가져오면 발급한 키가 비관리자·무소속이라 어떤 저장소도 열지 못해,
+    등록하자마자 연결 확인이 404(storage 'contracts' not found)였다. 그 저장소 하나만 연다."""
+    c = _client(monkeypatch, tmp_path)
+    from app.db import SessionLocal
+    from app.models import DocumentStore
+    with SessionLocal() as db:
+        for name in ("contracts", "hr"):
+            (tmp_path / name).mkdir()
+            db.add(DocumentStore(name=name, root_path=str(tmp_path / name), read_only=False, active=True))
+        db.commit()
+    entry = next(i for i in c.get(f"{API}/mcp/search", headers=ADMIN).json() if i["id"] == "paas-storage-contracts")
+    created = c.post(f"{API}/modules/import-mcp", headers=ADMIN, json={
+        "id": entry["id"], "name": entry["name"], "url": entry["url"], "category": entry["category"]}).json()
+    sent: dict[str, str] = {}
+
+    def post_rpc(url, headers, payload):
+        sent.update(headers)
+        res = c.post(url.replace("http://localhost:7000/paas", "/paas"), headers=headers, json=payload)
+        res.raise_for_status()
+        return res.json()
+
+    monkeypatch.setattr(mcp_client, "_post_rpc", post_rpc)
+    body = c.post(f"{API}/modules/{created['id']}/mcp-check", headers=ADMIN).json()
+    assert body["ok"] is True, body["error"]
+
+    key = {"authorization": sent["authorization"]}
+    rpc = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+           "params": {"name": "write_file", "arguments": {"path": "a.txt", "content": "계약"}}}
+    assert "result" in c.post(f"{API}/mcp/storage/contracts", headers=key, json=rpc).json()
+    assert (tmp_path / "contracts" / "a.txt").read_text(encoding="utf-8") == "계약"
+    # 다른 저장소는 그대로 닫혀 있고, 관리자 권한도 없다
+    assert c.post(f"{API}/mcp/storage/hr", headers=key, json=rpc).status_code == 404
+    assert c.get(f"{API}/audit", headers=key).status_code == 403
+    # 이름만 같은 다른 키는 통하지 않는다 — 모듈 설정의 키와 대조한다
+    from app.models import ApiKey
+    from app.security import hash_key
+    with SessionLocal() as db:
+        db.query(ApiKey).filter(ApiKey.name == "mcp-paas-storage-contracts").one().key_hash = hash_key("other")
+        db.commit()
+    assert c.post(f"{API}/mcp/storage/contracts", headers={"authorization": "Bearer other"},
+                  json=rpc).status_code == 404

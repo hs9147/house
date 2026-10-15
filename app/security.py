@@ -402,15 +402,46 @@ def viewer_org_ids(db: Session, key: ApiKey) -> set[int]:
     return {o.id for o in user.organizations} if user else set()
 
 
+def _module_store(db: Session, key: ApiKey) -> str | None:
+    """사내 저장소 서버(/mcp/storage/{저장소})를 모듈로 등록할 때 발급한 전용 키라면 그 저장소 이름.
+
+    그 키는 비관리자·무소속이라(api/modules._issue_module_key — 바인딩된 앱의 환경변수로 들어가므로
+    관리자 키를 줄 수 없다) 부서 판정으로는 어떤 저장소도 열지 못했다. 그래서 등록하자마자 연결 확인이
+    404였다. **그 모듈 주소의 저장소 하나만** 연다. 이름만 같은 다른 키가 통하지 않게, 모듈 설정에 든
+    키와 대조해 그 모듈의 키인지 확인한다.
+    """
+    if key.is_admin or not key.name.startswith("mcp-"):
+        return None
+    import re  # noqa: PLC0415
+    from urllib.parse import unquote  # noqa: PLC0415
+
+    from .models import Module, ModuleType  # noqa: PLC0415
+    from .services import mcp_search  # noqa: PLC0415
+    from .services import modules as modules_service  # noqa: PLC0415
+
+    for module in db.execute(select(Module).where(Module.type == ModuleType.mcp)).scalars():
+        if f"mcp-{module.name}"[:64] != key.name:
+            continue
+        config = modules_service.decrypt_config(module.config or {})
+        raw, url = config.get("api_key") or "", config.get("url") or ""
+        if not raw or not hmac.compare_digest(hash_key(raw), key.key_hash):
+            return None
+        found = re.search(r"/api/v1/mcp/storage/([^/?#]+)$", url)
+        return unquote(found.group(1)) if found and mcp_search.is_internal_server_url(url) else None
+    return None
+
+
 def accessible_document_stores(db: Session, key: ApiKey, *, include_internal: bool = False):
-    """명시적으로 소속된 부서의 저장소만. 관리자만 미배정/내부 저장소에 접근한다."""
+    """명시적으로 소속된 부서의 저장소만. 관리자는 전부(미배정·내부 포함)이고, 저장소 서버 모듈의
+    전용 키는 그 저장소 하나다(_module_store)."""
     from .services import storage  # noqa: PLC0415
 
     org_ids = viewer_org_ids(db, key) if not key.is_admin else set()
+    granted = _module_store(db, key)
     return [s for s in storage.stores(db)
             if (not s.hidden or include_internal)
-            and (key.is_admin or (s.organization_id is not None
-                                  and s.organization_id in org_ids))]
+            and (key.is_admin or s.name == granted
+                 or (s.organization_id is not None and s.organization_id in org_ids))]
 
 
 def require_document_store(db: Session, key: ApiKey, name: str):
