@@ -211,7 +211,9 @@ def list_files(root: Path) -> list[dict]:
         return []
     return sorted(
         (
-            {"path": p.relative_to(root).as_posix(), "size": p.stat().st_size}
+            # 바뀐 때(초) — 저장소 화면이 최근 파일을 가려 보게(정렬·표시).
+            {"path": p.relative_to(root).as_posix(), "size": p.stat().st_size,
+             "mtime": int(p.stat().st_mtime)}
             for p in root.rglob("*")
             # 휴지통은 목록에 넣지 않는다 — 지운 것이 계속 보이면 지운 것이 아니다.
             # (docsearch는 점으로 시작하는 폴더를 통째로 건너뛰므로 검색에도 안 잡힌다.)

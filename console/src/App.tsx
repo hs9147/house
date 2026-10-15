@@ -103,7 +103,7 @@ export default function App() {
             </AdminOnly>
           }
         />
-        {/* 파일 관리 다음 자리 — 웹사이트·API·MCP를 스캔해 저장소로 옮긴다. */}
+        {/* 저장소 관리 다음 자리 — 웹사이트·API·MCP를 스캔해 저장소로 옮긴다. */}
         <Route
           path="/sources"
           element={

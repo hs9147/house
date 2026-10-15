@@ -32,6 +32,11 @@ def _client(monkeypatch, tmp_path, doc_roots="", readonly="") -> TestClient:
     return TestClient(create_app())
 
 
+def _names(files: list[dict]) -> list[dict]:
+    """바뀐 때(mtime)는 실행마다 달라 뺀다."""
+    return [{"path": f["path"], "size": f["size"]} for f in files]
+
+
 def test_upload_list_download_delete(monkeypatch, tmp_path, fresh_settings):
     c = _client(monkeypatch, tmp_path)
 
@@ -41,7 +46,8 @@ def test_upload_list_download_delete(monkeypatch, tmp_path, fresh_settings):
     assert r.json()["path"] == "logo.png"
 
     listing = c.get(f"{API}/storage/internal/files", headers=ADMIN).json()
-    assert listing["files"] == [{"path": "logo.png", "size": 12}]
+    assert _names(listing["files"]) == [{"path": "logo.png", "size": 12}]
+    assert listing["files"][0]["mtime"] > 0       # 화면이 최근 파일을 가려 본다
     # 파일 목록에는 실제 디렉터리가 아니라 창구 URL이 실린다(경로는 /storage/stores에서만)
     assert listing["url"].endswith("/paas/api/v1/storage/internal")
     assert str(tmp_path) not in str(listing)
@@ -111,7 +117,7 @@ def test_doc_roots_are_read_write_by_default(monkeypatch, tmp_path, fresh_settin
     (docs / "규정.txt").write_text("연차 규정", encoding="utf-8")
     c = _client(monkeypatch, tmp_path, doc_roots=str(docs))
 
-    assert c.get(f"{API}/storage/shared/files", headers=ADMIN).json()["files"] == [
+    assert _names(c.get(f"{API}/storage/shared/files", headers=ADMIN).json()["files"]) == [
         {"path": "규정.txt", "size": len("연차 규정".encode())}]
     assert c.post(f"{API}/storage/shared/files",
                   files={"file": ("x.txt", b"hi")}, headers=ADMIN).status_code == 201
@@ -139,8 +145,8 @@ def test_internal_is_hidden_from_the_list_but_still_reachable(monkeypatch, tmp_p
     assert c.post(f"{API}/storage/internal/files",
                   files={"file": ("예전.txt", "내용".encode())},
                   headers=ADMIN).status_code == 201
-    assert c.get(f"{API}/storage/internal/files",
-                 headers=ADMIN).json()["files"] == [{"path": "예전.txt", "size": 6}]
+    assert _names(c.get(f"{API}/storage/internal/files",
+                        headers=ADMIN).json()["files"]) == [{"path": "예전.txt", "size": 6}]
 
 
 def test_delete_moves_to_trash_and_can_be_recovered(monkeypatch, tmp_path, fresh_settings):
@@ -345,3 +351,37 @@ def test_upload_succeeds_even_if_indexing_fails(monkeypatch, tmp_path, fresh_set
                files={"file": ("메모.md", "# 메모\n".encode())}, headers=ADMIN)
     assert r.status_code == 201, r.text
     assert (docs / "메모.md").read_text(encoding="utf-8") == "# 메모\n"
+
+
+def test_preview_and_body_text_for_what_the_browser_cannot_draw(monkeypatch, tmp_path, fresh_settings):
+    """저장소 화면의 미리보기 — 워드·파워포인트는 서버가 PDF로, 그 밖(한글 등)은 본문 텍스트로.
+    원본이 이미 서버에 있으니 브라우저가 다시 올려 보내지 않는다. 꺼내 간 것은 감사에 남는다."""
+    from app.services import doctext
+
+    c = _client(monkeypatch, tmp_path)
+    c.post(f"{API}/storage/internal/files", files={"file": ("규정.md", "# 연차\n\n- 15일".encode())},
+           headers=ADMIN)
+    c.post(f"{API}/storage/internal/files", files={"file": ("보고.docx", b"PK fake")}, headers=ADMIN)
+
+    text = c.get(f"{API}/storage/internal/files/text", params={"path": "규정.md"}, headers=ADMIN)
+    assert text.status_code == 200, text.text
+    assert "15일" in text.json()["text"] and text.json()["truncated"] is False
+
+    assert c.get(f"{API}/storage/internal/files/preview", params={"path": "규정.md"},
+                 headers=ADMIN).status_code == 400          # PDF로 바꿀 형식이 아니다
+    monkeypatch.setattr(doctext, "to_pdf", lambda path: b"%PDF-1.4 preview")
+    pdf = c.get(f"{API}/storage/internal/files/preview", params={"path": "보고.docx"}, headers=ADMIN)
+    assert pdf.status_code == 200 and pdf.headers["content-type"] == "application/pdf"
+
+    def no_office(path):
+        raise doctext.ExtractError("서버에 LibreOffice가 없어 미리 볼 수 없습니다")
+
+    monkeypatch.setattr(doctext, "to_pdf", no_office)
+    assert c.get(f"{API}/storage/internal/files/preview", params={"path": "보고.docx"},
+                 headers=ADMIN).status_code == 503
+    assert c.get(f"{API}/storage/internal/files/text", params={"path": "없음.txt"},
+                 headers=ADMIN).status_code == 404
+    assert c.get(f"{API}/storage/internal/files/text", params={"path": "../x"},
+                 headers=ADMIN).status_code == 400
+    actions = {row["action"] for row in c.get(f"{API}/audit", headers=ADMIN).json()}
+    assert {"storage.preview", "storage.read"} <= actions

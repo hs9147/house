@@ -85,6 +85,7 @@ import type {
   SmartworkSessionSummary,
   SmartworkAttachmentIn,
   SmartworkTurn,
+  StorageListing,
   StorageStore,
   UserAccountOut,
   UserOrgOut,
@@ -233,6 +234,29 @@ async function requestMultipart<T>(path: string, formData: FormData): Promise<T>
     throw new ApiError(res.status, detail);
   }
   return data as T;
+}
+
+// 바이너리를 받는다(GET) — 헤더로 인증해야 해서 <a href>나 <img src>로 바로 걸 수 없다.
+async function requestGetBlob(path: string, query: Record<string, string>): Promise<Blob> {
+  const res = await fetch(`${apiUrl(path)}?${new URLSearchParams(query)}`, {
+    headers: { 'x-api-key': getKey() },
+  });
+  if (res.status === 401) {
+    logout();
+    window.location.hash = '#/login';
+    throw new ApiError(401, '인증이 만료되었습니다. 다시 로그인하세요.');
+  }
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && typeof data === 'object' && 'detail' in data) detail = formatDetail(data.detail);
+    } catch {
+      /* 본문 없는 응답 */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return res.blob();
 }
 
 // 본문을 그대로 보내고 바이너리(PDF 등)를 받는다 — request()는 응답을 JSON으로 읽는다.
@@ -573,8 +597,18 @@ export const api = {
     request<StorageStore>('POST', '/storage/stores', body),
   updateStorageStore: (name: string, body: { organization_id: number; read_only: boolean }) =>
     request<StorageStore>('PATCH', `/storage/stores/${encodeURIComponent(name)}`, body),
-  // 파일 목록·다운로드·삭제 엔드포인트는 백엔드에 그대로 있지만 콘솔에서는 쓰지 않는다 —
-  // 파일 관리 화면은 저장소 상태와 업로드만 다루고, 내용을 찾는 창구는 paas-docs다.
+  // 저장소 관리 — 파일 조회와 미리보기. 내용을 꺼내는 요청은 서버가 감사에 남긴다.
+  listStorageFiles: (store: string) =>
+    request<StorageListing>('GET', `/storage/${encodeURIComponent(store)}/files`),
+  storageFileBlob: (store: string, path: string) =>
+    requestGetBlob(`/storage/${encodeURIComponent(store)}/files/content`, { path }),
+  // 워드·파워포인트 → PDF(서버의 LibreOffice)
+  storagePreviewPdf: (store: string, path: string) =>
+    requestGetBlob(`/storage/${encodeURIComponent(store)}/files/preview`, { path }),
+  // 브라우저가 열지 못하는 형식(hwp 등)의 본문 텍스트(마크다운)
+  storageFileText: (store: string, path: string) =>
+    request<{ text: string; truncated: boolean }>('GET', `/storage/${encodeURIComponent(store)}/files/text`,
+      undefined, { path }),
   uploadStorageFile: (store: string, file: File, path?: string) => {
     const fd = new FormData();
     fd.append('file', file);

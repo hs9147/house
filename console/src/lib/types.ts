@@ -133,6 +133,7 @@ export interface UserAccountOut {
 export interface StorageFile {
   path: string;
   size: number;
+  mtime: number;   // 바뀐 때(초)
 }
 
 export interface StorageStore {

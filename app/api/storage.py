@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ from ..db import get_db
 from ..models import ApiKey, DocumentStore, Organization
 from ..security import (accessible_document_stores, require_admin, require_api_key,
                         require_document_store)
+from ..services import docready, doctext
 from ..services import storage as storage_service
 from ..services.storage import Store
 
@@ -142,6 +143,62 @@ def download_storage_file(
     # key.name은 발급 키 이름이거나 OIDC preferred_username이다.
     audit.record(db, key.name, "storage.download", store.name, {"path": path})
     return FileResponse(target, filename=target.name)
+
+
+def _target(store: Store, path: str):
+    try:
+        target = storage_service.resolve(store.root, path)
+    except storage_service.StorageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    return target
+
+
+# 미리보기 — 브라우저가 직접 그리지 못하는 형식을 서버가 바꿔 준다. 원본은 이미 서버의 저장소에 있으니
+# (스마트워크의 내 PC 파일과 달리) 브라우저가 다시 올려 보낼 필요가 없다.
+_PDF_PREVIEW = (".doc", ".docx", ".ppt", ".pptx")
+MAX_PREVIEW_TEXT = 200_000
+
+
+@router.get("/storage/{store_name}/files/preview")
+def preview_storage_file(
+    store_name: str,
+    path: str,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """워드·파워포인트를 PDF로 — 서버의 LibreOffice가 모양 그대로 바꾸고, 브라우저 내장 뷰어가 그린다."""
+    store = _store(db, key, store_name)
+    target = _target(store, path)
+    if target.suffix.lower() not in _PDF_PREVIEW:
+        raise HTTPException(status_code=400, detail=f"PDF 미리보기는 {'·'.join(_PDF_PREVIEW)}만 합니다.")
+    try:
+        pdf = doctext.to_pdf(target)
+    except doctext.ExtractError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    audit.record(db, key.name, "storage.preview", store.name, {"path": path})
+    return Response(pdf, media_type="application/pdf")
+
+
+@router.get("/storage/{store_name}/files/text")
+def storage_file_text(
+    store_name: str,
+    path: str,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """본문 텍스트(마크다운) — 한글(hwp) 등 브라우저가 열지 못하는 문서의 미리보기. 검색 색인과 같은
+    추출 캐시(services/docready)를 쓴다 — 색인이 이미 읽어 둔 문서면 파일 하나 읽기다."""
+    store = _store(db, key, store_name)
+    target = _target(store, path)
+    rel = target.relative_to(store.root).as_posix()
+    try:
+        text = docready.read(store.name, rel, target)
+    except doctext.ExtractError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    audit.record(db, key.name, "storage.read", store.name, {"path": rel})
+    return {"text": text[:MAX_PREVIEW_TEXT], "truncated": len(text) > MAX_PREVIEW_TEXT}
 
 
 @router.post("/storage/{store_name}/files", status_code=201)
