@@ -69,11 +69,17 @@ export function WebView({ web }: { web: SmartworkWeb }) {
       {loaded ? (
         <>
           {/* 사이트가 X-Frame-Options·frame-ancestors로 끼워 넣기를 막으면 빈 칸으로 보인다 —
-              그때를 위해 새 창 링크를 함께 둔다(AgentView와 같은 이유). */}
+              그때를 위해 새 창 링크를 함께 둔다(AgentView와 같은 이유).
+              로그인이 안 되는 것은 다른 까닭이다: 브라우저는 **다른 사이트의 틀 안**에는 그 사이트의
+              로그인 쿠키(SameSite 미지정 = Lax)를 싣지 않는다. 사이트는 스킴까지 본다 — 콘솔이 http면
+              https://….lge.com도 다른 사이트라 틀 안에서는 로그인이 빠진다(콘솔을 https로 하면 같은 사이트). */}
           <iframe key={loaded} title={loaded} src={loaded} sandbox={WEB_SANDBOX}
             className="smartwork-frame" style={{ background: '#fff' }} />
           <p className="mutedtext" style={{ fontSize: 11 }}>
-            빈 화면이면 그 사이트가 다른 화면 안에 띄우는 것을 막은 것입니다 — 「새 창으로 열기」를 쓰세요.
+            빈 화면이면 그 사이트가 다른 화면 안에 띄우는 것을 막은 것입니다. 브라우저에는 로그인돼 있는데 여기서
+            권한 없음·로그인 화면이 보이면, 브라우저가 이 창 안으로는 그 사이트의 로그인을 넘기지 않은 것입니다
+            {location.protocol === 'http:' && '(콘솔이 http라 https 사이트의 로그인이 전달되지 않음)'} — 두 경우 모두
+            「새 창으로 열기」를 쓰세요.
           </p>
         </>
       ) : !web.url && (
