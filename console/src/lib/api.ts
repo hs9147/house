@@ -31,6 +31,8 @@ import type {
   WorkflowAssessment,
   WorkflowExtracted,
   WorkflowMessageOut,
+  WorkflowLink,
+  WorkflowLinks,
   WorkflowOut,
   WorkflowProposal,
   WorkflowResources,
@@ -477,6 +479,14 @@ export const api = {
   renameWorkflow: (id: number, name: string, description?: string) =>
     request<WorkflowOut>('PATCH', `/workflows/${id}`, { name, description }),
   deleteWorkflow: (id: number) => request<void>('DELETE', `/workflows/${id}`),
+  // 저장소 온톨로지와의 연결 — 설계·실행·이름·색인(다시 계산), LLM 제안(확인해야 쓰임)
+  workflowLinks: (id: number) => request<WorkflowLinks>('GET', `/workflows/${id}/links`),
+  refreshWorkflowLinks: (id: number) => request<WorkflowLinks>('POST', `/workflows/${id}/links/refresh`),
+  suggestWorkflowLinks: (id: number) => request<WorkflowLinks>('POST', `/workflows/${id}/links/suggest`),
+  confirmWorkflowLink: (id: number, linkId: number, confirmed: boolean) =>
+    request<WorkflowLink>('PATCH', `/workflows/${id}/links/${linkId}`, { confirmed }),
+  deleteWorkflowLink: (id: number, linkId: number) =>
+    request<void>('DELETE', `/workflows/${id}/links/${linkId}`),
   workflowResources: (organization_id: number) =>
     request<WorkflowResources>('GET', '/workflows/resources', undefined, { organization_id }),
   workflowMessages: (id: number) =>

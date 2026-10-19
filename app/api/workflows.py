@@ -13,13 +13,13 @@ from sqlalchemy.orm import Session
 from .. import audit
 from ..db import get_db
 from ..models import (
-    ApiKey, Organization, Workflow, WorkflowMessage, WorkflowRun, WorkflowRunStatus,
+    ApiKey, Organization, Workflow, WorkflowLink, WorkflowMessage, WorkflowRun, WorkflowRunStatus,
 )
 from ..security import require_api_key, viewer_org_ids
 from ..services import bedrock
 from ..services import llm as llm_service
 from ..services import workflow as workflow_service
-from ..services import workflowassess, workflowchat
+from ..services import workflowassess, workflowchat, workflowlinks
 from .llm import provider_error
 
 router = APIRouter(tags=["workflows"])
@@ -187,7 +187,17 @@ def save_workflow(workflow_id: int, body: WorkflowSave, db: Session = Depends(ge
     db.commit()
     audit.record(db, key.name, "workflow.save", row.name,
                  {"version": row.version, **workflow_service.spec_summary(row.spec)})
+    _refresh_links(db, row)
     return _out(row)
+
+
+def _refresh_links(db: Session, row: Workflow) -> None:
+    """저장소 온톨로지와의 연결(services/workflowlinks)을 다시 계산한다 — 실패해도 저장은 그대로다."""
+    try:
+        workflowlinks.compute(db, row)
+    except Exception as e:  # noqa: BLE001 — 연결은 파생 데이터다(다음 재색인·저장 때 다시 맞춘다)
+        db.rollback()
+        print(f"[paas] 워크플로 연결 계산 실패(무시): {row.name} — {e}")
 
 
 @router.patch("/workflows/{workflow_id}")
@@ -221,9 +231,91 @@ def delete_workflow(workflow_id: int, db: Session = Depends(get_db),
                     key: ApiKey = Depends(require_api_key)):
     row = _workflow_or_404(db, workflow_id, key)
     name = row.name
+    # SQLite는 외래키 CASCADE를 기본으로 끄고 돈다 — 딸린 연결을 직접 지운다.
+    db.query(WorkflowLink).filter(WorkflowLink.workflow_id == row.id).delete()
     db.delete(row)
     db.commit()
     audit.record(db, key.name, "workflow.delete", name, None)
+
+
+# --- 저장소 온톨로지와의 연결(services/workflowlinks) ---
+
+class LinkConfirm(BaseModel):
+    confirmed: bool = True
+
+
+def _link_out(link: WorkflowLink) -> dict:
+    return {"id": link.id, "subject_kind": link.subject_kind, "subject": link.subject, "rel": link.rel,
+            "store": link.store, "target_kind": link.target_kind, "target": link.target, "path": link.path,
+            "detail": link.detail, "source": link.source, "confirmed": link.confirmed}
+
+
+@router.get("/workflows/{workflow_id}/links")
+def workflow_links(workflow_id: int, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """이 워크플로가 저장소 온톨로지와 어떻게 이어져 있나 — 연결 목록·그림·근거 미확인 규칙."""
+    row = _workflow_or_404(db, workflow_id, key)
+    return {"stores": [s.name for s in workflowlinks.stores_of(db, row)],
+            "links": [_link_out(link) for link in workflowlinks.links_of(db, row)],
+            "graph": workflowlinks.graph(db, row),
+            "unground_rules": workflowlinks.unground_rules(db, row)}
+
+
+@router.post("/workflows/{workflow_id}/links/refresh")
+def refresh_workflow_links(workflow_id: int, db: Session = Depends(get_db),
+                           key: ApiKey = Depends(require_api_key)):
+    """설계·실행 기록·이름 일치·전문 색인으로 다시 계산한다(LLM 제안은 남는다)."""
+    row = _workflow_or_404(db, workflow_id, key)
+    result = workflowlinks.compute(db, row)
+    audit.record(db, key.name, "workflow.links", row.name, {"counts": result["counts"]})
+    return {**result, **workflow_links(workflow_id, db, key)}
+
+
+@router.post("/workflows/{workflow_id}/links/suggest")
+def suggest_workflow_links(workflow_id: int, db: Session = Depends(get_db),
+                           key: ApiKey = Depends(require_api_key)):
+    """아직 이어지지 않은 낱말에 LLM이 짝을 제안한다 — 온톨로지 후보 안에서만, 확인 전으로 둔다."""
+    row = _workflow_or_404(db, workflow_id, key)
+    provider = llm_service.default_provider(db)
+    if provider is None:
+        raise HTTPException(status_code=400, detail="기본 LLM 프로바이더가 없습니다 — LLM 관리에서 기본값을 지정하세요.")
+
+    def chat(prompt: str) -> str:
+        return llm_service.chat_completion(provider, [{"role": "user", "content": prompt}], db)
+
+    try:
+        result = workflowlinks.suggest(db, row, chat)
+    except (bedrock.BedrockError, llm_service.LlmTimeout, llm_service.LlmCallFailed,
+            llm_service.LlmTruncated) as e:
+        raise provider_error(db, key.name, e)
+    audit.record(db, key.name, "workflow.links.suggest", row.name, {"suggested": result["suggested"]})
+    return {**result, **workflow_links(workflow_id, db, key)}
+
+
+@router.patch("/workflows/{workflow_id}/links/{link_id}")
+def confirm_workflow_link(workflow_id: int, link_id: int, body: LinkConfirm,
+                          db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    row = _workflow_or_404(db, workflow_id, key)
+    link = db.get(WorkflowLink, link_id)
+    if link is None or link.workflow_id != row.id:
+        raise HTTPException(status_code=404, detail="연결을 찾을 수 없습니다")
+    link.confirmed = body.confirmed
+    db.commit()
+    audit.record(db, key.name, "workflow.links.confirm", row.name,
+                 {"link": link.id, "confirmed": link.confirmed, "source": link.source})
+    return _link_out(link)
+
+
+@router.delete("/workflows/{workflow_id}/links/{link_id}", status_code=204)
+def delete_workflow_link(workflow_id: int, link_id: int, db: Session = Depends(get_db),
+                         key: ApiKey = Depends(require_api_key)):
+    """연결 하나를 뺀다 — 설계·이름으로 다시 계산되는 것은 다음 계산 때 다시 생긴다(LLM 제안 거절용)."""
+    row = _workflow_or_404(db, workflow_id, key)
+    link = db.get(WorkflowLink, link_id)
+    if link is None or link.workflow_id != row.id:
+        raise HTTPException(status_code=404, detail="연결을 찾을 수 없습니다")
+    db.delete(link)
+    db.commit()
+    audit.record(db, key.name, "workflow.links.delete", row.name, {"link": link_id, "source": link.source})
 
 
 @router.get("/workflows/{workflow_id}/messages")

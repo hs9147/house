@@ -475,6 +475,7 @@ def _execute(db: Session, run: WorkflowRun) -> None:
             run.status = WorkflowRunStatus.waiting
             run.pending_node = node_id
             db.commit()
+            _relink(db, workflow)   # 사람을 기다리는 동안에도 앞 단계가 읽은 문서는 이미 사실이다
             return
 
         step_started = time.monotonic()
@@ -506,6 +507,19 @@ def _execute(db: Session, run: WorkflowRun) -> None:
     run.status = WorkflowRunStatus.succeeded
     run.finished_at = utcnow()
     db.commit()
+    _relink(db, workflow)
+
+
+def _relink(db: Session, workflow: Workflow) -> None:
+    """실제로 읽은 문서를 저장소 온톨로지와의 연결에 반영한다(services/workflowlinks) — 실행이 끝났거나
+    사람 단계에서 멈췄을 때. 실패해도 실행에는 영향이 없다(연결은 파생 데이터다)."""
+    try:
+        from . import workflowlinks  # noqa: PLC0415 — 순환 import 회피
+
+        workflowlinks.compute(db, workflow)
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        print(f"[paas] 워크플로 연결 계산 실패(무시): {workflow.name} — {e}")
 
 
 def _edge_live(edge: dict, outputs: dict, skipped: set[str]) -> bool:

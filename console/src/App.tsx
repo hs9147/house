@@ -24,6 +24,7 @@ import WorkflowDetail from './pages/WorkflowDetail';
 import Smartwork from './pages/Smartwork';
 import Workflows from './pages/Workflows';
 import OntologyExploreTab from './pages/ontology/ExploreTab';
+import OntologyWorkflowTab from './pages/ontology/WorkflowTab';
 import Storage from './pages/Storage';
 import SourceDetail from './pages/SourceDetail';
 import Sources from './pages/Sources';
@@ -132,6 +133,7 @@ export default function App() {
         >
           {/* 기본은 정보 조회 — 평소에 쓰는 일이 그것이다. 전환 현황은 고칠 때 본다. */}
           <Route index element={<OntologyExploreTab />} />
+          <Route path="workflows" element={<OntologyWorkflowTab />} />
           <Route path="conversion" element={<OntologyConversionTab />} />
           {/* 옛 주소는 살려 둔다 — 북마크·공유 링크가 깨지면 "없어졌다"로 읽힌다. */}
           <Route path="explore" element={<Navigate to="/ontology" replace />} />

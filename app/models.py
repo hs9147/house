@@ -996,6 +996,42 @@ class WorkflowRun(Base):
     )
 
 
+class WorkflowLink(Base):
+    """워크플로와 저장소 온톨로지를 잇는 선 하나(services/workflowlinks).
+
+    문서 온톨로지(저장소마다 sqlite, services/docsearch)는 **문서에서만** 나온다 — 워크플로가
+    바뀌어도 재색인하지 않는다. 그 위에 워크플로 쪽에서 그은 선을 여기 둔다: 워크플로 하나가
+    여러 저장소를 쓰고 저장소 하나를 여러 워크플로가 쓰니, 저장소를 넘나드는 연결점이 된다.
+
+      subject  워크플로 쪽 — workflow · step(단계 id) · entity · state · constraint(규칙 문장)
+      target   저장소 쪽 — store · document(경로) · section · term · table(문서 온톨로지의 이름)
+      source   근거 — spec(설계) · run(실행 기록) · name(이름 일치) · index(전문 색인) · llm(제안)
+
+    spec·run·name·index는 다시 계산할 때 통째로 바뀐다. llm은 제안이라 사람이 확인(confirmed)해야
+    쓰이고, 다시 계산해도 지우지 않는다.
+    span·weight는 나중 단계(절 위치 색인·사용 가중치)를 위한 자리다 — 지금은 비어 있다.
+    """
+
+    __tablename__ = "workflow_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(
+        ForeignKey("workflows.id", ondelete="CASCADE"), index=True)
+    subject_kind: Mapped[str] = mapped_column(String(16))
+    subject: Mapped[str] = mapped_column(String(400))
+    rel: Mapped[str] = mapped_column(String(16))    # uses · read · matches · mentions · grounded_in
+    store: Mapped[str] = mapped_column(String(64), default="")
+    target_kind: Mapped[str] = mapped_column(String(16))
+    target: Mapped[str] = mapped_column(String(400))
+    path: Mapped[str] = mapped_column(String(1024), default="")   # 문서 경로(있으면)
+    detail: Mapped[str] = mapped_column(String(400), default="")
+    source: Mapped[str] = mapped_column(String(8))
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=True)
+    span: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class InfoSource(Base):
     """정보 출처 하나 — 웹사이트·API·MCP 서버. 스캔해서 저장소에 문서로 옮긴다.
 

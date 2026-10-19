@@ -176,6 +176,15 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
             return JobStatus.failed, {"error": f"저장소가 없습니다: {job.target}"}
         result = docsearch.reindex(store.name, store.root)
         changed = result["indexed"] + result["failed"] + result["removed"]
+        if changed:
+            # 이름 일치·전문 색인 연결은 문서가 바뀌면 달라진다 — 그 저장소를 쓰는 워크플로만 다시.
+            from . import workflowlinks  # noqa: PLC0415
+
+            try:
+                result["workflows_relinked"] = workflowlinks.refresh_for_store(db, store.name)
+            except Exception as e:  # noqa: BLE001 — 연결 실패가 색인 성공을 뒤집지 않게
+                db.rollback()
+                result["workflows_relinked_error"] = str(e)[:200]
         return (JobStatus.ok if changed else JobStatus.skipped), result
 
     module = db.execute(

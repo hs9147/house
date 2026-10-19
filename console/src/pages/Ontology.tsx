@@ -1,7 +1,7 @@
 import { NavLink, Outlet } from 'react-router-dom';
 
 /**
- * 온톨로지 관리 — 탭 둘.
+ * 온톨로지 관리 — 탭 셋.  워크플로 연결: 부서 워크플로의 낱말·단계가 저장소의 어느 문서·용어·조문에 닿는지.
  *
  *  - **전환 현황**: 문서가 그래프로 얼마나 옮겨졌고 어디서 멈췄는지(집계·퍼널·행렬).
  *  - **정보 조회**: 옮겨진 것을 실제로 들여다본다(검색 → 이웃 → 요구 시 확장).
@@ -14,6 +14,7 @@ import { NavLink, Outlet } from 'react-router-dom';
 // 그래서 기본 탭도 정보 조회다(/ontology).
 const TABS: [string, string][] = [
   ['/ontology', '정보 조회'],
+  ['/ontology/workflows', '워크플로 연결'],
   ['/ontology/conversion', '전환 현황'],
 ];
 

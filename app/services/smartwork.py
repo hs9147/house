@@ -840,6 +840,12 @@ def _system_sections(email: str, agent_list: list[dict], has_personal: bool,
                 lines.append(f"설명: {wf['description']}")
             lines += [f"- 단계: {step}" for step in wf.get("steps", [])]
             lines += [f"- 규칙: {rule}" for rule in wf.get("constraints", [])]
+            if task.get("stores"):
+                lines.append(f"이 업무의 저장소: {', '.join(task['stores'])} — docs__·graph__ 도구는 source로"
+                             " 이 저장소를 먼저 찾고, 없을 때만 넓힌다.")
+            if task.get("grounds"):
+                lines.append("이 업무의 근거(워크플로 낱말 → 저장소 온톨로지):")
+                lines += [f"- {g}" for g in task["grounds"]]
             lines.append("제안·답변은 이 워크플로의 업무 안에서 한다.")
     lines = section("기본 규칙")
     lines += [
@@ -979,6 +985,14 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
         org = db.get(Organization, org_id)
         task = {"org": org.name if org else "",
                 "workflow": next((w for w in dept if w["name"] == workflow), None)}
+        if task["workflow"]:
+            # 저장소 온톨로지와의 연결(services/workflowlinks) — 검색을 이 워크플로의 저장소부터, 근거부터.
+            row = db.execute(select(Workflow).where(Workflow.organization_id == org_id,
+                                                    Workflow.name == workflow)).scalar_one_or_none()
+            if row is not None:
+                from . import workflowlinks  # noqa: PLC0415
+
+                task["stores"], task["grounds"] = workflowlinks.prompt_lines(db, row)
     dept_set: Toolset = ("dept", _DEPT_TOOLS,
                          lambda n, a: json.dumps(dept, ensure_ascii=False))
     # 파일 뷰어가 열 수 있는 내 문서 — open_file의 허용 범위이기도 하다.

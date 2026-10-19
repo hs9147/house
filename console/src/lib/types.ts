@@ -896,6 +896,35 @@ export interface WorkflowExtracted {
   constraints?: { text: string; origin?: string; node?: string }[];
 }
 
+// 워크플로 ↔ 저장소 온톨로지 연결(services/workflowlinks)
+export interface WorkflowLink {
+  id: number;
+  subject_kind: 'workflow' | 'step' | 'entity' | 'state' | 'constraint';
+  subject: string;
+  rel: 'uses' | 'read' | 'matches' | 'mentions' | 'grounded_in';
+  store: string;
+  target_kind: 'store' | 'document' | 'section' | 'term' | 'table';
+  target: string;
+  path: string;
+  detail: string;
+  source: 'spec' | 'run' | 'name' | 'index' | 'llm';
+  confirmed: boolean;
+}
+
+export interface WorkflowLinks {
+  stores: string[];
+  links: WorkflowLink[];
+  graph: {
+    nodes: { id: string; label: string; kind: string; store?: string; path?: string }[];
+    links: { source: string; target: string; label: string; link_id?: number; confirmed?: boolean }[];
+  };
+  unground_rules: string[];
+  counts?: Record<string, number>;
+  suggested?: number;
+  note?: string;
+  skipped?: string[];
+}
+
 export interface WorkflowOut {
   id: number;
   organization_id: number;

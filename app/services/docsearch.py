@@ -608,6 +608,29 @@ def search(store_name: str, query: str, limit: int = 10, *, width: int = 60,
         conn.close()
 
 
+def mentions(store_name: str, term: str, limit: int = 5) -> dict:
+    """그 낱말이 **많이 나오는** 문서부터 — (경로, 횟수)와 나오는 문서 수(total).
+
+    search()는 경로순이다(낱말을 모두 포함하는 문서를 찾는 용도). 워크플로의 대상이 어느 문서의
+    주제인지 가늠하려면 횟수가 순서여야 한다 — 한 번 스치는 문서보다 수십 번 나오는 문서가 먼저다.
+    """
+    term = term.strip()
+    if not term:
+        return {"total": 0, "hits": []}
+    conn = _connect(store_name)
+    try:
+        pattern = _like_pattern(term)
+        total = conn.execute("SELECT COUNT(*) FROM docs WHERE body IS NOT NULL AND body LIKE ? ESCAPE '\\'",
+                             (pattern,)).fetchone()[0]
+        rows = conn.execute(
+            "SELECT path, (LENGTH(body) - LENGTH(REPLACE(body, ?, ''))) / LENGTH(?) AS n FROM docs"
+            " WHERE body IS NOT NULL AND body LIKE ? ESCAPE '\\' ORDER BY n DESC, path LIMIT ?",
+            (term, term, pattern, limit)).fetchall()
+        return {"total": total, "hits": [{"path": r["path"], "count": r["n"]} for r in rows]}
+    finally:
+        conn.close()
+
+
 def _snippets(body: str, term: str, count: int, width: int) -> list[str]:
     """일치 지점 주변을 잘라 낸다 — 경로만 주면 어느 대목인지 확인하러 또 열어야 한다."""
     out: list[str] = []
