@@ -630,7 +630,7 @@ export const api = {
   // 수정에서 headers를 빼면(undefined) 그대로 두고, ''이면 지운다.
   sourceCapabilities: () => request<SourceCapabilities>('GET', '/sources/capabilities'),
   listSources: () => request<SourceOut[]>('GET', '/sources'),
-  createSource: (body: { name: string; kind: SourceKind; url: string; headers: string; note: string }) =>
+  createSource: (body: { name: string; kind: SourceKind; url: string; note: string }) =>
     request<SourceOut>('POST', '/sources', body),
   getSource: (id: number) => request<SourceOut>('GET', `/sources/${id}`),
   updateSource: (id: number, body: { name?: string; url?: string; note?: string; headers?: string }) =>

@@ -39,7 +39,8 @@
   function paint(el, css) { el.style.cssText = INK + css; return el; }
   var box = paint(document.createElement('div'), 'display:block;position:fixed;top:12px;right:12px;' +
     'z-index:2147483647;background:#1f2937;width:380px;padding:10px 14px;border-radius:6px;box-shadow:0 2px 8px #0006');
-  var head = paint(document.createElement('div'), 'display:block;font-weight:700;color:#fff;margin-bottom:4px');
+  var head = paint(document.createElement('div'), 'display:block;font-weight:700;color:#fff;margin-bottom:4px;' +
+    'cursor:move;user-select:none;touch-action:none');
   var status = paint(document.createElement('div'), 'display:block;margin-bottom:6px;word-break:break-all');
   var logBox = paint(document.createElement('div'), 'display:block;max-height:180px;overflow:auto;' +
     'background:#111827;padding:4px 6px;border-radius:4px;scrollbar-color:#4b5563 #111827');
@@ -49,6 +50,20 @@
     'font-size:12px;color:#111827;background:#fff;border:1px solid #9ca3af;border-radius:3px;padding:1px 4px');
   var stopBtn = button('멈추기', null);
   head.textContent = 'GPAX 스캔 · ' + SOURCE.name;
+  head.title = '끌어서 옮기기';
+  /* 머리글을 끌어 창을 옮긴다 — 사이트의 버튼·표를 가리면 비켜 놓는다. 머리글이 화면 밖으로 나가지 않게. */
+  head.onpointerdown = function (e) {
+    if (e.button !== 0) return;
+    var r = box.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top;
+    head.setPointerCapture(e.pointerId);
+    head.onpointermove = function (m) {
+      box.style.left = Math.max(0, Math.min(window.innerWidth - r.width, m.clientX - dx)) + 'px';
+      box.style.top = Math.max(0, Math.min(window.innerHeight - head.offsetHeight - 20, m.clientY - dy)) + 'px';
+      box.style.right = 'auto';
+    };
+    head.onpointerup = head.onpointercancel = function () { head.onpointermove = null; };
+    e.preventDefault();
+  };
   rowsIn.type = 'number';
   rowsIn.min = '1';
   rowsIn.max = String(MAX_ROWS);
@@ -390,6 +405,8 @@
   var MUTATE_TEXT = /저장|삭제|등록|수정|승인|반려|결재|상신|전송|제출|발송|취소|확정|신청|반영|초기화|로그아웃|save|delete|remove|insert|update|modify|edit|approve|reject|submit|send|cancel|reset|logout|sign ?out/i;
   var MUTATE_CODE = /delete|remove|save|insert|update|modify|approve|reject|cancel|logout|signout|send|_del|del_|fn_?del|fn_?reg|fn_?upd|fn_?apr/i;
   var SEARCH = /^(조회|검색|찾기|조회하기|검색하기|search|find)$/i;
+  /* 버튼 글자에 빈칸을 넣어 넓히는 사이트가 있다(「조 회」) — 빈칸을 빼고 본다. */
+  function isSearch(t) { return SEARCH.test(String(t || '').replace(/\s+/g, '')); }
   var DETAIL = /상세|보기|detail|view|열기/i;
   var EXPORT = /엑셀|excel|xls|export|내보내기|다운로드|내려받기|download/i;
   var NOT_EXPORT = /양식|서식|템플릿|template|매뉴얼|manual|도움말|help|첨부/i;
@@ -785,7 +802,7 @@
       ' · 안의 틀 ' + (d ? d.querySelectorAll('iframe,frame').length : 0) + '개';
   }
   function findSearch(doc) {
-    var hits = clickables(doc).filter(function (el) { return SEARCH.test(labelOf(el)) && !risky(el); });
+    var hits = clickables(doc).filter(function (el) { return isSearch(labelOf(el)) && !risky(el); });
     return hits.filter(visible)[0] || hits[0] || null;
   }
   function resultRows(doc) {
@@ -1205,7 +1222,7 @@
     rec.steps.push({
       frame: framePathOf(win, window), target: locOf(el), label: t, url: win.location.href.split('#')[0],
       title: clean(win.document.title, 120), risky: risky(el), attach: isAttachment(el),
-      search: SEARCH.test(t), export: t.length <= 20 && EXPORT.test(t) && !NOT_EXPORT.test(t),
+      search: isSearch(t), export: t.length <= 20 && EXPORT.test(t) && !NOT_EXPORT.test(t),
       row: inRow ? { col: Array.prototype.indexOf.call(tr.children, cell), tag: el.tagName.toLowerCase() } : null,
       fields: Object.keys(fieldMap(win.document)).length ? snapshot(win.document) : null,
     });
@@ -1222,7 +1239,10 @@
     if (si < 0) {
       /* 조회 글자가 없는 버튼(아이콘) — 상세를 누르기 바로 전에 조건 칸이 있던 화면에서 누른 것. */
       for (i = 0; i < steps.length; i++) if (steps[i].row && !steps[i].attach) { detailAt = i; break; }
-      for (i = detailAt - 1; i >= 0 && si < 0; i--) if (steps[i].fields && !steps[i].row && !steps[i].risky) si = i;
+      /* 상세까지 누르지 않고 끝냈으면 — 마지막으로 조건 칸이 있던 화면에서 누른 것. */
+      for (i = (detailAt < 0 ? steps.length : detailAt) - 1; i >= 0 && si < 0; i--) {
+        if (steps[i].fields && !steps[i].row && !steps[i].risky) si = i;
+      }
     }
     if (si < 0) return null;
     var s = steps[si];
@@ -1252,9 +1272,11 @@
   function finishRecording() {
     clearInterval(rec.timer);
     var recipe = recipeOf(rec.steps), n = rec.steps.length;
+    var labels = rec.steps.map(function (x) { return clean(x.label, 30) || '(글자 없음)'; });
     rec = null;
     if (!recipe) {
-      say('조회를 누른 화면을 찾지 못했습니다(누름 ' + n + '번) — 다시 녹화하세요');
+      say('조회를 누른 화면을 찾지 못했습니다(누름 ' + n + '번: ' + labels.join(' → ') + ') — 조건 칸이 있는 화면에서 ' +
+          '조회 버튼을 눌렀는지 보고 다시 녹화하세요');
       finish();
       return;
     }
@@ -1264,7 +1286,7 @@
     say('녹화 끝 — 「' + recipe.screen + '」 가는 길 ' + recipe.path.length + '단계, 조건 ' + recipe.conditions.length +
         '개' + (recipe.shown.detail ? ', 상세' : '') + (recipe.shown.attach ? '·첨부' : '') +
         (sent ? '. 콘솔로 보냈습니다 — 콘솔이 수집 조건에 올립니다.'
-          : '. 내려받은 파일을 GPAX 콘솔 → ' + SOURCE.name + ' → 수집 조건 → 「녹화 올리기」에 올리세요.'));
+          : '. 내려받은 파일을 GPAX 콘솔 → ' + SOURCE.name + ' → 브라우저로 스캔·녹화 → 「연결되지 않을 때」에 올리세요(수집 조건에 더해집니다).'));
     finish();
   }
 
@@ -1339,7 +1361,7 @@
     var sent = deliver('scan', out, 'gpax-scan');
     say('끝 — 메뉴 ' + menuN + '개 · 화면 ' + pages.length + '장 · 파일 ' + files.length + '개. ' +
         (sent ? '콘솔로 보냈습니다 — 콘솔이 결과를 올립니다.'
-          : '내려받은 파일을 GPAX 콘솔 정보 업데이트 → ' + SOURCE.name + ' → 브라우저에서 스캔에 올리세요.'));
+          : '내려받은 파일을 GPAX 콘솔 데이터 수집 → ' + SOURCE.name + ' → 브라우저로 스캔·녹화 → 「연결되지 않을 때」에 올리세요.'));
     finish();
   }
   /* 끝나면 기록은 남겨 둔다(읽을 수 있게) — 닫기로 치운다. */
