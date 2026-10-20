@@ -69,6 +69,9 @@ class QueryScreen(BaseModel):
     search: dict | None = None
     export: dict | None = None
     detail: dict | None = None
+    # LLM 분석이 남긴 것 — 버튼 글자(search·export)와 수집 방법(plan: method·reason·risks)
+    hints: dict | None = None
+    plan: dict | None = None
 
 
 class SourceQueries(BaseModel):

@@ -594,6 +594,42 @@ def test_query_suggestion_keeps_only_real_screens_and_fields(client, monkeypatch
     assert client.get(f"{API}/sources/{sid}/queries", headers=ADMIN).json()["screens"] == []
 
 
+def test_query_analysis_plans_how_to_collect_and_keeps_to_the_facts(client, monkeypatch):
+    """LLM 분석 — 화면마다 여는 길·조회 버튼·상세 열·엑셀 버튼까지. 찾은 길이 없는데 '메뉴 길'이면 녹화로 낮추고,
+    표에 없는 열은 버린다. 받은 계획·힌트는 저장되고 북마크가 싣는다."""
+    sid = _notice_scan(client, monkeypatch)
+    url = f"{API}/sources/{sid}/queries/suggest"
+    # LLM 없이 — 지난 수집 기록이 없으면 주소로
+    assert client.post(url, headers=ADMIN).json()["screens"][0]["plan"]["method"] == "url"
+
+    seen = {}
+
+    def fake(provider, messages, db=None, **kw):
+        seen["prompt"] = messages[0]["content"]
+        return json.dumps({"screens": [{
+            "url": "https://intra.test/notice", "conditions": [{"field": "등록일", "value": "@today-7d"}],
+            "method": "path", "method_reason": "메뉴로 연다", "search": "조회", "export": "엑셀 다운로드",
+            "detail_column": "제목", "risks": ["팝업 차단"]}]}, ensure_ascii=False)
+
+    monkeypatch.setattr(llm, "default_provider", lambda db: object())
+    monkeypatch.setattr(llm, "chat_completion", fake)
+    screen = client.post(url, headers=ADMIN).json()["screens"][0]
+    assert '"has_path": false' in seen["prompt"]
+    assert screen["plan"]["method"] == "record" and "녹화" in screen["plan"]["reason"]
+    assert screen["plan"]["risks"] == ["팝업 차단"]
+    assert screen["hints"] == {"search": "조회", "export": "엑셀 다운로드"}
+    assert screen["detail"] == {"col": 1, "tag": "a"}       # 표 머리글 ["번호", "제목"]의 두 번째
+
+    monkeypatch.setattr(llm, "chat_completion", lambda *a, **kw: json.dumps({"screens": [{
+        "url": "https://intra.test/notice", "conditions": [], "detail_column": "지어낸 열", "method": "보기"}]}))
+    other = client.post(url, headers=ADMIN).json()["screens"][0]
+    assert "detail" not in other and other["plan"]["method"] == "url"
+
+    saved = client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [screen]}).json()["screens"][0]
+    assert saved["plan"]["method"] == "record" and saved["hints"]["export"] == "엑셀 다운로드"
+    assert client.get(f"{API}/sources/{sid}", headers=ADMIN).json()["queries"][0]["hints"]["search"] == "조회"
+
+
 def test_collection_files_and_summary_arrive_with_the_browser_scan(client, monkeypatch):
     """수집은 파일이 많다(결과 파일 + 행마다 첨부) — 예전 상한(20개)을 넘어 받고, 화면마다 요약이 메모로."""
     import base64

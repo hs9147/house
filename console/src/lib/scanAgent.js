@@ -114,8 +114,58 @@
     while (logBox.childNodes.length > 300) logBox.removeChild(logBox.firstChild);
     logBox.scrollTop = logBox.scrollHeight;
     show();
+    relay({ gpax: 'log', text: t });
   }
   function say(t) { status.textContent = t; log(t); }
+
+  /* 콘솔이 연 창(콘솔의 「새 창에서 녹화·스캔」) — 진행 기록을 실시간으로, 결과를 파일 대신 콘솔로 바로 보낸다.
+   * 콘솔이 인사(hello)에 답해야(start) 통로가 열린다: 보낸 쪽 출처(콘솔 주소)와 창(opener)을 둘 다 확인하고,
+   * 콘솔이 준 표(nonce)를 이후 메시지마다 주고받는다. 답이 없으면(사이트가 창 연결을 끊었거나 콘솔이 연 창이
+   * 아니면) 예전처럼 파일로 내려받는다. 콘솔이 보낸 수집 조건이 북마크에 실린 것보다 앞선다 — 조건을 고친 뒤
+   * 북마크를 다시 끌어다 놓지 않아도 된다. */
+  var link = null, started = false;
+  function relay(msg) {
+    if (!link) return;
+    msg.nonce = link.nonce;
+    try { link.win.postMessage(msg, SOURCE.console); } catch (e) { link = null; }
+  }
+  function deliver(kind, out, file) {
+    if (link) {
+      relay({ gpax: 'result', kind: kind, payload: out });
+      return true;
+    }
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(out)], { type: 'application/json' }));
+    a.download = file + '-' + SOURCE.id + '-' + String(SOURCE.name).replace(/[\\/:*?"<>|\s]+/g, '_') + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return false;
+  }
+  function listen() {
+    window.addEventListener('message', function (e) {
+      var m = e.data;
+      if (!m || typeof m !== 'object' || e.origin !== SOURCE.console || e.source !== window.opener) return;
+      if (m.gpax === 'start' && !link && typeof m.nonce === 'string' && m.nonce) {
+        link = { win: e.source, nonce: m.nonce };
+        if (Array.isArray(m.queries)) { SOURCE.queries = m.queries; SOURCE.version = String(m.version || ''); }
+        head.textContent = 'GPAX 스캔 · ' + SOURCE.name + ' · 콘솔과 연결됨';
+        log('콘솔과 연결했습니다 — 기록과 결과가 콘솔로 갑니다' +
+            (Array.isArray(m.queries) ? ' (콘솔의 수집 조건 ' + m.queries.length + '개)' : ''));
+        if (started) return;
+        if (m.mode === 'record') startRecording();
+        else if (m.mode === 'scan') {
+          ctl.explore = m.explore !== false;
+          controls();
+          run().catch(function (err) { say('실패 — ' + (err && err.message)); finish(); });
+        }
+        return;
+      }
+      if (!link || m.nonce !== link.nonce) return;
+      if (m.gpax === 'stop' && started && !rec) stopBtn.onclick();
+      if (m.gpax === 'end' && rec) finishRecording();
+    });
+  }
 
   function clean(s, cap) { return String(s || '').replace(/\s+/g, ' ').trim().slice(0, cap || 200); }
   function textOf(el) { return clean(el ? (el.innerText || el.textContent) : '', 200); }
@@ -781,11 +831,21 @@
     /* 행 클릭을 스크립트로 단 그리드 — 제목 칸을 눌러 본다(아무 일도 없으면 그뿐이다). */
     return tr.querySelectorAll('td')[1] || null;
   }
+  /* LLM 분석이 본문에서 읽은 버튼 글자(q.hints) — 녹화가 남긴 위치 다음, 모양으로 고르기 전에 쓴다. */
+  function byLabel(doc, text) {
+    var want = String(text || '').replace(/\s+/g, '');
+    if (!want) return null;
+    return clickables(doc).filter(function (el) {
+      return labelOf(el).replace(/\s+/g, '') === want && !risky(el);
+    })[0] || null;
+  }
   function exportButton(doc, rows, q) {
     if (q.export) {
       var known = locate(doc, q.export);
       if (known && !risky(known)) return known;
     }
+    var hinted = byLabel(doc, (q.hints || {}).export);
+    if (hinted && !rows.some(function (tr) { return tr.contains(hinted); })) return hinted;
     return clickables(doc).filter(function (el) {
       var t = labelOf(el);
       return t.length <= 20 && EXPORT.test(t) && !NOT_EXPORT.test(t) && !risky(el) &&
@@ -896,7 +956,7 @@
       return '조건 칸을 찾지 못했습니다: ' + missing.join(', ') + ' — ' + describe(t.frame);
     }
     if (missing.length) note('채우지 못한 조건: ' + missing.join(', '));
-    var btn = (q.search && locate(doc, q.search)) || findSearch(doc);
+    var btn = (q.search && locate(doc, q.search)) || byLabel(doc, (q.hints || {}).search) || findSearch(doc);
     if (!btn || risky(btn)) return '조회 버튼을 찾지 못했습니다 — ' + describe(t.frame);
     arm(t.frame);
     mode = 'pass';
@@ -1112,7 +1172,7 @@
    * 프로그래밍 바이 데모(Rousillon·WebRobot)의 생각: 사람이 한 번 하면 첫 행에 한 일을 '모든 행'으로 넓힌다.
    * 적는 것은 누른 요소의 특징·그 요소가 있던 틀의 경로, 그리고 조회를 누른 순간의 조건 칸 값뿐이다(비밀번호
    * 칸은 읽지 않는다). 녹화 중에는 아무것도 막지 않는다 — 사람이 실제로 하는 일이다. 다시 밟을 때 무언가를
-   * 바꾸는 버튼은 빼고 밟는다. 결과는 JSON 파일로 내려받아 콘솔의 수집 조건에 올린다. */
+   * 바꾸는 버튼은 빼고 밟는다. 결과는 JSON 파일로 내려받아(콘솔이 연 탭이면 콘솔로 바로) 수집 조건에 올린다. */
   var RECORD_AGENT = 'gpax-record/1';
   var rec = null;
   function recAttach() {
@@ -1179,6 +1239,7 @@
     };
   }
   function startRecording() {
+    started = true;
     rec = { start: location.href.split('#')[0], steps: [], timer: setInterval(recAttach, 500) };
     recAttach();
     bar.textContent = '';
@@ -1199,19 +1260,16 @@
     }
     var out = { agent: RECORD_AGENT, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
                 at: new Date().toISOString(), recipe: recipe };
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(out)], { type: 'application/json' }));
-    a.download = 'gpax-record-' + SOURCE.id + '-' + String(SOURCE.name).replace(/[\\/:*?"<>|\s]+/g, '_') + '.json';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    var sent = deliver('record', out, 'gpax-record');
     say('녹화 끝 — 「' + recipe.screen + '」 가는 길 ' + recipe.path.length + '단계, 조건 ' + recipe.conditions.length +
         '개' + (recipe.shown.detail ? ', 상세' : '') + (recipe.shown.attach ? '·첨부' : '') +
-        '. 내려받은 파일을 GPAX 콘솔 → ' + SOURCE.name + ' → 수집 조건 → 「녹화 올리기」에 올리세요.');
+        (sent ? '. 콘솔로 보냈습니다 — 콘솔이 수집 조건에 올립니다.'
+          : '. 내려받은 파일을 GPAX 콘솔 → ' + SOURCE.name + ' → 수집 조건 → 「녹화 올리기」에 올리세요.'));
     finish();
   }
 
   async function run() {
+    started = true;
     var pages = [], seen = {}, menu = [], menuN = 0;
     box.remove();   /* 열린 화면을 읽는 동안 이 창의 글이 섞이지 않게 — 다음 say가 다시 붙인다 */
     frames(window, 0, []).forEach(function (f) {
@@ -1278,14 +1336,10 @@
     var out = { agent: AGENT, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
                 url: location.href.split('#')[0], at: new Date().toISOString(), menu: menu, pages: pages,
                 files: files, collected: collected, queries_version: SOURCE.version || '' };
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(out)], { type: 'application/json' }));
-    a.download = 'gpax-scan-' + SOURCE.id + '-' + String(SOURCE.name).replace(/[\\/:*?"<>|\s]+/g, '_') + '.json';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    say('끝 — 메뉴 ' + menuN + '개 · 화면 ' + pages.length + '장 · 파일 ' + files.length + '개. 내려받은 파일을 GPAX 콘솔 ' +
-        '정보 업데이트 → ' + SOURCE.name + ' → 브라우저에서 스캔에 올리세요.');
+    var sent = deliver('scan', out, 'gpax-scan');
+    say('끝 — 메뉴 ' + menuN + '개 · 화면 ' + pages.length + '장 · 파일 ' + files.length + '개. ' +
+        (sent ? '콘솔로 보냈습니다 — 콘솔이 결과를 올립니다.'
+          : '내려받은 파일을 GPAX 콘솔 정보 업데이트 → ' + SOURCE.name + ' → 브라우저에서 스캔에 올리세요.'));
     finish();
   }
   /* 끝나면 기록은 남겨 둔다(읽을 수 있게) — 닫기로 치운다. */
@@ -1305,4 +1359,8 @@
     return;
   }
   choose();
+  if (window.opener && SOURCE.console) {
+    listen();
+    try { window.opener.postMessage({ gpax: 'hello', source: SOURCE.id }, SOURCE.console); } catch (e) { /* 끊긴 창 */ }
+  }
 })(__GPAX_SOURCE__);

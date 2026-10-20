@@ -1181,7 +1181,13 @@ export interface SourceQueryScreen {
   search?: SourceLocator;
   export?: SourceLocator;
   detail?: { col: number; tag: string };
+  // LLM 분석 — 본문에서 읽은 버튼 글자(녹화가 남긴 위치가 없을 때 북마크가 쓴다)와 수집 방법
+  hints?: { search?: string; export?: string };
+  plan?: { method: SourceQueryMethod; reason: string; risks: string[] };
 }
+
+// 화면을 여는 길 — 열어 둔 화면 · 메뉴 길(탐색·녹화가 찾은) · 주소 · 녹화 필요
+export type SourceQueryMethod = 'open' | 'path' | 'url' | 'record';
 
 export interface SourceQueries {
   screens: SourceQueryScreen[];

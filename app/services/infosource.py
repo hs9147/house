@@ -1491,12 +1491,28 @@ _DATE_FIELD = re.compile(r"일자|날짜|일시|기간|등록일|작성일|date|
 _FROM_FIELD = re.compile(r"시작|부터|from|start|begin|~$", re.I)
 _TO_FIELD = re.compile(r"종료|까지|to$|end", re.I)
 
-QUERY_PROMPT = """사내 업무 사이트의 조회 화면마다 조회 조건을 정한다. 목적은 그 화면의 **조회 결과를
-내려받은 파일과 행마다 상세의 첨부파일**을 모으는 것이다 — 결과가 너무 많지 않고(20건 안팎) 최근
-것이 오도록 정한다. 출력은 JSON 객체 하나다(설명·코드펜스 없이).
+QUERY_PROMPT = """사내 업무 사이트의 조회 화면마다 **수집 방법과 조회 조건**을 정한다. 목적은 그 화면의 조회 결과를
+내려받은 파일과 행마다 상세의 첨부파일을 모으는 것이다 — 결과가 너무 많지 않고(20건 안팎) 최근 것이 오도록.
+출력은 JSON 객체 하나다(설명·코드펜스 없이).
 
-{{"screens": [{{"url": "아래 화면의 url 그대로", "conditions": [{{"field": "칸 이름", "value": "값"}}],
-               "why": "이 조건을 고른 이유 한 문장"}}]}}
+{{"screens": [{{
+  "url": "아래 화면의 url 그대로",
+  "conditions": [{{"field": "칸 이름", "value": "값"}}],
+  "why": "이 조건을 고른 이유 한 문장",
+  "method": "open | path | url | record",
+  "method_reason": "그 방법을 고른 근거 한 문장(아래 사실에서)",
+  "search": "조회를 실행하는 버튼의 글자(모르면 빈 값)",
+  "detail_column": "결과 표에서 상세를 여는 열의 이름 — tables에 있는 이름 그대로(모르면 빈 값)",
+  "export": "결과를 파일로 내려받는 버튼의 글자(없거나 모르면 빈 값)",
+  "risks": ["수집이 막힐 만한 점 — 짧게"]
+}}]}}
+
+수집 방법(method) — 화면을 여는 길:
+- url: 주소로 열면 그 화면이 뜬다(지난 수집이 주소로 성공했거나, 메뉴 링크가 GET 주소다).
+- path: 메뉴를 다시 눌러 연다 — has_path가 true일 때만(메뉴 탐색·녹화가 찾은 길이 있다).
+- record: 주소로 열면 다른 화면이 뜨는데(지난 수집 메모에 "조건 칸을 찾지 못했습니다", "잘못된 접근" 등) 찾은
+  길도 없다 — 사람이 한 번 녹화해야 한다.
+- open: 사람이 그 화면을 열어 둔 채 북마크를 누르면 된다(탭·프레임 안의 화면이고 다른 길이 없을 때).
 
 규칙:
 - 조회할 가치가 있는 화면만(목록·조회 화면). 로그인·메인·설정·입력(등록) 화면은 뺀다.
@@ -1504,13 +1520,15 @@ QUERY_PROMPT = """사내 업무 사이트의 조회 화면마다 조회 조건�
 - 날짜·기간 칸은 상대 날짜로 쓴다: @today, @today-7d, @today-1m, @today-1y. 한 항목에 시작·끝 칸이
   둘이면(기간) 같은 field를 두 번 쓴다 — 시작, 끝 순서로.
 - 목록에서 고르는 칸의 값을 모르면 쓰지 않는다(화면 기본값 그대로 둔다). 지어낸 코드값을 쓰지 마라.
+- search·export·detail_column은 사실(본문 발췌·표 머리글)에 보이는 것만 적는다. 지어내지 마라.
 
 출처 이름: {name}
 출처 메모: {note}
 
-조회 화면:
+조회 화면(지난 수집 결과 포함):
 {pages}
 """
+METHODS = ("open", "path", "url", "record")
 
 
 def query_candidates(row: InfoSource) -> list[dict]:
@@ -1561,8 +1579,17 @@ def clean_screens(row: InfoSource, screens) -> list[dict]:
         route = _route_in(s, origin)
         if "path" not in route and url in known:   # 사람이 보낸 것에 길이 없으면 스캔(탐색)이 찾은 길로
             route = {**_route_in(known[url], origin), **route}
+        extra = {}
+        hints = s.get("hints") if isinstance(s.get("hints"), dict) else {}
+        hints = {k: _s(hints.get(k), 40) for k in ("search", "export") if _s(hints.get(k), 40)}
+        if hints:
+            extra["hints"] = hints
+        plan = s.get("plan") if isinstance(s.get("plan"), dict) else {}
+        if plan.get("method") in METHODS:
+            extra["plan"] = {"method": plan["method"], "reason": _s(plan.get("reason"), 300),
+                             "risks": _strs(plan.get("risks"), 4, 120)}
         out.append({"screen": _s(s.get("screen"), 200) or (known.get(url) or {}).get("title") or url, "url": url,
-                    "conditions": conditions, **route})
+                    "conditions": conditions, **route, **extra})
     return out
 
 
@@ -1718,8 +1745,46 @@ def _date_guess(fields: list[str]) -> list[dict]:
     return out
 
 
+def _analysis_facts(row: InfoSource, pages: list[dict]) -> list[dict]:
+    """LLM에 주는 사실 — 화면의 구조와 **지난 수집이 어떻게 됐는지**(어떤 길로 열었고 어디서 막혔나)."""
+    collected = {c.get("url"): c for c in (row.scan or {}).get("collected") or []}
+    by_url = {p["url"]: p for p in (row.scan or {}).get("pages") or []}
+    out = []
+    for p in pages:
+        last = collected.get(p["url"]) or {}
+        out.append({
+            "url": p["url"], "title": p["title"], "kind": p["kind"], "info": p["info"][:200],
+            "fields": p["fields"], "tables": p["tables"], "has_path": bool(p.get("path")),
+            "text": str((by_url.get(p["url"]) or {}).get("text") or "")[:400],
+            **({"last_collect": {k: last.get(k) for k in ("via", "rows", "details", "files", "notes")}}
+               if last else {}),
+        })
+    return out
+
+
+def _plan_guess(row: InfoSource, page: dict) -> dict:
+    """LLM 없이 — 찾은 길이 있으면 메뉴 길, 지난 수집이 주소로 칸을 못 찾았으면 녹화, 아니면 주소."""
+    last = next((c for c in (row.scan or {}).get("collected") or [] if c.get("url") == page["url"]), {})
+    if page.get("path"):
+        return {"method": "path", "reason": "메뉴 탐색·녹화가 찾은 길이 있습니다.", "risks": []}
+    if any("조건 칸을 찾지 못했" in n or "그 화면이 아닙니다" in n for n in last.get("notes") or []):
+        return {"method": "record", "reason": "주소로 열면 조건 칸이 없는 화면이 떴습니다 — 녹화로 길을 보여 주세요.",
+                "risks": []}
+    return {"method": "url", "reason": "주소로 엽니다(지난 수집 기록이 없거나 주소로 됐습니다).", "risks": []}
+
+
+def _detail_of(page: dict, column: str) -> dict | None:
+    """상세를 여는 열 이름 → 몇 번째 칸인지(표 머리글에서). 모르는 이름이면 없음."""
+    column = column.strip()
+    for table in page.get("tables") or []:
+        if column in table:
+            return {"col": table.index(column), "tag": "a"}
+    return None
+
+
 def suggest_queries(db: Session, row: InfoSource) -> dict:
-    """조건 제안 — 저장하지 않는다(사람이 보고 고쳐 저장한다). 지어낸 화면·칸은 버린다."""
+    """화면마다 수집 방법과 조회 조건 분석 — 저장하지 않는다(사람이 보고 고쳐 저장한다).
+    지어낸 화면·칸·열은 버리고, 찾은 길이 없는데 '메뉴 길'이라 하면 '녹화 필요'로 낮춘다."""
     pages = query_candidates(row)
     if not pages:
         return {"screens": [], "notes": [
@@ -1730,14 +1795,14 @@ def suggest_queries(db: Session, row: InfoSource) -> dict:
     picked: list[dict] = []
     if provider is not None:
         text = QUERY_PROMPT.format(name=row.name, note=(row.note or "(없음)")[:500],
-                                   pages=json.dumps(pages, ensure_ascii=False)[:30000])
+                                   pages=json.dumps(_analysis_facts(row, pages), ensure_ascii=False)[:30000])
         try:
             data = _parse(llm.chat_completion(provider, [{"role": "user", "content": text}], db))
             picked = data.get("screens") if isinstance(data.get("screens"), list) else []
-        except Exception as e:  # noqa: BLE001 — 제안이 없을 뿐, 사람이 직접 정하면 된다
-            notes.append(f"LLM 제안 실패 — 날짜 칸만 최근 한 달로 채웠습니다: {str(e)[:200]}")
+        except Exception as e:  # noqa: BLE001 — 분석이 없을 뿐, 사람이 직접 정하면 된다
+            notes.append(f"LLM 분석 실패 — 날짜 칸과 지난 수집 기록으로만 정했습니다: {str(e)[:200]}")
     else:
-        notes.append("기본 LLM 프로바이더가 없어 날짜 칸만 최근 한 달로 채웠습니다.")
+        notes.append("기본 LLM 프로바이더가 없어 날짜 칸과 지난 수집 기록으로만 정했습니다.")
     screens, dropped = [], []
     for s in picked:
         page = by_url.get(str(s.get("url") or "")) if isinstance(s, dict) else None
@@ -1750,12 +1815,22 @@ def suggest_queries(db: Session, row: InfoSource) -> dict:
                 dropped.append(field)
                 continue
             conditions.append({"field": field, "value": _s(c.get("value"), 200)})
-        screens.append({"screen": page["title"] or page["url"], "url": page["url"],
-                        "conditions": conditions[:MAX_CONDITIONS], "why": _s(s.get("why"), 300),
-                        **{k: page[k] for k in ("path", "start", "frame") if page.get(k)}})
+        method = s.get("method") if s.get("method") in METHODS else _plan_guess(row, page)["method"]
+        reason = _s(s.get("method_reason"), 300)
+        if method == "path" and not page.get("path"):
+            method, reason = "record", (reason + " — 찾은 길이 없어 녹화가 필요합니다").strip(" —")
+        detail = _detail_of(page, _s(s.get("detail_column"), 80)) if s.get("detail_column") else None
+        screens.append({
+            "screen": page["title"] or page["url"], "url": page["url"],
+            "conditions": conditions[:MAX_CONDITIONS], "why": _s(s.get("why"), 300),
+            "plan": {"method": method, "reason": reason, "risks": _strs(s.get("risks"), 4, 120)},
+            "hints": {k: _s(s.get(k), 40) for k in ("search", "export") if _s(s.get(k), 40)},
+            **({"detail": detail} if detail else {}),
+            **{k: page[k] for k in ("path", "start", "frame") if page.get(k)},
+        })
     if not screens:
         screens = [{"screen": p["title"] or p["url"], "url": p["url"],
-                    "conditions": _date_guess(p["fields"]), "why": "",
+                    "conditions": _date_guess(p["fields"]), "why": "", "plan": _plan_guess(row, p),
                     **{k: p[k] for k in ("path", "start", "frame") if p.get(k)}}
                    for p in pages if _date_guess(p["fields"]) or p.get("kind") == "list"]
     if dropped:
