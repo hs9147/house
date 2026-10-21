@@ -16,7 +16,7 @@ from ..models import (
     SmartworkSessionMember, SmartworkSessionMessage, UserAccount, Workflow, utcnow,
 )
 from ..security import viewer_org_ids
-from . import smartwork
+from . import personal, smartwork
 
 MAX_TITLE = 200
 
@@ -202,7 +202,9 @@ def set_context(db: Session, email: str, session_id: int, folders: list[str], ma
     ctx = db.execute(select(PersonalContext).where(PersonalContext.email == email)).scalar_one_or_none()
     mine = {f.get("name") for f in (ctx.folders or [])} if ctx else set()
     member.folders = sorted({f for f in folders if f in mine})
-    member.mail = bool(mail) and ctx is not None and ctx.mail_synced_at is not None
+    # 받아 둔 메일이 있어야 고를 수 있다 — Graph로 동기화했거나 웹 Outlook 북마크로 넣었거나.
+    member.mail = bool(mail) and ctx is not None and (ctx.mail_synced_at is not None
+                                                       or personal.web_mail_count(email) > 0)
     db.commit()
     return {"folders": member.folders, "mail": member.mail}
 

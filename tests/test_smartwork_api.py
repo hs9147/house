@@ -497,6 +497,10 @@ def test_web_outlook_mail_from_the_bookmark_goes_to_the_owner_only(client):
     text = (store.root / hit["path"]).read_text(encoding="utf-8")
     assert text.startswith("# 협력사 단가 협의") and "김팀장" in text
     assert client.get(f"{API}/smartwork/personal", headers=alice).json()["mail"]["web"] == 1
+    # 웹 Outlook으로 넣은 메일만 있어도 업무에 「메일」을 고를 수 있다(Graph 동기화 없이)
+    sid = _session(client, alice)
+    ctx = client.put(f"{API}/smartwork/sessions/{sid}/context", json={"folders": [], "mail": True}, headers=alice)
+    assert ctx.status_code == 200 and ctx.json()["mail"] is True, ctx.text
     assert docsearch.search(personal.store_for("bob@corp.com").name, "오리온")["hits"] == []
 
     from app.db import SessionLocal

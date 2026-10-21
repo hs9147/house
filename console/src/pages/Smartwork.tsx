@@ -9,6 +9,7 @@ import { canKeepFolders, forget, pickFolder, type PickedFolder, remember, reopen
 import { cancelTask, dismissTask, runTask, type TaskHandle, useTask } from '../lib/tasks';
 import { parseCsv, renderMarkdown } from '../lib/markdown';
 import mailAgent from '../lib/mailAgent.js?raw';
+import { MAIL_CHAT_EVENT, type MailChat, mailAttachment, takeMailChat } from '../lib/webmail';
 import type {
   HealthInfo,
   MailLogin,
@@ -109,7 +110,7 @@ export default function Smartwork() {
     if (!chatRunning) setLiveSteps([]);
   }, [chatRunning]);
 
-  const open = async (id: number) => {
+  const open = async (id: number): Promise<SmartworkSession | null> => {
     setError(null);
     setPending(null);
     setCreating(false);
@@ -126,8 +127,10 @@ export default function Smartwork() {
       setFile(latest('file'));
       const last = [...s.messages].reverse().find((m) => m.agent || m.report || m.web || m.file);
       setView(last?.agent ? 'agent' : last?.file ? 'file' : last?.web ? 'web' : 'report');
+      return s;
     } catch (e) {
       setError((e as Error).message);
+      return null;
     }
   };
 
@@ -209,7 +212,7 @@ export default function Smartwork() {
   };
 
   const start = async (orgId: number | null, workflowId: number | null,
-                       context: SmartworkContext) => {
+                       context: SmartworkContext): Promise<SmartworkSession | null> => {
     setBusy(true);
     setError(null);
     let s: SmartworkSession;
@@ -223,7 +226,7 @@ export default function Smartwork() {
     } catch (e) {
       setError((e as Error).message);
       setBusy(false);
-      return;
+      return null;
     }
     current.current = s;
     setSession(s);
@@ -236,7 +239,39 @@ export default function Smartwork() {
     sessions.reload();
     // 여는 턴은 저절로 돌리지 않는다 — 입력란의 기본 프롬프트를 보내기로 돌린다.
     setBusy(false);
+    return s;
   };
+
+  // 웹 Outlook 메일 받는 창의 「대화 시작」(components/MailRelay가 넘긴다) — 고른 업무를 열거나 새로 만들고,
+  // 그 업무의 맥락에 「메일」을 켠 뒤 메일을 첨부로 붙여 보낸다. 다른 화면에 있다가 와도 받는다.
+  const mailChat = async (c: MailChat) => {
+    opened.current = true;   // 처음 들어올 때 최근 업무를 여는 것보다 앞선다
+    setLeftTab('chat');
+    let s = c.sessionId ? await open(c.sessionId) : await start(null, null, { folders: [], mail: true });
+    if (!s) return;
+    if (!s.my_context.mail) {
+      try {
+        const ctx = await api.setSessionContext(s.id, { ...s.my_context, mail: true });
+        s = { ...s, my_context: ctx };
+        setSession((cur) => (cur && cur.id === s!.id ? { ...cur, my_context: ctx } : cur));
+      } catch {
+        /* 맥락을 못 켜도 이번 요청은 첨부로 간다 */
+      }
+    }
+    current.current = s;
+    const where = c.path ? ` (내 업무 맥락 ${c.path})` : '';
+    await send(s, `${c.text}\n\n— 웹 Outlook 메일 「${c.mail.subject || '(제목 없음)'}」${where}`, [mailAttachment(c.mail)]);
+  };
+  useEffect(() => {
+    const take = () => {
+      const c = takeMailChat();
+      if (c) void mailChat(c);
+    };
+    take();
+    window.addEventListener(MAIL_CHAT_EVENT, take);
+    return () => window.removeEventListener(MAIL_CHAT_EVENT, take);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const patch = async (changes: { organization_id: number | null; workflow_id: number | null }) => {
     if (!session) return;
@@ -784,7 +819,8 @@ function NewSession({ orgs, personal, busy, onStart }: {
   const [workflowId, setWorkflowId] = useState<number | null>(null);
   const [context, setContext] = useState<SmartworkContext>({ folders: [], mail: false });
   const folders = personal?.consented ? personal.folders : [];
-  const mailReady = !!personal?.consented && personal.mail.connected;
+  // 받아 둔 메일 — Graph 동기화나 웹 Outlook 북마크로 넣은 것
+  const mailReady = !!personal?.consented && (personal.mail.connected || (personal.mail.web ?? 0) > 0);
   return (
     <div className="chat-thread">
       <p className="mutedtext">
@@ -895,7 +931,7 @@ function ContextPicker({ session, status, onSaved, onError }: {
   onError: (message: string) => void;
 }) {
   if (!status?.consented) return null;
-  const mailReady = status.mail.connected;
+  const mailReady = status.mail.connected || (status.mail.web ?? 0) > 0;
   if (status.folders.length === 0 && !mailReady) {
     return (
       <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 8px' }}>
