@@ -1480,6 +1480,8 @@ export interface PersonalStatus {
     connected: boolean;
     account: string;
     synced_at: string | null;
+    // 웹 Outlook 북마크로 넣은 메일 수
+    web?: number;
   };
 }
 

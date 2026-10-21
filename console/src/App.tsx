@@ -11,6 +11,7 @@ import AuditLogTab from './pages/audit/LogTab';
 import Dashboard from './pages/Dashboard';
 import Git from './pages/Git';
 import Login from './pages/Login';
+import MailReceive from './pages/MailReceive';
 import Modules from './pages/Modules';
 import Organizations from './pages/Organizations';
 import ProjectDetail from './pages/ProjectDetail';
@@ -51,6 +52,8 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      {/* 웹 Outlook 북마크가 여는 받는 창 — 다른 사이트가 연 창이라 로그인이 따라오지 않는다(pages/MailReceive) */}
+      <Route path="/mail-receive" element={<MailReceive />} />
       <Route
         element={
           <RequireAuth>

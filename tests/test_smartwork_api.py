@@ -476,6 +476,39 @@ def test_outlook_mail_login_by_device_code_keeps_no_token(client, monkeypatch):
     assert client.get(f"{API}/smartwork/personal", headers=alice).json()["mail"]["connected"] is False
 
 
+def test_web_outlook_mail_from_the_bookmark_goes_to_the_owner_only(client):
+    """Graph 권한 없이 — 웹 Outlook 북마크가 넘긴 화면의 글자를 그 사람의 저장소(outlook/)에만 넣는다."""
+    alice = _user(client, "alice@corp.com")
+    bob = _user(client, "bob@corp.com")
+    url = f"{API}/smartwork/personal/mail/web"
+    item = {"subject": "협력사 단가 협의", "header": "김팀장 <kim@corp.com>  2026-10-20 (월) 오전 9:12  받는 사람: alice",
+            "body": "오리온 부품 단가를 3% 낮추는 안입니다."}
+    assert client.post(url, json={"items": [item]}, headers=alice).status_code == 400   # 동의 전
+
+    client.post(f"{API}/smartwork/personal/consent", headers=alice)
+    client.post(f"{API}/smartwork/personal/consent", headers=bob)
+    out = client.post(url, json={"items": [item, {"subject": "빈 것"}]}, headers=alice).json()
+    assert out["new"] == 1 and out["saved"][0]["path"].startswith("outlook/web_")
+    # 같은 메일을 다시 누르면 새로 쓰지 않는다
+    assert client.post(url, json={"items": [item]}, headers=alice).json()["new"] == 0
+
+    store = personal.store_for("alice@corp.com")
+    hit = docsearch.search(store.name, "오리온")["hits"][0]
+    text = (store.root / hit["path"]).read_text(encoding="utf-8")
+    assert text.startswith("# 협력사 단가 협의") and "김팀장" in text
+    assert client.get(f"{API}/smartwork/personal", headers=alice).json()["mail"]["web"] == 1
+    assert docsearch.search(personal.store_for("bob@corp.com").name, "오리온")["hits"] == []
+
+    from app.db import SessionLocal
+    from app.models import AuditEvent
+    with SessionLocal() as s:
+        event = s.query(AuditEvent).filter(AuditEvent.action == "smartwork.personal.mail.web").first()
+        assert "오리온" not in json.dumps(event.detail, ensure_ascii=False)   # 내용은 감사에 남지 않는다
+    # 메일 지우기는 웹 Outlook에서 넣은 것도 지운다
+    assert client.delete(f"{API}/smartwork/personal/mail", headers=alice).status_code == 204
+    assert docsearch.search(store.name, "오리온")["hits"] == []
+
+
 def test_outlook_mail_login_needs_consent_and_names_the_app_setting(client, monkeypatch):
     alice = _user(client, "alice@corp.com")
     monkeypatch.setenv("PAAS_MS_GRAPH_CLIENT_ID", "client-123")

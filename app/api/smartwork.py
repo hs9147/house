@@ -379,6 +379,27 @@ def mail_login_poll(db: Session = Depends(get_db), key: ApiKey = Depends(require
     return {"status": "done", "account": inbox["account"], **result}
 
 
+class WebMailIn(BaseModel):
+    subject: str = ""
+    header: str = ""
+    body: str = ""
+
+
+class WebMailsIn(BaseModel):
+    items: list[WebMailIn]
+
+
+@router.post("/personal/mail/web")
+def mail_web(body: WebMailsIn, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """웹 Outlook 북마크가 넘긴 메일(화면의 글자) — 그 사람의 개인 저장소에만. 감사에는 수만 남긴다."""
+    try:
+        result = personal.mail_save_page(db, key.name, [i.model_dump() for i in body.items])
+    except personal.PersonalError as e:
+        raise _personal_error(e)
+    audit.record(db, key.name, "smartwork.personal.mail.web", key.name, {"new": result["new"]})
+    return result
+
+
 @router.delete("/personal/mail", status_code=204)
 def mail_disconnect(db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
     try:

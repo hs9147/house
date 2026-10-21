@@ -746,6 +746,10 @@ export const api = {
   mailLogin: () => request<MailLogin>('POST', '/smartwork/personal/mail/login'),
   mailLoginPoll: () => request<MailLoginPoll>('POST', '/smartwork/personal/mail/login/poll'),
   mailDisconnect: () => request<void>('DELETE', '/smartwork/personal/mail'),
+  // 웹 Outlook 북마크가 화면에서 읽은 메일(lib/mailAgent.js) — 개인 저장소에만
+  saveWebMail: (items: { subject: string; header: string; body: string }[]) =>
+    request<{ new: number; saved: { subject: string; path: string; new: boolean }[] }>(
+      'POST', '/smartwork/personal/mail/web', { items }),
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
   projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),
   // 바인딩 **생성**은 화면에서 하지 않는다 — 기획 "솔루션 구성" 단계가 문서와 함께 정한다

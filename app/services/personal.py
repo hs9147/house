@@ -105,7 +105,8 @@ def status(db: Session, email: str) -> dict:
     if row is None:
         return {"consented": False, "folders": [], "index": None, "mail": mail}
     mail.update(connected=row.mail_synced_at is not None, account=row.mail_account,
-                synced_at=row.mail_synced_at.isoformat() if row.mail_synced_at else None)
+                synced_at=row.mail_synced_at.isoformat() if row.mail_synced_at else None,
+                web=web_mail_count(email))
     index = docsearch.status(store_for(email).name)
     # 변환에 실패한 파일은 저장소에 없어 색인이 모른다 — 기록해 둔 실패를 더한다.
     unconverted = sum(1 for f in (row.files or {}).values() if f.get("error"))
@@ -279,6 +280,51 @@ def mail_save(db: Session, email: str, account: str, messages: list[dict]) -> di
     row.mail_synced_at = utcnow()
     db.commit()
     return {"fetched": len(messages[:MAIL_SYNC_COUNT]), "new": written}
+
+
+# --- 웹 Outlook 북마크 ---
+#
+# Graph 앱 권한이 없어도 — 사람이 웹 Outlook에서 메일을 연 채 「GPAX 메일」 북마크를 누르면 그 화면의
+# 제목·머리글·본문 **글자**를 콘솔로 넘긴다(console/src/lib/mailAgent.js → 콘솔 받는 창 → 로그인한 콘솔
+# 탭). 서버는 Outlook과 통신하지 않고, 사람이 고른 메일 한 통씩만 받는다. 첨부는 화면에서 받지 않는다.
+
+WEB_MAIL_MAX = 20
+WEB_MAIL_BODY_CHARS = 200_000
+
+
+def mail_save_page(db: Session, email: str, items: list[dict]) -> dict:
+    """웹 Outlook 화면에서 읽은 메일 — Graph로 받은 메일과 같은 자리(outlook/)·같은 색인. 같은 메일을
+    다시 누르면 새로 쓰지 않는다(제목·머리글·본문의 해시)."""
+    require(db, email)
+    store = store_for(email)
+    written, saved = 0, []
+    for item in items[:WEB_MAIL_MAX]:
+        subject = str(item.get("subject") or "").strip()[:300] or "(제목 없음)"
+        header = str(item.get("header") or "").strip()[:2000]
+        body = str(item.get("body") or "").strip()[:WEB_MAIL_BODY_CHARS]
+        if not body and not header:
+            continue
+        digest = hashlib.sha256(f"{subject}\n{header}\n{body}".encode()).hexdigest()[:12]
+        existing = sorted((store.root / MAIL_DIR).glob(f"web_*_{digest}.md"))
+        if existing:
+            saved.append({"subject": subject, "path": existing[0].relative_to(store.root).as_posix(), "new": False})
+            continue
+        rel = f"{MAIL_DIR}/web_{utcnow().date().isoformat()}_{digest}.md"
+        target = store.root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lines = [f"# {subject}", "", "- 가져온 곳: 웹 Outlook(화면에서 읽음 — 첨부는 이름만 보일 수 있다)"]
+        if header:
+            lines.append(f"- 머리글: {' '.join(header.split())}")
+        target.write_text("\n".join([*lines, "", body, ""]), encoding="utf-8")
+        docsearch.index_one(store.name, store.root, rel)
+        written += 1
+        saved.append({"subject": subject, "path": rel, "new": True})
+    return {"new": written, "saved": saved}
+
+
+def web_mail_count(email: str) -> int:
+    folder = store_for(email).root / MAIL_DIR
+    return len(list(folder.glob("web_*.md"))) if folder.is_dir() else 0
 
 
 def mail_disconnect(db: Session, email: str) -> None:
