@@ -28,7 +28,8 @@
    * 바꿀 수 있는 것: 상세를 열 행 수(조회 한도)와 멈추기. 한도는 다음 행부터 바로 반영되고, 멈추면 지금
    * 하던 일까지 하고 받은 것을 내려받는다. */
   var MAX_ROWS = 100;
-  var ctl = { rows: 20, stop: false, explore: true };
+  /* fresh — 봇 실행: 열려 있는 화면을 쓰지 않고 녹화·탐색한 길로 처음부터 연다(사람이 한 그대로 되는지). */
+  var ctl = { rows: 20, stop: false, explore: true, fresh: false };
   /* 창의 모양은 요소마다 직접 못 박는다(all:initial 뒤에 색·글꼴) — 이 창은 남의 사이트 안에 뜬다. 사이트의
    * div·button·input 규칙(div{color:#333}, button{background:#fff;color:#fff} 같은)은 물려받은 색보다
    * 이겨서, 못 박지 않으면 어두운 바탕에 어두운 글자·흰 바탕에 흰 글자가 된다.
@@ -109,7 +110,7 @@
     bar.appendChild(button('스캔·수집', function () {
       ctl.explore = exp.checked;
       controls();
-      run().catch(function (e) { say('실패 — ' + (e && e.message)); finish(); });
+      run().catch(function (e) { running = false; say('실패 — ' + (e && e.message)); finish(); });
     }, true));
     bar.appendChild(button('녹화', startRecording));
     bar.appendChild(lab);
@@ -138,7 +139,7 @@
    * 콘솔이 준 표(nonce)를 이후 메시지마다 주고받는다. 답이 없으면(사이트가 창 연결을 끊었거나 콘솔이 연 창이
    * 아니면) 예전처럼 파일로 내려받는다. 콘솔이 보낸 수집 조건이 북마크에 실린 것보다 앞선다 — 조건을 고친 뒤
    * 북마크를 다시 끌어다 놓지 않아도 된다. */
-  var link = null, started = false;
+  var link = null, started = false, running = false;
   function relay(msg) {
     if (!link) return;
     msg.nonce = link.nonce;
@@ -169,16 +170,23 @@
             (Array.isArray(m.queries) ? ' (콘솔의 수집 조건 ' + m.queries.length + '개)' : ''));
         if (started) return;
         if (m.mode === 'record') startRecording();
+        else if (m.mode === 'replay') botRun();
         else if (m.mode === 'scan') {
           ctl.explore = m.explore !== false;
           controls();
-          run().catch(function (err) { say('실패 — ' + (err && err.message)); finish(); });
+          run().catch(function (err) { running = false; say('실패 — ' + (err && err.message)); finish(); });
         }
         return;
       }
       if (!link || m.nonce !== link.nonce) return;
       if (m.gpax === 'stop' && started && !rec) stopBtn.onclick();
       if (m.gpax === 'end' && rec) finishRecording();
+      /* 녹화를 끝낸 탭에서 바로 — 북마크를 다시 누르지 않아도 된다. */
+      if (m.gpax === 'replay' && !rec && !running && Array.isArray(m.queries)) {
+        SOURCE.queries = m.queries;
+        SOURCE.version = String(m.version || '');
+        botRun();
+      }
     });
   }
 
@@ -1045,7 +1053,7 @@
     var rep = { screen: q.screen, url: q.url, rows: 0, details: 0, files: 0, notes: [], via: '' };
     notes = rep.notes;
     repair = null;
-    var live = liveFrame(q), start = files.length;
+    var live = ctl.fresh ? null : liveFrame(q), start = files.length;
     /* 맨 위 창에 그 화면이 떠 있으면(틀 없는 사이트) 그 주소를 숨긴 틀에 연다. */
     var t = { root: work, live: !!live, frame: live,
               url: !live && hasFieldsTop(q) ? location.href.split('#')[0] : q.url.split('#')[0] };
@@ -1286,12 +1294,39 @@
     say('녹화 끝 — 「' + recipe.screen + '」 가는 길 ' + recipe.path.length + '단계, 조건 ' + recipe.conditions.length +
         '개' + (recipe.shown.detail ? ', 상세' : '') + (recipe.shown.attach ? '·첨부' : '') +
         (sent ? '. 콘솔로 보냈습니다 — 콘솔이 수집 조건에 올립니다.'
-          : '. 내려받은 파일을 GPAX 콘솔 → ' + SOURCE.name + ' → 브라우저로 스캔·녹화 → 「연결되지 않을 때」에 올리세요(수집 조건에 더해집니다).'));
+          : '. 내려받은 파일을 GPAX 콘솔 → ' + SOURCE.name + ' → ① 북마크 추가 → 「콘솔 없이 쓸 때」에 올리세요(수집 조건에 더해집니다).'));
     finish();
   }
 
+  /* 봇 실행 — 화면을 다시 읽지 않고 수집 조건(녹화한 길)대로만 다시 한다. 서버는 화면 목록을 지난 스캔
+   * 그대로 두고 받은 파일·수집 결과만 바꾼다(replay). */
+  async function botRun() {
+    started = running = true;
+    ctl.stop = false;
+    ctl.fresh = true;
+    stopBtn.disabled = false;
+    stopBtn.style.opacity = '';
+    controls();
+    say('봇 실행 — 수집 조건 ' + (SOURCE.queries || []).length + '개를 녹화한 길대로 처음부터 다시 합니다');
+    try {
+      var files = [], collected = await collect(files, { left: MAX_TOTAL_BYTES });
+      var out = { agent: AGENT, replay: true, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
+                  url: location.href.split('#')[0], at: new Date().toISOString(), menu: [], pages: [],
+                  files: files, collected: collected, queries_version: SOURCE.version || '' };
+      var sent = deliver('scan', out, 'gpax-scan');
+      say('봇 끝 — ' + collected.map(function (c) {
+        return c.screen + ' 결과 ' + c.rows + '행 · 상세 ' + c.details + ' · 파일 ' + c.files;
+      }).join(' / ') + (sent ? '. 콘솔로 보냈습니다.' : '. 내려받은 파일을 콘솔에 올리세요.'));
+    } catch (err) {
+      say('봇 실패 — ' + (err && err.message));
+    } finally {
+      ctl.fresh = running = false;
+      finish();
+    }
+  }
+
   async function run() {
-    started = true;
+    started = running = true;
     var pages = [], seen = {}, menu = [], menuN = 0;
     box.remove();   /* 열린 화면을 읽는 동안 이 창의 글이 섞이지 않게 — 다음 say가 다시 붙인다 */
     frames(window, 0, []).forEach(function (f) {
@@ -1359,9 +1394,10 @@
                 url: location.href.split('#')[0], at: new Date().toISOString(), menu: menu, pages: pages,
                 files: files, collected: collected, queries_version: SOURCE.version || '' };
     var sent = deliver('scan', out, 'gpax-scan');
+    running = false;
     say('끝 — 메뉴 ' + menuN + '개 · 화면 ' + pages.length + '장 · 파일 ' + files.length + '개. ' +
         (sent ? '콘솔로 보냈습니다 — 콘솔이 결과를 올립니다.'
-          : '내려받은 파일을 GPAX 콘솔 데이터 수집 → ' + SOURCE.name + ' → 브라우저로 스캔·녹화 → 「연결되지 않을 때」에 올리세요.'));
+          : '내려받은 파일을 GPAX 콘솔 데이터 수집 → ' + SOURCE.name + ' → ① 북마크 추가 → 「콘솔 없이 쓸 때」에 올리세요.'));
     finish();
   }
   /* 끝나면 기록은 남겨 둔다(읽을 수 있게) — 닫기로 치운다. */

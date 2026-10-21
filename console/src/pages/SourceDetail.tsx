@@ -48,6 +48,8 @@ export default function SourceDetail() {
   const caps = useApi(() => api.sourceCapabilities(), []);
   const first = useApi(() => api.getSource(id), [id]);
 
+  const live = useLive(row, setRow);
+
   useEffect(() => { if (first.data) setRow(first.data); }, [first.data]);
   usePolling(async () => setRow(await api.getSource(id)), 2000, row?.status === 'scanning');
 
@@ -83,22 +85,23 @@ export default function SourceDetail() {
         </p>
         {row.note && <p className="mutedtext" style={{ fontSize: 12 }}>{row.note}</p>}
         <Means caps={caps.data} kind={row.kind} />
-        <div className="row" style={{ gap: 8, marginTop: 8 }}>
-          {/* 웹사이트는 아래 브라우저 스캔이 주된 길 — 서버 스캔은 로그인 없이 열리는 사이트용 보조 버튼이다. */}
-          <button className={row.kind === 'web' ? 'small secondary' : 'small'} disabled={row.status === 'scanning'}
-            onClick={rescan}>
-            {row.status === 'scanning' ? '스캔 중…'
-              : `${row.kind === 'web' ? '서버에서 ' : ''}${row.scan ? '다시 스캔' : '스캔'}`}
-          </button>
-          {row.kind === 'web' && <span className="mutedtext" style={{ fontSize: 11 }}>
-            로그인 없이 열리는 사이트만 — 로그인이 필요하면 아래 「브라우저로 스캔·녹화」
-          </span>}
-        </div>
-        <ScanProgress id={row.id} running={row.status === 'scanning'} />
+        {/* 웹사이트는 스캔이 ② 카드에 있다(브라우저 스캔이 주된 길, 서버 스캔은 보조). API·MCP는 여기서. */}
+        {row.kind !== 'web' && (
+          <>
+            <div className="row" style={{ gap: 8, marginTop: 8 }}>
+              <button className="small" disabled={row.status === 'scanning'} onClick={rescan}>
+                {row.status === 'scanning' ? '스캔 중…' : row.scan ? '다시 스캔' : '스캔'}
+              </button>
+            </div>
+            <ScanProgress id={row.id} running={row.status === 'scanning'} />
+          </>
+        )}
         {row.status === 'failed' && row.error && <p className="error">{row.error}</p>}
         {error && <p className="error">{error}</p>}
       </div>
-      {row.kind === 'web' && <BrowserPanel row={row} onChange={setRow} />}
+      {row.kind === 'web' && <BookmarkPanel row={row} onChange={setRow} />}
+      {row.kind === 'web' && <ScanPanel row={row} live={live} onServerScan={rescan} />}
+      {row.kind === 'web' && <RecordPanel row={row} live={live} />}
       {row.kind === 'web' && <QueryPanel row={row} onChange={setRow} />}
       <StoredHeaders row={row} onChange={setRow} />
       {/* 유형별 제안 전에 스캔한 출처(proposal에 targets가 없다)는 다시 스캔해야 저장할 수 있다. */}
@@ -240,9 +243,14 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
   return (
     <div className="panel">
       <h3 style={{ marginTop: 0 }}>수집 조건</h3>
+      <p style={{ fontSize: 12, margin: '4px 0' }}>
+        <b>무엇을 받을지</b> 정하는 곳입니다. 스캔은 사이트의 메뉴와 화면 구조만 읽습니다 — 실제 업무 자료(조회
+        결과와 첨부파일)는 여기 적힌 화면만, 적힌 조건으로 조회해서 받습니다. ② 스캔·수집과 ③ 봇 실행이 이 목록대로
+        돌고, 저장하면 다음 실행부터 바뀐 조건이 쓰입니다. 조건이 없으면 스캔만 합니다.
+      </p>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
-        화면마다 조회 조건을 정하면 북마크가 그 화면을 조회해 <b>결과 파일</b>(엑셀 버튼, 없으면 결과 표를 CSV로)과{' '}
-        <b>행마다 상세의 첨부파일</b>을 받습니다. 날짜는 <span className="mono">@today</span>·
+        화면마다 — 여는 길, 조회 조건, 조회·엑셀 버튼, 상세를 여는 열. 북마크가 그 화면을 조회해 <b>결과 파일</b>(엑셀
+        버튼, 없으면 결과 표를 CSV로)과 <b>행마다 상세의 첨부파일</b>을 받습니다. 날짜는 <span className="mono">@today</span>·
         <span className="mono">@today-7d</span>·<span className="mono">@today-1m</span>처럼 쓰면 북마크를 누른 날로
         바뀝니다. 기간처럼 칸이 둘이면 같은 칸 이름을 두 번(시작, 끝 순서) 넣습니다.
       </p>
@@ -250,8 +258,8 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
         화면을 여는 길: ① 그 화면을 열어 둔 채 북마크를 누르면 그 자리에서, ② 「녹화」나 메뉴 탐색이 찾은 길이
         있으면 메뉴를 다시 눌러서, ③ 아니면 주소로 엽니다. 「LLM 분석」은 화면마다 어느 길로 열지·조회 버튼·상세를
         여는 열·엑셀 버튼·조건을 지난 스캔과 수집 기록에서 골라 줍니다(저장 전에 고칠 수 있다). 메뉴로만 열리는
-        화면(주소로 열면 다른 화면이 뜬다)은 위 「브라우저로 스캔·녹화」의 「녹화 시작」으로 메뉴 → 조건 → 조회 →
-        첫 행의 상세 → 첨부를 한 번 보여 주면 여기에 바로 더해집니다.
+        화면(주소로 열면 다른 화면이 뜬다)은 ③의 「녹화 시작」으로 메뉴 → 조건 → 조회 → 첫 행의 상세 → 첨부를 한 번
+        보여 주면 여기에 바로 더해집니다.
       </p>
       <Async state={state}>
         {() => (
@@ -285,7 +293,7 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
                     <div style={{ fontSize: 11 }}>
                       <span className={`status ${s.plan.method === 'record' ? 'warn' : 'info'}`}>{METHOD[s.plan.method]}</span>
                       {s.plan.reason && <span className="mutedtext"> {s.plan.reason}</span>}
-                      {s.plan.method === 'record' && <span> — 위 「브라우저로 스캔·녹화」의 「녹화 시작」으로 보여 주세요</span>}
+                      {s.plan.method === 'record' && <span> — ③의 「녹화 시작」으로 보여 주세요</span>}
                       {s.plan.risks.length > 0 && <div className="mutedtext">주의: {s.plan.risks.join(' · ')}</div>}
                     </div>
                   )}
@@ -356,7 +364,7 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
               </button>
               <button className="small" disabled={busy || screens === null} onClick={save}>저장</button>
               {saved && <span className="mutedtext" style={{ fontSize: 11 }}>
-                저장했습니다 — 다음 「스캔·수집 시작」부터 새 조건으로 돕니다(파일로 올릴 때는 북마크를 다시 끌어다 놓으세요).
+                저장했습니다 — 다음 스캔·수집·봇 실행부터 새 조건으로 돕니다(콘솔 없이 쓸 때는 북마크를 다시 끌어다 놓으세요).
               </span>}
             </div>
             {notes.map((n) => <p key={n} className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>{n}</p>)}
@@ -386,33 +394,188 @@ function scanCode(row: SourceOut): string {
 const nonceOf = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 const MAX_LIVE_LINES = 300;
 
-type LiveMode = 'record' | 'scan';
+type LiveMode = 'record' | 'scan' | 'replay';
 
 /**
- * 브라우저로 스캔·녹화 — SSO 뒤의 사이트는 서버가 로그인할 수 없으니 사용자가 로그인한 탭에서 북마크릿이 읽는다.
+ * 브라우저 세션(북마크와 콘솔 사이의 실시간 통로) — ② 스캔·수집과 ③ 녹화·봇 실행이 함께 쓴다.
  *
  * 콘솔이 업무 사이트를 새 탭으로 열고, 그 탭에서 북마크를 한 번 누르면 북마크가 이 창(opener)에 인사한다.
  * 콘솔이 표(nonce)와 할 일·수집 조건을 답하면 북마크가 바로 시작하고, 진행 기록을 실시간으로, 결과를 파일
  * 대신 이리로 보낸다 — 콘솔이 받아서 올린다. 메시지는 보낸 출처(업무 사이트)와 창(연 탭)을 둘 다 확인한다.
- * 사이트가 창 연결을 끊거나(COOP) 콘솔이 열지 않은 탭에서 누르면 북마크는 결과를 파일로 내려받는다 — 그
- * 파일은 접어 둔 「연결되지 않을 때」에서 올린다. 새 탭은 창 기능(width 등) 없이 연다 — 팝업 창에는 북마크바가 없다.
+ * 녹화를 끝낸 탭은 연결이 살아 있어 북마크를 다시 누르지 않고 봇을 돌린다. 새 탭은 창 기능(width 등) 없이
+ * 연다 — 팝업 창에는 북마크바가 없다.
  */
-function BrowserPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut) => void }) {
-  const site = new URL(row.url).origin;
-  const link = useRef<HTMLAnchorElement>(null);
+function useLive(row: SourceOut | null, onChange: (r: SourceOut) => void) {
+  const site = row ? new URL(row.url).origin : '';
   const win = useRef<Window | null>(null);
   const nonce = useRef('');
   const latest = useRef(row);
   latest.current = row;
-  const [copied, setCopied] = useState(false);
+  // 봇이 돌 화면 — 녹화 직후면 방금 녹화한 화면, 아니면 수집 조건 전부
+  const only = useRef<SourceQueryScreen[]>([]);
   const [mode, setMode] = useState<LiveMode | null>(null);
   const [state, setState] = useState<'' | 'waiting' | 'linked' | 'uploading' | 'done' | 'lost'>('');
   const [lines, setLines] = useState<string[]>([]);
   const [explore, setExplore] = useState(true);
-  const [uploading, setUploading] = useState(false);
+  const [recorded, setRecorded] = useState<SourceQueryScreen | null>(null);
   const [error, setError] = useState('');
   const push = (t: string) => setLines((prev) => [...prev, `${new Date().toTimeString().slice(0, 8)} ${t}`].slice(-MAX_LIVE_LINES));
 
+  const receive = async (kind: 'record' | 'scan', payload: unknown) => {
+    const id = latest.current?.id;
+    if (!id) return;
+    setState('uploading');
+    setError('');
+    const file = new File([JSON.stringify(payload)], `gpax-${kind}-${id}.json`, { type: 'application/json' });
+    try {
+      if (kind === 'record') {
+        const out = await api.uploadSourceRecording(id, file);
+        // 같은 주소의 화면이 이미 있으면 서버가 주소에 #이름을 붙인다 — 이름과 주소 앞부분으로 찾는다.
+        const recipe = (payload as { recipe?: { screen?: string; url?: string } }).recipe ?? {};
+        const base = (recipe.url ?? '').split('#')[0];
+        setRecorded(out.screens.find((q) => q.screen === recipe.screen && q.url.split('#')[0] === base)
+          ?? out.screens.find((q) => q.url === recipe.url) ?? null);
+        push(`녹화를 수집 조건에 올렸습니다 — 화면 ${out.screens.length}개. 「녹화대로 봇 실행」으로 같은 일을 시켜 보세요`);
+        onChange(await api.getSource(id));
+      } else {
+        onChange(await api.uploadBrowserScan(id, file));
+        push('결과를 올렸습니다 — 오른쪽에서 읽은 것·받은 파일을, 아래 맨 끝에서 저장을');
+      }
+      setState('done');
+    } catch (e) {
+      setError((e as Error).message);
+      setState('linked');
+    }
+  };
+
+  useEffect(() => {
+    if (!mode || !row) return;
+    const onMessage = (e: MessageEvent) => {
+      const m = e.data;
+      if (!m || typeof m !== 'object' || e.origin !== site || !win.current || e.source !== win.current) return;
+      if (m.gpax === 'hello') {
+        if (m.source !== row.id) return;
+        // 북마크를 다시 누를 때마다(화면을 옮긴 뒤 등) 새 표 — 옛 북마크의 메시지는 받지 않는다.
+        nonce.current = nonceOf();
+        win.current.postMessage({
+          gpax: 'start', nonce: nonce.current, mode, explore,
+          queries: mode === 'replay' ? only.current : latest.current?.queries ?? [],
+          version: latest.current?.queries_version ?? '',
+        }, site);
+        setState('linked');
+        push(`창의 북마크와 연결했습니다 — ${LIVE_LABEL[mode]}을 시작합니다`);
+        return;
+      }
+      if (!nonce.current || m.nonce !== nonce.current) return;
+      if (m.gpax === 'log' && typeof m.text === 'string') push(m.text.slice(0, 300));
+      if (m.gpax === 'result' && (m.kind === 'record' || m.kind === 'scan')) void receive(m.kind, m.payload);
+    };
+    window.addEventListener('message', onMessage);
+    const watch = window.setInterval(() => {
+      if (win.current?.closed) {
+        win.current = null;
+        nonce.current = '';
+        setState((st) => (st === 'done' || st === 'uploading' ? st : 'lost'));
+      }
+    }, 1000);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      window.clearInterval(watch);
+    };
+    // receive·push는 매번 새로 만들어지지만 row.id·site가 같으면 하는 일이 같다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, explore, site, row?.id]);
+
+  const open = (next: LiveMode) => {
+    if (!row) return;
+    setError('');
+    setLines([]);
+    nonce.current = '';
+    if (next !== 'replay') setRecorded(null);
+    const w = window.open(row.url, `gpax-source-${row.id}`);
+    if (!w) {
+      setError('새 탭이 막혔습니다 — 브라우저의 팝업 차단을 이 콘솔에 대해 풀어 주세요.');
+      return;
+    }
+    win.current = w;
+    setMode(next);
+    setState('waiting');
+    push(`${row.url}을 새 탭으로 열었습니다 — 로그인한 뒤 그 탭에서 북마크 「GPAX 스캔 · ${row.name}」을 누르세요`);
+  };
+  // 봇 — 녹화를 끝낸 탭이 살아 있으면 그 탭에서 바로, 아니면 새 탭을 열고 북마크를 기다린다.
+  const runBot = () => {
+    only.current = recorded ? [recorded] : latest.current?.queries ?? [];
+    setError('');
+    if (win.current && !win.current.closed && nonce.current) {
+      setMode('replay');
+      setState('linked');
+      win.current.postMessage({ gpax: 'replay', nonce: nonce.current, queries: only.current,
+                                version: latest.current?.queries_version ?? '' }, site);
+      push(`봇 실행 — ${only.current.map((q) => q.screen).join(', ')}`);
+    } else {
+      open('replay');
+    }
+  };
+  const send = (gpax: 'end' | 'stop') => {
+    if (win.current && nonce.current) win.current.postMessage({ gpax, nonce: nonce.current }, site);
+  };
+  const busy = state === 'waiting' || state === 'linked' || state === 'uploading';
+  return { mode, state, lines, explore, setExplore, recorded, error, busy, open, runBot, send };
+}
+
+type Live = ReturnType<typeof useLive>;
+const LIVE_LABEL: Record<LiveMode, string> = { scan: '스캔·수집', record: '녹화', replay: '봇 실행' };
+
+// 그 카드의 일(modes)이 돌 때만 — 상태, 녹화 끝·멈추기, 실시간 기록
+function LiveStatus({ live, modes }: { live: Live; modes: LiveMode[] }) {
+  if (!live.mode || !modes.includes(live.mode)) return null;
+  const { mode, state } = live;
+  return (
+    <>
+      <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 6 }}>
+        {state === 'linked' && mode === 'record' && <button className="small" onClick={() => live.send('end')}>녹화 끝</button>}
+        {state === 'linked' && mode !== 'record' && (
+          <button className="small secondary" onClick={() => live.send('stop')}>멈추기</button>
+        )}
+        {state && <span className="mutedtext" style={{ fontSize: 12 }}>
+          {LIVE_LABEL[mode]} · {{
+            waiting: '탭에서 북마크를 누르기를 기다립니다…', linked: '연결됨', uploading: '올리는 중…', done: '끝',
+            lost: '탭이 닫혔거나 사이트가 창 연결을 끊었습니다',
+          }[state]}
+        </span>}
+      </div>
+      {state === 'waiting' && (
+        <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+          북마크를 눌렀는데 여기에 아무것도 오지 않으면 옛 북마크입니다 — ①에서 다시 끌어다 놓으세요. 탭의 북마크 창에
+          「콘솔과 연결됨」이 뜨지 않으면 사이트가 창 연결을 끊은 것입니다 — ①의 「콘솔 없이 쓸 때」를 보세요.
+        </p>
+      )}
+      {mode === 'record' && state === 'linked' && (
+        <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+          탭에서 메뉴를 눌러 조회 화면을 열고, 조건을 넣고, 조회 → 첫 행의 상세 → 첨부를 누른 뒤 「녹화 끝」(여기나
+          탭의 창). 화면 전체가 새로 열리면 녹화가 끊기니 그때는 북마크를 다시 누르세요.
+        </p>
+      )}
+      {live.lines.length > 0 && (
+        <pre className="mono" style={{ fontSize: 11, maxHeight: 200, overflow: 'auto', margin: '6px 0 0', whiteSpace: 'pre-wrap' }}>
+          {live.lines.join('\n')}
+        </pre>
+      )}
+      {live.error && <p className="error">{live.error}</p>}
+    </>
+  );
+}
+
+/**
+ * ① 북마크 추가 — SSO 뒤의 사이트는 서버가 로그인할 수 없으니 로그인한 탭에서 북마크릿이 읽는다. 출처마다
+ * 하나, 한 번만 끌어다 놓는다. 콘솔이 열지 않은 탭에서 누르거나 사이트가 창 연결을 끊으면 북마크 창에서 직접
+ * 고르고 결과를 파일로 내려받는다 — 그 파일은 여기서 올린다.
+ */
+function BookmarkPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut) => void }) {
+  const link = useRef<HTMLAnchorElement>(null);
+  const [copied, setCopied] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState('');
   const code = scanCode(row);
 
   // React는 javascript: href를 경고한다 — DOM에 직접 넣는다.
@@ -430,82 +593,7 @@ function BrowserPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceO
     if (!ok) setError('복사하지 못했습니다 — 북마크로 끌어다 놓아 쓰세요.');
   };
 
-  const live = async (kind: LiveMode, payload: unknown) => {
-    setState('uploading');
-    setError('');
-    const file = new File([JSON.stringify(payload)], `gpax-${kind}-${row.id}.json`, { type: 'application/json' });
-    try {
-      if (kind === 'record') {
-        const out = await api.uploadSourceRecording(row.id, file);
-        push(`녹화를 수집 조건에 올렸습니다 — 화면 ${out.screens.length}개`);
-        onChange(await api.getSource(row.id));
-      } else {
-        onChange(await api.uploadBrowserScan(row.id, file));
-        push('스캔 결과를 올렸습니다 — 오른쪽에서 읽은 것을, 아래 맨 끝에서 저장을');
-      }
-      setState('done');
-    } catch (e) {
-      setError((e as Error).message);
-      setState('linked');
-    }
-  };
-
-  useEffect(() => {
-    if (!mode) return;
-    const onMessage = (e: MessageEvent) => {
-      const m = e.data;
-      if (!m || typeof m !== 'object' || e.origin !== site || !win.current || e.source !== win.current) return;
-      if (m.gpax === 'hello') {
-        if (m.source !== row.id) return;
-        // 북마크를 다시 누를 때마다(화면을 옮긴 뒤 등) 새 표 — 옛 북마크의 메시지는 받지 않는다.
-        nonce.current = nonceOf();
-        win.current.postMessage({
-          gpax: 'start', nonce: nonce.current, mode, explore,
-          queries: latest.current.queries ?? [], version: latest.current.queries_version ?? '',
-        }, site);
-        setState('linked');
-        push(`창의 북마크와 연결했습니다 — ${mode === 'record' ? '녹화' : '스캔·수집'}을 시작합니다`);
-        return;
-      }
-      if (!nonce.current || m.nonce !== nonce.current) return;
-      if (m.gpax === 'log' && typeof m.text === 'string') push(m.text.slice(0, 300));
-      if (m.gpax === 'result' && (m.kind === 'record' || m.kind === 'scan')) void live(m.kind, m.payload);
-    };
-    window.addEventListener('message', onMessage);
-    const watch = window.setInterval(() => {
-      if (win.current?.closed) {
-        win.current = null;
-        setState((s) => (s === 'done' || s === 'uploading' ? s : 'lost'));
-      }
-    }, 1000);
-    return () => {
-      window.removeEventListener('message', onMessage);
-      window.clearInterval(watch);
-    };
-    // live·push는 매번 새로 만들어지지만 row.id·site가 같으면 하는 일이 같다
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, explore, site, row.id]);
-
-  const open = (next: LiveMode) => {
-    setError('');
-    setLines([]);
-    nonce.current = '';
-    const w = window.open(row.url, `gpax-source-${row.id}`);
-    if (!w) {
-      setError('새 탭이 막혔습니다 — 브라우저의 팝업 차단을 이 콘솔에 대해 풀어 주세요.');
-      return;
-    }
-    win.current = w;
-    setMode(next);
-    setState('waiting');
-    push(`${row.url}을 새 탭으로 열었습니다 — 로그인한 뒤 그 탭에서 북마크 「GPAX 스캔 · ${row.name}」을 누르세요`);
-  };
-  const send = (gpax: 'end' | 'stop') => {
-    if (win.current && nonce.current) win.current.postMessage({ gpax, nonce: nonce.current }, site);
-  };
-  const busy = state === 'waiting' || state === 'linked' || state === 'uploading';
-
-  // 연결되지 않아 내려받은 파일 — 스캔·녹화를 한 곳에서 받는다. 맨 앞의 agent로 가른다(파일 전체를 읽지 않는다).
+  // 내려받은 파일 — 스캔·녹화를 한 곳에서 받는다. 맨 앞의 agent로 가른다(파일 전체를 읽지 않는다).
   const upload = async (file: File | undefined) => {
     if (!file) return;
     setUploading(true);
@@ -526,72 +614,24 @@ function BrowserPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceO
 
   return (
     <div className="panel">
-      <h3 style={{ marginTop: 0 }}>브라우저로 스캔·녹화</h3>
-      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
-        사내 SSO로 로그인하는 사이트는 서버가 들어갈 수 없어, 로그인한 내 브라우저에서 북마크가 읽습니다 — 세션은
-        브라우저 밖으로 나가지 않고, 입력값·쿠키는 읽지 않습니다(입력칸은 수집 조건을 채울 때만 씁니다). 순서:
-        스캔·수집(메뉴 탐색) → 아래 「수집 조건」에서 「LLM 분석」, 메뉴로만 열리는 화면은 녹화 → 저장 → 다시
-        스캔·수집(파일이 받아짐) → 맨 아래 저장.
+      <h3 style={{ marginTop: 0 }}>① 북마크 추가</h3>
+      <p style={{ fontSize: 12, margin: '4px 0' }}>
+        <a ref={link} className="mono" onClick={(e) => e.preventDefault()}
+           style={{ padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 4, cursor: 'grab' }}>
+          GPAX 스캔 · {row.name}
+        </a>
+        {' '}을 북마크바로 한 번 끌어다 놓습니다(또는{' '}
+        <button className="small secondary" onClick={copy}>{copied ? '복사됨' : '코드 복사'}</button>
+        {' '}후 개발자 도구 Console에 붙여 넣기).
       </p>
-      <ol style={{ fontSize: 12, paddingLeft: 18, margin: '6px 0' }}>
-        <li>
-          <a ref={link} className="mono" onClick={(e) => e.preventDefault()}
-             style={{ padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 4, cursor: 'grab' }}>
-            GPAX 스캔 · {row.name}
-          </a>
-          {' '}을 북마크바로 한 번 끌어다 놓습니다(또는{' '}
-          <button className="small secondary" onClick={copy}>{copied ? '복사됨' : '코드 복사'}</button>
-          {' '}후 개발자 도구 Console에 붙여 넣기). 이 출처 전용이고, 수집 조건은 아래 시작 버튼이 탭으로 보내므로
-          조건을 고쳐도 다시 끌어다 놓지 않아도 됩니다.
-        </li>
-        <li>
-          <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <button className="small" disabled={busy} onClick={() => open('scan')}>스캔·수집 시작(새 탭)</button>
-            <button className="small secondary" disabled={busy} onClick={() => open('record')}>녹화 시작(새 탭)</button>
-            <label style={{ fontSize: 12 }}>
-              <input type="checkbox" checked={explore} disabled={busy} onChange={(e) => setExplore(e.target.checked)} /> 메뉴 탐색
-            </label>
-            {state === 'linked' && mode === 'record' && (
-              <button className="small" onClick={() => send('end')}>녹화 끝</button>
-            )}
-            {state === 'linked' && mode === 'scan' && (
-              <button className="small secondary" onClick={() => send('stop')}>멈추기</button>
-            )}
-            {state && <span className="mutedtext" style={{ fontSize: 12 }}>
-              {{
-                waiting: '탭에서 북마크를 누르기를 기다립니다…', linked: '연결됨', uploading: '올리는 중…', done: '끝',
-                lost: '탭이 닫혔거나 사이트가 창 연결을 끊었습니다',
-              }[state]}
-            </span>}
-          </div>
-          <div className="mutedtext" style={{ fontSize: 11, marginTop: 2 }}>
-            새 탭에서 로그인하고 북마크를 누르면 바로 시작합니다. 진행은 여기와 탭 오른쪽 위 창(머리글을 끌어 옮길 수
-            있다)에 실시간으로 보이고, 결과는 내려받지 않고 바로 올라갑니다. 스캔·수집은 메뉴와 열린 화면을 읽고(메뉴
-            탐색을 켜면 스크립트로 여는 메뉴를 숨긴 틀에서 눌러 조회 화면과 가는 길을 찾는다) 수집 조건대로 결과
-            파일과 행마다 상세의 첨부를 받습니다. 녹화는 메뉴 → 조건 → 조회 → 첫 행의 상세 → 첨부를 한 번 보여 주면
-            수집 조건에 더해집니다.
-          </div>
-        </li>
-      </ol>
-      {state === 'waiting' && (
-        <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
-          북마크를 눌렀는데 여기에 아무것도 오지 않으면 옛 북마크입니다 — ①에서 다시 끌어다 놓으세요. 탭의 북마크 창에
-          「콘솔과 연결됨」이 뜨지 않으면 사이트가 창 연결을 끊은 것입니다 — 아래 「연결되지 않을 때」를 보세요.
-        </p>
-      )}
-      {mode === 'record' && state === 'linked' && (
-        <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
-          탭에서 메뉴를 눌러 조회 화면을 열고, 조건을 넣고, 조회 → 첫 행의 상세 → 첨부를 누른 뒤 「녹화 끝」(여기나
-          탭의 창). 화면 전체가 새로 열리면 녹화가 끊기니 그때는 북마크를 다시 누르세요.
-        </p>
-      )}
-      {lines.length > 0 && (
-        <pre className="mono" style={{ fontSize: 11, maxHeight: 200, overflow: 'auto', margin: '6px 0 0', whiteSpace: 'pre-wrap' }}>
-          {lines.join('\n')}
-        </pre>
-      )}
-      <details style={{ fontSize: 12, marginTop: 6 }}>
-        <summary style={{ cursor: 'pointer' }}>연결되지 않을 때(파일로 올리기)</summary>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        사내 SSO로 로그인하는 사이트는 서버가 들어갈 수 없어, 로그인한 내 브라우저에서 이 북마크가 읽습니다 — 세션은
+        브라우저 밖으로 나가지 않고, 입력값·쿠키는 읽지 않습니다(입력칸은 수집 조건을 채울 때만 씁니다). 이 출처
+        전용이라 다른 사이트에서 누르면 읽지 않습니다. ②·③의 시작 버튼이 연 탭에서 누르면 콘솔과 연결되고, 수집
+        조건은 콘솔이 보내므로 조건을 고쳐도 다시 끌어다 놓지 않아도 됩니다.
+      </p>
+      <details style={{ fontSize: 12 }}>
+        <summary style={{ cursor: 'pointer' }}>콘솔 없이 쓸 때(파일로 올리기)</summary>
         <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
           사이트가 창 연결을 끊거나 콘솔이 열지 않은 탭에서 북마크를 누르면, 북마크 창에서 「스캔·수집」·「녹화」를
           직접 고르고 결과가 <span className="mono">gpax-scan-{row.id}-*.json</span>·
@@ -608,12 +648,68 @@ function BrowserPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceO
           북마크로 돌면 결과를 올릴 때 스캔 메모에 알립니다.
         </p>
       </details>
-      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
-        메뉴의 GET 링크는 최대 25곳까지 더 열어 봅니다(로그아웃·삭제는 건너뜀). 조회·상세·첨부·엑셀 버튼만 누르고,
-        저장·삭제·승인 같은 버튼은 누르지 않으며 사이트가 묻는 창에는 '아니오'로 답합니다. 파일은 60개(하나 10MB,
-        모두 50MB)까지, 상세는 기본 20행(탭의 창에서 바꾸거나 멈출 수 있다)까지 엽니다.
-      </p>
       {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+/** ② 스캔·수집 — 사이트를 읽고(메뉴·화면·가는 길) 수집 조건이 있으면 그대로 받는다. 서버 스캔은 보조. */
+function ScanPanel({ row, live, onServerScan }: { row: SourceOut; live: Live; onServerScan: () => void }) {
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>② 스캔·수집</h3>
+      <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button className="small secondary" disabled={live.busy} onClick={() => live.open('scan')}>스캔·수집 시작(새 탭)</button>
+        <label style={{ fontSize: 12 }}>
+          <input type="checkbox" checked={live.explore} disabled={live.busy}
+                 onChange={(e) => live.setExplore(e.target.checked)} /> 메뉴 탐색
+        </label>
+        {/* 서버 스캔은 로그인 없이 열리는 사이트용 보조 버튼이다 */}
+        <button className="small secondary" disabled={row.status === 'scanning'} onClick={onServerScan}>
+          {row.status === 'scanning' ? '스캔 중…' : `서버에서 ${row.scan ? '다시 스캔' : '스캔'}`}
+        </button>
+      </div>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        새 탭에서 로그인하고 북마크를 누르면 바로 시작합니다. 메뉴와 열린 화면을 읽고(메뉴 탐색을 켜면 스크립트로
+        여는 메뉴를 숨긴 틀에서 눌러 조회 화면과 가는 길을 찾는다), 아래 수집 조건이 있으면 화면마다 조회해 결과
+        파일과 행마다 상세의 첨부를 받습니다. 진행은 여기와 탭 오른쪽 위 창(머리글을 끌어 옮길 수 있다)에 실시간으로
+        보이고, 결과는 바로 올라갑니다. 「서버에서 스캔」은 로그인 없이 열리는 사이트만 — 서버가 읽은 것으로 결과를
+        바꿉니다.
+      </p>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        조회·상세·첨부·엑셀 버튼만 누르고, 저장·삭제·승인 같은 버튼은 누르지 않으며 사이트가 묻는 창에는 '아니오'로
+        답합니다. 메뉴의 GET 링크는 25곳까지 더 열어 보고(로그아웃·삭제는 건너뜀), 파일은 60개(하나 10MB, 모두
+        50MB)까지, 상세는 기본 20행(탭의 창에서 바꾸거나 멈출 수 있다)까지 엽니다.
+      </p>
+      <LiveStatus live={live} modes={['scan']} />
+      <ScanProgress id={row.id} running={row.status === 'scanning'} />
+    </div>
+  );
+}
+
+/**
+ * ③ 녹화·봇 실행 — 메뉴로만 열리는 화면은 사람이 한 번 보여 주고(녹화 → 수집 조건에 더해진다), 봇이 그대로
+ * 해 본다. 봇은 화면을 다시 읽지 않고 녹화한 길로 처음부터 열어 조건 → 조회 → 상세 → 첨부를 받는다 — 결과는
+ * 스캔 결과의 받은 파일·수집 결과로 바뀌고 화면 목록은 그대로다.
+ */
+function RecordPanel({ row, live }: { row: SourceOut; live: Live }) {
+  const target = live.recorded ? `녹화대로 봇 실행 — ${live.recorded.screen}` : '봇 실행(수집 조건 전부)';
+  const ready = !!live.recorded || !!row.queries?.length;
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>③ 녹화·봇 실행</h3>
+      <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button className="small secondary" disabled={live.busy} onClick={() => live.open('record')}>녹화 시작(새 탭)</button>
+        <button className="small secondary" disabled={live.busy || !ready || !row.scan} onClick={live.runBot}>{target}</button>
+      </div>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        녹화: 메뉴로만 열리는 화면(주소로 열면 다른 화면이 뜬다)을 메뉴 → 조건 → 조회 → 첫 행의 상세 → 첨부 순서로
+        한 번 보여 주면 아래 수집 조건에 그 화면이 더해집니다. 봇 실행: 녹화한 길대로 처음부터 화면을 열어 같은 일을
+        합니다 — 녹화 직후에는 방금 녹화한 화면만, 아니면 수집 조건 전부. 녹화를 끝낸 탭이 열려 있으면 그 탭에서
+        바로 돌고, 닫혔으면 새 탭에서 북마크를 누르면 됩니다. 받은 파일은 스캔 결과로 올라가고 화면 목록은 그대로입니다.
+        {!row.scan && ' (스캔·수집을 한 번 한 뒤에 돌릴 수 있습니다.)'}
+      </p>
+      <LiveStatus live={live} modes={['record', 'replay']} />
     </div>
   );
 }

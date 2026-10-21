@@ -1332,9 +1332,29 @@ def _route_in(s: dict, origin: str) -> dict:
     return out
 
 
+def _replay_pages(row: InfoSource) -> list[dict]:
+    """봇 실행은 화면을 다시 읽지 않는다 — 지난 스캔의 화면을 북마크가 읽은 것과 같은 모양으로 넘긴다
+    (메뉴 탐색이 찾은 길·조건을 고를 화면이 그대로 남는다)."""
+    return [{"url": p["url"], "title": p.get("title") or "", "headings": p.get("headings") or [],
+             "tables": p.get("tables") or [], "fields": p.get("fields") or [],
+             "requires_login": bool(p.get("requires_login")), "links": [], "text": p.get("text") or "",
+             "depth": p.get("depth", 0), **{k: p[k] for k in ("path", "start", "frame") if p.get(k)}}
+            for p in (row.scan or {}).get("pages") or [] if p.get("url")]
+
+
 def from_browser(row: InfoSource, payload) -> dict:
-    """북마크릿 결과 → _crawl과 같은 모양. 다른 사이트의 결과·모르는 파일은 받지 않는다."""
+    """북마크릿 결과 → _crawl과 같은 모양. 다른 사이트의 결과·모르는 파일은 받지 않는다.
+    봇 실행(replay)은 수집 결과·파일만 싣는다 — 화면·메뉴는 지난 스캔 것을 쓴다."""
     origin = _check_payload(row, payload, BROWSER_AGENT, "브라우저 스캔 결과")
+    if payload.get("replay") is True:
+        pages = _replay_pages(row)
+        if not pages:
+            raise SourceError("봇 실행은 스캔한 뒤에 할 수 있습니다 — 먼저 스캔·수집을 하세요.")
+        downloads, skipped = _browser_files(payload.get("files"), origin)
+        return {"origin": origin, "pages": pages, "skipped": skipped, "sitemap": 0, "browser": False,
+                "via": "browser", "menu_dom": (row.scan or {}).get("menu") or [], "replay": True,
+                "downloads": downloads, "collected": _collected_in(payload.get("collected"), origin),
+                "queries_version": _s(payload.get("queries_version"), 32)}
     pages, seen = [], set()
     for p in (payload.get("pages") if isinstance(payload.get("pages"), list) else [])[:MAX_PAGES * 2]:
         url = _same(p.get("url"), origin) if isinstance(p, dict) else ""
@@ -1462,6 +1482,9 @@ def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
     got, missed = _download(result.pop("downloads"), {}, result["origin"], limit=MAX_BROWSER_FILES)
     result["files"], result["stage_notes"] = _stage(row.id, got)
     result["stage_notes"] = _collected_notes(result["collected"]) + result["stage_notes"]
+    if result.pop("replay", False):
+        result["stage_notes"].insert(0, "봇 실행 — 화면은 지난 스캔 그대로이고, 수집 조건(녹화한 길)대로 다시 받은 "
+                                        "결과입니다.")
     current = queries_version(row)
     if result.pop("queries_version") != current:
         result["stage_notes"].insert(0, (

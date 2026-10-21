@@ -630,6 +630,31 @@ def test_query_analysis_plans_how_to_collect_and_keeps_to_the_facts(client, monk
     assert client.get(f"{API}/sources/{sid}", headers=ADMIN).json()["queries"][0]["hints"]["search"] == "조회"
 
 
+def test_bot_replay_keeps_the_screens_and_takes_only_the_collection(client, monkeypatch):
+    """녹화 뒤 봇 실행 — 화면을 다시 읽지 않고 수집 조건대로만 받는다. 화면 목록(조건을 고를 화면)은 지난 스캔 그대로."""
+    import base64
+
+    made = _create(client, headers="", name="봇 시험")
+    url = f"{API}/sources/{made['id']}/browser-result"
+    replay = {"replay": True, "pages": [], "menu": [],
+              "files": [{"url": "https://intra.test/download.do#1", "name": "붙임1.pdf", "text": "붙임",
+                         "data": base64.b64encode(b"%PDF-1.4 1").decode()}],
+              "collected": [{"screen": "공지 조회", "url": "https://intra.test/notice", "rows": 2, "details": 1,
+                             "files": 1, "via": "path"}]}
+    # 스캔한 적이 없으면 봇이 남길 화면이 없다
+    assert client.post(url, headers=ADMIN, files=_browser_file(made["id"], **replay)).status_code == 400
+
+    sid = _notice_scan(client, monkeypatch)
+    before = client.get(f"{API}/sources/{sid}/queries", headers=ADMIN).json()["candidates"]
+    res = client.post(f"{API}/sources/{sid}/browser-result", headers=ADMIN, files=_browser_file(sid, **replay))
+    assert res.status_code == 202, res.text
+    scan = client.get(f"{API}/sources/{sid}", headers=ADMIN).json()["scan"]
+    assert [f["name"] for f in scan["files"]] == ["붙임1.pdf"]
+    assert scan["collected"][0]["rows"] == 2 and scan["collected"][0]["via"] == "path"
+    assert any(n.startswith("봇 실행") for n in scan["notes"])
+    assert client.get(f"{API}/sources/{sid}/queries", headers=ADMIN).json()["candidates"] == before
+
+
 def test_collection_files_and_summary_arrive_with_the_browser_scan(client, monkeypatch):
     """수집은 파일이 많다(결과 파일 + 행마다 첨부) — 예전 상한(20개)을 넘어 받고, 화면마다 요약이 메모로."""
     import base64

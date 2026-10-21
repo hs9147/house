@@ -34,11 +34,14 @@ import { FileView, WebView } from './smartwork/viewers';
  *
  * 오른쪽에 무엇을 띄울지는 서버가 정한다(모델이 show_agent·show_report 도구로 고른다).
  * 화면은 그 결과만 따른다 — 에이전트가 오면 보고서보다 **먼저** 에이전트를 연다.
- * 새 업무는 빈 화면이 아니라 **제안으로 시작한다**: 만들자마자 빈 내용으로 한 턴을 돌려,
- * 부서 워크플로와 개인 업무 맥락을 본 모델이 할 일을 버튼으로 띄운다.
+ * 새 업무는 빈 화면이 아니라 **제안으로 시작한다**: 입력란에 기본 프롬프트가 음영으로 떠 있고, 그대로
+ * 보내면 빈 내용으로 한 턴을 돌려 부서 워크플로와 개인 업무 맥락을 본 모델이 할 일을 버튼으로 띄운다.
+ * 저절로 돌리지 않는다 — 맥락을 고르거나 직접 물을 틈을 준다. 글자를 치면 음영은 바로 사라진다(placeholder).
  */
 
 type View = 'agent' | 'report' | 'web' | 'file';
+// 기본 프롬프트를 사람이 읽는 말로 — 보내면 빈 내용으로 가고 서버가 여는 지시(OPENING_PROMPT)로 돌린다.
+const OPENING_HINT = '부서 워크플로와 내 업무 맥락(최근 메일·문서)에서 진행할 업무를 찾아 다음 할 일을 제안해 줘';
 // 공유 세션은 다른 참여자가 보낸 말을 이 간격으로 다시 읽는다.
 const SHARED_POLL_MS = 5000;
 // 답을 기다리는 동안 진행 과정을 읽는 간격.
@@ -230,7 +233,8 @@ export default function Smartwork() {
     setWeb(null);
     setFile(null);
     sessions.reload();
-    await send(s, '');
+    // 여는 턴은 저절로 돌리지 않는다 — 입력란의 기본 프롬프트를 보내기로 돌린다.
+    setBusy(false);
   };
 
   const patch = async (changes: { organization_id: number | null; workflow_id: number | null }) => {
@@ -286,7 +290,11 @@ export default function Smartwork() {
   const chosenProvider = usable.some((p) => p.id === providerId) ? providerId : 0;
   const submit = () => {
     const text = input.trim();
-    if (!text || busy || !session) return;
+    if (busy || !session) return;
+    if (!text) {
+      if (opening && files.length === 0) void send(session, '');
+      return;
+    }
     setInput('');
     void send(session, text, files.map(({ name, type, data }) => ({ name, type, data })));
   };
@@ -311,6 +319,8 @@ export default function Smartwork() {
   const settled = !busy && pending === null && last?.role === 'assistant';
   const suggestions = settled ? last.suggestions ?? [] : [];
   const choices = settled ? last.choices ?? [] : [];
+  // 아직 아무 말도 없는 업무 — 입력란에 기본 프롬프트를 음영으로 보이고, 비운 채 보내면 그것으로 시작한다.
+  const opening = !!session && messages.length === 0 && pending === null && !chatRunning;
 
   const chat = (
     <div className="panel">
@@ -432,7 +442,10 @@ export default function Smartwork() {
           <textarea
             rows={3}
             value={input}
-            placeholder="무엇을 할까요? (Enter 보내기, Shift+Enter 줄바꿈)"
+            placeholder={opening
+              ? `${OPENING_HINT} — 보내기를 누르면 이대로 시작, 직접 물으려면 입력하세요`
+              : '무엇을 할까요? (Enter 보내기, Shift+Enter 줄바꿈)'}
+            style={opening && !input ? { background: 'var(--bg-subtle, rgba(148, 163, 184, 0.12))' } : undefined}
             onChange={(e) => setInput(e.target.value)}
             onPaste={(e) => {
               // 화면 캡처처럼 글 없이 파일만 든 클립보드는 첨부로 받는다. 엑셀 셀을 복사하면
@@ -462,7 +475,7 @@ export default function Smartwork() {
             </div>
           )}
           <div className="row" style={{ marginTop: 8 }}>
-            <button onClick={submit} disabled={busy || !input.trim()}>보내기</button>
+            <button onClick={submit} disabled={busy || (!input.trim() && !(opening && files.length === 0))}>보내기</button>
             <select value={chosenProvider} disabled={busy} title="이 대화에 쓸 LLM"
               onChange={(e) => setProviderId(Number(e.target.value))}>
               <option value={0}>LLM: 기본</option>
@@ -678,18 +691,26 @@ function Message({ message: m, showAuthor }: { message: SmartworkSessionMessage;
 function Rating({ message: m }: { message: SmartworkSessionMessage }) {
   const [score, setScore] = useState(m.my_rating ?? 0);
   const [reason, setReason] = useState('');
+  // 보낸 사유 — 점수는 「아쉬움」을 누를 때 이미 바뀌어 있어서, 이것이 없으면 사유를 보내도 화면이 그대로다.
+  const [sent, setSent] = useState('');
+  const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
 
   const send = async (next: number, text: string) => {
     setFailed(null);
     setScore(next);  // 눌린 것은 바로 보인다 — 왕복을 기다리면 두 번 누른다
+    setSending(true);
     try {
-      await api.rateAnswer(m.id, next, text);
+      const out = await api.rateAnswer(m.id, next, text);
+      setSent(out.reason);
     } catch (e) {
       setScore(m.my_rating ?? 0);
       setFailed((e as Error).message);
+    } finally {
+      setSending(false);
     }
   };
+  const draft = reason.trim();
 
   return (
     <div style={{ marginTop: 8 }}>
@@ -705,9 +726,14 @@ function Rating({ message: m }: { message: SmartworkSessionMessage }) {
           <input value={reason} placeholder="무엇이 아쉬웠나요? (선택)"
             style={{ flex: 1 }}
             onChange={(e) => setReason(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && send(-1, reason)} />
-          <button className="secondary small" disabled={!reason.trim()}
-            onClick={() => send(-1, reason)}>보내기</button>
+            onKeyDown={(e) => e.key === 'Enter' && draft && draft !== sent && !sending && send(-1, reason)} />
+          <button className="secondary small" disabled={!draft || draft === sent || sending}
+            onClick={() => send(-1, reason)}>{sending ? '보내는 중…' : draft && draft === sent ? '보냄' : '보내기'}</button>
+        </div>
+      )}
+      {score < 0 && sent && (
+        <div className="mutedtext" style={{ fontSize: 11, marginTop: 4 }}>
+          사유를 보냈습니다 — 관리자의 평가 탭에 남습니다. 고쳐 쓰면 다시 보낼 수 있습니다.
         </div>
       )}
       {failed && <div className="mutedtext" style={{ fontSize: 11 }}>평가 실패: {failed}</div>}
