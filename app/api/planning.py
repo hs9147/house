@@ -39,6 +39,7 @@ from ..schemas import (
     ComplianceOut,
     PlanArtifactContentOut,
     PlanArtifactOut,
+    PlanBranchOut,
     PlanChatMessageOut,
     PlanConfirmIn,
     PlanConstraintIn,
@@ -490,10 +491,13 @@ async def merge_plan_session(
     db: Session = Depends(get_db),
     key: ApiKey = Depends(require_api_key),
 ):
-    """세션 마무리 — 작업 브랜치를 기본 브랜치로 반영한다.
+    """미반영 브랜치 정리 — 작업 브랜치에 기본 브랜치로 아직 가지 않은 커밋을 반영하고, 다 반영됐으면 작업
+    브랜치를 지운다.
 
-    단계별 확정도 매번 PR·머지를 시도하지만(auto_pull_request), 충돌 등으로 열린 채
-    남은 PR이 있을 수 있다. 작업 지시까지 끝낸 뒤 여기서 한 번 더 마무리한다.
+    단계 확정마다 PR·머지를 시도하므로(auto_pull_request) 보통은 할 일이 없다 — 화면은 미반영 커밋이 있을
+    때만 이 버튼을 보인다(GET …/branch). 브랜치 보호·필수 승인 등으로 PR이 열린 채 남았을 때 쓴다. 지운
+    브랜치는 다음 확정 때 기본 브랜치에서 다시 만들어진다(workspace.ensure_branch) — 머지된 커밋은 기본
+    브랜치에 남는다.
     """
     session = db.get(ChatSession, session_id)
     if session is None:
@@ -508,20 +512,43 @@ async def merge_plan_session(
         f"plan: 기획 산출물 반영 (session #{session_id})",
         "에이전트 기획 세션 마무리 — 확정 산출물과 작업 지시를 기본 브랜치로 반영합니다.",
     )
-    # 반영에 성공했을 때만 마무리로 기록한다 — PR이 열린 채 남았거나(pr_opened) 건너뛴
-    # 것은(skipped) 아직 마무리가 아니다. 이 값으로 화면이 '브랜치 머지'와 '진행 현황
-    # 업데이트' 중 무엇을 보일지 갈리므로, 실패를 마무리로 적으면 되돌릴 길이 사라진다.
+    # 반영에 성공했을 때만 기록한다 — PR이 열린 채 남았거나(pr_opened) 건너뛴 것은(skipped) 아직
+    # 반영이 아니다. 버튼은 이 값이 아니라 미반영 커밋 수로 보인다(GET …/branch).
+    deleted = False
     if result["action"] in ("merged", "committed"):
         session.merged_at = utcnow()
         db.commit()
+        # 정리 — 남은 커밋이 없을 때만 지운다(머지가 늦게 반영되는 Gitea도 있다).
+        if await asyncio.to_thread(workspace.unmerged_count, project, session.branch) == 0:
+            try:
+                deleted = await asyncio.to_thread(workspace.delete_branch, project, session.branch)
+            except Exception:  # noqa: BLE001 — 정리 실패가 반영을 되돌리지 않는다
+                deleted = False
     audit.record(db, key.name, "plan.session.merge", project.name,
-                 {"session_id": session_id, "branch": session.branch, "action": result["action"]})
+                 {"session_id": session_id, "branch": session.branch, "action": result["action"],
+                  "branch_deleted": deleted})
     return PlanMergeOut(
         branch=session.branch,
         action=result["action"],
         detail=result.get("detail"),
         pull_request_url=result.get("url"),
+        branch_deleted=deleted,
     )
+
+
+@router.get("/plan/sessions/{session_id}/branch", response_model=PlanBranchOut)
+async def plan_session_branch(
+    session_id: int,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """작업 브랜치에 기본 브랜치로 아직 반영되지 않은 커밋이 몇 개인지."""
+    session = db.get(ChatSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    project = db.get(Project, session.project_id)
+    count = await asyncio.to_thread(workspace.unmerged_count, project, session.branch)
+    return PlanBranchOut(branch=session.branch, base=project.branch, unmerged=count)
 
 
 def _artifact_content(db: Session, project: Project, session: ChatSession,

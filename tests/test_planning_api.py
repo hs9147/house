@@ -553,9 +553,19 @@ def test_session_merge_finishes_the_branch(monkeypatch, fresh_settings, tmp_path
     })
     monkeypatch.setattr(gitea, "merge_pull_request", lambda o, r, index, title="": (True, ""))
 
+    # 미반영 커밋이 있을 때만 화면이 「브랜치 머지」를 보인다
+    branch = f"/paas/api/v1/plan/sessions/{sid}/branch"
+    assert c.get(branch, headers=ADMIN).json()["unmerged"] == 1
+
+    # 머지가 기본 브랜치에 실제로 반영된 것처럼(목킹한 Gitea 대신 로컬에서) — 그러면 작업 브랜치를 지워 정리한다
+    work = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--ff-only", work)
     body = c.post(f"/paas/api/v1/plan/sessions/{sid}/merge", headers=ADMIN).json()
     assert body["action"] == "merged"
     assert body["pull_request_url"] == "https://git.example.com/o/plan-app/pulls/11"
+    assert c.get(branch, headers=ADMIN).json()["unmerged"] == 0
+    assert subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{work}"], cwd=repo).returncode != 0
     assert body["branch"] == c.get(f"/paas/api/v1/plan/sessions/{sid}",
                                    headers=ADMIN).json()["branch"]
 

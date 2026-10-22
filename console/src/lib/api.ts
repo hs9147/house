@@ -44,6 +44,7 @@ import type {
   PlanBuildStatus,
   PlanChatMessage,
   PlanConstraintOut,
+  PlanBranchOut,
   PlanMergeOut,
   PlanMessageReply,
   PlanSessionOut,
@@ -865,10 +866,11 @@ export const api = {
                      signal?: AbortSignal) =>
     request<PlanArtifactOut>('POST', `/plan/sessions/${sessionId}/stages/${stage}/confirm`,
       { content, overwrite }, undefined, signal),
-  // 세션 마무리 — 작업 브랜치를 기본 브랜치로 반영
+  // 미반영 브랜치 정리 — 남은 커밋을 기본 브랜치로 반영하고, 다 반영됐으면 작업 브랜치를 지운다
   mergePlanSession: (sessionId: number, signal?: AbortSignal) =>
     request<PlanMergeOut>('POST', `/plan/sessions/${sessionId}/merge`,
       undefined, undefined, signal),
+  planBranch: (sessionId: number) => request<PlanBranchOut>('GET', `/plan/sessions/${sessionId}/branch`),
   planBuildStatus: (sessionId: number, signal?: AbortSignal) =>
     request<PlanBuildStatus>('GET', `/plan/sessions/${sessionId}/build-status`,
       undefined, undefined, signal),

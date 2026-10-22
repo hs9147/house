@@ -211,9 +211,8 @@ export interface PlanSessionOut {
   provider: string;
   project_id: number;
   project_name: string;
-  // 세션을 마무리(브랜치 머지)한 시각. 화면이 '브랜치 머지'와 '진행 현황 업데이트' 중
-  // 무엇을 보여줄지 이 값으로 갈리므로, 세션을 다시 열어도 상태가 유지된다.
-  // 작업 지시를 재생성하면 서버가 null로 되돌린다.
+  // 「브랜치 머지」로 미반영분을 반영한 시각(기록용). 버튼을 보일지는 이 값이 아니라 미반영 커밋 수로
+  // 정한다(api.planBranch). 작업 지시를 재생성하면 서버가 null로 되돌린다.
   merged_at: string | null;
   artifacts: PlanArtifactOut[];
 }
@@ -246,6 +245,15 @@ export interface PlanMergeOut {
   action: 'merged' | 'pr_opened' | 'committed' | 'skipped';
   detail: string | null;
   pull_request_url: string | null;
+  // 다 반영된 작업 브랜치를 지웠는지(정리)
+  branch_deleted?: boolean;
+}
+
+// 작업 브랜치에 기본 브랜치로 아직 반영되지 않은 커밋 수 — 있을 때만 「브랜치 머지」를 보인다
+export interface PlanBranchOut {
+  branch: string;
+  base: string;
+  unmerged: number | null;
 }
 
 // 기획 세션 이력 — 재개·삭제 대상 선택용

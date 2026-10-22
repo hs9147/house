@@ -227,6 +227,39 @@ def default_branch_ref(workdir: Path, branch: str) -> str | None:
     return None
 
 
+def unmerged_count(project: Project, branch: str) -> int | None:
+    """작업 브랜치에서 기본 브랜치에 아직 없는 커밋 수 — 「브랜치 머지」를 보일지 정한다.
+
+    원격이 있으면 원격 기준이다(기본 브랜치와 작업 브랜치를 먼저 가져온다). 원격에 작업 브랜치가 없으면
+    (머지 뒤 정리했거나 아직 확정한 적이 없으면) 반영할 것이 없다 — 0. 워크스페이스가 없거나 기본 브랜치를
+    찾지 못하면 판정할 수 없다 — None.
+    """
+    if not branch or branch == project.branch:
+        return 0
+    workdir = workdir_for(project)
+    if not workdir.exists():
+        return None
+    origin = subprocess.run(["git", "remote", "get-url", "origin"], cwd=workdir, capture_output=True, **_TEXT)
+    if origin.returncode == 0:
+        auth = auth_args(project.git_url)
+        subprocess.run(["git", *auth, "fetch", "origin", f"+refs/heads/{project.branch}:refs/remotes/origin/{project.branch}"],
+                       cwd=workdir, capture_output=True, **_TEXT)
+        fetched = subprocess.run(["git", *auth, "fetch", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                                 cwd=workdir, capture_output=True, **_TEXT)
+        if fetched.returncode != 0:
+            return 0
+        head = f"origin/{branch}"
+    elif _branch_exists(workdir, branch):
+        head = branch
+    else:
+        return 0
+    base = default_branch_ref(workdir, project.branch)
+    if base is None:
+        return None
+    out = subprocess.run(["git", "rev-list", "--count", f"{base}..{head}"], cwd=workdir, capture_output=True, **_TEXT)
+    return int(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip().isdigit() else None
+
+
 def is_merged(workdir: Path, base_ref: str, sha: str) -> bool:
     """sha가 base_ref에서 도달 가능한지 — 즉 기본 브랜치에 실제로 반영됐는지.
 

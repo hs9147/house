@@ -135,17 +135,28 @@ export default function AgentPlanning() {
   const stageUnlocked = (stage: string) =>
     STAGES.slice(0, stageIndex(stage)).every((s) => isConfirmed(s.key));
 
-  // 세션이 마무리(브랜치 머지)됐는지 — **서버가 기억한다**(ChatSession.merged_at).
-  // 방금 머지한 결과(mergeResult)만 보면 세션을 다시 열었을 때 이미 머지한 세션에 머지
-  // 버튼이 또 보인다. 작업 지시를 재생성하면 서버가 merged_at을 지우므로 다시 머지 단계로
-  // 돌아간다.
-  const merged = session?.merged_at != null;
+  // 작업 브랜치에 기본 브랜치로 아직 반영되지 않은 커밋 수 — 단계 확정마다 PR·머지를 시도하므로 보통 0이다.
+  // 있을 때만(브랜치 보호·필수 승인 등으로 PR이 열린 채 남았을 때) 「브랜치 머지」를 보인다. null = 판정 못 함.
+  const [unmerged, setUnmerged] = useState<number | null>(null);
+  const refreshBranch = async (id = session?.id) => {
+    if (!id) return;
+    try {
+      setUnmerged((await api.planBranch(id)).unmerged);
+    } catch {
+      setUnmerged(null);
+    }
+  };
+  useEffect(() => {
+    setUnmerged(null);
+    if (session?.id) void refreshBranch(session.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id]);
 
-  // ⑤ 단계에서 지금 강조할 버튼 — 작업 지시 생성 → 단계 확정 → 브랜치 머지 → 진행 현황 순.
-  const taskStep: 'generate' | 'confirm' | 'merge' | 'progress' =
-    tasks.length === 0 ? 'generate'
-      : !isConfirmed(TASK_STAGE) ? 'confirm'
-        : merged ? 'progress' : 'merge';
+  // 기획서부터 작업 지시까지 모두 확정됐으면 진행 현황을 본다.
+  const allConfirmed = STAGES.every((s) => isConfirmed(s.key));
+  // ⑤ 단계에서 지금 강조할 버튼 — 작업 지시 생성 → 단계 확정 → 진행 현황 순.
+  const taskStep: 'generate' | 'confirm' | 'progress' =
+    tasks.length === 0 ? 'generate' : !allConfirmed ? 'confirm' : 'progress';
 
   const start = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -386,6 +397,7 @@ export default function AgentPlanning() {
       }
       setGitResult(confirmed); // 커밋 후 자동 수행된 PR/머지 결과
       await refreshSession();
+      void refreshBranch();
       // 다음 단계로 자동 이동. 마지막 단계면 그 자리에 남아 머지로 이어진다.
       const next = STAGES[stageIndex(activeStage) + 1];
       setMessages([]);
@@ -437,8 +449,6 @@ export default function AgentPlanning() {
       setTasks(await api.generatePlanTasks(session.id, signal));
       // 산출물 문서는 이 목록을 렌더한 것이다 — 편집기도 새 목록으로 맞춘다.
       await loadArtifact(session.id, TASK_STAGE);
-      // 재생성으로 세션 마무리가 무효가 됐다(서버가 merged_at을 지운다) — 버튼 상태를
-      // 다시 읽어 '진행 현황 업데이트'가 '브랜치 머지'로 돌아가게 한다.
       setMergeResult(null);
       await refreshSession();
     } catch (err) {
@@ -453,11 +463,12 @@ export default function AgentPlanning() {
     if (!session) return;
     const signal = begin(
       '브랜치 머지 중',
-      '작업 브랜치를 기본 브랜치로 반영합니다(PR 생성·머지).',
+      '작업 브랜치에 남은 커밋을 기본 브랜치로 반영하고(PR 생성·머지), 다 반영되면 작업 브랜치를 정리합니다.',
     );
     try {
       setMergeResult(await api.mergePlanSession(session.id, signal));
       await refreshSession();
+      await refreshBranch();
       history.reload();
     } catch (err) {
       if (isCancel(err)) await afterCancel();
@@ -713,6 +724,26 @@ export default function AgentPlanning() {
                 );
               })}
             </div>
+            {unmerged != null && unmerged > 0 && (
+              <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+                <span className="status warn">미반영</span>
+                <span style={{ fontSize: 12 }}>
+                  작업 브랜치 <span className="mono">{session.branch}</span>에 기본 브랜치로 반영되지 않은 커밋{' '}
+                  {unmerged}개가 있습니다.
+                </span>
+                <button className="primary small" onClick={mergeSession} disabled={busy}>🔀 브랜치 머지</button>
+              </div>
+            )}
+            {mergeResult && (
+              <p style={{ fontSize: 12, marginTop: 6, color: mergeResult.action === 'merged' ? '#10b981' : '#f59e0b' }}>
+                {mergeResult.branch} → {GIT_ACTION_LABEL[mergeResult.action] ?? mergeResult.action}
+                {mergeResult.pull_request_url && (
+                  <> · <a href={mergeResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
+                )}
+                {mergeResult.detail && <> · {mergeResult.detail}</>}
+                {mergeResult.branch_deleted && <> · 작업 브랜치를 정리했습니다(다음 확정 때 다시 만들어집니다)</>}
+              </p>
+            )}
           </div>
 
           {/* 단계별 시각화 — 산출물에 실린 mermaid C4 블록이 그림의 원천이다.
@@ -827,7 +858,7 @@ export default function AgentPlanning() {
             ) : (
               <>
                 {/* ⑤ 작업 지시 — 산출물 본문은 이 목록을 렌더한 것이다(대화 없음).
-                    지금 할 일 하나만 강조한다: 생성 → 단계 확정 → 브랜치 머지 → 진행 현황.
+                    지금 할 일 하나만 강조한다: 생성 → 단계 확정 → 진행 현황.
                     지난 단계 버튼은 남겨 두되(재생성·재머지가 필요할 수 있다) 강조는 뺀다. */}
                 <div className="row" style={{ gap: 8, marginTop: 12 }}>
                   {/* 작업 지시 생성·재생성은 산출물 편집기 아래 '이 단계 확정' 옆으로
@@ -841,20 +872,9 @@ export default function AgentPlanning() {
                   <ZipDownloadButton
                     project={availableProjects.find((p) => p.id === session?.project_id)}
                   />
-                  {/* 머지 전에는 '브랜치 머지', 머지 후에는 '진행 현황 업데이트' —
-                      둘을 함께 두지 않는다. 마무리한 세션에 머지 버튼이 남아 있으면 다시
-                      눌러야 하는 것처럼 보인다. 작업 지시를 재생성하면 서버가 마무리를
-                      무효로 만들어(merged_at=None) 다시 머지 버튼으로 돌아온다. */}
-                  {isConfirmed(TASK_STAGE) && !merged && (
-                    <button
-                      className={taskStep === 'merge' ? 'primary small' : 'secondary small'}
-                      onClick={mergeSession}
-                      disabled={busy}
-                    >
-                      🔀 브랜치 머지 (세션 마무리)
-                    </button>
-                  )}
-                  {merged && (
+                  {/* 기획서~작업 지시가 모두 확정되면 진행 현황을 본다. 확정마다 기본 브랜치로 반영되므로
+                      따로 마무리할 일은 없다 — 미반영 커밋이 남았을 때만 위에 「브랜치 머지」가 보인다. */}
+                  {allConfirmed && (
                     <button
                       className={taskStep === 'progress' ? 'primary small' : 'secondary small'}
                       onClick={loadBuildStatus}
@@ -864,15 +884,6 @@ export default function AgentPlanning() {
                     </button>
                   )}
                 </div>
-                {mergeResult && (
-                  <p style={{ fontSize: 12, marginTop: 6, color: mergeResult.action === 'merged' ? '#10b981' : '#f59e0b' }}>
-                    {mergeResult.branch} → {GIT_ACTION_LABEL[mergeResult.action] ?? mergeResult.action}
-                    {mergeResult.pull_request_url && (
-                      <> · <a href={mergeResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
-                    )}
-                    {mergeResult.detail && <> · {mergeResult.detail}</>}
-                  </p>
-                )}
                 <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
                   외부 빌더가 MCP(<span className="mono">list_tasks·update_task·submit_build_result</span>)로
                   집어가고 상태를 갱신합니다. 막히면 <span className="mono">request_clarification</span>으로

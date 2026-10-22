@@ -310,6 +310,16 @@ class PlanMergeOut(BaseModel):
     action: str  # merged | pr_opened | committed | skipped
     detail: str | None = None
     pull_request_url: str | None = None
+    # 다 반영된 작업 브랜치를 지웠는지(정리) — 다음 확정 때 기본 브랜치에서 다시 만들어진다
+    branch_deleted: bool = False
+
+
+class PlanBranchOut(BaseModel):
+    """작업 브랜치의 반영 상태 — 미반영 커밋이 있을 때만 화면이 「브랜치 머지」를 보인다."""
+
+    branch: str
+    base: str
+    unmerged: int | None = None  # None = 판정할 수 없음(워크스페이스·기본 브랜치 없음)
 
 
 class PlanArtifactOut(BaseModel):
