@@ -39,6 +39,7 @@ from ..schemas import (
     ProjectSourceSubdirSet,
     StartScriptOut,
     StartScriptProposeIn,
+    StartScriptUnitsOut,
     StartScriptSet,
     DeployRequest,
     EnvVarSet,
@@ -391,6 +392,34 @@ def get_start_script(
         return StartScriptOut(script=saved, problems=startscript.validate(saved),
                               source="project", **common)
     return StartScriptOut(script=build_module._START_SCRIPT, source="template", **common)
+
+
+@router.post("/{project_id}/start-script/units", response_model=StartScriptUnitsOut,
+             dependencies=[Depends(require_feature("deploy"))])
+async def start_script_units(
+    project_id: int,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """「LLM으로 작성」의 첫 단계 — 배포 유닛부터 확인한다.
+
+    스크립트는 유닛마다 따로다. 저장된 구조가 리포와 어긋나 있으면(컴포넌트를 더했거나 뺐으면) 없는 유닛의
+    스크립트를 쓰거나 있는 유닛을 빠뜨린다. 그래서 리포를 최신으로 두고 다시 감지한 뒤(구조 감지와 같은 길 —
+    services/structure.refresh) 유닛 목록을 돌려준다. 화면은 유닛마다 propose를 부른다 — 한 요청에 몰아
+    쓰면 유닛 수만큼 LLM을 기다려 프록시 시간 제한에 걸린다.
+    """
+    project = _get_project(db, project_id)
+    workdir = get_settings().work_dir / project.name
+    git_sha = ""
+    try:
+        workdir, git_sha = await asyncio.to_thread(checkout, project)
+    except Exception:  # noqa: BLE001 — 원격이 없어도 워킹카피가 있으면 읽는다
+        pass
+    detected, changed = await asyncio.to_thread(
+        structure.refresh, db, project, workdir, actor=admin.name, source="repo", git_sha=git_sha)
+    return StartScriptUnitsOut(components=_script_components(project),
+                               structure=structure.summary(project.structure) or "(감지된 배포 단위 없음)",
+                               changed=changed)
 
 
 @router.post("/{project_id}/start-script/propose", response_model=StartScriptOut,

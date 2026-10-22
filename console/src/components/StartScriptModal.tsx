@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Modal from './Modal';
 import { api } from '../lib/api';
 import type { BuildProfile, StartScriptOut } from '../lib/types';
@@ -17,6 +17,9 @@ import type { BuildProfile, StartScriptOut } from '../lib/types';
  * 스크립트는 **프로필·컴포넌트마다 따로**다. 개발 배포와 운영 배포는 기동 방법이 아예 다르고
  * (dev 서버 vs 빌드본 서빙), 복합 배포는 컴포넌트마다 유닛·포트·공개 경로가 따로다 — 한
  * 스크립트가 둘을 띄우면 서비스 감시자가 자식 하나만 본다.
+ *
+ * 「LLM으로 작성」은 **배포 유닛부터 확인한다** — 리포를 최신으로 두고 구조를 다시 감지한 뒤 유닛마다
+ * 차례로 쓴다. 제안은 유닛별 초안으로 들고 있다가(저장 전), 유닛을 골라 확인하고 하나씩 저장한다.
  */
 interface Props {
   projectId: number;
@@ -44,6 +47,10 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
   const [notice, setNotice] = useState('');
   // 이 창에서 저장(또는 되돌리기)을 한 번 했는가 — 했다면 다음 할 일은 저장이 아니라 배포다.
   const [applied, setApplied] = useState(false);
+  // LLM이 유닛마다 쓴 초안(저장 전) — 유닛을 바꿔도 남고, 그 유닛을 저장·되돌리면 지운다.
+  const drafts = useRef<Record<string, StartScriptOut>>({});
+  const [draftUnits, setDraftUnits] = useState<string[]>([]);
+  const showing = drafts.current[component] !== undefined && data === drafts.current[component];
 
   // 유닛을 바꾸면 그 유닛의 스크립트를 다시 읽는다 — 화면에 남은 본문을 그대로 두면
   // 다른 컴포넌트의 스크립트를 이 컴포넌트에 저장하게 된다.
@@ -64,8 +71,10 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
           setComponent(res.components[0]);
           return;
         }
-        setData(res);
-        setScript(res.script);
+        // 이 유닛의 초안이 있으면 그것을 보인다 — 저장한 것은 초안을 저장하거나 버리면 보인다.
+        const draft = drafts.current[component];
+        setData(draft ?? res);
+        setScript((draft ?? res).script);
         setBusy('');
       },
       (err: Error) => {
@@ -111,24 +120,59 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
     }
   };
 
+  // 배포 유닛부터 확인하고 유닛마다 쓴다 — 유닛 하나에 수십 초라 한 요청에 몰지 않고 하나씩 부른다.
   const propose = async () => {
-    const res = await run(
-      'LLM이 리포를 보고 작성하는 중… (수십 초 걸릴 수 있습니다)',
-      () => api.proposeStartScript(projectId, providerId, profile, component),
-    );
-    // 검증에 걸리면 서버가 그 문구를 모델에 돌려주고 한 번 고치게 한다 — 사람이 같은 말을
-    // 다시 적어 넣지 않아도 되지만, "고쳐서 온 것"이라는 사실은 보여야 한다.
-    if (res && res.attempts > 1) {
-      setNotice(res.problems.length === 0
-        ? '첫 제안이 검증에 걸려, 그 지적을 반영해 다시 작성했습니다.'
-        : '두 번 작성했지만 아직 검증을 통과하지 못했습니다 — 아래 항목을 보고 직접 고치세요.');
+    setError('');
+    setNotice('');
+    setApplied(false);
+    try {
+      setBusy('배포 유닛을 확인하는 중… (리포를 최신으로 받아 구조를 다시 감지합니다)');
+      const units = await api.startScriptUnits(projectId);
+      setComponents(units.components);
+      const list = units.components.length ? units.components : [''];
+      const failed: string[] = [];
+      const retried: string[] = [];
+      for (const [i, unit] of list.entries()) {
+        const label = unit || '단일 배포';
+        setBusy(`LLM이 「${label}」 스크립트를 작성하는 중… (${i + 1}/${list.length}, 유닛마다 수십 초)`);
+        try {
+          const res = await api.proposeStartScript(projectId, providerId, profile, unit);
+          drafts.current[unit] = res;
+          // 검증에 걸리면 서버가 그 문구를 모델에 돌려주고 한 번 고치게 한다 — "고쳐서 온 것"은 알린다.
+          if (res.attempts > 1) retried.push(`${label}${res.problems.length ? '(아직 검증 실패)' : ''}`);
+        } catch (err) {
+          failed.push(`${label}: ${(err as Error).message}`);
+        }
+      }
+      setDraftUnits(Object.keys(drafts.current));
+      const first = list.find((u) => drafts.current[u]) ?? list[0];
+      if (first === component && drafts.current[first]) {
+        setData(drafts.current[first]);
+        setScript(drafts.current[first].script);
+      } else {
+        setComponent(first);   // 바꾸면 위 effect가 그 유닛의 초안을 보인다
+      }
+      const written = list.filter((u) => drafts.current[u]).length;
+      setNotice(`배포 유닛 ${list.length}개 — ${units.structure}${units.changed ? ' (리포에 맞춰 구조를 갱신했습니다)' : ''}. `
+        + `${written}개 작성 — 유닛을 하나씩 골라 확인하고 저장하세요.`
+        + (retried.length ? ` 검증에 걸려 다시 쓴 유닛: ${retried.join(', ')}.` : ''));
+      if (failed.length) setError(`작성하지 못한 유닛 — ${failed.join(' / ')}`);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy('');
     }
-    return res;
+  };
+  // 저장·되돌리기를 하면 그 유닛의 초안은 끝났다
+  const settle = () => {
+    delete drafts.current[component];
+    setDraftUnits(Object.keys(drafts.current));
   };
   const save = async () => {
     const res = await run('저장 중…',
       () => api.setStartScript(projectId, script, profile, component));
     if (res) {
+      settle();
       setApplied(true);
       setNotice('저장했습니다 — 재배포하면 이 스크립트로 뜹니다.');
     }
@@ -137,6 +181,7 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
     const res = await run('되돌리는 중…',
       () => api.resetStartScript(projectId, profile, component));
     if (res) {
+      settle();
       // 되돌리기도 다음 배포가 실행할 것을 바꾼 것이다 — 그다음 할 일은 똑같이 배포다.
       setApplied(true);
       setNotice('템플릿으로 되돌렸습니다 — 재배포하면 템플릿으로 뜹니다.');
@@ -169,7 +214,9 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
           <label className="field" style={{ margin: 0 }}>
             배포 유닛
             <select value={component} onChange={(e) => setComponent(e.target.value)}>
-              {components.map((c) => <option key={c} value={c}>{c}</option>)}
+              {components.map((c) => (
+                <option key={c} value={c}>{c}{draftUnits.includes(c) ? ' · LLM 제안(저장 전)' : ''}</option>
+              ))}
             </select>
           </label>
         )}
@@ -192,12 +239,13 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
           onClick={propose}
           disabled={!!busy || !providerId}
         >
-          LLM으로 작성
+          LLM으로 작성(유닛별)
         </button>
       </div>
 
       <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 6px' }}>
-        현재: {data?.source === 'project' ? '이 프로젝트에 지정된 스크립트' : '플랫폼 템플릿'}
+        현재: {showing ? 'LLM 제안 — 아직 저장하지 않았습니다'
+          : data?.source === 'project' ? '이 프로젝트에 지정된 스크립트' : '플랫폼 템플릿'}
         {' · '}{profile} 프로필에만 적용됩니다{' · '}이 스크립트는 서버에서 서비스 권한으로
         실행됩니다 — 내용을 읽고 확인한 뒤 저장하세요.
       </p>

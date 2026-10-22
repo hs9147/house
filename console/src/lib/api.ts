@@ -49,10 +49,7 @@ import type {
   PlanMessageReply,
   PlanSessionOut,
   PlanSessionSummary,
-  PreviewOut,
   ProjectCreate,
-  ProjectFileContentOut,
-  ProjectFilesOut,
   ProjectModuleReportOut,
   PlatformModuleReportOut,
   ProjectOut,
@@ -61,10 +58,10 @@ import type {
   QualityTelemetry,
   RedirectRule,
   SchedulerSnapshot,
-  ResourceItem,
   ReviewResult,
   ServerConfigOut,
   StartScriptOut,
+  StartScriptUnitsOut,
   StatusSnapshot,
   SourceCapabilities,
   SourceCategory,
@@ -457,6 +454,8 @@ export const api = {
   startScript: (id: number, profile: BuildProfile, component = '') =>
     request<StartScriptOut>('GET', `/projects/${id}/start-script`, undefined,
       { component, profile }),
+  // 「LLM으로 작성」 첫 단계 — 리포를 최신으로 두고 배포 유닛을 다시 감지한다
+  startScriptUnits: (id: number) => request<StartScriptUnitsOut>('POST', `/projects/${id}/start-script/units`),
   proposeStartScript: (id: number, provider_id: number, profile: BuildProfile, component = '') =>
     request<StartScriptOut>(
       'POST', `/projects/${id}/start-script/propose`, { provider_id }, { component, profile }),
@@ -523,10 +522,6 @@ export const api = {
   deleteEnv: (id: number, key: string) =>
     request<void>('DELETE', `/projects/${id}/env/${encodeURIComponent(key)}`),
 
-  // 코드 확인 화면 (읽기 전용 — 수정은 채팅/diff 승인으로만)
-  projectFiles: (id: number) => request<ProjectFilesOut>('GET', `/projects/${id}/files`),
-  projectFileContent: (id: number, path: string) =>
-    request<ProjectFileContentOut>('GET', `/projects/${id}/files/content`, undefined, { path }),
   // 코드 구조 트리 (정적 파싱 — 확대/축소 시각화 + 채팅 LLM 컨텍스트와 동일 소스)
   projectCodemap: (id: number) => request<CodeMapOut>('GET', `/projects/${id}/codemap`),
 
@@ -752,7 +747,6 @@ export const api = {
     request<{ new: number; saved: { subject: string; path: string; new: boolean }[] }>(
       'POST', '/smartwork/personal/mail/web', { items }),
   projectModules: (id: number) => request<ModuleSummary[]>('GET', `/projects/${id}/modules`),
-  projectResources: (id: number) => request<ResourceItem[]>('GET', `/projects/${id}/resources`),
   // 바인딩 **생성**은 화면에서 하지 않는다 — 기획 "솔루션 구성" 단계가 문서와 함께 정한다
   // (감사 기록: 34건 중 32건이 그 경로, 손으로 만든 2건은 같은 날 해제됐다). 서버의
   // POST .../bind 엔드포인트는 그대로 있다: 에이전트·API 클라이언트가 쓴다.
@@ -858,6 +852,8 @@ export const api = {
   // stage·draft를 주면 **확정 전 초안**까지 반영해 그린다 — 그림은 확정을 검토하는
   // 도구이므로 확정을 기다리면 정작 검토에 쓸 수 없다. 초안 본문이 커서 GET 쿼리에
   // 실을 수 없어 POST를 쓴다(읽기지만 본문이 필요한 계산 조회다).
+  // 프로젝트의 C4 모델 — 기획 세션 없이 기본 브랜치의 기획 산출물로(프로젝트 화면 「모델」 탭)
+  projectC4: (projectId: number) => request<C4Model>('GET', `/plan/projects/${projectId}/c4`),
   planC4: (sessionId: number, stage = '', draft = '', signal?: AbortSignal) =>
     request<C4Model>('POST', `/plan/sessions/${sessionId}/c4`,
       { stage, draft }, undefined, signal),
@@ -921,15 +917,6 @@ export const api = {
       from_path, to_path, kind, status_code,
     }),
   deleteRedirect: (id: number) => request<void>('DELETE', `/redirects/${id}`),
-
-  // 프리뷰
-  createPreview: (projectId: number, branch?: string, ttl_minutes = 60) =>
-    request<PreviewOut>('POST', `/projects/${projectId}/preview`, {
-      branch: branch || null, ttl_minutes,
-    }),
-  listPreviews: (projectId: number) =>
-    request<PreviewOut[]>('GET', `/projects/${projectId}/previews`),
-  deletePreview: (id: number) => request<void>('DELETE', `/previews/${id}`),
 
   // 계정 회원가입
   registerUser: (body: { email: string; name: string; password: string }) =>

@@ -1472,6 +1472,29 @@ def _c4(c, sid: int, stage: str = "", draft: str = "") -> dict:
     return r.json()
 
 
+def test_project_model_view_draws_from_the_default_branch_docs(monkeypatch, fresh_settings, tmp_path):
+    """프로젝트 화면의 「모델」 탭 — 기획 세션 없이 기본 브랜치의 기획 산출물로 그린다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, _prov = _project_and_provider(c)
+    url = f"/paas/api/v1/plan/projects/{pid}/c4"
+    assert c.get(url, headers=ADMIN).json()["levels"].get("context") is None   # 문서가 없으면 그림도 없다
+
+    for name, body in (("01-기획서.md", _C4_SPEC_DOC), ("02-아키텍처설계.md", _C4_ARCH_DOC)):
+        doc = repo / "docs" / "agent-planning" / name
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.write_text(body, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "plan docs")
+    levels = c.get(url, headers=ADMIN).json()["levels"]
+    assert {"context", "container", "component"} <= set(levels)
+    names = {e["label"] for e in levels["context"]["elements"]}
+    assert {"기획자", "GPaaS", "Gitea"} <= names
+    entry = next(e for e in levels["component"]["elements"] if e["alias"] == "entry")
+    assert entry["paths"] == ["app.py"]
+    assert c.get("/paas/api/v1/plan/projects/999/c4", headers=ADMIN).status_code == 404
+
+
 def test_c4_levels_unlock_as_stages_are_confirmed(monkeypatch, fresh_settings, tmp_path):
     """조회 가능한 C4 레벨은 확정된 단계가 정한다 — 기획서 → context, 아키텍처 → container·component."""
     repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)

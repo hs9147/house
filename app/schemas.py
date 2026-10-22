@@ -135,6 +135,15 @@ class StartScriptSet(BaseModel):
     script: str = Field(min_length=1)
 
 
+class StartScriptUnitsOut(BaseModel):
+    """「LLM으로 작성」의 첫 단계 — 리포를 최신으로 두고 다시 감지한 배포 유닛. 화면이 유닛마다 작성을 부른다."""
+
+    # 스크립트를 따로 두는 유닛 — 단일 배포는 비어 있다(스크립트 하나, component "")
+    components: list[str] = []
+    structure: str = ""      # 감지된 구조 요약(사람이 읽는 한 줄)
+    changed: bool = False    # 이번 감지로 구조가 바뀌었는지
+
+
 class StartScriptOut(BaseModel):
     """제안·현재 스크립트와 **검증 결과**. problems가 비어 있지 않으면 저장할 수 없다."""
 

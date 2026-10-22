@@ -612,3 +612,28 @@ def test_native_deploy_fails_clearly_when_source_subdir_is_not_in_the_repo(
     finally:
         db.close()
         get_settings.cache_clear()
+
+
+def test_llm_writing_starts_by_checking_the_deploy_units(client, monkeypatch, tmp_path):
+    """「LLM으로 작성」은 배포 유닛부터 확인한다 — 저장된 구조가 리포와 어긋나 있으면(단일로 등록했는데 리포는
+    두 컴포넌트) 없는 유닛의 스크립트를 쓰거나 있는 유닛을 빠뜨린다. 리포를 다시 감지해 유닛 목록을 준다."""
+    _write(tmp_path, "api/requirements.txt", "fastapi\n")
+    _write(tmp_path, "api/main.py", "app = None\n")
+    _write(tmp_path, "web/package.json", '{"dependencies": {"react": "18.0.0"}}')
+    db = SessionLocal()
+    try:
+        project = _project(db, "script-api-units")
+    finally:
+        db.close()
+    monkeypatch.setattr("app.api.projects.checkout", lambda p: (tmp_path, "abc123"))
+
+    res = client.post(f"{API}/projects/{project.id}/start-script/units", headers=ADMIN)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert sorted(body["components"]) == ["api", "web"] and body["changed"] is True
+    assert "api" in body["structure"] and "web" in body["structure"]
+    # 이제 유닛마다 스크립트를 읽고 쓸 수 있다
+    got = client.get(f"{API}/projects/{project.id}/start-script", headers=ADMIN, params={"component": "web"})
+    assert got.status_code == 200 and got.json()["component"] == "web"
+    # 같은 리포를 다시 보면 바뀐 것이 없다
+    assert client.post(f"{API}/projects/{project.id}/start-script/units", headers=ADMIN).json()["changed"] is False

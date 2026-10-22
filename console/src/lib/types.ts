@@ -163,17 +163,6 @@ export interface ModuleSummary {
   binding_id: number; // 이 프로젝트에서의 바인딩 식별자 — 해제(unbind) 시 사용
 }
 
-// 대화식 편집 화면 자원 리스팅 — 바인딩 여부와 무관하게 사용 가능한 모듈을 아이템화
-export interface ResourceItem {
-  id: number;
-  name: string;
-  type: string;
-  category: string | null;
-  scope: 'global' | 'org';
-  env_prefix?: string;
-  bound?: boolean;
-}
-
 export interface LlmProviderOut {
   id: number;
   name: string;
@@ -390,19 +379,6 @@ export interface ReviewResult {
   max_severity: string;
 }
 
-export interface PreviewOut {
-  id: number;
-  project_id: number;
-  branch: string;
-  url: string;
-  status: 'running' | 'expired' | 'failed';
-  expires_at: string;
-}
-
-export interface ProjectFilesOut {
-  files: string[];
-}
-
 // 온톨로지 전환 현황 — 문서가 그래프로 얼마나 옮겨졌는지(app/services/ontology_status.py).
 // 퍼널의 각 단계는 직전 단계의 부분집합이다 — 그래야 "어디서 떨어졌나"가 읽힌다.
 export interface OntologyStore {
@@ -504,6 +480,13 @@ export interface DeployCheckOut {
 
 // 기동 스크립트(start.cmd). problems가 비어 있지 않으면 저장할 수 없다 — 이 스크립트는
 // 서버에서 서비스 권한으로 실행되므로, 검증을 통과하지 못한 것을 경고만 하고 넘기지 않는다.
+// 「LLM으로 작성」의 첫 단계 — 리포를 다시 감지한 배포 유닛(단일 배포면 비어 있다)
+export interface StartScriptUnitsOut {
+  components: string[];
+  structure: string;
+  changed: boolean;
+}
+
 export interface StartScriptOut {
   script: string;
   problems: string[];
@@ -576,11 +559,6 @@ export interface ApiCatalogSource {
 export interface ApiCatalogStatus {
   total: number;
   sources: Record<string, ApiCatalogSource>;
-}
-
-export interface ProjectFileContentOut {
-  path: string;
-  content: string;
 }
 
 // composite 프로젝트의 컴포넌트별 상태 — 서버구성 표 + 토폴로지 다이어그램이 함께 쓴다

@@ -48,7 +48,8 @@ const LEVELS: { key: Level; label: string; origin: string }[] = [
 ];
 
 interface Props {
-  sessionId: number;
+  // 기획 세션 — 없으면(프로젝트 화면의 「모델」 탭) 기본 브랜치의 기획 산출물로 그린다(api.projectC4).
+  sessionId?: number;
   projectId: number;
   // 확정 상태가 바뀌면 다시 불러온다(확정 커밋 sha를 이어 붙인 값).
   reloadKey: string;
@@ -78,8 +79,8 @@ export default function C4Diagram({
 }: Props) {
   const settledDraft = useDebounced(draft, DRAFT_DEBOUNCE_MS);
   const model = useApi(
-    () => api.planC4(sessionId, stage, settledDraft),
-    [sessionId, reloadKey, stage, settledDraft],
+    () => (sessionId ? api.planC4(sessionId, stage, settledDraft) : api.projectC4(projectId)),
+    [sessionId, projectId, reloadKey, stage, settledDraft],
   );
   const [level, setLevel] = useState<Level>('context');
 

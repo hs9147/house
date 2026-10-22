@@ -706,7 +706,12 @@ def get_plan_c4_model(
             stage_docs.append((stage.value, content))
     levels = c4_service.model_from_stages(
         stage_docs, draft_stage=draft_stage if draft_is_unconfirmed else None)
+    _attach_component_paths(project, levels)
+    return C4ModelOut(project_id=project.id, levels=levels)
 
+
+def _attach_component_paths(project: Project, levels: dict) -> None:
+    """component마다 구현 파일 경로 — code 레벨이 그 경로로 코드맵을 거른다."""
     # component가 없으면 리포를 훑지 않는다 — 초안을 편집하는 동안 이 요청이 반복되므로
     # 매번 git ls-files를 부를 이유가 없다.
     components = [e for level in levels.values() for e in level["elements"]
@@ -718,6 +723,34 @@ def get_plan_c4_model(
         tree = workspace.file_tree(workdir, limit=2000) if workdir.exists() else []
         for element in components:
             element["paths"] = c4_service.component_paths(element, tree)
+
+
+@router.get("/plan/projects/{project_id}/c4", response_model=C4ModelOut)
+def get_project_c4_model(
+    project_id: int,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_api_key),
+):
+    """프로젝트의 C4 모델 — 기획 세션 없이, **기본 브랜치의 기획 산출물**(docs/agent-planning/*.md)로 그린다.
+
+    단계 확정은 매번 기본 브랜치로 반영되므로(auto_pull_request) 거기 있는 문서가 그 프로젝트의 최신 확정
+    모델이다. 프로젝트 화면의 「모델」 탭이 쓴다 — 그림 규칙은 세션 시각화와 같다(services/c4).
+    """
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    workdir = workspace.workdir_for(project)
+    stage_docs: list[tuple[str, str]] = []
+    if workdir.exists():
+        for stage in planning_service.STAGE_ORDER:
+            path = planning_service.stage_repo_path(stage)
+            content = next((body for ref in (f"origin/{project.branch}", project.branch)
+                            if (body := workspace.read_file_at_ref(workdir, ref, path))), None)
+            content = content or workspace.read_context_files(workdir, [path]).get(path)
+            if content:
+                stage_docs.append((stage.value, content))
+    levels = c4_service.model_from_stages(stage_docs, draft_stage=None)
+    _attach_component_paths(project, levels)
     return C4ModelOut(project_id=project.id, levels=levels)
 
 

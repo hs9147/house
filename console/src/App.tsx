@@ -29,14 +29,13 @@ import OntologyWorkflowTab from './pages/ontology/WorkflowTab';
 import Storage from './pages/Storage';
 import SourceDetail from './pages/SourceDetail';
 import Sources from './pages/Sources';
-import CodeTab from './pages/project/CodeTab';
 import DeploymentsTab from './pages/project/DeploymentsTab';
 import EnvTab from './pages/project/EnvTab';
 import LogsTab from './pages/project/LogsTab';
 import ModulesTab from './pages/project/ModulesTab';
+import ModelTab from './pages/project/ModelTab';
 import ModuleReportTab from './pages/project/ModuleReportTab';
 import OverviewTab from './pages/project/OverviewTab';
-import PreviewsTab from './pages/project/PreviewsTab';
 
 function RequireAuth({ children }: { children: ReactNode }) {
   if (!isLoggedIn()) return <Navigate to="/login" replace />;
@@ -77,13 +76,12 @@ export default function App() {
         <Route path="/projects/:id" element={<ProjectDetail />}>
           <Route index element={<Navigate to="overview" replace />} />
           <Route path="overview" element={<OverviewTab />} />
-          <Route path="code" element={<CodeTab />} />
+          <Route path="model" element={<ModelTab />} />
           <Route path="deployments" element={<DeploymentsTab />} />
           <Route path="logs" element={<LogsTab />} />
           <Route path="env" element={<EnvTab />} />
           <Route path="modules" element={<ModulesTab />} />
           <Route path="module-report" element={<ModuleReportTab />} />
-          <Route path="previews" element={<PreviewsTab />} />
         </Route>
         <Route
           path="/modules"
