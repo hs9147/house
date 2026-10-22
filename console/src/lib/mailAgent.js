@@ -7,7 +7,10 @@
  * 탭으로 넘겨 저장한다(pages/MailReceive.tsx).
  *
  * 웹 Outlook은 Trusted Types를 강제한다 — innerHTML·DOMParser를 쓰지 않고 글자(innerText·textContent)만
- * 읽는다. 주석은 블록 주석만 쓴다(북마크로 만들 때 줄을 붙인다). */
+ * 읽는다. 주석은 블록 주석만 쓴다(북마크로 만들 때 줄을 붙인다).
+ *
+ * 통합 북마크(lib/agentCode.ts)의 웹 Outlook 쪽이다 — 식 하나 `(function (GPAX) {…})`이고 GPAX는
+ * {console, receive}(콘솔 주소와 받는 창 주소). 다른 사이트에서는 scanAgent.js가 돈다. */
 (function (GPAX) {
   function clean(s, cap) { return String(s || '').replace(/[ \t\u00a0]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, cap); }
   var hosts = /(^|\.)(outlook\.cloud\.microsoft|outlook\.office\.com|outlook\.office365\.com)$/;
@@ -36,7 +39,8 @@
   var mail = { subject: clean(heading && heading.innerText, 300), header: header,
                body: clean(body.innerText, 200000) };
 
-  var win = window.open(GPAX.receive, 'gpax-mail', 'width=520,height=420');
+  /* 열려 있던 받는 창도 새로 읽게 — 같은 주소면 브라우저가 다시 읽지 않아 「준비됨」이 오지 않는다. */
+  var win = window.open(GPAX.receive.replace('#', '?r=' + Date.now() + '#'), 'gpax-agent', 'width=560,height=680');
   if (!win) {
     alert('GPAX 메일 — 받는 창이 막혔습니다. 이 사이트의 팝업을 허용하고 다시 누르세요.');
     return;
@@ -55,4 +59,4 @@
       alert('GPAX 메일 — 받는 창이 답하지 않습니다. 콘솔 주소(' + GPAX.console + ')가 열리는지 보세요.');
     }
   }, 15000);
-})(__GPAX_MAIL__);
+})

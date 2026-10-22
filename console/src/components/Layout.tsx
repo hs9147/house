@@ -3,7 +3,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { getEmail, isAdmin, logout } from '../lib/auth';
 import { useApi } from '../lib/hooks';
-import MailRelay from './MailRelay';
+import AgentRelay from './AgentRelay';
 import McpAccessModal from './McpAccessModal';
 import SsoLoginNotice from './SsoLoginNotice';
 import TaskTray from './TaskTray';
@@ -125,7 +125,7 @@ export default function Layout() {
         <Outlet />
       </main>
       <TaskTray />
-      <MailRelay />
+      <AgentRelay />
       {mcpOpen && <McpAccessModal onClose={() => setMcpOpen(false)} />}
     </div>
   );

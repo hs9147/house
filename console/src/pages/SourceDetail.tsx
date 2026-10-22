@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import Async from '../components/Async';
+import GpaxBookmark from '../components/GpaxBookmark';
 import Split from '../components/Split';
 import Tabs from '../components/Tabs';
+import { agentCode } from '../lib/agentCode';
 import { api } from '../lib/api';
 import { useApi, usePolling } from '../lib/hooks';
-import scanAgent from '../lib/scanAgent.js?raw';
 import type {
   SourceCapabilities, SourceCategory, SourceChange, SourceFile, SourceMenuItem, SourceOut, SourcePage,
   OrgOut, SourceQueryMethod, SourceQueryScreen, SourceSaveResult, SourceSaveTarget, SourceTarget, StorageStore,
@@ -376,19 +377,10 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
   );
 }
 
-// 북마크에 통째로 들어간다 — 주석과 들여쓰기만 덜어 낸다(코드에 줄 주석 //는 쓰지 않았다).
-const SCAN_CODE = scanAgent.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\n\s+/g, '\n').trim();
-
 const METHOD: Record<SourceQueryMethod, string> = {
   open: '열어 둔 화면', path: '메뉴 길', url: '주소', record: '녹화 필요',
 };
 
-// 북마크는 출처마다 하나 — 이름으로 구분하고, 다른 사이트에서 누르면 읽지 않는다.
-function scanCode(row: SourceOut): string {
-  const source = { id: row.id, name: row.name, origin: new URL(row.url).origin, queries: row.queries ?? [],
-                   version: row.queries_version ?? '', console: location.origin };
-  return SCAN_CODE.replace('__GPAX_SOURCE__', JSON.stringify(source));
-}
 
 // 창에 보내는 표 — http 콘솔에서는 crypto.randomUUID가 없다(보안 맥락에서만).
 const nonceOf = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -454,11 +446,15 @@ function useLive(row: SourceOut | null, onChange: (r: SourceOut) => void) {
       const m = e.data;
       if (!m || typeof m !== 'object' || e.origin !== site || !win.current || e.source !== win.current) return;
       if (m.gpax === 'hello') {
-        if (m.source !== row.id) return;
+        // 옛 출처별 북마크는 출처 id로, 통합 북마크는 id 없이 인사한다 — 이 탭은 이 출처로 연 것이다.
+        if (m.source !== undefined && m.source !== row.id) return;
         // 북마크를 다시 누를 때마다(화면을 옮긴 뒤 등) 새 표 — 옛 북마크의 메시지는 받지 않는다.
         nonce.current = nonceOf();
+        const now = latest.current;
         win.current.postMessage({
           gpax: 'start', nonce: nonce.current, mode, explore,
+          source: now && { id: now.id, name: now.name, origin: site, queries: now.queries ?? [],
+                           version: now.queries_version ?? '' },
           queries: mode === 'replay' ? only.current : latest.current?.queries ?? [],
           version: latest.current?.queries_version ?? '',
         }, site);
@@ -567,24 +563,19 @@ function LiveStatus({ live, modes }: { live: Live; modes: LiveMode[] }) {
 }
 
 /**
- * ① 북마크 추가 — SSO 뒤의 사이트는 서버가 로그인할 수 없으니 로그인한 탭에서 북마크릿이 읽는다. 출처마다
- * 하나, 한 번만 끌어다 놓는다. 콘솔이 열지 않은 탭에서 누르거나 사이트가 창 연결을 끊으면 북마크 창에서 직접
- * 고르고 결과를 파일로 내려받는다 — 그 파일은 여기서 올린다.
+ * ① 북마크 추가 — SSO 뒤의 사이트는 서버가 로그인할 수 없으니 로그인한 탭에서 북마크릿이 읽는다. 북마크는
+ * 하나(통합 「GPAX」 — 스마트워크의 웹 Outlook 메일도 같은 것)이고 한 번만 끌어다 놓는다. 출처와 수집 조건은
+ * 누를 때 콘솔이 보낸다. 예전 출처별 북마크가 내려받은 파일은 여기서 올린다.
  */
 function BookmarkPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut) => void }) {
-  const link = useRef<HTMLAnchorElement>(null);
   const [copied, setCopied] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
-  const code = scanCode(row);
-
-  // React는 javascript: href를 경고한다 — DOM에 직접 넣는다.
-  useEffect(() => { link.current?.setAttribute('href', `javascript:${encodeURIComponent(code)}`); }, [code]);
 
   const copy = () => {
     // http에서는 navigator.clipboard가 없다 — 고른 글을 복사하는 옛 방식으로.
     const area = document.createElement('textarea');
-    area.value = code;
+    area.value = agentCode();
     document.body.appendChild(area);
     area.select();
     const ok = document.execCommand('copy');
@@ -616,36 +607,27 @@ function BookmarkPanel({ row, onChange }: { row: SourceOut; onChange: (r: Source
     <div className="panel">
       <h3 style={{ marginTop: 0 }}>① 북마크 추가</h3>
       <p style={{ fontSize: 12, margin: '4px 0' }}>
-        <a ref={link} className="mono" onClick={(e) => e.preventDefault()}
-           style={{ padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 4, cursor: 'grab' }}>
-          GPAX 스캔 · {row.name}
-        </a>
-        {' '}을 북마크바로 한 번 끌어다 놓습니다(또는{' '}
+        <GpaxBookmark /> 을 북마크바로 한 번 끌어다 놓습니다(또는{' '}
         <button className="small secondary" onClick={copy}>{copied ? '복사됨' : '코드 복사'}</button>
-        {' '}후 개발자 도구 Console에 붙여 넣기).
+        {' '}후 개발자 도구 Console에 붙여 넣기). 모든 출처·사이트에 같은 북마크 하나입니다.
       </p>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         사내 SSO로 로그인하는 사이트는 서버가 들어갈 수 없어, 로그인한 내 브라우저에서 이 북마크가 읽습니다 — 세션은
-        브라우저 밖으로 나가지 않고, 입력값·쿠키는 읽지 않습니다(입력칸은 수집 조건을 채울 때만 씁니다). 이 출처
-        전용이라 다른 사이트에서 누르면 읽지 않습니다. ②·③의 시작 버튼이 연 탭에서 누르면 콘솔과 연결되고, 수집
-        조건은 콘솔이 보내므로 조건을 고쳐도 다시 끌어다 놓지 않아도 됩니다.
+        브라우저 밖으로 나가지 않고, 입력값·쿠키는 읽지 않습니다(입력칸은 수집 조건을 채울 때만 씁니다). ②·③의 시작
+        버튼이 연 탭에서 누르면 그 일을 바로 시작합니다. 사이트를 직접 열고 누르면 작은 GPAX 창이 열려 이 출처를 찾아
+        잇고, 사이트 화면의 GPAX 창에서 스캔·수집·녹화·봇 실행·스마트워크로를 고릅니다 — 어느 쪽이든 수집 조건은
+        콘솔이 지금 것을 보내므로 조건을 고쳐도 다시 끌어다 놓지 않습니다. 이 브라우저의 다른 탭에 콘솔이 로그인돼
+        있어야 합니다.
       </p>
       <details style={{ fontSize: 12 }}>
-        <summary style={{ cursor: 'pointer' }}>콘솔 없이 쓸 때(파일로 올리기)</summary>
+        <summary style={{ cursor: 'pointer' }}>예전 북마크가 내려받은 파일 올리기</summary>
         <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
-          사이트가 창 연결을 끊거나 콘솔이 열지 않은 탭에서 북마크를 누르면, 북마크 창에서 「스캔·수집」·「녹화」를
-          직접 고르고 결과가 <span className="mono">gpax-scan-{row.id}-*.json</span>·
-          <span className="mono">gpax-record-{row.id}-*.json</span>으로 내려받아집니다. 그 파일을 여기에 올립니다(녹화는
-          수집 조건에 더해진다):{' '}
+          예전 출처별 북마크(「GPAX 스캔 · 이름」)를 콘솔 없이 누르면 결과가{' '}
+          <span className="mono">gpax-scan-{row.id}-*.json</span>·<span className="mono">gpax-record-{row.id}-*.json</span>으로
+          내려받아집니다. 그 파일을 여기에 올립니다(녹화는 수집 조건에 더해진다):{' '}
           <input type="file" accept=".json,application/json" disabled={uploading || row.status === 'scanning'}
                  onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ''; }} />
           {uploading && ' 올리는 중…'}
-        </p>
-        <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
-          이때는 북마크에 실린 수집 조건으로 돕니다 — 지금 실리는 것: {row.queries?.length
-            ? `화면 ${row.queries.length}개 (${row.queries.map((q) => q.screen).join(', ')})`
-            : '없음(스캔만)'}. <b>조건을 저장하거나 녹화·고칠 길을 적용한 뒤에는 북마크를 다시 끌어다 놓으세요</b> — 옛
-          북마크로 돌면 결과를 올릴 때 스캔 메모에 알립니다.
         </p>
       </details>
       {error && <p className="error">{error}</p>}

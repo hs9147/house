@@ -6,10 +6,15 @@
  *    숨긴 틀에서 눌러 조회 화면과 그리로 가는 길을 찾는다(「메뉴 탐색」). 수집 조건이 있으면 그 화면을
  *    조회해 결과 파일과 행마다 상세의 첨부를 받아(「수집」) JSON 파일로 내려받는다.
  *  - 녹화: 사람이 한 번 보여 주는 길(메뉴 → 조건 → 조회 → 첫 행의 상세 → 첨부)을 적어 JSON으로 내려받는다.
- * 하지 않는 일: gpax로 보내기(운영 콘솔이 http라 https 페이지가 부를 수 없다), 쿠키 읽기,
- * 입력값 읽기(이름·라벨만 — 수집 조건을 채울 뿐이다), 저장·삭제·승인 같은 버튼 누르기, 로그아웃·삭제 링크 열기.
- * 바깥 파일을 불러오지 않는다 — 북마크에 이 코드가 통째로 들어간다(외부 의존 금지).
- * 북마크는 출처마다 하나다 — 콘솔이 __GPAX_SOURCE__ 자리에 {id, name, origin, queries}를 넣는다.
+ *  - 스마트워크로: 지금 화면의 글자를 받는 창으로 넘겨 스마트워크 대화에 붙인다.
+ * 하지 않는 일: gpax로 직접 보내기(운영 콘솔이 http라 https 페이지가 부를 수 없다 — 콘솔 창과 postMessage로만),
+ * 쿠키 읽기, 입력값 읽기(이름·라벨만 — 수집 조건을 채울 뿐이다), 저장·삭제·승인 같은 버튼 누르기, 로그아웃·삭제
+ * 링크 열기. 바깥 파일을 불러오지 않는다 — 북마크에 이 코드가 통째로 들어간다(외부 의존 금지).
+ *
+ * 북마크는 하나다(lib/agentCode.ts — 웹 Outlook에서는 mailAgent.js가 돈다). 이 코드는 식 하나
+ * `(function (SOURCE) {…})`이고, SOURCE에는 콘솔 주소({console, receive})만 온다. 이 사이트의 출처 정보
+ * (id·이름·수집 조건)는 시작할 때 받는다 — 콘솔이 연 탭이면 콘솔이, 아니면 이 코드가 연 받는 창(콘솔의
+ * #/agent)이 로그인한 콘솔 탭에서 사이트 주소로 찾아 보낸다(start).
  */
 (function (SOURCE) {
   var AGENT = 'gpax-scan/1';
@@ -50,7 +55,7 @@
   var rowsIn = paint(document.createElement('input'), 'appearance:auto;display:inline-block;width:56px;' +
     'font-size:12px;color:#111827;background:#fff;border:1px solid #9ca3af;border-radius:3px;padding:1px 4px');
   var stopBtn = button('멈추기', null);
-  head.textContent = 'GPAX 스캔 · ' + SOURCE.name;
+  head.textContent = 'GPAX';
   head.title = '끌어서 옮기기';
   /* 머리글을 끌어 창을 옮긴다 — 사이트의 버튼·표를 가리면 비켜 놓는다. 머리글이 화면 밖으로 나가지 않게. */
   head.onpointerdown = function (e) {
@@ -107,14 +112,43 @@
     lab.appendChild(document.createTextNode(' 메뉴 탐색'));
     lab.title = '주소 없이 스크립트로 여는 메뉴를 숨긴 틀에서 눌러 보고 조회 화면과 그리로 가는 길을 찾습니다(최대 40개)';
     bar.textContent = '';
-    bar.appendChild(button('스캔·수집', function () {
-      ctl.explore = exp.checked;
-      controls();
-      run().catch(function (e) { running = false; say('실패 — ' + (e && e.message)); finish(); });
-    }, true));
-    bar.appendChild(button('녹화', startRecording));
-    bar.appendChild(lab);
-    say('무엇을 할까요? 스캔·수집 — 화면을 읽고 수집 조건대로 받기 · 녹화 — 조회 화면까지 가는 길을 한 번 보여 주기');
+    /* 등록한 출처면 데이터 수집 셋, 받는 창과 이어졌으면 스마트워크로 — 등록하지 않은 사이트는 그것만. */
+    if (SOURCE.id) {
+      bar.appendChild(button('스캔·수집', function () {
+        ctl.explore = exp.checked;
+        controls();
+        run().catch(function (e) { running = false; say('실패 — ' + (e && e.message)); finish(); });
+      }, true));
+      bar.appendChild(button('녹화', startRecording));
+      if ((SOURCE.queries || []).length) bar.appendChild(button('봇 실행', botRun));
+    }
+    if (viaReceiver()) bar.appendChild(button('스마트워크로', toSmartwork, !SOURCE.id));
+    if (SOURCE.id) bar.appendChild(lab);
+    say(SOURCE.id
+      ? '무엇을 할까요? 스캔·수집 — 화면을 읽고 수집 조건대로 받기 · 녹화 — 조회 화면까지 가는 길을 한 번 보여 주기' +
+        ((SOURCE.queries || []).length ? ' · 봇 실행 — 수집 조건대로 다시 받기' : '') + ' · 스마트워크로 — 이 화면을 대화에'
+      : '등록하지 않은 사이트입니다 — 「스마트워크로」로 이 화면을 대화에 붙일 수 있습니다(데이터 수집은 콘솔의 데이터 ' +
+        '수집에서 이 사이트를 출처로 등록하세요).');
+  }
+  function viaReceiver() { return !!link && link.win !== window.opener; }
+  /* 스마트워크로 — 지금 화면의 글자(글이 가장 많은 같은 출처 틀)를 받는 창으로 넘긴다. 받는 창에서 업무를 고른다. */
+  function toSmartwork() {
+    box.remove();   /* 이 창의 글이 섞이지 않게 */
+    var best = null;
+    frames(window, 0, []).forEach(function (f) {
+      if (f.win.frameElement && ours(f.win.frameElement)) return;
+      var t = String((f.doc.body && f.doc.body.innerText) || '');
+      if (!best || t.length > best.text.length) best = { text: t, doc: f.doc, url: f.url };
+    });
+    show();
+    if (!best || !best.text.trim()) { say('이 화면에서 읽을 글이 없습니다'); return; }
+    var heading = best.doc.querySelector('h1,h2,h3');
+    var where = location.href.split('#')[0];
+    relay({ gpax: 'page', item: {
+      subject: clean((heading && textOf(heading)) || best.doc.title || document.title, 300),
+      header: where + (best.url && best.url.split('#')[0] !== where ? ' · ' + best.url : ''),
+      body: best.text.replace(/[ \t\u00a0]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 200000) } });
+    say('받는 창으로 보냈습니다 — 그 창에서 업무를 고르고 「대화 시작」을 누르세요');
   }
   box.appendChild(head);
   box.appendChild(status);
@@ -134,12 +168,11 @@
   }
   function say(t) { status.textContent = t; log(t); }
 
-  /* 콘솔이 연 창(콘솔의 「새 창에서 녹화·스캔」) — 진행 기록을 실시간으로, 결과를 파일 대신 콘솔로 바로 보낸다.
-   * 콘솔이 인사(hello)에 답해야(start) 통로가 열린다: 보낸 쪽 출처(콘솔 주소)와 창(opener)을 둘 다 확인하고,
-   * 콘솔이 준 표(nonce)를 이후 메시지마다 주고받는다. 답이 없으면(사이트가 창 연결을 끊었거나 콘솔이 연 창이
-   * 아니면) 예전처럼 파일로 내려받는다. 콘솔이 보낸 수집 조건이 북마크에 실린 것보다 앞선다 — 조건을 고친 뒤
-   * 북마크를 다시 끌어다 놓지 않아도 된다. */
-  var link = null, started = false, running = false;
+  /* 통로 — 상대(peer)는 이 탭을 연 콘솔(콘솔의 「스캔·수집 시작」·「녹화 시작」) 또는 이 코드가 연 받는 창이다.
+   * 인사(hello)에 상대가 답해야(start) 통로가 열린다: 보낸 쪽 출처(콘솔 주소)와 창을 둘 다 확인하고, 상대가 준
+   * 표(nonce)를 이후 메시지마다 주고받는다. 진행 기록은 실시간으로, 결과는 파일 대신 상대에게 간다(받는 창은
+   * 로그인한 콘솔 탭으로 넘겨 올린다). 수집 조건은 늘 상대가 보낸 지금 것이다 — 북마크를 다시 끌어다 놓지 않는다. */
+  var link = null, peer = null, started = false, running = false;
   function relay(msg) {
     if (!link) return;
     msg.nonce = link.nonce;
@@ -161,14 +194,24 @@
   function listen() {
     window.addEventListener('message', function (e) {
       var m = e.data;
-      if (!m || typeof m !== 'object' || e.origin !== SOURCE.console || e.source !== window.opener) return;
+      if (!m || typeof m !== 'object' || e.origin !== SOURCE.console || !peer || e.source !== peer) return;
       if (m.gpax === 'start' && !link && typeof m.nonce === 'string' && m.nonce) {
         link = { win: e.source, nonce: m.nonce };
+        /* 이 사이트의 출처 — 등록하지 않은 사이트면 없다(그때는 스마트워크로 보내기만). */
+        var src = m.source && typeof m.source === 'object' ? m.source : null;
+        if (src && src.origin === origin) {
+          SOURCE.id = src.id;
+          SOURCE.name = String(src.name || '');
+          SOURCE.origin = src.origin;
+          SOURCE.queries = Array.isArray(src.queries) ? src.queries : [];
+          SOURCE.version = String(src.version || '');
+        }
         if (Array.isArray(m.queries)) { SOURCE.queries = m.queries; SOURCE.version = String(m.version || ''); }
-        head.textContent = 'GPAX 스캔 · ' + SOURCE.name + ' · 콘솔과 연결됨';
+        head.textContent = 'GPAX' + (SOURCE.id ? ' · ' + SOURCE.name : '') + ' · 콘솔과 연결됨';
         log('콘솔과 연결했습니다 — 기록과 결과가 콘솔로 갑니다' +
-            (Array.isArray(m.queries) ? ' (콘솔의 수집 조건 ' + m.queries.length + '개)' : ''));
+            (SOURCE.id ? ' (수집 조건 ' + (SOURCE.queries || []).length + '개)' : ' (등록하지 않은 사이트)'));
         if (started) return;
+        if (!m.mode) { choose(); return; }
         if (m.mode === 'record') startRecording();
         else if (m.mode === 'replay') botRun();
         else if (m.mode === 'scan') {
@@ -1405,20 +1448,37 @@
     bar.textContent = '';
     bar.appendChild(button('닫기', function () { box.remove(); }));
   }
-  function dismiss() {
-    box.onclick = function () { box.remove(); };
-    setTimeout(function () { box.remove(); }, 20000);
-  }
 
-  /* 다른 사이트에서 누른 북마크는 아무것도 읽지 않는다 — 북마크가 여러 개면 헷갈리기 쉽다. */
-  if (origin !== SOURCE.origin) {
-    say('이 북마크는 ' + SOURCE.origin + '용입니다. 지금 사이트(' + origin + ')에서는 읽지 않습니다.');
-    dismiss();
-    return;
+  /* 받는 창 — 콘솔이 연 탭이 아니면 이 코드가 콘솔의 받는 창을 팝업으로 연다(자기가 연 팝업과는 연결이 남는다).
+   * 받는 창이 「준비됨」을 알리면 인사한다. */
+  function hello(win) {
+    peer = win;
+    try { win.postMessage({ gpax: 'hello', origin: origin, title: clean(document.title, 120) }, SOURCE.console); }
+    catch (e) { /* 끊긴 창 */ }
   }
-  choose();
+  function openReceiver() {
+    if (link) return;
+    /* 열려 있던 받는 창도 새로 읽게 — 같은 주소면 브라우저가 다시 읽지 않아 「준비됨」이 오지 않는다. */
+    var w = window.open(SOURCE.receive.replace('#', '?r=' + Date.now() + '#'), 'gpax-agent', 'width=560,height=680');
+    if (!w) {
+      say('콘솔 받는 창이 막혔습니다 — 이 사이트의 팝업을 허용하고 북마크를 다시 누르세요.');
+      finish();
+      return;
+    }
+    say('콘솔 받는 창을 여는 중… (이 브라우저의 다른 탭에 GPAX 콘솔이 로그인돼 있어야 합니다)');
+    window.addEventListener('message', function ready(e) {
+      if (e.source !== w || e.origin !== SOURCE.console || !e.data || e.data.gpax !== 'ready') return;
+      window.removeEventListener('message', ready);
+      hello(w);
+    });
+  }
+  listen();
+  /* 콘솔이 연 탭이면 콘솔이 곧 답한다 — 답이 없으면(다른 페이지가 연 탭) 받는 창으로. */
   if (window.opener && SOURCE.console) {
-    listen();
-    try { window.opener.postMessage({ gpax: 'hello', source: SOURCE.id }, SOURCE.console); } catch (e) { /* 끊긴 창 */ }
+    hello(window.opener);
+    say('콘솔과 잇는 중…');
+    setTimeout(function () { if (!link) openReceiver(); }, 1500);
+  } else {
+    openReceiver();
   }
-})(__GPAX_SOURCE__);
+})

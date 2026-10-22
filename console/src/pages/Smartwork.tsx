@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Async from '../components/Async';
+import GpaxBookmark from '../components/GpaxBookmark';
 import Split from '../components/Split';
 import { api } from '../lib/api';
 import { getEmail } from '../lib/auth';
@@ -8,7 +9,6 @@ import { type AsyncState, useApi, usePolling } from '../lib/hooks';
 import { canKeepFolders, forget, pickFolder, type PickedFolder, remember, reopenFolder } from '../lib/localfiles';
 import { cancelTask, dismissTask, runTask, type TaskHandle, useTask } from '../lib/tasks';
 import { parseCsv, renderMarkdown } from '../lib/markdown';
-import mailAgent from '../lib/mailAgent.js?raw';
 import { MAIL_CHAT_EVENT, type MailChat, mailAttachment, takeMailChat } from '../lib/webmail';
 import type {
   HealthInfo,
@@ -247,9 +247,11 @@ export default function Smartwork() {
   const mailChat = async (c: MailChat) => {
     opened.current = true;   // 처음 들어올 때 최근 업무를 여는 것보다 앞선다
     setLeftTab('chat');
-    let s = c.sessionId ? await open(c.sessionId) : await start(null, null, { folders: [], mail: true });
+    const mail = c.kind === 'mail';
+    let s = c.sessionId ? await open(c.sessionId) : await start(null, null, { folders: [], mail });
     if (!s) return;
-    if (!s.my_context.mail) {
+    // 메일은 개인 맥락에 넣었으니 그 업무의 「메일」을 켠다 — 화면은 이번 요청에만 붙인다.
+    if (mail && !s.my_context.mail) {
       try {
         const ctx = await api.setSessionContext(s.id, { ...s.my_context, mail: true });
         s = { ...s, my_context: ctx };
@@ -259,8 +261,10 @@ export default function Smartwork() {
       }
     }
     current.current = s;
-    const where = c.path ? ` (내 업무 맥락 ${c.path})` : '';
-    await send(s, `${c.text}\n\n— 웹 Outlook 메일 「${c.mail.subject || '(제목 없음)'}」${where}`, [mailAttachment(c.mail)]);
+    const title = c.mail.subject || '(제목 없음)';
+    const where = mail ? `웹 Outlook 메일 「${title}」${c.path ? ` (내 업무 맥락 ${c.path})` : ''}`
+      : `화면 「${title}」 (${c.mail.header || c.from})`;
+    await send(s, `${c.text}\n\n— ${where}`, [mailAttachment(c.mail, c.kind)]);
   };
   useEffect(() => {
     const take = () => {
@@ -1050,31 +1054,19 @@ function when(iso: string | null | undefined): string {
 // 동기화·메일 로그인은 화면 밖에서 돈다(lib/tasks) — 대화/설정 탭을 바꾸거나 다른 메뉴로 가도
 // 이어지고, 돌아오면 진행이 그대로 보인다. 폴더 동기화는 한 번에 하나다(같은 폴더를 두 루프가
 // 함께 올리지 않게). 창을 닫아 끊겨도 다시 고르면 남은 파일만 올라간다(manifest가 비교한다).
-// 웹 Outlook 북마크 — 주석과 들여쓰기만 덜어 낸다(코드에 줄 주석 //는 쓰지 않았다). 받는 창은 이 콘솔의 주소.
-const MAIL_CODE = mailAgent.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\n\s+/g, '\n').trim();
-const mailCode = () => MAIL_CODE.replace('__GPAX_MAIL__', JSON.stringify({
-  console: location.origin, receive: `${location.origin}${location.pathname}#/mail-receive`,
-}));
-
 function MailBookmark({ count }: { count: number }) {
-  const link = useRef<HTMLAnchorElement>(null);
-  // React는 javascript: href를 경고한다 — DOM에 직접 넣는다.
-  useEffect(() => { link.current?.setAttribute('href', `javascript:${encodeURIComponent(mailCode())}`); }, []);
   return (
     <div style={{ marginBottom: 10 }}>
       <p style={{ margin: '4px 0' }}>
-        <b>웹 Outlook에서 한 통씩</b> —{' '}
-        <a ref={link} className="mono" onClick={(e) => e.preventDefault()}
-           style={{ padding: '2px 6px', border: '1px solid var(--border)', borderRadius: 4, cursor: 'grab' }}>
-          GPAX 메일
-        </a>
-        {' '}을 북마크바로 끌어다 놓고, 웹 Outlook(outlook.cloud.microsoft)에서 메일을 연 채 누르면 그 메일이 여기에
-        들어옵니다{count > 0 && ` — 지금까지 ${count}통`}.
+        <b>웹 Outlook에서 한 통씩</b> — <GpaxBookmark /> 을 북마크바로 끌어다 놓고, 웹 Outlook(outlook.cloud.microsoft)에서
+        메일을 연 채 누르면 그 메일이 여기에 들어오고, 그 메일로 바로 대화를 시작할 수 있습니다
+        {count > 0 && ` — 지금까지 ${count}통`}.
       </p>
       <p className="mutedtext" style={{ margin: '4px 0', fontSize: 12 }}>
         Microsoft 앱 권한이 없어도 됩니다. 누른 메일 한 통의 제목·머리글·본문 글자만 넘어가고(첨부는 받지 않는다),
-        작은 창이 잠깐 열렸다 닫힙니다 — 그때 이 브라우저의 다른 탭에 콘솔이 로그인돼 있어야 합니다. 처음 누를 때
-        웹 Outlook이 팝업을 막으면 허용하세요.
+        작은 창이 열립니다 — 그때 이 브라우저의 다른 탭에 콘솔이 로그인돼 있어야 합니다. 처음 누를 때 웹 Outlook이
+        팝업을 막으면 허용하세요. 같은 북마크를 업무 사이트(GPS 등)에서 누르면 그 화면을 스마트워크 대화에 붙이거나
+        데이터 수집(스캔·녹화·봇)을 할 수 있습니다.
       </p>
     </div>
   );
