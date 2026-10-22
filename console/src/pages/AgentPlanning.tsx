@@ -189,6 +189,12 @@ export default function AgentPlanning() {
     }
   };
 
+  // 세션을 재개하면 위의 카드(에이전트 기획·공통 제약사항·기획 세션 이력)를 접는다 — 이어서 할 일은 단계 대화다.
+  // 머리줄은 남기고 「펼치기」로 다시 연다.
+  const [foldIntro, setFoldIntro] = useState(false);
+  const [foldHistory, setFoldHistory] = useState(false);
+  const [foldConstraints, setFoldConstraints] = useState(false);
+
   // 이력에서 세션을 다시 연다 — 대화·산출물을 복원하고 첫 미확정 단계로 이동한다.
   const resume = async (row: PlanSessionSummary) => {
     setError('');
@@ -208,6 +214,9 @@ export default function AgentPlanning() {
       setInput(defaultRequestOf(s, next.key));
       await loadArtifact(row.id, next.key);
       setTasks(await api.listPlanTasks(row.id));
+      setFoldIntro(true);
+      setFoldHistory(true);
+      setFoldConstraints(true);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -502,12 +511,21 @@ export default function AgentPlanning() {
           <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)' }}>
             기획 단계 순차 수행 · 산출물 Gitea 저장
           </span>
+          {foldIntro && session && (
+            <span className="mutedtext" style={{ fontSize: 12 }}>
+              세션 #{session.id} · 브랜치 <span className="mono">{session.branch}</span> · {session.provider}
+            </span>
+          )}
           <div className="spacer" />
+          <button className="secondary small" onClick={() => setFoldIntro(!foldIntro)}>
+            {foldIntro ? '펼치기' : '접기'}
+          </button>
           <button onClick={() => setShowCreate(true)}>+ 새 프로젝트</button>
         </div>
+        {!foldIntro && (<>
         <p className="mutedtext" style={{ fontSize: 12, marginTop: 6, marginBottom: 12 }}>
-          코딩 전에 기획서 → 아키텍처 → 솔루션 구성 → 개발원칙 → 작업 지시 5단계를 순서대로 확정하고,
-          마지막에 브랜치를 머지해 세션을 마무리합니다. ⑤ 작업 지시는 대화 대신 앞 단계 확정 산출물에서
+          코딩 전에 기획서 → 아키텍처 → 솔루션 구성 → 개발원칙 → 작업 지시 5단계를 순서대로 확정합니다.
+          확정할 때마다 기본 브랜치로 반영됩니다. ⑤ 작업 지시는 대화 대신 앞 단계 확정 산출물에서
           외주 빌드 단위를 뽑아 문서로 확정합니다. 각 단계는 앞 단계의 확정 문서를 참조하며, 확정 산출물은
           프로젝트 Gitea 리포에 커밋되어 외부 개발도구(VSCode·Claude·Antigravity)에서 그대로 활용합니다.
         </p>
@@ -539,6 +557,7 @@ export default function AgentPlanning() {
             </span>
           )}
         </form>
+        </>)}
       </div>
 
       {/* 공통 제약사항 — 프로젝트와 무관하게 늘 지켜야 하는 환경 제약.
@@ -552,12 +571,18 @@ export default function AgentPlanning() {
             <div className="row" style={{ gap: 6 }}>
               {/* 무엇이 반복되는 실수인지는 등록된 레포에 이미 남아 있다 — 사람이 매번
                   발견해 문구를 손으로 고치는 대신 근거와 함께 제안받는다. */}
-              <button className="secondary small" onClick={runAdvice} disabled={advising}>
-                {advising ? '레포 검토 중...' : '🔎 등록된 레포 검토'}
+              {!foldConstraints && (<>
+                <button className="secondary small" onClick={runAdvice} disabled={advising}>
+                  {advising ? '레포 검토 중...' : '🔎 등록된 레포 검토'}
+                </button>
+                <button className="secondary small" onClick={() => commonConstraints.reload()}>새로고침</button>
+              </>)}
+              <button className="secondary small" onClick={() => setFoldConstraints(!foldConstraints)}>
+                {foldConstraints ? '펼치기' : '접기'}
               </button>
-              <button className="secondary small" onClick={() => commonConstraints.reload()}>새로고침</button>
             </div>
           </div>
+          {!foldConstraints && (<>
           <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
             여기에 등록한 제약은 기획 ①~⑤ 각 단계의 제약 문서에 함께 실려 매 단계에서 고려되고,
             작업 지시 생성과 외주 빌더(MCP <span className="mono">get_constraints</span>)·
@@ -644,6 +669,7 @@ export default function AgentPlanning() {
               </ul>
             )}
           </Async>
+          </>)}
         </div>
       )}
 
@@ -651,9 +677,14 @@ export default function AgentPlanning() {
       <div className="panel">
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
           <h3 style={{ margin: 0 }}>🗂️ 기획 세션 이력</h3>
-          <button className="secondary small" onClick={() => history.reload()}>새로고침</button>
+          <div className="row" style={{ gap: 6 }}>
+            {!foldHistory && <button className="secondary small" onClick={() => history.reload()}>새로고침</button>}
+            <button className="secondary small" onClick={() => setFoldHistory(!foldHistory)}>
+              {foldHistory ? '펼치기' : '접기'}
+            </button>
+          </div>
         </div>
-        <Async state={history} empty="기획 세션이 없습니다.">
+        {!foldHistory && <Async state={history} empty="기획 세션이 없습니다.">
           {(rows) => {
             // 목록에 보이는 프로젝트(조직 범위)의 세션만 노출한다.
             const visible = rows.filter((r) =>
@@ -698,7 +729,7 @@ export default function AgentPlanning() {
               </table>
             );
           }}
-        </Async>
+        </Async>}
       </div>
 
       {session && (
@@ -861,8 +892,14 @@ export default function AgentPlanning() {
                     지금 할 일 하나만 강조한다: 생성 → 단계 확정 → 진행 현황.
                     지난 단계 버튼은 남겨 두되(재생성·재머지가 필요할 수 있다) 강조는 뺀다. */}
                 <div className="row" style={{ gap: 8, marginTop: 12 }}>
-                  {/* 작업 지시 생성·재생성은 산출물 편집기 아래 '이 단계 확정' 옆으로
-                      옮겼다 — 문서를 만들고 확정하는 일이라 그 문서 옆에 있어야 한다. */}
+                  {/* 작업 지시 생성·재생성 — ⑤ 단계의 첫 일이라 이 줄 맨 앞(VS Code로 작업 왼쪽)에 둔다. */}
+                  <button
+                    className={taskStep === 'generate' ? 'primary small' : 'secondary small'}
+                    onClick={generateTasks}
+                    disabled={busy}
+                  >
+                    {tasks.length === 0 ? '확정 산출물에서 작업 지시 생성' : '작업 지시 재생성'}
+                  </button>
                   {/* 작업 지시까지 나오면 다음은 실제 구현이다 — 이 세션의 프로젝트
                       리포를 바로 VS Code로 받게 한다. 세션에는 project_id만 있으므로
                       목록에서 프로젝트를 찾아 넘긴다. */}
@@ -1008,15 +1045,6 @@ export default function AgentPlanning() {
                 </button>
                 {/* 작업 지시는 대화가 아니라 이 버튼이 문서를 만든다 — 만드는 버튼과
                     확정하는 버튼이 같은 줄에 있어야 순서가 보인다. */}
-                {activeStage === TASK_STAGE && (
-                  <button
-                    className={taskStep === 'generate' ? 'primary' : 'secondary'}
-                    onClick={generateTasks}
-                    disabled={busy}
-                  >
-                    {tasks.length === 0 ? '확정 산출물에서 작업 지시 생성' : '작업 지시 재생성'}
-                  </button>
-                )}
                 {gitResult?.git_action && (
                   <span className="mutedtext" style={{ fontSize: 12 }}>
                     {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
