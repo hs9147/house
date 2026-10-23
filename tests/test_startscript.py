@@ -637,3 +637,47 @@ def test_llm_writing_starts_by_checking_the_deploy_units(client, monkeypatch, tm
     assert got.status_code == 200 and got.json()["component"] == "web"
     # 같은 리포를 다시 보면 바뀐 것이 없다
     assert client.post(f"{API}/projects/{project.id}/start-script/units", headers=ADMIN).json()["changed"] is False
+
+
+def test_legacy_composite_without_detected_structure_writes_into_the_old_folders(tmp_path):
+    """회귀: 구조가 감지되지 않은 예전 복합 프로젝트는 유닛 이름이 예전 규칙(backend·frontend)인데, 스크립트를
+    쓸 폴더는 감지된 구조에서만 찾아 「감지된 구조에 없는 컴포넌트입니다: backend」로 실패했다."""
+    _write(tmp_path, "backend/requirements.txt", "fastapi\n")
+    _write(tmp_path, "frontend/package.json", '{"scripts": {"build": "vite build"}}')
+    project = Project(name="legacy", git_url="https://git.example.com/x", type=ProjectType.composite, structure=None)
+    assert startscript.component_dir(tmp_path, project, "backend") == tmp_path / "backend"
+    assert "this unit's files are in: frontend" in startscript._facts(tmp_path, project, "frontend")
+    # 감지된 구조가 있으면 그 밖의 이름은 여전히 거부한다(조용히 다른 폴더로 떨어지지 않게)
+    project.structure = {"components": [{"name": "api", "path": "api"}]}
+    with pytest.raises(ValueError):
+        startscript.component_dir(tmp_path, project, "backend")
+
+
+def test_llm_writing_never_skips_the_structure_recheck(client, monkeypatch, tmp_path):
+    """「LLM으로 작성」은 재확인을 건너뛰지 않는다 — 최신으로 받지 못하면 멈추고, 배포 단위가 없으면 쓰지 않는다.
+    그대로 진행하면 옛 구조나 예전 규칙 이름(backend·frontend)으로 없는 폴더의 스크립트를 쓴다(실측 오류)."""
+    from app.services.build import BuildError
+
+    _write(tmp_path, "README.md", "# 비어 있는 리포\n")
+    db = SessionLocal()
+    try:
+        project = _project(db, "script-api-legacy", type=ProjectType.composite)
+    finally:
+        db.close()
+    url = f"{API}/projects/{project.id}/start-script/units"
+
+    def offline(p):
+        raise BuildError("git fetch failed: could not resolve host")
+    monkeypatch.setattr("app.api.projects.checkout", offline)
+    res = client.post(url, headers=ADMIN)
+    assert res.status_code == 502 and "최신으로 받지 못해" in res.json()["detail"]
+
+    monkeypatch.setattr("app.api.projects.checkout", lambda p: (tmp_path, "abc123"))
+    res = client.post(url, headers=ADMIN)
+    assert res.status_code == 409 and "package.json" in res.json()["detail"]
+
+    # 구조가 다르면 바꾸고, 이전 구조를 함께 알린다
+    _write(tmp_path, "server/requirements.txt", "fastapi\n")
+    _write(tmp_path, "client/package.json", '{"dependencies": {"react": "18.0.0"}}')
+    body = client.post(url, headers=ADMIN).json()
+    assert sorted(body["components"]) == ["client", "server"] and body["changed"] is True

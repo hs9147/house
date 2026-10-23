@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from ..models import BuildProfile, LlmProvider, Project
 from . import llm as llm_service
 from . import structure, workspace
+from .build import COMPOSITE_COMPONENTS
 
 MAX_SCRIPT_CHARS = 8000
 MAX_FILES_IN_PROMPT = 200
@@ -156,12 +157,18 @@ def component_dir(workdir: Path, project: Project, component: str = "") -> Path:
 
     복합 배포는 컴포넌트마다 폴더가 다르고, **이름이 아니라 경로**를 쓴다 — `apps/web`은
     이름이 `apps-web`이다(docker 태그에 슬래시를 넣을 수 없어 그렇게 정했다).
+
+    구조가 감지되지 않은 예전 레코드는 유닛 이름이 예전 규칙(backend·frontend — structure.unit_names)으로
+    정해진다. 그때는 폴더도 그 규칙대로 리포 루트의 같은 이름 폴더다(build.detect_composite_components).
     """
     if component:
-        for comp in (project.structure or {}).get("components") or []:
+        components = (project.structure or {}).get("components") or []
+        for comp in components:
             if str(comp.get("name")) == component:
                 path = str(comp.get("path") or "")
                 return workdir / path if path else workdir
+        if not components and component in COMPOSITE_COMPONENTS:
+            return workdir / component
         raise ValueError(f"감지된 구조에 없는 컴포넌트입니다: {component}")
     return workdir / (project.source_subdir or "")
 

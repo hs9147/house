@@ -401,25 +401,33 @@ async def start_script_units(
     db: Session = Depends(get_db),
     admin: ApiKey = Depends(require_admin),
 ):
-    """「LLM으로 작성」의 첫 단계 — 배포 유닛부터 확인한다.
+    """「LLM으로 작성」의 첫 단계 — **늘 구조부터 다시 확인하고, 다르면 바꾼다.**
 
     스크립트는 유닛마다 따로다. 저장된 구조가 리포와 어긋나 있으면(컴포넌트를 더했거나 뺐으면) 없는 유닛의
-    스크립트를 쓰거나 있는 유닛을 빠뜨린다. 그래서 리포를 최신으로 두고 다시 감지한 뒤(구조 감지와 같은 길 —
-    services/structure.refresh) 유닛 목록을 돌려준다. 화면은 유닛마다 propose를 부른다 — 한 요청에 몰아
-    쓰면 유닛 수만큼 LLM을 기다려 프록시 시간 제한에 걸린다.
+    스크립트를 쓰거나 있는 유닛을 빠뜨린다. 그래서 리포를 최신으로 받아 다시 감지하고(services/structure.refresh)
+    유닛 목록을 돌려준다. 화면은 유닛마다 propose를 부른다 — 한 요청에 몰아 쓰면 유닛 수만큼 LLM을 기다려
+    프록시 시간 제한에 걸린다.
+
+    구조 감지 화면과 달리 **재확인을 건너뛰지 않는다**: 최신으로 받지 못하면(옛 사본으로 보면 재확인이 아니다)
+    멈추고, 받은 리포에서 배포 단위를 하나도 찾지 못하면 쓰지 않는다 — 그대로 진행하면 저장된 옛 구조나 예전
+    규칙의 이름(backend·frontend)으로 없는 폴더의 스크립트를 쓰게 된다(실측 오류).
     """
     project = _get_project(db, project_id)
-    workdir = get_settings().work_dir / project.name
-    git_sha = ""
     try:
         workdir, git_sha = await asyncio.to_thread(checkout, project)
-    except Exception:  # noqa: BLE001 — 원격이 없어도 워킹카피가 있으면 읽는다
-        pass
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=(
+            f"리포를 최신으로 받지 못해 구조를 다시 확인할 수 없습니다 — 스크립트를 쓰지 않습니다: {str(e)[:300]}"))
+    before = structure.summary(project.structure)
     detected, changed = await asyncio.to_thread(
         structure.refresh, db, project, workdir, actor=admin.name, source="repo", git_sha=git_sha)
+    if not detected.get("components"):
+        raise HTTPException(status_code=409, detail=(
+            "리포에서 배포 단위를 찾지 못했습니다 — 루트나 하위 폴더에 "
+            f"{'·'.join(structure.MARKER_FILES)} 중 하나가 있어야 그 폴더가 배포 단위가 됩니다."))
     return StartScriptUnitsOut(components=_script_components(project),
-                               structure=structure.summary(project.structure) or "(감지된 배포 단위 없음)",
-                               changed=changed)
+                               structure=structure.summary(project.structure),
+                               changed=changed, before=before if changed else "")
 
 
 @router.post("/{project_id}/start-script/propose", response_model=StartScriptOut,

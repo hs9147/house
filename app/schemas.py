@@ -142,6 +142,7 @@ class StartScriptUnitsOut(BaseModel):
     components: list[str] = []
     structure: str = ""      # 감지된 구조 요약(사람이 읽는 한 줄)
     changed: bool = False    # 이번 감지로 구조가 바뀌었는지
+    before: str = ""         # 바뀌었으면 이전 구조 요약(없었으면 "")
 
 
 class StartScriptOut(BaseModel):

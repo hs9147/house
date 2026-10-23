@@ -126,6 +126,7 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
     setNotice('');
     setApplied(false);
     try {
+      // 늘 구조부터 다시 확인한다 — 리포를 최신으로 받지 못하거나 배포 단위가 없으면 서버가 멈추고 이유를 준다.
       setBusy('배포 유닛을 확인하는 중… (리포를 최신으로 받아 구조를 다시 감지합니다)');
       const units = await api.startScriptUnits(projectId);
       setComponents(units.components);
@@ -153,7 +154,9 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
         setComponent(first);   // 바꾸면 위 effect가 그 유닛의 초안을 보인다
       }
       const written = list.filter((u) => drafts.current[u]).length;
-      setNotice(`배포 유닛 ${list.length}개 — ${units.structure}${units.changed ? ' (리포에 맞춰 구조를 갱신했습니다)' : ''}. `
+      setNotice(`배포 유닛 ${list.length}개 — ${units.structure}`
+        + (units.changed ? ` (구조가 바뀌어 갱신했습니다: ${units.before || '없음'} → ${units.structure})` : '')
+        + '. '
         + `${written}개 작성 — 유닛을 하나씩 골라 확인하고 저장하세요.`
         + (retried.length ? ` 검증에 걸려 다시 쓴 유닛: ${retried.join(', ')}.` : ''));
       if (failed.length) setError(`작성하지 못한 유닛 — ${failed.join(' / ')}`);

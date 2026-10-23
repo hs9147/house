@@ -485,6 +485,7 @@ export interface StartScriptUnitsOut {
   components: string[];
   structure: string;
   changed: boolean;
+  before: string;   // 바뀌었으면 이전 구조 요약
 }
 
 export interface StartScriptOut {
