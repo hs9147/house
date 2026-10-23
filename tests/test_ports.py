@@ -232,3 +232,25 @@ def test_deleting_a_project_frees_its_ports(monkeypatch, fresh_settings):
 
     assert c.delete(f"{API}/projects/{pid}", headers=ADMIN).status_code == 204
     assert c.get(f"{API}/ports", headers=ADMIN).json()["allocated"] == 0
+
+
+def _ipv6_localhost() -> bool:
+    try:
+        return any(info[0] == socket.AF_INET6 for info in socket.getaddrinfo("localhost", 80))
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not socket.has_ipv6 or not _ipv6_localhost(), reason="이 머신의 localhost가 ::1로 풀리지 않는다")
+def test_a_server_listening_only_on_ipv6_localhost_is_seen(fresh_settings):
+    """회귀(실측): 개발 배포의 Vite가 HOST=localhost를 ::1로 풀어 거기에만 들었는데, 플랫폼은 IPv4(127.0.0.1)로만
+    포트를 확인해 90초 내내 「닫힘」으로 보고 배포를 실패시켰다. 이름이 풀리는 모든 주소를 봐야 한다."""
+    from app.services.runtime import dev_process_runtime as dpr
+
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as server:
+        server.bind(("::1", 0))
+        server.listen(16)   # 받지 않은 확인 연결이 대기열을 채워 다음 확인을 막지 않게
+        port = server.getsockname()[1]
+        assert ports.is_listening("localhost", port) is True
+        assert dpr._port_open(port) is True
+    assert ports.is_listening("localhost", port) is False

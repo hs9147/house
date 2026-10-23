@@ -594,8 +594,9 @@ class PlatformModuleReportOut(BaseModel):
 
 
 class ComponentStatus(BaseModel):
-    name: str  # "backend" | "frontend"
+    name: str  # 감지된 구조의 컴포넌트 이름
     status: str
+    # 프록시가 전달하는 호스트 포트(포트 대장) — 앱 안쪽 포트가 아니다. 떠 있지 않으면 None.
     internal_port: int | None = None
 
 
@@ -616,8 +617,9 @@ class ServerConfigSite(BaseModel):
     domain: str
     path_prefix: str
     status: str
-    # 프록시가 실제로 전달하는 업스트림(예: 127.0.0.1:8123). 지금 running인 배포
-    # 레코드에서 가져오므로, 떠 있지 않으면 None이다.
+    # 프록시가 실제로 전달하는 업스트림(예: 127.0.0.1:8123) — 포트 대장(services/ports.upstreams).
+    # 떠 있지 않으면 None, 복합 프로젝트는 컴포넌트마다라 None(components의 internal_port).
+    # internal_host는 어느 유닛이든 포트가 있으면 채운다.
     internal_host: str | None = None
     internal_port: int | None = None
     redirect_count: int

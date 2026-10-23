@@ -15,7 +15,6 @@ DockerRuntime과 동일한 블루-그린 패턴: 서비스 이름은 {unit}-a / 
 쓰고, 새 슬롯이 헬스체크를 통과한 뒤에만 이전 슬롯을 제거한다.
 """
 import os
-import socket
 import subprocess
 import time
 import urllib.error
@@ -66,11 +65,13 @@ def allocate_port() -> int:
     먼저 풀리는데, ::1에서 이미 쓰이는 포트가 127.0.0.1에서는 비어 보인다 — 그러면 이미
     다른 배포가 쓰는 포트를 다시 내주고 두 번째 기동이 조용히 실패한다.
     """
+    from .. import ports  # noqa: PLC0415
+
     settings = get_settings()
     for port in range(settings.port_range_start, settings.port_range_end + 1):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex((UPSTREAM_HOST, port)) != 0:
-                return port
+        # IPv4로만 보면 ::1에서 쓰이는 포트가 비어 보인다 — 이름이 풀리는 모든 주소를 본다.
+        if not ports.is_listening(UPSTREAM_HOST, port):
+            return port
     raise RuntimeError("no free port in configured range")
 
 

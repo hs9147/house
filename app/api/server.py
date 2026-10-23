@@ -15,7 +15,7 @@ from .. import audit
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
-    ApiKey, BuildProfile, Deployment, DeploymentStatus, Project, ProjectType,
+    ApiKey, BuildProfile, Project, ProjectType,
     RedirectKind, RedirectRule,
 )
 from ..schemas import (
@@ -92,37 +92,11 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
     rules_by_project: dict[int, list[RedirectRule]] = defaultdict(list)
     for rule in db.execute(select(RedirectRule).order_by(RedirectRule.id)).scalars():
         rules_by_project[rule.project_id].append(rule)
-    # composite 컴포넌트의 내부 포트 — 롤백 없이도 마지막으로 running이었던 값을 보여준다
-    ports = {
-        (project_id, profile, component): port
-        for project_id, profile, component, port in db.execute(
-            select(
-                Deployment.project_id, Deployment.profile, Deployment.component,
-                Deployment.internal_port,
-            ).where(
-                Deployment.status == DeploymentStatus.running,
-                Deployment.component.is_not(None),
-            )
-        ).all()
-    }
-    # 일반 프로젝트(컴포넌트 없음)의 업스트림 — 서버구성 화면의 URL 칸이 공개 주소가
-    # 아니라 프록시가 실제로 전달하는 곳을 보여주기 위한 값이다.
-    #
-    # host_port를 읽는다. internal_port는 **컨테이너 내부** 포트(8000 등)라 프록시가
-    # 바라보는 주소가 아니고, 일반 프로젝트의 배포 레코드에는 채워지지도 않는다
-    # (composite 컴포넌트 재기동용으로만 저장된다) — 그걸 읽으면 항상 비어 보인다.
-    upstreams = {
-        (project_id, profile): port
-        for project_id, profile, port in db.execute(
-            select(
-                Deployment.project_id, Deployment.profile, Deployment.host_port,
-            ).where(
-                Deployment.status == DeploymentStatus.running,
-                Deployment.component.is_(None),
-            )
-        ).all()
-        if port is not None
-    }
+    # 유닛마다 프록시가 실제로 전달하는 호스트 포트 — 서버구성의 「내부 URL」은 공개 주소가 아니라 그곳이다.
+    # 원천은 포트 대장이다(services/ports.upstreams). 예전에는 복합 컴포넌트에 앱 안쪽 포트(internal_port,
+    # 8000·80)를 보여 서로 다른 프로젝트가 같은 주소로 겹쳐 보였고, 복합 프로젝트의 표 칸은 늘 비었다(실측).
+    # 떠 있지 않은(stopped) 유닛은 비운다.
+    unit_ports = ports_service.upstreams(db)
     sites = []
     for p in projects:
         for profile in BuildProfile:
@@ -143,7 +117,8 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
                         comp_status = f"unknown ({e})"
                     components.append(ComponentStatus(
                         name=name, status=comp_status,
-                        internal_port=ports.get((p.id, profile, name)),
+                        internal_port=(None if comp_status == "stopped"
+                                       else unit_ports.get((p.id, profile, name))),
                     ))
                 statuses = {c.status for c in components}
                 status = statuses.pop() if len(statuses) == 1 else "partial"
@@ -152,6 +127,9 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
                     status = runtime.status(p.name, profile)
                 except Exception as e:  # noqa: BLE001 — 런타임 미설치/미접근이 전체 화면을 막지 않게
                     status = f"unknown ({e})"
+            # 단일 배포의 업스트림 — 복합은 컴포넌트마다라 사이트 칸에는 두지 않는다(화면이 컴포넌트를 나열한다).
+            site_port = (None if components is not None or status == "stopped"
+                         else unit_ports.get((p.id, profile, "")))
             org_name = p.organization.name if p.organization else None
             project_rules = rules_by_project.get(p.id, [])
             in_proxy = (
@@ -171,8 +149,9 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
                 # 곳은 같다. 실제 바인드·프록시 설정 문자열은 127.0.0.1 그대로다
                 # (Windows에서 localhost는 ::1로 먼저 풀려, 앱이 127.0.0.1에만 듣는
                 #  지금 구성에서 프록시 대상까지 바꾸면 502가 난다).
-                internal_host=_upstream_host(settings) if upstreams.get((p.id, profile)) else None,
-                internal_port=upstreams.get((p.id, profile)),
+                internal_host=(_upstream_host(settings)
+                               if site_port or any(c.internal_port for c in components or []) else None),
+                internal_port=site_port,
                 redirect_count=len(project_rules),
                 redirects=[
                     RedirectRuleSummary(

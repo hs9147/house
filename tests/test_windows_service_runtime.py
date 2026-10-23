@@ -253,21 +253,14 @@ def test_health_failure_message_names_the_probed_url(env, monkeypatch):
 def test_port_probe_uses_the_same_host_the_app_binds(monkeypatch, fresh_settings):
     """127.0.0.1로 확인하면 ::1에서 이미 쓰이는 포트가 비어 보인다 — 이미 다른 배포가
     쓰는 포트를 다시 내주고 두 번째 기동이 조용히 실패한다."""
-    import socket as _socket
+    from app.services import ports
 
     probed: list = []
 
-    class _Sock:
-        def __enter__(self):
-            return self
+    def listening(host, port, timeout=0.2):
+        probed.append(host)
+        return False  # 비어 있음
 
-        def __exit__(self, *a):
-            return False
-
-        def connect_ex(self, addr):
-            probed.append(addr)
-            return 1  # 비어 있음
-
-    monkeypatch.setattr(_socket, "socket", lambda *a, **kw: _Sock())
+    monkeypatch.setattr(ports, "is_listening", listening)
     wsr.allocate_port()
-    assert probed and probed[0][0] == wsr.UPSTREAM_HOST
+    assert probed and probed[0] == wsr.UPSTREAM_HOST

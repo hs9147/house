@@ -25,11 +25,32 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import BuildProfile, PortAllocation, Project
+from ..models import BuildProfile, Deployment, DeploymentStatus, PortAllocation, Project
 
 # 포트가 열려 있는지 확인하는 데 쓰는 상한. 로컬 접속이라 정상이면 즉시 끝나고, 방화벽
 # 때문에 응답이 없는 경우에도 배포가 이 확인 하나로 오래 멈추지 않게 한다.
 PROBE_TIMEOUT = 0.2
+
+
+def upstreams(db: Session) -> dict[tuple[int, BuildProfile, str], int]:
+    """유닛(프로젝트·프로필·컴포넌트 — 단일은 "")마다 프록시가 바라보는 호스트 포트.
+
+    **대장이 원천이다** — 배포·롤백이 이 포트로 띄우고(deployer.make_spec) 프록시도 이 포트를 가리킨다. 대장이
+    생기기 전의 예전 배포만 running 배포 기록의 host_port로 채우되, **가장 최근** 기록이 이긴다(같은 유닛에
+    running 행이 여럿 남아 있으면 옛 포트가 보일 수 있었다). 배포 기록의 internal_port는 앱 안쪽 포트(8000·80
+    등)라 여기에 쓰지 않는다 — 그것을 보이면 서로 다른 프로젝트가 같은 주소로 겹쳐 보인다(실측).
+    """
+    out: dict[tuple[int, BuildProfile, str], int] = {}
+    rows = db.execute(
+        select(Deployment.project_id, Deployment.profile, Deployment.component, Deployment.host_port)
+        .where(Deployment.status == DeploymentStatus.running, Deployment.host_port.is_not(None))
+        .order_by(Deployment.id)
+    ).all()
+    for project_id, profile, component, port in rows:
+        out[(project_id, profile, component or "")] = port
+    for row in db.execute(select(PortAllocation)).scalars():
+        out[(row.project_id, row.profile, row.component or "")] = row.port
+    return out
 
 
 class PortExhausted(RuntimeError):
@@ -37,9 +58,17 @@ class PortExhausted(RuntimeError):
 
 
 def is_listening(host: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(timeout)
-        return sock.connect_ex((host, port)) == 0
+    """그 이름으로 붙을 수 있는지 — 이름이 풀리는 **모든** 주소(IPv6·IPv4)를 시도한다.
+
+    IPv4 소켓으로만 보면 안 된다. 앱에 HOST=localhost를 주면 Windows의 Node(Vite)는 ::1에만 듣는다 — IPv4로
+    127.0.0.1만 보면 떠 있는 앱을 "닫힘"으로 보고(개발 배포 헬스체크가 90초 내내 실패한 실측), ::1에서 쓰이는
+    포트를 비었다고 내준다.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _owner_row(db: Session, project_id: int, profile: BuildProfile,

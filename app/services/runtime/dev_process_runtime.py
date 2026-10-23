@@ -21,7 +21,6 @@ URL rewrite는 그대로 필요하다 — 프록시가 서브패스로 라우팅
 같은 base를 넘긴다(PAAS_BASE_PATH). 이 런타임은 그 값을 환경변수로 전달할 뿐이다.
 """
 import os
-import socket
 import subprocess
 import time
 import urllib.error
@@ -30,6 +29,7 @@ from pathlib import Path
 
 from ...config import get_settings
 from ...models import BuildProfile
+from .. import ports
 from .base import Endpoint, Runtime, RuntimeSpec
 # 같은 호스트 이름(프록시 업스트림)과 로그 tail 읽기를 공유한다 — 두 런타임이 같은
 # 머신의 같은 프로세스를 다루므로, 이름이 갈라지면 프록시가 ::1로 붙어 502가 난다
@@ -80,9 +80,9 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _port_open(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(1.0)
-        return s.connect_ex((UPSTREAM_HOST, port)) == 0
+    """앱에 넘긴 이름(UPSTREAM_HOST=localhost)이 풀리는 모든 주소를 본다(services/ports.is_listening) —
+    Windows의 Vite는 localhost를 ::1로 풀어 거기에만 듣는다. IPv4로만 보면 떠 있는 dev 서버를 끝까지 못 찾는다."""
+    return ports.is_listening(UPSTREAM_HOST, port, timeout=1.0)
 
 
 class DevProcessRuntime(Runtime):

@@ -329,3 +329,43 @@ def test_upstream_host_follows_runtime(monkeypatch, fresh_settings):
     monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "docker")
     get_settings.cache_clear()
     assert _upstream_host(get_settings()) == "127.0.0.1"
+
+
+def test_internal_url_comes_from_the_port_ledger_without_overlaps_or_blanks(monkeypatch, fresh_settings):
+    """회귀(실측): 복합 프로젝트는 떠 있어도 표의 내부 URL이 비었고, 컴포넌트에는 앱 안쪽 포트(8000·80)를 보여
+    서로 다른 프로젝트가 같은 주소로 겹쳐 보였다. 단일 프로젝트에 옛 running 행이 남으면 옛 포트가 보일 수 있었다.
+    내부 URL은 포트 대장(프록시가 실제로 가리키는 호스트 포트)이 원천이다."""
+    monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
+    c = _client()
+    from app.db import SessionLocal
+    from app.models import BuildProfile, Deployment, DeploymentStatus, PortAllocation, Project, ProjectType
+
+    with SessionLocal() as db:
+        for name, base in (("comp-one", 8101), ("comp-two", 8201)):
+            p = Project(name=name, type=ProjectType.composite, git_url="https://g/x",
+                        structure={"components": [{"name": "api", "path": "api", "type": "python"},
+                                                  {"name": "web", "path": "web", "type": "react"}]})
+            db.add(p)
+            db.commit()
+            for i, (comp, inner) in enumerate((("api", 8000), ("web", 80))):
+                db.add(PortAllocation(port=base + i, project_id=p.id, profile=BuildProfile.release, component=comp))
+                db.add(Deployment(project_id=p.id, git_sha="a" * 40, image_tag="", profile=BuildProfile.release,
+                                  status=DeploymentStatus.running, component=comp, internal_port=inner,
+                                  host_port=base + i))
+        single = Project(name="single-one", type=ProjectType.python, git_url="https://g/x")
+        db.add(single)
+        db.commit()
+        # 대장이 없던 예전 배포 — 옛 running 행이 남아 있어도 가장 최근 것이 보인다
+        db.add(Deployment(project_id=single.id, git_sha="c" * 40, image_tag="", profile=BuildProfile.release,
+                          status=DeploymentStatus.running, host_port=8301))
+        db.add(Deployment(project_id=single.id, git_sha="b" * 40, image_tag="", profile=BuildProfile.release,
+                          status=DeploymentStatus.running, host_port=8302))
+        db.commit()
+
+    sites = {(s["project_name"], s["profile"]): s
+             for s in c.get("/paas/api/v1/server-config", headers=ADMIN).json()["sites"]}
+    one, two = sites[("comp-one", "release")], sites[("comp-two", "release")]
+    assert {x["name"]: x["internal_port"] for x in one["components"]} == {"api": 8101, "web": 8102}
+    assert {x["name"]: x["internal_port"] for x in two["components"]} == {"api": 8201, "web": 8202}
+    assert one["internal_host"]          # 떠 있으면 비지 않는다(주소는 컴포넌트마다)
+    assert sites[("single-one", "release")]["internal_port"] == 8302

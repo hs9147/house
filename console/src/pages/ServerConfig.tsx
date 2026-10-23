@@ -131,7 +131,27 @@ export default function ServerConfig() {
         컴포넌트별 상태를 볼 수 있습니다.
       </p>
       <Async state={state} empty="등록된 프로젝트가 없습니다.">
-        {(cfg) => (
+        {(cfg) => {
+          // 같은 호스트 포트가 두 유닛에 보이면 한쪽 주소는 틀린 것이다 — 대장(services/ports)이 원천이라
+          // 정상이면 생기지 않는다. 생기면 칸에 ⚠로 보이고 위에 알린다.
+          const owners = new Map<number, string[]>();
+          cfg.sites.forEach((x) => {
+            const units = x.components?.length
+              ? x.components.map((u) => [u.internal_port, `${x.project_name}·${x.profile}·${u.name}`] as const)
+              : [[x.internal_port, `${x.project_name}·${x.profile}`] as const];
+            units.forEach(([port, who]) => { if (port) owners.set(port, [...(owners.get(port) ?? []), who]); });
+          });
+          const clash = [...owners.entries()].filter(([, who]) => who.length > 1);
+          const clashed = (port: number | null | undefined) => !!port && (owners.get(port)?.length ?? 0) > 1;
+          // 서버가 내부 호스트를 localhost로 표기한다(app/api/server.py — 127.0.0.1과 같은 루프백).
+          const url = (port: number) => `http://localhost:${port}`;
+          return (
+          <>
+          {clash.length > 0 && (
+            <p className="error" style={{ fontSize: 12 }}>
+              ⚠ 같은 내부 주소를 둘 이상의 유닛이 가리킵니다 — {clash.map(([port, who]) => `:${port}(${who.join(', ')})`).join(' / ')}
+            </p>
+          )}
           <table>
             <thead>
               <tr>
@@ -159,9 +179,14 @@ export default function ServerConfig() {
                         라우팅이 어디로 꽂혀 있는지 확인하는 화면이다. 떠 있지 않으면
                         할당된 포트가 없다. */}
                     <td className="mono">
-                      {s.internal_port
-                        ? `http://${s.internal_host ?? 'localhost'}:${s.internal_port}`
-                        : '-'}
+                      {/* 복합 프로젝트는 유닛마다 주소가 따로다 — 유닛별로 나열한다. */}
+                      {s.components?.length
+                        ? s.components.map((u) => (
+                          <div key={u.name}>
+                            {u.name} → {u.internal_port ? url(u.internal_port) : '-'}{clashed(u.internal_port) && ' ⚠'}
+                          </div>
+                        ))
+                        : s.internal_port ? <>{url(s.internal_port)}{clashed(s.internal_port) && ' ⚠'}</> : '-'}
                     </td>
                     <td><StatusPill value={s.status} /></td>
                     <td><AutoDeployMark status={s.status} /></td>
@@ -171,7 +196,9 @@ export default function ServerConfig() {
               })}
             </tbody>
           </table>
-        )}
+          </>
+          );
+        }}
       </Async>
     </div>
   );

@@ -57,7 +57,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..features import is_enabled, require_feature
 from ..models import (
-    ApiKey, AuditEvent, BuildProfile, Deployment, DeploymentStatus, Module, ModuleType,
+    ApiKey, AuditEvent, BuildProfile, Deployment, Module, ModuleType,
     Project, ProjectType,
 )
 from ..security import (accessible_document_stores, require_agent_key,
@@ -324,20 +324,10 @@ def _ops_call(db: Session, actor: str, name: str, args: dict) -> str:
     if name == "get_deploy_status":
         runtime = deployer.get_runtime()
         org_name = project.organization.name if project.organization else None
-        # 프록시가 실제로 전달하는 곳(업스트림 포트)은 running 배포 행의 host_port다 —
-        # internal_port는 컨테이너 내부 포트라 일반 프로젝트에는 채워지지도 않는다.
-        # 이름을 running_ports로 둔다 — 모듈 상단의 ports(services/ports.py)를 가리면
+        # 프록시가 실제로 전달하는 곳(업스트림 포트) — 서버구성 화면과 같은 원천(포트 대장, ports.upstreams).
+        # 이름을 unit_ports로 둔다 — 모듈 상단의 ports(services/ports.py)를 가리면
         # 같은 함수의 list_ports 분기가 UnboundLocalError로 죽는다(실제로 그랬다).
-        running_ports = {
-            profile: port
-            for profile, port in db.execute(
-                select(Deployment.profile, Deployment.host_port).where(
-                    Deployment.project_id == project.id,
-                    Deployment.status == DeploymentStatus.running,
-                    Deployment.component.is_(None),
-                )
-            ).all()
-        }
+        unit_ports = ports.upstreams(db)
         out = {"project": project.name, "type": project.type.value, "branch": project.branch,
                "profiles": {}}
         for profile in BuildProfile:
@@ -346,11 +336,12 @@ def _ops_call(db: Session, actor: str, name: str, args: dict) -> str:
                 .where(Deployment.project_id == project.id, Deployment.profile == profile)
                 .order_by(Deployment.id.desc())
             ).scalars().first()
+            status = _runtime_status(runtime, project, profile)
             out["profiles"][profile.value] = {
-                "status": _runtime_status(runtime, project, profile),
+                "status": status,
                 "domain": domain_for(project.name, profile),
                 "path_prefix": path_prefix_for(org_name, project.name, profile),
-                "internal_port": running_ports.get(profile),
+                "internal_port": None if status == "stopped" else unit_ports.get((project.id, profile, "")),
                 "last_deployment": None if latest is None else {
                     "id": latest.id, "status": latest.status.value, "git_sha": latest.git_sha,
                     "created_at": latest.created_at, "finished_at": latest.finished_at,
