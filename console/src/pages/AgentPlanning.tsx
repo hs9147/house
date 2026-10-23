@@ -755,26 +755,6 @@ export default function AgentPlanning() {
                 );
               })}
             </div>
-            {unmerged != null && unmerged > 0 && (
-              <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
-                <span className="status warn">미반영</span>
-                <span style={{ fontSize: 12 }}>
-                  작업 브랜치 <span className="mono">{session.branch}</span>에 기본 브랜치로 반영되지 않은 커밋{' '}
-                  {unmerged}개가 있습니다.
-                </span>
-                <button className="primary small" onClick={mergeSession} disabled={busy}>🔀 브랜치 머지</button>
-              </div>
-            )}
-            {mergeResult && (
-              <p style={{ fontSize: 12, marginTop: 6, color: mergeResult.action === 'merged' ? '#10b981' : '#f59e0b' }}>
-                {mergeResult.branch} → {GIT_ACTION_LABEL[mergeResult.action] ?? mergeResult.action}
-                {mergeResult.pull_request_url && (
-                  <> · <a href={mergeResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
-                )}
-                {mergeResult.detail && <> · {mergeResult.detail}</>}
-                {mergeResult.branch_deleted && <> · 작업 브랜치를 정리했습니다(다음 확정 때 다시 만들어집니다)</>}
-              </p>
-            )}
           </div>
 
           {/* 단계별 시각화 — 산출물에 실린 mermaid C4 블록이 그림의 원천이다.
@@ -921,6 +901,27 @@ export default function AgentPlanning() {
                     </button>
                   )}
                 </div>
+                {/* 미반영 커밋이 있을 때만 — 작업 지시 버튼 줄 아래(단계 확정마다 반영되므로 보통은 없다) */}
+                {unmerged != null && unmerged > 0 && (
+                  <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+                    <span className="status warn">미반영</span>
+                    <span style={{ fontSize: 12 }}>
+                      작업 브랜치 <span className="mono">{session.branch}</span>에 기본 브랜치로 반영되지 않은 커밋{' '}
+                      {unmerged}개가 있습니다.
+                    </span>
+                    <button className="primary small" onClick={mergeSession} disabled={busy}>🔀 브랜치 머지</button>
+                  </div>
+                )}
+                {mergeResult && (
+                  <p style={{ fontSize: 12, marginTop: 6, color: mergeResult.action === 'merged' ? '#10b981' : '#f59e0b' }}>
+                    {mergeResult.branch} → {GIT_ACTION_LABEL[mergeResult.action] ?? mergeResult.action}
+                    {mergeResult.pull_request_url && (
+                      <> · <a href={mergeResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
+                    )}
+                    {mergeResult.detail && <> · {mergeResult.detail}</>}
+                    {mergeResult.branch_deleted && <> · 작업 브랜치를 정리했습니다(다음 확정 때 다시 만들어집니다)</>}
+                  </p>
+                )}
                 <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
                   외부 빌더가 MCP(<span className="mono">list_tasks·update_task·submit_build_result</span>)로
                   집어가고 상태를 갱신합니다. 막히면 <span className="mono">request_clarification</span>으로
