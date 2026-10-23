@@ -32,7 +32,7 @@ def test_development_deploys_while_release_is_running(monkeypatch, fresh_setting
     }, headers=ADMIN).json()["id"]
     monkeypatch.setattr(deployer, "get_runtime", lambda: _Runtime({BuildProfile.release}))
     monkeypatch.setattr(deployer, "deploy_queued",
-                        lambda db, p, prof, sha=None: type("D", (), {
+                        lambda db, p, prof, sha=None, **kw: type("D", (), {
                             "id": 1, "project_id": p.id, "git_sha": "", "image_tag": "",
                             "profile": prof, "status": "building", "component": None,
                             "created_at": None, "finished_at": None, "error": None,
@@ -59,3 +59,51 @@ def test_each_profile_has_its_own_deploy_folder(fresh_settings):
         DevProcessRuntime().start(spec)
     except DevProcessError as e:
         assert "shop~dev" in str(e)   # development는 ~dev 폴더의 start.cmd를 찾는다
+
+
+def test_redeploy_cancels_the_running_deploy_and_waits_for_it(monkeypatch, fresh_settings):
+    """배포 중에 「재배포」 — 진행 중인 배포에 취소를 요청하고, 새 배포는 그것이 멈추기를 기다렸다가 시작한다.
+    파이프라인이 이 프로세스에 없으면(플랫폼 재시작) 남은 building 기록은 그 자리에서 닫는다."""
+    import threading
+    import time
+    from datetime import datetime, timezone
+
+    from app.db import SessionLocal
+    from app.models import Deployment, DeploymentStatus
+
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    project_id = c.post("/paas/api/v1/projects", json={
+        "name": "redo", "type": "python", "git_url": "https://git.example.com/o/r.git", "branch": "main",
+    }, headers=ADMIN).json()["id"]
+    with SessionLocal() as db:
+        stale = Deployment(project_id=project_id, git_sha="", image_tag="", profile=BuildProfile.release,
+                           status=DeploymentStatus.building)
+        db.add(stale)
+        db.commit()
+        stale_id = stale.id
+
+    seen = {}
+
+    def queued(db, p, prof, sha=None, wait_lock=False):
+        seen["wait_lock"] = wait_lock
+        return type("D", (), {"id": 99, "project_id": p.id, "git_sha": "", "image_tag": "", "profile": prof,
+                              "status": "building", "component": None, "created_at": datetime.now(timezone.utc),
+                              "finished_at": None, "error": None, "host_port": None, "internal_port": None, "build_log_path": None})()
+    monkeypatch.setattr(deployer, "deploy_queued", queued)
+    r = c.post(f"/paas/api/v1/projects/{project_id}/deploy",
+               json={"profile": "release", "wait": False, "redeploy": True}, headers=ADMIN)
+    assert r.status_code == 202, r.text
+    assert seen["wait_lock"] is True
+    with SessionLocal() as db:
+        row = db.get(Deployment, stale_id)
+        assert row.status == DeploymentStatus.failed and "재배포" in row.error
+
+    # 기다림 — 앞 배포가 잠금을 놓으면 그때 잡는다(재배포가 아니면 바로 포기한다)
+    lock = threading.Lock()
+    lock.acquire()
+    threading.Timer(0.3, lock.release).start()
+    assert deployer._acquire(lock, wait=False) is False
+    t0 = time.monotonic()
+    assert deployer._acquire(lock, wait=True) is True and time.monotonic() - t0 >= 0.2
+    lock.release()

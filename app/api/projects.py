@@ -854,15 +854,21 @@ async def deploy_project(
     project = _get_project(db, project_id)
     profile = body.profile or project.default_profile
     # release와 development는 동시에 떠 있을 수 있다 — 경로(~dev)·포트·유닛 이름·배포 폴더가 프로필마다 따로다.
+    # 재배포: 진행 중인 배포에 취소를 요청하고, 새 배포는 그것이 멈추기를 기다렸다가 시작한다(deployer.LOCK_WAIT).
+    wait_lock = body.redeploy
+    if body.redeploy:
+        cancelled = deployer.cancel_building(db, project, profile)
+        audit.record(db, key.name, "deploy.redeploy", project.name,
+                     {"profile": profile.value, "cancelled": cancelled})
     if project.type == ProjectType.composite:
         if not body.wait:
-            records = deployer.deploy_composite_queued(db, project, profile, body.git_sha)
+            records = deployer.deploy_composite_queued(db, project, profile, body.git_sha, wait_lock=wait_lock)
             response.status_code = 202
             audit.record(db, key.name, "deploy.queued", project.name,
                          {"profile": profile.value, "deployment_ids": [r.id for r in records.values()]})
             return list(records.values())
         try:
-            records = await deployer.deploy_composite(db, project, profile, body.git_sha)
+            records = await deployer.deploy_composite(db, project, profile, body.git_sha, wait_lock=wait_lock)
         except DeployInProgress as e:
             raise HTTPException(status_code=409, detail=str(e))
         except Exception as e:
@@ -873,13 +879,13 @@ async def deploy_project(
         )
         return list(records.values())
     if not body.wait:
-        record = deployer.deploy_queued(db, project, profile, body.git_sha)
+        record = deployer.deploy_queued(db, project, profile, body.git_sha, wait_lock=wait_lock)
         response.status_code = 202
         audit.record(db, key.name, "deploy.queued", project.name,
                      {"profile": profile.value, "deployment_id": record.id})
         return record
     try:
-        record = await deployer.deploy(db, project, profile, body.git_sha)
+        record = await deployer.deploy(db, project, profile, body.git_sha, wait_lock=wait_lock)
     except DeployInProgress as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:

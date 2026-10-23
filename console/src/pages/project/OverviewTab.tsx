@@ -10,15 +10,21 @@ import DeployCheckModal from '../../components/DeployCheckModal';
 import StartScriptModal from '../../components/StartScriptModal';
 import StatusPill from '../../components/StatusPill';
 import { api, ApiError } from '../../lib/api';
-import { useApi } from '../../lib/hooks';
+import { useApi, usePolling } from '../../lib/hooks';
 import type { BuildProfile } from '../../lib/types';
 import type { ProjectContext } from '../ProjectDetail';
 
-type Action = { kind: 'deploy' | 'rollback' | 'stop'; profile: BuildProfile } | null;
+type Action = { kind: 'deploy' | 'redeploy' | 'rollback' | 'stop'; profile: BuildProfile } | null;
 
 export default function OverviewTab() {
   const { project } = useOutletContext<ProjectContext>();
   const state = useApi(() => api.projectStatus(project.id), [project.id]);
+  // 진행 중인 배포 — 그 프로필의 배포 버튼이 「재배포」가 된다(취소를 요청하고 그것이 멈추면 새로 배포).
+  const history = useApi(() => api.deployments(project.id), [project.id]);
+  const deploying = (profile: BuildProfile) =>
+    (history.data ?? []).some((d) => d.profile === profile && d.status === 'building');
+  usePolling(async () => history.reload(), 3000,
+             (history.data ?? []).some((d) => d.status === 'building'));
   const health = useApi(() => api.health());
   const [gitSha, setGitSha] = useState('');
   const [action, setAction] = useState<Action>(null);
@@ -41,10 +47,12 @@ export default function OverviewTab() {
     setError('');
     setMessage('');
     try {
-      if (action.kind === 'deploy') {
-        const result = await api.deployQueued(project.id, action.profile, gitSha.trim() || undefined);
+      if (action.kind === 'deploy' || action.kind === 'redeploy') {
+        const result = await api.deployQueued(project.id, action.profile, gitSha.trim() || undefined,
+                                              action.kind === 'redeploy');
         const records = Array.isArray(result) ? result : [result];
         setDeployFor({ ids: records.map((r) => r.id), profile: action.profile });
+        history.reload();
       } else if (action.kind === 'rollback') {
         const d = await api.rollback(project.id, action.profile);
         setMessage(`롤백 완료 — ${d.image_tag}`);
@@ -67,7 +75,7 @@ export default function OverviewTab() {
   };
 
   const labels: Record<string, string> = {
-    deploy: '배포', rollback: '롤백', stop: '중지',
+    deploy: '배포', redeploy: '재배포', rollback: '롤백', stop: '중지',
   };
 
   return (
@@ -146,9 +154,10 @@ export default function OverviewTab() {
                           <button
                             className="small"
                             disabled={busy}
-                            onClick={() => setAction({ kind: 'deploy', profile })}
+                            title={deploying(profile) ? '진행 중인 배포를 취소하고, 멈추면 처음부터 다시 배포합니다' : undefined}
+                            onClick={() => setAction({ kind: deploying(profile) ? 'redeploy' : 'deploy', profile })}
                           >
-                            배포
+                            {deploying(profile) ? '재배포' : '배포'}
                           </button>
                           <button
                             className="small secondary"
@@ -194,7 +203,9 @@ export default function OverviewTab() {
       {action && (
         <Confirm
           title={`${action.profile} ${labels[action.kind]}`}
-          message={`${project.name}에 ${action.profile} 프로필로 "${labels[action.kind]}"을(를) 실행합니다.`}
+          message={action.kind === 'redeploy'
+            ? `${project.name}의 진행 중인 ${action.profile} 배포를 취소하고, 그것이 멈추면 처음부터 다시 배포합니다.`
+            : `${project.name}에 ${action.profile} 프로필로 "${labels[action.kind]}"을(를) 실행합니다.`}
           confirmLabel={labels[action.kind]}
           danger={action.kind === 'stop'}
           busy={busy}
@@ -232,6 +243,7 @@ export default function OverviewTab() {
           onClose={() => {
             setDeployFor(null);
             state.reload();
+            history.reload();
           }}
         />
       )}

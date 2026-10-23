@@ -24,11 +24,12 @@ export default function ServerConfig() {
 
   // 배포는 큐(비블로킹)로 한 번만 요청하고, 받은 레코드 id를 진행 로그 모달에 넘겨
   // 폴링으로 진행 상황을 보여준다.
-  const startDeploy = async (projectId: number, name: string, profile: BuildProfile) => {
+  // redeploy — 그 프로필에 진행 중인 배포가 있을 때(버튼이 「재배포」): 취소를 요청하고 멈추면 새로 배포한다.
+  const startDeploy = async (projectId: number, name: string, profile: BuildProfile, redeploy = false) => {
     setBusyKey(`${projectId}-${profile}-deploy`);
     setError('');
     try {
-      const result = await api.deployQueued(projectId, profile);
+      const result = await api.deployQueued(projectId, profile, undefined, redeploy);
       const records = Array.isArray(result) ? result : [result];
       setDeployFor({ projectId, ids: records.map((r) => r.id), name, profile });
     } catch (e) {
@@ -79,8 +80,9 @@ export default function ServerConfig() {
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             <button className="small"
                     disabled={busyKey === `${site.project_id}-${site.profile}-deploy`}
-                    onClick={() => startDeploy(site.project_id, site.project_name, site.profile)}>
-              배포
+                    title={site.deploying ? '진행 중인 배포를 취소하고, 멈추면 처음부터 다시 배포합니다' : undefined}
+                    onClick={() => startDeploy(site.project_id, site.project_name, site.profile, !!site.deploying)}>
+              {site.deploying ? '재배포' : '배포'}
             </button>
             <button className="small danger"
                     disabled={busyKey === `${site.project_id}-${site.profile}-stop`}

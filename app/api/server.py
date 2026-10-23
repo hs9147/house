@@ -15,7 +15,7 @@ from .. import audit
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
-    ApiKey, BuildProfile, Project, ProjectType,
+    ApiKey, BuildProfile, Deployment, DeploymentStatus, Project, ProjectType,
     RedirectKind, RedirectRule,
 )
 from ..schemas import (
@@ -97,6 +97,13 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
     # 8000·80)를 보여 서로 다른 프로젝트가 같은 주소로 겹쳐 보였고, 복합 프로젝트의 표 칸은 늘 비었다(실측).
     # 떠 있지 않은(stopped) 유닛은 비운다.
     unit_ports = ports_service.upstreams(db)
+    deploying = {
+        (project_id, profile)
+        for project_id, profile in db.execute(
+            select(Deployment.project_id, Deployment.profile)
+            .where(Deployment.status == DeploymentStatus.building)
+        ).all()
+    }
     sites = []
     for p in projects:
         for profile in BuildProfile:
@@ -162,6 +169,7 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
                 ],
                 components=components,
                 in_proxy=in_proxy,
+                deploying=(p.id, profile) in deploying,
             ))
     unregistered: list[UnregisteredSite] = []
     if configured_routes is not None:

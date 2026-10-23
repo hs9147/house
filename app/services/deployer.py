@@ -36,6 +36,33 @@ from .runtime import upstream_host
 from .runtime.base import Endpoint, Runtime, RuntimeSpec
 
 _locks: dict[int, threading.Lock] = defaultdict(threading.Lock)
+# 재배포가 앞 배포(취소를 요청한 것)가 멈추기를 기다리는 최대 시간(초). 설치 중이면 곧 멈추지만, docker 빌드처럼
+# 끊을 수 없는 단계는 끝날 때까지 간다 — 그동안 기다렸다가 새로 배포한다.
+LOCK_WAIT = 1800.0
+
+
+def _acquire(lock: threading.Lock, wait: bool) -> bool:
+    return lock.acquire(timeout=LOCK_WAIT) if wait else lock.acquire(blocking=False)
+
+
+def cancel_building(db: Session, project: Project, profile: BuildProfile) -> list[int]:
+    """재배포 — 이 프로필에 진행 중인 배포에 취소를 요청한다. 파이프라인이 이 프로세스에 없으면(플랫폼이
+    재시작됐다) 요청이 닿을 곳이 없으므로 레코드를 지금 닫는다(배포 취소 API와 같은 규칙)."""
+    rows = db.execute(
+        select(Deployment).where(Deployment.project_id == project.id, Deployment.profile == profile,
+                                 Deployment.status == DeploymentStatus.building)
+    ).scalars().all()
+    running = deploy_is_running(project.id)
+    for row in rows:
+        if running:
+            request_cancel(row.id)
+        else:
+            # 받을 파이프라인이 없으면 취소 요청을 남기지 않는다 — 남기면 아무도 지우지 않는다.
+            row.status = DeploymentStatus.failed
+            row.error = "취소됨 — 재배포로 대체했습니다(진행 중인 파이프라인이 없어 레코드만 닫았습니다)."
+            row.finished_at = datetime.now(timezone.utc)
+    db.commit()
+    return [row.id for row in rows]
 
 
 class DeployCancelled(RuntimeError):
@@ -330,14 +357,15 @@ def make_spec(
 
 def deploy_sync(
     db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None,
-    record: Deployment | None = None,
+    record: Deployment | None = None, wait_lock: bool = False,
 ) -> Deployment:
     """블로킹 배포 파이프라인. API에서는 스레드로 위임해 이벤트 루프를 막지 않는다.
 
-    record가 주어지면(큐 경로에서 선생성) 새로 만들지 않고 그 레코드를 채운다.
+    record가 주어지면(큐 경로에서 선생성) 새로 만들지 않고 그 레코드를 채운다. wait_lock이면(재배포) 진행 중인
+    배포가 멈추기를 기다렸다가 시작한다 — 아니면 바로 「이미 진행 중」으로 끝난다.
     """
     lock = _locks[project.id]
-    if not lock.acquire(blocking=False):
+    if not _acquire(lock, wait_lock):
         if record is not None:
             record.status = DeploymentStatus.failed
             record.error = f"deployment already in progress for {project.name}"
@@ -485,13 +513,15 @@ def deploy_sync(
 
 
 async def deploy(
-    db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None
+    db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None,
+    wait_lock: bool = False,
 ) -> Deployment:
-    return await asyncio.to_thread(deploy_sync, db, project, profile, git_sha)
+    return await asyncio.to_thread(deploy_sync, db, project, profile, git_sha, None, wait_lock)
 
 
 def deploy_queued(
-    db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None
+    db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None,
+    wait_lock: bool = False,
 ) -> Deployment:
     """비동기 배포(갭2): building 레코드를 즉시 만들고 파이프라인은 작업 큐에서 실행.
 
@@ -518,7 +548,7 @@ def deploy_queued(
             if proj is None or rec is None:
                 return
             try:
-                deploy_sync(session, proj, profile, git_sha, record=rec)
+                deploy_sync(session, proj, profile, git_sha, record=rec, wait_lock=wait_lock)
             except Exception:
                 # 실패 상태·에러는 deploy_sync가 레코드에 기록함
                 pass
@@ -528,13 +558,15 @@ def deploy_queued(
 
 
 async def deploy_composite(
-    db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None
+    db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None,
+    wait_lock: bool = False,
 ) -> dict[str, Deployment]:
-    return await asyncio.to_thread(deploy_composite_sync, db, project, profile, git_sha)
+    return await asyncio.to_thread(deploy_composite_sync, db, project, profile, git_sha, None, wait_lock)
 
 
 def deploy_composite_queued(
-    db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None
+    db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None,
+    wait_lock: bool = False,
 ) -> dict[str, Deployment]:
     """composite 프로젝트의 비동기 배포 — deploy_queued와 동일한 패턴이나 컴포넌트마다
     자리 행을 미리 만들어 즉시 반환한다.
@@ -569,7 +601,7 @@ def deploy_composite_queued(
             if proj is None or any(r is None for r in recs.values()):
                 return
             try:
-                deploy_composite_sync(session, proj, profile, git_sha, records=recs)
+                deploy_composite_sync(session, proj, profile, git_sha, records=recs, wait_lock=wait_lock)
             except Exception:
                 # 실패 상태·에러는 deploy_composite_sync가 레코드에 기록함
                 pass
@@ -642,7 +674,7 @@ def _mark_previous_stopped(db: Session, new_record: Deployment) -> None:
 
 def deploy_composite_sync(
     db: Session, project: Project, profile: BuildProfile, git_sha: str | None = None,
-    records: dict[str, Deployment] | None = None,
+    records: dict[str, Deployment] | None = None, wait_lock: bool = False,
 ) -> dict[str, Deployment]:
     """composite 프로젝트(backend/frontend) 전용 배포 파이프라인.
 
@@ -652,7 +684,7 @@ def deploy_composite_sync(
     트래픽을 받으므로 부분 실패가 서비스 중단으로 이어지지 않는다.
     """
     lock = _locks[project.id]
-    if not lock.acquire(blocking=False):
+    if not _acquire(lock, wait_lock):
         if records:
             for rec in records.values():
                 rec.status = DeploymentStatus.failed

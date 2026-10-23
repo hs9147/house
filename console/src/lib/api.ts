@@ -397,11 +397,13 @@ export const api = {
   // composite 프로젝트는 backend/frontend 두 레코드를 배열로 돌려준다. 콘솔의 모든
   // 배포 진입점(서버구성·프로젝트 개요)이 이 경로로 통일돼 DeployProgressModal로
   // 같은 진행 팝업을 보여준다.
-  deployQueued: (id: number, profile?: BuildProfile, git_sha?: string) =>
+  // redeploy — 진행 중인 배포에 취소를 요청하고, 그것이 멈추면 새로 배포한다(배포 중일 때의 「재배포」)
+  deployQueued: (id: number, profile?: BuildProfile, git_sha?: string, redeploy = false) =>
     request<DeploymentOut | DeploymentOut[]>('POST', `/projects/${id}/deploy`, {
       profile: profile ?? null,
       git_sha: git_sha || null,
       wait: false,
+      redeploy,
     }),
   rollback: (id: number, profile: BuildProfile) =>
     request<DeploymentOut>('POST', `/projects/${id}/rollback`, undefined, { profile }),

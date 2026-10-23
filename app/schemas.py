@@ -99,6 +99,8 @@ class DeployRequest(BaseModel):
     git_sha: str | None = None
     # False면 202 + building 레코드 즉시 반환, 파이프라인은 작업 큐에서 실행 (폴링으로 확인)
     wait: bool = True
+    # 재배포 — 이 프로필에 진행 중인 배포에 취소를 요청하고, 그것이 멈추기를 기다렸다가 새로 배포한다
+    redeploy: bool = False
 
 
 class DeploymentOut(BaseModel):
@@ -626,6 +628,8 @@ class ServerConfigSite(BaseModel):
     redirects: list[RedirectRuleSummary]
     # composite 프로젝트만 채워짐(backend/frontend 개별 상태) — 일반 프로젝트는 None.
     components: list[ComponentStatus] | None = None
+    # 이 프로필에 진행 중(building)인 배포가 있는지 — 있으면 화면의 배포 버튼이 「재배포」가 된다
+    deploying: bool = False
     # 프록시 설정(IIS web.config 등)에 실제로 라우팅이 구성돼 있는지 — 프록시가
     # 설정 멤버십을 추적하지 않는 백엔드(caddy/apache)에서는 None.
     in_proxy: bool | None = None

@@ -589,6 +589,8 @@ export interface ServerConfigSite {
   // 프록시가 실제로 전달하는 업스트림 — 떠 있지 않으면 null
   internal_host: string | null;
   internal_port: number | null;
+  // 이 프로필에 진행 중인 배포가 있는지 — 있으면 배포 버튼이 「재배포」
+  deploying?: boolean;
   redirect_count: number;
   redirects: RedirectRuleSummary[];
   // composite 프로젝트만 채워짐 — 일반 프로젝트는 null
