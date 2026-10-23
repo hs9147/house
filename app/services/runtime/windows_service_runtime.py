@@ -153,7 +153,10 @@ class WindowsServiceRuntime(Runtime):
         settings = get_settings()
         # 복합 배포는 컴포넌트마다 폴더가 다르다 — spec.work_subdir가 그 폴더다(빈
         # 문자열이면 리포 루트). 여기를 AppDirectory로 쓰고 그 안의 start.cmd를 실행한다.
-        workdir = settings.work_dir / spec.project_name / (spec.work_subdir or "")
+        # 프로필마다 배포 폴더가 따로다(build.deploy_dir — development는 {프로젝트}~dev).
+        from ..build import deploy_dir  # noqa: PLC0415
+
+        workdir = deploy_dir(spec.project_name, spec.profile) / (spec.work_subdir or "")
         start_script = workdir / "start.cmd"
         if not start_script.exists():
             raise WindowsServiceError(

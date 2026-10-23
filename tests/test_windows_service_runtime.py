@@ -55,9 +55,11 @@ def env(monkeypatch, tmp_path, fresh_settings):
     monkeypatch.setenv("PAAS_PORT_RANGE_END", "9199")
     get_settings.cache_clear()
     settings = get_settings()
-    workdir = settings.work_dir / "shop"
-    workdir.mkdir(parents=True, exist_ok=True)
-    (workdir / "start.cmd").write_text("echo start\n", encoding="utf-8")
+    # 프로필마다 배포 폴더가 따로다(build.deploy_dir — development는 shop~dev)
+    for folder in ("shop", "shop~dev"):
+        workdir = settings.work_dir / folder
+        workdir.mkdir(parents=True, exist_ok=True)
+        (workdir / "start.cmd").write_text("echo start\n", encoding="utf-8")
 
     fake = _FakeServices()
     monkeypatch.setattr(subprocess, "run", fake.run)

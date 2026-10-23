@@ -346,16 +346,7 @@ def deploy_sync(
         raise DeployInProgress(project.name)
     try:
         _close_orphaned_building(db, project, profile, {record.id} if record else set())
-        try:
-            assert_no_profile_conflict(project, profile)
-        except ProfileConflict as e:
-            if record is not None:
-                record.status = DeploymentStatus.failed
-                record.error = str(e)
-                record.finished_at = datetime.now(timezone.utc)
-                db.commit()
-            raise
-        workdir, sha = checkout(project, git_sha)
+        workdir, sha = checkout(project, git_sha, profile=profile)
         # 배포 직전에 구조를 다시 읽는다. 저장된 구조로 빌드하면 리포가 바뀐 뒤에는 없는
         # 폴더를 찾거나 새 컴포넌트를 빼먹는다 — 빌드할 수 있는 것은 리포에 있는 것뿐이라
         # 감지 결과가 이긴다. 바뀐 내용은 감사기록에 남는다(services/structure.refresh).
@@ -509,8 +500,6 @@ def deploy_queued(
     from ..db import SessionLocal  # noqa: PLC0415
     from . import jobs  # noqa: PLC0415
 
-    # 레코드를 만들기 전에 막는다 — 만들고 나서 실패시키면 실패 이력만 쌓인다.
-    assert_no_profile_conflict(project, profile)
     record = Deployment(
         project_id=project.id,
         git_sha=git_sha or "",
@@ -560,7 +549,6 @@ def deploy_composite_queued(
     from ..db import SessionLocal  # noqa: PLC0415
     from . import jobs  # noqa: PLC0415
 
-    assert_no_profile_conflict(project, profile)
     records = {
         name: Deployment(
             project_id=project.id, git_sha=git_sha or "", image_tag="", profile=profile,
@@ -675,8 +663,7 @@ def deploy_composite_sync(
     try:
         _close_orphaned_building(
             db, project, profile, {r.id for r in (records or {}).values() if r.id})
-        assert_no_profile_conflict(project, profile)
-        workdir, sha = checkout(project, git_sha)
+        workdir, sha = checkout(project, git_sha, profile=profile)
         # 단일 배포와 같은 이유로 구조를 다시 읽어 저장한다 — 화면·감사기록이 실제로
         # 배포한 구성을 말해야 한다.
         detected, _changed = structure.refresh(
@@ -981,40 +968,6 @@ def rollback_composite(db: Session, project: Project, profile: BuildProfile) -> 
     for rec in records.values():
         _mark_previous_stopped(db, rec)
     return records
-
-
-class ProfileConflict(RuntimeError):
-    def __init__(self, project_name: str, other: BuildProfile):
-        super().__init__(
-            f"{project_name}: {other.value} 프로필이 이미 떠 있습니다. 두 프로필은 같은 "
-            f"도메인에서 경로가 겹쳐(/apps/.../ 규칙이 그 아래 /dev/까지 함께 잡습니다) "
-            f"동시에 띄울 수 없습니다 — {other.value}를 먼저 중지한 뒤 배포하세요."
-        )
-
-
-def assert_no_profile_conflict(project: Project, profile: BuildProfile) -> None:
-    """release와 development를 동시에 띄우지 못하게 막는다.
-
-    1차(small)는 두 프로필이 같은 도메인을 쓰고 경로만 다르다(/apps/{조직}/{프로젝트}/ 와
-    그 아래 /dev/). 프록시 규칙은 접두사 매칭이라 release 규칙이 dev 경로까지 함께 잡고,
-    둘이 동시에 떠 있으면 어느 쪽이 응답할지 규칙 순서에 달린다 — 주소가 충돌한다.
-    2차(enterprise)는 프로필마다 도메인이 갈리므로 해당 없다.
-    """
-    if get_settings().tier != "small":
-        return
-    other = (
-        BuildProfile.release if profile == BuildProfile.development
-        else BuildProfile.development
-    )
-    try:
-        other_status = get_runtime().status(project.name, other)
-    except Exception:
-        # 상태를 못 읽는 것("알 수 없음")을 충돌로 처리하면 안 된다 — 런타임 조회가
-        # 잠깐 실패했다는 이유로 멀쩡한 배포가 막힌다. 이 가드는 주소 충돌을 줄이려는
-        # 것이지 안전 필수 불변식이 아니므로, 판단이 안 서면 통과시킨다.
-        return
-    if other_status == "running":
-        raise ProfileConflict(project.name, other)
 
 
 class DeployInProgress(RuntimeError):

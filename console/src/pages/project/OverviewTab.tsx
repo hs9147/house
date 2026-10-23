@@ -57,7 +57,7 @@ export default function OverviewTab() {
     } catch (e) {
       const err = e as ApiError;
       setMessage('');
-      // 409는 이유가 두 가지다(진행 중 / 다른 프로필과 주소 충돌) — 서버가 준
+      // 409는 진행 중인 배포가 있을 때다(두 프로필은 동시에 떠 있을 수 있다) — 서버가 준
       // 메시지를 그대로 보여준다. 한 문구로 뭉치면 무엇을 해야 하는지 알 수 없다.
       setError(err.message || '이미 배포가 진행 중입니다. 잠시 후 다시 시도하세요.');
     } finally {

@@ -80,7 +80,7 @@ def test_second_bootstrap_call_skips_redeploy(monkeypatch, fresh_settings):
     monkeypatch.setenv("PAAS_SELF_DEPLOY_CONSOLE_GIT_URL", "https://git.example.com/hs9147/chofam")
     monkeypatch.setenv("PAAS_GIT_INTERNAL_ONLY", "false")
     monkeypatch.setattr(
-        deployer, "checkout", lambda project, git_sha=None: (_ for _ in ()).throw(RuntimeError("stub"))
+        deployer, "checkout", lambda project, git_sha=None, **kw: (_ for _ in ()).throw(RuntimeError("stub"))
     )
 
     create_app()  # 첫 부트스트랩 — 실제 deploy_queued 실행, Deployment 행 동기 생성

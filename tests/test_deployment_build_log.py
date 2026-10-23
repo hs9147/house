@@ -29,7 +29,7 @@ def _create_project(db: SessionLocal, name: str) -> Project:
 
 def test_deploy_sync_docker_branch_commits_build_log_path_before_build_starts(monkeypatch, tmp_path):
     create_app()
-    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None: (tmp_path, "e" * 40))
+    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None, **kw: (tmp_path, "e" * 40))
     monkeypatch.setattr(deployer, "get_runtime", lambda: type(
         "R", (), {"start": lambda self, spec: Endpoint(host="127.0.0.1", port=9200)},
     )())

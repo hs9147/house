@@ -44,7 +44,7 @@ def test_windows_service_deploy_skips_build_and_generates_start_script(
     workdir = tmp_path / "chatbot"
     workdir.mkdir()
     (workdir / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
-    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None: (workdir, "a" * 40))
+    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None, **kw: (workdir, "a" * 40))
 
     # windows_service 경로는 docker build를 절대 호출하면 안 된다.
     def _boom(*a, **kw):
@@ -94,7 +94,7 @@ def test_windows_service_deploy_commits_build_log_path_before_install_starts(
     workdir = tmp_path / "chatbot-order"
     workdir.mkdir()
     (workdir / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
-    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None: (workdir, "d" * 40))
+    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None, **kw: (workdir, "d" * 40))
     monkeypatch.setattr(deployer, "build_image", lambda *a, **kw: pytest.fail("build 금지"))
     monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
     monkeypatch.setattr(deployer.proxy, "configure", lambda *a, **kw: None)
@@ -140,7 +140,7 @@ def test_windows_service_deploy_fails_when_dependency_install_fails(
 
     workdir = tmp_path / "chatbot3"
     workdir.mkdir()
-    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None: (workdir, "c" * 40))
+    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None, **kw: (workdir, "c" * 40))
     monkeypatch.setattr(deployer, "build_image", lambda *a, **kw: pytest.fail("build 금지"))
 
     def _fail_install(wd, log_path, base_path=None, build=True, **kw):
@@ -181,7 +181,7 @@ def test_windows_service_deploy_regenerates_start_script_unconditionally(
     workdir = tmp_path / "chatbot2"
     workdir.mkdir()
     (workdir / START_SCRIPT_NAME).write_text("@echo custom start\n", encoding="utf-8")
-    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None: (workdir, "b" * 40))
+    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None, **kw: (workdir, "b" * 40))
     monkeypatch.setattr(deployer, "build_image", lambda *a, **kw: pytest.fail("build 금지"))
     monkeypatch.setattr(deployer, "install_dependencies",
                         lambda wd, log_path, base_path=None, build=True, **kw: None)

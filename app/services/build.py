@@ -743,10 +743,21 @@ class BuildError(RuntimeError):
         self.log_path = log_path
 
 
-def checkout(project: Project, git_sha: str | None = None) -> tuple[Path, str]:
-    """clone 또는 pull 후 (작업 디렉토리, 해석된 커밋 SHA)를 반환한다."""
-    settings = get_settings()
-    workdir = settings.work_dir / project.name
+def deploy_dir(project_name: str, profile: BuildProfile | str = BuildProfile.release) -> Path:
+    """그 프로필의 배포 폴더 — release는 work_dir/{프로젝트}, development는 work_dir/{프로젝트}~dev.
+
+    두 프로필은 동시에 떠 있을 수 있다(경로·포트·유닛 이름이 이미 프로필마다 따로다). 폴더까지 같으면 한쪽
+    배포가 다른 쪽이 실행 중인 폴더를 다른 커밋으로 되돌리고(reset --hard) 의존성을 다시 깔며, start.cmd를
+    덮어써 release 서비스가 재시작될 때 development 스크립트로 뜬다. 이름은 공개 경로의 규칙(~dev)과 같다.
+    """
+    suffix = "~dev" if BuildProfile(profile) == BuildProfile.development else ""
+    return get_settings().work_dir / f"{project_name}{suffix}"
+
+
+def checkout(project: Project, git_sha: str | None = None,
+             profile: BuildProfile = BuildProfile.release) -> tuple[Path, str]:
+    """clone 또는 pull 후 (작업 디렉토리, 해석된 커밋 SHA)를 반환한다. 폴더는 프로필마다 따로다(deploy_dir)."""
+    workdir = deploy_dir(project.name, profile)
     if not (workdir / ".git").exists():
         shutil.rmtree(workdir, ignore_errors=True)
         _run_git(["clone", "--branch", project.branch, project.git_url, str(workdir)],

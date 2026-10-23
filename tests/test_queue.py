@@ -28,7 +28,7 @@ class _FakeRuntime:
 
 
 def _mock_pipeline(monkeypatch, tmp_path, delay: float = 0.0):
-    def fake_checkout(project, git_sha=None):
+    def fake_checkout(project, git_sha=None, **kw):
         if delay:
             time.sleep(delay)
         return tmp_path, "a" * 40

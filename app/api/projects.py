@@ -61,7 +61,7 @@ from ..services import (
     workspace,
 )
 from ..services.build import checkout
-from ..services.deployer import DeployInProgress, NoRollbackTarget, ProfileConflict
+from ..services.deployer import DeployInProgress, NoRollbackTarget
 from ..services.gitea import GiteaError, GiteaNotConfigured
 from ..services.upload import UploadError, UploadRejected
 
@@ -319,6 +319,7 @@ def delete_project(
     db.commit()
 
     shutil.rmtree(get_settings().work_dir / name, ignore_errors=True)
+    shutil.rmtree(build_module.deploy_dir(name, BuildProfile.development), ignore_errors=True)
     audit.record(db, admin.name, "project.delete", name, {"project_id": project_id})
 
 
@@ -852,11 +853,7 @@ async def deploy_project(
 ):
     project = _get_project(db, project_id)
     profile = body.profile or project.default_profile
-    # release와 development는 같은 도메인에서 경로가 겹친다 — 동시에 띄우지 못하게 막는다.
-    try:
-        deployer.assert_no_profile_conflict(project, profile)
-    except ProfileConflict as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    # release와 development는 동시에 떠 있을 수 있다 — 경로(~dev)·포트·유닛 이름·배포 폴더가 프로필마다 따로다.
     if project.type == ProjectType.composite:
         if not body.wait:
             records = deployer.deploy_composite_queued(db, project, profile, body.git_sha)

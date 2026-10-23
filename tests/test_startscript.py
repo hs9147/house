@@ -355,7 +355,7 @@ def test_native_composite_deploy_writes_a_script_per_component(
         project.start_scripts = {"release:web": GOOD.replace("app.py", "web.py")}
         db.commit()
 
-        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "b" * 40))
+        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None, **kw: (tmp_path, "b" * 40))
         monkeypatch.setattr(deployer, "build_image", _must_not_build)
         installed: list[Path] = []
         monkeypatch.setattr(deployer, "install_dependencies",
@@ -406,7 +406,7 @@ def test_api_saved_script_is_the_file_the_deploy_runs(client, monkeypatch, tmp_p
     monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "windows_service")
     monkeypatch.setenv("PAAS_TIER", "small")
     get_settings.cache_clear()
-    monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "d" * 40))
+    monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None, **kw: (tmp_path, "d" * 40))
     monkeypatch.setattr(deployer, "build_image", _must_not_build)
     monkeypatch.setattr(deployer, "install_dependencies", lambda *a, **kw: None)
     runtime = _FakeRuntime()
@@ -448,7 +448,7 @@ def test_saved_script_is_applied_on_the_very_next_deploy(monkeypatch, tmp_path, 
         }
         db.commit()
 
-        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "c" * 40))
+        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None, **kw: (tmp_path, "c" * 40))
         monkeypatch.setattr(deployer, "build_image", _must_not_build)
         monkeypatch.setattr(deployer, "install_dependencies", lambda *a, **kw: None)
         monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
@@ -574,7 +574,7 @@ def test_native_single_deploy_uses_source_subdir_as_the_run_folder(monkeypatch, 
     try:
         project = _project(db, "subdir-native", type=ProjectType.streamlit,
                            source_subdir="Strategy")
-        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "e" * 40))
+        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None, **kw: (tmp_path, "e" * 40))
         monkeypatch.setattr(deployer, "build_image", _must_not_build)
         installed: list[Path] = []
         monkeypatch.setattr(deployer, "install_dependencies",
@@ -604,7 +604,7 @@ def test_native_deploy_fails_clearly_when_source_subdir_is_not_in_the_repo(
     try:
         project = _project(db, "subdir-missing", type=ProjectType.python,
                            source_subdir="nope")
-        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "f" * 40))
+        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None, **kw: (tmp_path, "f" * 40))
         monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
         with pytest.raises(build_module.BuildError) as raised:
             deployer.deploy_sync(db, project, BuildProfile.release)

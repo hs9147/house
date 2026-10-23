@@ -102,7 +102,7 @@ def test_start_requires_an_allocated_port(monkeypatch, fresh_settings, tmp_path)
 
     monkeypatch.setenv("PAAS_WORK_DIR", str(tmp_path / "ws"))
     get_settings.cache_clear()
-    workdir = tmp_path / "ws" / "demo"
+    workdir = tmp_path / "ws" / "demo~dev"   # development의 배포 폴더(build.deploy_dir)
     workdir.mkdir(parents=True)
     (workdir / "start.cmd").write_text("@echo off\n", encoding="utf-8")
     spec = RuntimeSpec("demo", "", 0, BuildProfile.development, "", host_port=None)

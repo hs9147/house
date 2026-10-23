@@ -100,7 +100,7 @@ def _make_project(db, name: str, tmp_path: Path) -> Project:
 
 
 def _mock_checkout(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None: (tmp_path, "a" * 40))
+    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None, **kw: (tmp_path, "a" * 40))
 
 
 def _mock_build_success(monkeypatch):

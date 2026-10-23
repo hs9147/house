@@ -81,7 +81,7 @@ def test_install_stops_at_cancel_and_the_record_says_cancelled(monkeypatch, tmp_
         db.commit()
         db.refresh(record)
 
-        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "a" * 40))
+        monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None, **kw: (tmp_path, "a" * 40))
 
         # 설치가 시작되면 취소를 요청한다 — 그 안에서 끊기는지 본다.
         def fake_install(workdir, log_path, base_path=None, build=True, should_cancel=None):
@@ -93,7 +93,7 @@ def test_install_stops_at_cancel_and_the_record_says_cancelled(monkeypatch, tmp_
         monkeypatch.setattr(deployer, "install_dependencies", fake_install)
 
         class _MustNotStart:
-            """상태 조회는 배포 전 검사(다른 프로필 충돌)가 부르므로 허용하고, **기동만** 막는다."""
+            """상태 조회는 허용하고, **기동만** 막는다."""
 
             def start(self, spec):
                 raise AssertionError("취소됐는데 런타임을 띄웠다")

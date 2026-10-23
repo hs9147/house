@@ -57,7 +57,7 @@ def _setup(db, monkeypatch, tmp_path, name: str):
     db.add(project)
     db.commit()
     db.refresh(project)
-    monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None: (tmp_path, "a" * 40))
+    monkeypatch.setattr(deployer, "checkout", lambda p, git_sha=None, **kw: (tmp_path, "a" * 40))
 
     builds: list[dict] = []
 
