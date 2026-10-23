@@ -456,9 +456,10 @@ export const api = {
       { component, profile }),
   // 「LLM으로 작성」 첫 단계 — 리포를 최신으로 두고 배포 유닛을 다시 감지한다
   startScriptUnits: (id: number) => request<StartScriptUnitsOut>('POST', `/projects/${id}/start-script/units`),
-  proposeStartScript: (id: number, provider_id: number, profile: BuildProfile, component = '') =>
+  // analysis — 배포 진단 창의 LLM 원인 분석(그 창에서 재작성으로 왔을 때). 지난 실패 기록은 서버가 붙인다.
+  proposeStartScript: (id: number, provider_id: number, profile: BuildProfile, component = '', analysis = '') =>
     request<StartScriptOut>(
-      'POST', `/projects/${id}/start-script/propose`, { provider_id }, { component, profile }),
+      'POST', `/projects/${id}/start-script/propose`, { provider_id, analysis }, { component, profile }),
   setStartScript: (id: number, script: string, profile: BuildProfile, component = '') =>
     request<StartScriptOut>('PUT', `/projects/${id}/start-script`, { script },
       { component, profile }),

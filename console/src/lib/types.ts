@@ -490,6 +490,8 @@ export interface StartScriptUnitsOut {
 
 export interface StartScriptOut {
   script: string;
+  // 작성할 때 참고한 지난 실패 배포(그 유닛의 마지막 배포가 실패였을 때)
+  failure_deployment_id?: number | null;
   problems: string[];
   // 프롬프트에 실은 사실 — 무엇을 보고 쓴 것인지 사람이 확인할 수 있어야 한다.
   facts: string;

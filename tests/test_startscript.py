@@ -681,3 +681,56 @@ def test_llm_writing_never_skips_the_structure_recheck(client, monkeypatch, tmp_
     _write(tmp_path, "client/package.json", '{"dependencies": {"react": "18.0.0"}}')
     body = client.post(url, headers=ADMIN).json()
     assert sorted(body["components"]) == ["client", "server"] and body["changed"] is True
+
+
+def test_propose_reads_the_last_failure_of_this_unit(client, monkeypatch, tmp_path):
+    """「LLM으로 작성」은 그 유닛의 마지막 배포가 실패였으면 그 실패(오류·로그 꼬리·그때 돈 스크립트·진단 창의
+    분석)를 함께 읽는다 — 리포만 보고 처음부터 쓰면 같은 실수를 되풀이한다. 마지막이 성공이면 싣지 않는다."""
+    from app.models import Deployment, DeploymentStatus
+
+    _write(tmp_path, "app.py", "print(1)")
+    _git_repo(tmp_path)
+    log = tmp_path / "build.log"
+    log.write_text("starting...\nModuleNotFoundError: No module named 'streamlit'\n", encoding="utf-8")
+    db = SessionLocal()
+    try:
+        project = _project(db, "script-api-failure")
+        provider = LlmProvider(name="p", kind="openai", base_url="http://x", model="m", api_key_encrypted=None)
+        db.add(provider)
+        db.add(Deployment(project_id=project.id, git_sha="a" * 40, image_tag="t", profile=BuildProfile.release,
+                          status=DeploymentStatus.failed, error="health check failed: port 8000",
+                          build_log_path=str(log)))
+        db.commit()
+        db.refresh(provider)
+        pid, prov = project.id, provider.id
+    finally:
+        db.close()
+
+    seen = {}
+
+    def chat(provider, messages, db=None, **kw):
+        seen["prompt"] = messages[-1]["content"]
+        return f"```bat\n{GOOD}```\n"
+    monkeypatch.setattr("app.services.workspace.code_workdir", lambda p: tmp_path)
+    monkeypatch.setattr(startscript.llm_service, "chat_completion", chat)
+    url = f"{API}/projects/{pid}/start-script/propose"
+
+    res = client.post(url, json={"provider_id": prov, "analysis": "streamlit이 requirements에 없다"}, headers=ADMIN)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["failure_deployment_id"] is not None
+    for fact in ("FAILED", "health check failed: port 8000", "No module named 'streamlit'",
+                 "streamlit이 requirements에 없다", "start.cmd that ran then"):
+        assert fact in seen["prompt"], fact
+    assert "health check failed" in body["facts"]   # 화면의 「LLM에게 준 사실」에도 보인다
+
+    # 마지막 배포가 성공이면 지난 실패를 다시 피하라고 하지 않는다
+    db = SessionLocal()
+    try:
+        db.add(Deployment(project_id=pid, git_sha="b" * 40, image_tag="t", profile=BuildProfile.release,
+                          status=DeploymentStatus.running))
+        db.commit()
+    finally:
+        db.close()
+    body = client.post(url, json={"provider_id": prov}, headers=ADMIN).json()
+    assert body["failure_deployment_id"] is None and "FAILED" not in seen["prompt"]

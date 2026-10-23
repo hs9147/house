@@ -461,16 +461,51 @@ async def propose_start_script(
         workdir = await asyncio.to_thread(workspace.code_workdir, project)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"리포를 가져올 수 없습니다: {str(e)[:300]}")
+    failed = _last_failure(db, project, component, profile)
+    failure = _failure_facts(project, workdir, failed, component, profile, body.analysis) if failed else ""
     try:
         result = await asyncio.to_thread(
-            startscript.propose, db, project, provider, workdir, component, profile)
+            startscript.propose, db, project, provider, workdir, component, profile, failure)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"스크립트 작성 실패: {str(e)[:500]}")
     audit.record(db, admin.name, "project.start_script.propose", project.name,
                  {"provider": provider.name, "component": component,
-                  "profile": profile.value, "problems": len(result["problems"])})
+                  "profile": profile.value, "problems": len(result["problems"]),
+                  "failure_deployment": failed.id if failed else None})
     return StartScriptOut(source="project", component=component, profile=profile,
-                          components=_script_components(project), **result)
+                          components=_script_components(project),
+                          failure_deployment_id=failed.id if failed else None, **result)
+
+
+def _last_failure(db: Session, project: Project, component: str, profile: BuildProfile) -> Deployment | None:
+    """이 유닛·프로필의 **마지막** 배포가 실패였으면 그 배포. 마지막이 성공(또는 진행 중)이면 없다 — 이미 고친
+    실패를 다시 피하라고 하면 지금 되는 스크립트를 흔든다."""
+    unit = Deployment.component == component if component else Deployment.component.is_(None)
+    last = db.execute(
+        select(Deployment)
+        .where(Deployment.project_id == project.id, Deployment.profile == profile, unit)
+        .order_by(Deployment.id.desc())
+    ).scalars().first()
+    return last if last is not None and last.status == DeploymentStatus.failed else None
+
+
+def _failure_facts(project: Project, workdir: Path, failed: Deployment, component: str,
+                   profile: BuildProfile, analysis: str) -> str:
+    """지난 실패의 사실 — 배포 진단과 같은 재료(결정론 진단·로그 꼬리·그때 돈 스크립트)."""
+    run_dir = startscript.component_dir(workdir, project, component) if component else None
+    diag = deploydiag.diagnose(
+        workdir,
+        source_subdir=(run_dir.relative_to(workdir).as_posix() if run_dir and run_dir != workdir
+                       else project.source_subdir or ""),
+        is_streamlit=project.type == ProjectType.streamlit,
+        error=failed.error or "",
+        log_path=failed.build_log_path,
+    )
+    return startscript.failure_block(
+        deployment_id=failed.id, error=failed.error or "",
+        verdict=f"{diag.get('cause')} - {diag.get('detail')}",
+        script=build_module.start_script_for(project, component, profile),
+        log_tail=diag.get("log_tail") or "", analysis=analysis)
 
 
 @router.put("/{project_id}/start-script", response_model=StartScriptOut,

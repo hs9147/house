@@ -34,9 +34,11 @@ interface Props {
    * 여기서 만들지 않고 그 경로를 그대로 쓴다.
    */
   onRedeploy: () => Promise<void>;
+  /** 배포 진단 창의 LLM 원인 분석 — 그 창에서 「기동 스크립트 재작성」으로 열면 작성에 함께 싣는다. */
+  analysis?: string;
 }
 
-export default function StartScriptModal({ projectId, profile, onClose, onRedeploy }: Props) {
+export default function StartScriptModal({ projectId, profile, onClose, onRedeploy, analysis = '' }: Props) {
   const [component, setComponent] = useState('');
   const [data, setData] = useState<StartScriptOut | null>(null);
   const [script, setScript] = useState('');
@@ -144,12 +146,14 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
       const list = kept ? [component] : all;
       const failed: string[] = [];
       const retried: string[] = [];
+      const learned: string[] = [];   // 지난 실패를 참고한 유닛
       for (const [i, unit] of list.entries()) {
         const label = unit || '단일 배포';
         setBusy(`LLM이 「${label}」 스크립트를 작성하는 중… (${i + 1}/${list.length}, 유닛마다 수십 초)`);
         try {
-          const res = await api.proposeStartScript(projectId, providerId, profile, unit);
+          const res = await api.proposeStartScript(projectId, providerId, profile, unit, analysis);
           drafts.current[unit] = res;
+          if (res.failure_deployment_id) learned.push(`${label}(배포 #${res.failure_deployment_id})`);
           // 검증에 걸리면 서버가 그 문구를 모델에 돌려주고 한 번 고치게 한다 — "고쳐서 온 것"은 알린다.
           if (res.attempts > 1) retried.push(`${label}${res.problems.length ? '(아직 검증 실패)' : ''}`);
         } catch (err) {
@@ -173,6 +177,7 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
       setNotice(`배포 유닛 ${all.length}개 — ${units.structure}`
         + (units.changed ? ` (구조가 바뀌어 목록을 갱신했습니다: ${units.before || '없음'} → ${units.structure})` : '')
         + '. 작성한 유닛을 확인하고 저장하세요.'
+        + (learned.length ? ` 지난 실패를 참고해 썼습니다: ${learned.join(', ')}${analysis ? ' — 진단 창의 분석도 함께' : ''}.` : '')
         + (retried.length ? ` 검증에 걸려 다시 쓴 유닛: ${retried.join(', ')}.` : ''));
       if (failed.length) setError(`작성하지 못한 유닛 — ${failed.join(' / ')}`);
     } catch (err) {

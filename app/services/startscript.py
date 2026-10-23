@@ -268,8 +268,37 @@ def _extract(reply: str) -> str:
     return (found.group(1) if found else reply).strip()
 
 
+def failure_block(*, deployment_id: int, error: str, verdict: str, script: str, log_tail: str,
+                  analysis: str = "") -> str:
+    """지난 배포가 실패했을 때 프롬프트에 붙이는 사실 — 같은 실수를 되풀이하지 않게.
+
+    재료와 상한은 실패 원인 분석(deploydiag.facts_for_llm)과 같다 — 환경변수 값은 싣지 않는다. 진단 창의
+    LLM 분석이 있으면 함께 싣되, 모델이 쓴 추정이라고 밝힌다.
+    """
+    from .deploydiag import MAX_LOG_CHARS_FOR_LLM, MAX_SCRIPT_CHARS_FOR_LLM  # noqa: PLC0415
+
+    lines = [
+        f"--- the last deploy of this unit FAILED (deployment #{deployment_id}) ---",
+        "Write a script that avoids this failure. If the cause is not the start script (for example a",
+        "missing dependency in the repo), still write the best script and add one REM line naming the cause.",
+        f"recorded error: {(error or '(none)').strip()[:1000]}",
+        f"deterministic verdict: {verdict or '(none)'}",
+        "",
+        "start.cmd that ran then:",
+        script[:MAX_SCRIPT_CHARS_FOR_LLM] or "(none)",
+        "",
+        "build log tail:",
+        (log_tail or "(empty)")[-MAX_LOG_CHARS_FOR_LLM:],
+    ]
+    if analysis.strip():
+        lines += ["", "an earlier analysis of that failure (written by a model - it may be wrong):",
+                  analysis.strip()[:4000]]
+    return "\n".join(lines)
+
+
 def propose(db: Session, project: Project, provider: LlmProvider, workdir: Path,
-            component: str = "", profile: BuildProfile = BuildProfile.release) -> dict:
+            component: str = "", profile: BuildProfile = BuildProfile.release,
+            failure: str = "") -> dict:
     """LLM에게 기동 스크립트를 쓰게 하고 **검증 결과와 함께** 돌려준다(저장하지 않는다).
 
     복합 배포는 컴포넌트마다 따로 부른다 — 한 스크립트가 여러 컴포넌트를 띄우면 서비스
@@ -277,6 +306,9 @@ def propose(db: Session, project: Project, provider: LlmProvider, workdir: Path,
     개발 배포는 dev 서버로, 운영 배포는 빌드본으로 뜬다.
     """
     facts = _facts(workdir, project, component, profile)
+    # 지난 배포가 실패했으면 그 사실도 — 화면의 「LLM에게 준 사실」에도 같이 보인다.
+    if failure:
+        facts = f"{facts}\n\n{failure}"
     messages = [{"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": facts}]
     script = _extract(llm_service.chat_completion(provider, messages, db))

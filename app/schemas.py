@@ -127,6 +127,8 @@ class StartScriptProposeIn(BaseModel):
     """
 
     provider_id: int | None = None
+    # 배포 진단 창의 LLM 원인 분석 — 그 창에서 「기동 스크립트 재작성」으로 왔을 때 함께 싣는다
+    analysis: str = ""
 
 
 class StartScriptSet(BaseModel):
@@ -161,6 +163,8 @@ class StartScriptOut(BaseModel):
     # LLM이 몇 번 썼는지. 검증에 걸리면 그 문구를 돌려주고 한 번 고치게 한다 —
     # 2면 "한 번 고쳐 다시 제안한 것"이다(화면이 그 사실을 말해 준다).
     attempts: int = 1
+    # 작성할 때 참고한 지난 실패 배포(그 유닛의 마지막 배포가 실패였을 때)
+    failure_deployment_id: int | None = None
     # 이 프로젝트에서 고를 수 있는 컴포넌트 — 화면이 목록을 따로 조회하지 않게 함께 준다.
     components: list[str] = []
 
