@@ -18,8 +18,9 @@ import type { BuildProfile, StartScriptOut } from '../lib/types';
  * (dev 서버 vs 빌드본 서빙), 복합 배포는 컴포넌트마다 유닛·포트·공개 경로가 따로다 — 한
  * 스크립트가 둘을 띄우면 서비스 감시자가 자식 하나만 본다.
  *
- * 「LLM으로 작성」은 **배포 유닛부터 확인한다** — 리포를 최신으로 두고 구조를 다시 감지한 뒤 유닛마다
- * 차례로 쓴다. 제안은 유닛별 초안으로 들고 있다가(저장 전), 유닛을 골라 확인하고 하나씩 저장한다.
+ * 「LLM으로 작성」은 **전체 배포 단위부터 확인한다** — 리포를 최신으로 두고 구조를 다시 감지해 유닛 목록에
+ * 반영한 뒤, 고른 유닛이 그대로 있으면 그 유닛만, 없어졌으면 모든 유닛을 쓴다(결과에 어느 쪽인지 보인다).
+ * 제안은 유닛별 초안으로 들고 있다가(저장 전), 유닛을 골라 확인하고 하나씩 저장한다.
  */
 interface Props {
   projectId: number;
@@ -50,6 +51,8 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
   // LLM이 유닛마다 쓴 초안(저장 전) — 유닛을 바꿔도 남고, 그 유닛을 저장·되돌리면 지운다.
   const drafts = useRef<Record<string, StartScriptOut>>({});
   const [draftUnits, setDraftUnits] = useState<string[]>([]);
+  // 마지막 「LLM으로 작성」이 고친 범위 — 선택한 유닛만인지, 모든 유닛인지
+  const [result, setResult] = useState<{ all: boolean; text: string } | null>(null);
   const showing = drafts.current[component] !== undefined && data === drafts.current[component];
 
   // 유닛을 바꾸면 그 유닛의 스크립트를 다시 읽는다 — 화면에 남은 본문을 그대로 두면
@@ -125,12 +128,20 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
     setError('');
     setNotice('');
     setApplied(false);
+    setResult(null);   // 지난 작성의 결과가 새 작성 동안 남아 있으면 그것이 이번 결과로 읽힌다
     try {
-      // 늘 구조부터 다시 확인한다 — 리포를 최신으로 받지 못하거나 배포 단위가 없으면 서버가 멈추고 이유를 준다.
-      setBusy('배포 유닛을 확인하는 중… (리포를 최신으로 받아 구조를 다시 감지합니다)');
+      // 늘 전체 배포 단위부터 다시 확인하고 목록에 반영한다 — 리포를 최신으로 받지 못하거나 배포 단위가 없으면
+      // 서버가 멈추고 이유를 준다.
+      setBusy('배포 유닛을 확인하는 중… (리포를 최신으로 받아 전체 구조를 다시 감지합니다)');
       const units = await api.startScriptUnits(projectId);
       setComponents(units.components);
-      const list = units.components.length ? units.components : [''];
+      const all = units.components.length ? units.components : [''];
+      // 없어진 유닛의 초안은 버린다 — 남기면 목록에 없는 유닛을 저장하려 한다.
+      Object.keys(drafts.current).filter((u) => !all.includes(u)).forEach((u) => { delete drafts.current[u]; });
+      // 고른 유닛이 새 목록에 있으면 그 유닛만, 없어졌으면(이름이 바뀌었거나 단일↔복합이 바뀌었으면) 오류로
+      // 끝내지 않고 모든 유닛을 쓴다.
+      const kept = all.includes(component);
+      const list = kept ? [component] : all;
       const failed: string[] = [];
       const retried: string[] = [];
       for (const [i, unit] of list.entries()) {
@@ -153,11 +164,15 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
       } else {
         setComponent(first);   // 바꾸면 위 effect가 그 유닛의 초안을 보인다
       }
-      const written = list.filter((u) => drafts.current[u]).length;
-      setNotice(`배포 유닛 ${list.length}개 — ${units.structure}`
-        + (units.changed ? ` (구조가 바뀌어 갱신했습니다: ${units.before || '없음'} → ${units.structure})` : '')
-        + '. '
-        + `${written}개 작성 — 유닛을 하나씩 골라 확인하고 저장하세요.`
+      const written = list.filter((u) => drafts.current[u]);
+      const names = (us: string[]) => us.map((u) => u || '단일 배포').join('·');
+      const scope = kept
+        ? `선택한 유닛 「${component || '단일 배포'}」만 갱신했습니다`
+        : `선택한 유닛 「${component || '단일 배포'}」이 지금 구조에 없어 모든 유닛(${all.length}개: ${names(all)})을 갱신했습니다`;
+      setResult({ all: !kept, text: `${scope} — 작성 ${written.length}/${list.length}${written.length ? ` (${names(written)})` : ''}` });
+      setNotice(`배포 유닛 ${all.length}개 — ${units.structure}`
+        + (units.changed ? ` (구조가 바뀌어 목록을 갱신했습니다: ${units.before || '없음'} → ${units.structure})` : '')
+        + '. 작성한 유닛을 확인하고 저장하세요.'
         + (retried.length ? ` 검증에 걸려 다시 쓴 유닛: ${retried.join(', ')}.` : ''));
       if (failed.length) setError(`작성하지 못한 유닛 — ${failed.join(' / ')}`);
     } catch (err) {
@@ -242,7 +257,7 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
           onClick={propose}
           disabled={!!busy || !providerId}
         >
-          LLM으로 작성(유닛별)
+          LLM으로 작성
         </button>
       </div>
 
@@ -284,6 +299,14 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
         </details>
       )}
 
+      {result && (
+        <p style={{ fontSize: 13, margin: '8px 0 0' }}>
+          <span className={`status ${result.all ? 'warn' : 'info'}`} style={{ marginRight: 6 }}>
+            {result.all ? '모든 유닛 갱신' : '선택한 유닛만 갱신'}
+          </span>
+          {result.text}
+        </p>
+      )}
       {busy && <p style={{ fontSize: 13 }}>{busy}</p>}
       {error && <p className="error">{error}</p>}
       {notice && <p style={{ fontSize: 13, color: '#7ee787' }}>{notice}</p>}
