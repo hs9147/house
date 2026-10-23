@@ -119,7 +119,7 @@ sudo apt install -y caddy
 
 DNS: 배포는 기본적으로 서브패스 기반이다 — 모든 프로젝트가 `PAAS_BASE_DOMAIN` 하나를
 공유하고 `/apps/{조직}/{프로젝트}/`(조직 없는 프로젝트는 `/apps/_/{프로젝트}/`, development는
-그 아래 `/dev/`) 경로로 구분되므로, A 레코드 `deploy.example.com → 서버 IP` 한 줄이면
+그 형제인 `/apps/{조직}/{프로젝트}~dev/`) 경로로 구분되므로, A 레코드 `deploy.example.com → 서버 IP` 한 줄이면
 충분하다. 와일드카드(`*.deploy.example.com`)는 커스텀 도메인을 지정한 release 배포나
 PR 프리뷰(`{project}-pv{id}.deploy.example.com`)처럼 여전히 서브도메인을 쓰는 예외
 경로에서만 필요하다.

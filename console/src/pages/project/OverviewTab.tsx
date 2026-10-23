@@ -89,9 +89,11 @@ export default function OverviewTab() {
               <tbody>
                 {(['release', 'development'] as BuildProfile[]).map((profile) => {
                   const orgSegment = project.org_name || '_';
+                  // development는 release의 **형제** 경로다(서버 proxy.path_prefix_for — `~dev`). 예전 규칙
+                  // (`/{프로젝트}/dev/`)으로 링크를 만들면 release 규칙에 걸려 release 앱으로 가고 오류가 난다(실측).
                   const pathUrl = profile === 'release'
                     ? `/apps/${orgSegment}/${project.name}/`
-                    : `/apps/${orgSegment}/${project.name}/dev/`;
+                    : `/apps/${orgSegment}/${project.name}~dev/`;
                   // base_domain을 아직 못 불러왔으면(로딩 중) 경로만 보여준다 —
                   // 잘못된 호스트로 링크를 만드는 것보다 안전하다.
                   // 스킴을 https로 박아 두면 80포트만 여는 구성에서 죽은 링크가 된다.
