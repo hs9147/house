@@ -18,19 +18,14 @@ const HUB = 'paas';
  * 토큰은 사람에게 속한다(과제에 묶이지 않는다) — 한 토큰으로 문서·온톨로지·코드·저장소 서버와,
  * 고른 과제의 기획 MCP를 함께 등록한다. 접근 권한은 그 사람의 조직으로 판정된다. 원문은 발급 직후
  * **한 번만** 보인다(서버는 해시만 둔다) — 그래서 붙여 넣을 설정 전체를 그 자리에서 보여 준다.
- *
- * initialProject: 과제 행의 「에이전트 접속」에서 열었으면 그 과제의 기획 MCP를 미리 골라 둔다.
  */
-export default function McpAccessModal({ initialProject, onClose }: {
-  initialProject?: string;
-  onClose: () => void;
-}) {
+export default function McpAccessModal({ onClose }: { onClose: () => void }) {
   const tokens = useApi(() => api.listMcpTokens());
   const catalog = useApi(() => api.myMcpServers());
   const [label, setLabel] = useState('Claude Desktop — 내 PC');
-  const [bundle, setBundle] = useState(!initialProject);  // 과제 행에서 열면 그 과제의 기획 MCP를 따로
+  const [bundle, setBundle] = useState(true);
   const [skip, setSkip] = useState<Set<string>>(new Set());          // 뺄 공용 서버
-  const [plans, setPlans] = useState<Set<string>>(new Set(initialProject ? [initialProject] : []));
+  const [plans, setPlans] = useState<Set<string>>(new Set());
   const [issued, setIssued] = useState<{ token: string; servers: McpServerRef[]; gateway: string } | null>(null);
   const [target, setTarget] = useState<Target>('desktop');
   const [os, setOs] = useState<DesktopOs>(navigator.userAgent.includes('Mac') ? 'mac' : 'windows');

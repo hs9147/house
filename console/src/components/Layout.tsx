@@ -12,7 +12,7 @@ export default function Layout() {
   const navigate = useNavigate();
   const admin = isAdmin();
   const email = getEmail();
-  // 토큰은 사람에게 속한다 — 과제와 무관하게 여기서 발급한다(과제 행의 「에이전트 접속」도 같은 창).
+  // 토큰은 사람에게 속한다 — 과제와 무관하게 여기서 발급한다.
   const [mcpOpen, setMcpOpen] = useState(false);
 
 
