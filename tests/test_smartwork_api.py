@@ -190,8 +190,28 @@ def test_folder_sync_indexes_only_documents_and_tracks_changes(client):
     # 원본은 남지 않는다 — 저장소에는 변환본만 있다
     assert sorted(p.relative_to(store.root).as_posix() for p in store.root.rglob("*") if p.is_file())         == ["work/plan/q3.md.md"]
 
-    # 다시 골라도 같은 파일은 다시 올리지 않는다
+    # 다시 골라도 같은 파일은 다시 올리지 않는다 — 바뀐 파일(크기·수정 시각)과 새 파일만
     assert _upload(client, alice, "work", files)["needed"] == []
+    assert _upload(client, alice, "work", files, mtime=1_700_000_100.0)["needed"] == ["plan/q3.md"]
+    more = {**files, "plan/q4.md": "# 4분기".encode()}
+    assert _upload(client, alice, "work", more, mtime=1_700_000_100.0)["needed"] == ["plan/q4.md"]
+    files = more
+
+    # 저장할 수 없는 경로라 건너뛴 파일도 기록한다 — 남기지 않으면 동기화마다 다시 받는다
+    real = personal.storage_service.resolve
+
+    def refuse(root, rel):
+        if "q5" in rel:
+            raise personal.storage_service.StorageError("경로가 너무 깁니다")
+        return real(root, rel)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(personal.storage_service, "resolve", refuse)
+        odd = {**files, "plan/q5.md": "# 5".encode()}
+        assert _upload(client, alice, "work", odd, mtime=1_700_000_100.0)["needed"] == ["plan/q5.md"]
+        assert _upload(client, alice, "work", odd, mtime=1_700_000_100.0)["needed"] == []
+    files = {k: v for k, v in odd.items() if k != "plan/q4.md" and k != "plan/q5.md"}
+    assert _upload(client, alice, "work", files, mtime=1_700_000_100.0)["removed"] == 2
     # PC에서 지운 파일은 여기서도 지운다
     gone = _upload(client, alice, "work", {})
     assert gone["removed"] == 1

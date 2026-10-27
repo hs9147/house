@@ -7,7 +7,8 @@
  *    고르지 않고 이것으로 지금의 파일을 읽는다. 폴더가 없어졌거나 핸들이 없을 때만 다시 고른다.
  *    이 API는 보안 출처(https·localhost)에서만 있다 — 평문 http면 없어서 매번 고른다(canKeepFolders).
  *  - 고른 파일의 사본(IndexedDB는 File을 그 순간의 사본으로 담는다) — 파일 뷰어가 새로 고친
- *    뒤에도 연다. 다시 동기화하면 그 폴더의 사본을 통째로 바꾼다.
+ *    뒤에도 연다. 다시 동기화하면 **새 파일·바뀐 파일만** 다시 담고 없어진 파일은 지운다(changesOf) —
+ *    예전에는 폴더 사본을 통째로 지우고 모든 파일을 다시 복사해, 바뀐 것이 없어도 폴더 용량만큼 일했다.
  *  - 이 페이지의 메모리 — 위 둘의 빠른 길.
  * 폴더를 제거하거나 동의를 철회하면 모두 지운다. 고친 결과는 내려받기로 저장한다.
  */
@@ -52,14 +53,40 @@ async function withStore<T>(store: string, mode: IDBTransactionMode,
 
 const folderRange = (folder: string) => IDBKeyRange.bound(`${folder}/`, `${folder}/￿`);
 
-/** 동기화할 때 고른 폴더의 파일 — 그 폴더의 이전 사본은 통째로 바꾼다(지운 파일이 남지 않게). */
+type Stamp = { size: number; lastModified: number };
+
+/** 다시 동기화할 때 사본에서 바꿀 것 — 담아 둔 것이 없거나 크기·수정 시각이 다른 파일만 넣고(put),
+ *  이번에 없는 파일은 지운다(remove). 그대로인 파일은 건드리지 않는다. */
+export function changesOf(folder: string, stored: Map<string, Stamp>, items: { path: string; file: Stamp }[]):
+  { put: string[]; remove: string[] } {
+  const now = new Set(items.map((it) => `${folder}/${it.path}`));
+  const put = items.filter((it) => {
+    const old = stored.get(`${folder}/${it.path}`);
+    return !old || old.size !== it.file.size || old.lastModified !== it.file.lastModified;
+  }).map((it) => `${folder}/${it.path}`);
+  const remove = [...stored.keys()].filter((key) => key.startsWith(`${folder}/`) && !now.has(key));
+  return { put, remove };
+}
+
+/** 동기화할 때 고른 폴더의 파일 — 바뀐 것만 다시 담고, 지운 파일은 사본에서도 지운다(changesOf). */
 export async function remember(folder: string, items: { path: string; file: File }[]): Promise<void> {
   for (const key of [...remembered.keys()]) if (key.startsWith(`${folder}/`)) remembered.delete(key);
   for (const it of items) remembered.set(`${folder}/${it.path}`, it.file);
-  await withStore(FILES, 'readwrite', (s) => {
-    s.delete(folderRange(folder));
-    for (const it of items) s.put(it.file, `${folder}/${it.path}`);
-  }).catch(() => { /* 저장 공간이 모자라면 이 페이지 동안만 기억한다 */ });
+  try {
+    // 담아 둔 사본의 크기·수정 시각 — File을 꺼내도 내용은 읽지 않는다(필요할 때 읽는 참조다).
+    const keys = await withStore<IDBValidKey[]>(FILES, 'readonly', (s) => s.getAllKeys(folderRange(folder)));
+    const files = await withStore<File[]>(FILES, 'readonly', (s) => s.getAll(folderRange(folder)));
+    const stored = new Map<string, Stamp>((keys ?? []).map((k, i) => [String(k), files?.[i] as File]));
+    const { put, remove } = changesOf(folder, stored, items);
+    if (!put.length && !remove.length) return;
+    const byKey = new Map(items.map((it) => [`${folder}/${it.path}`, it.file]));
+    await withStore(FILES, 'readwrite', (s) => {
+      for (const key of remove) s.delete(key);
+      for (const key of put) s.put(byKey.get(key), key);
+    });
+  } catch {
+    /* 저장 공간이 모자라면 이 페이지 동안만 기억한다 */
+  }
 }
 
 export async function lookup(folder: string, path: string): Promise<File | undefined> {

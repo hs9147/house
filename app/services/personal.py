@@ -197,12 +197,16 @@ def save_file(db: Session, email: str, folder: str, rel: str, source: Path, mtim
     size = source.stat().st_size
     if not accepts(rel, size):
         return {"path": rel, "status": "skipped"}
-    try:
-        target = storage_service.resolve(store.root, key + CONVERTED_SUFFIX)
-    except storage_service.StorageError:
-        return {"path": rel, "status": "skipped"}
     known = dict(row.files or {})
     meta = {"size": size, "mtime": int(mtime), "error": None}
+    try:
+        target = storage_service.resolve(store.root, key + CONVERTED_SUFFIX)
+    except storage_service.StorageError as e:
+        # 기록해 둔다 — 남기지 않으면 manifest가 이 파일을 늘 "새 파일"로 보고 동기화마다 다시 받는다.
+        known[key] = {**meta, "error": f"저장할 수 없는 경로: {e}"[:300]}
+        row.files = known
+        db.commit()
+        return {"path": rel, "status": "skipped"}
     try:
         markdown = doctext.extract(source)[0]
     except doctext.ExtractError as e:

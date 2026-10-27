@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applyTextEdit, coerceCell, decodeText, editedName, encodeText, parseCell,
+  applyTextEdit, changesOf, coerceCell, decodeText, editedName, encodeText, parseCell,
 } from '../lib/localfiles';
 
 describe('decodeText / encodeText', () => {
@@ -57,5 +57,24 @@ describe('editedName', () => {
   it('names the download as a copy so the original is not overwritten by accident', () => {
     expect(editedName('단가표.xlsx')).toBe('단가표 (수정).xlsx');
     expect(editedName('README')).toBe('README (수정)');
+  });
+});
+
+describe('changesOf', () => {
+  it('re-copies only new or changed files and drops the ones that are gone', () => {
+    const stored = new Map([
+      ['work/same.docx', { size: 10, lastModified: 1000 }],
+      ['work/edited.xlsx', { size: 20, lastModified: 1000 }],
+      ['work/gone.txt', { size: 5, lastModified: 1000 }],
+      ['other/x.txt', { size: 5, lastModified: 1000 }],
+    ]);
+    const out = changesOf('work', stored, [
+      { path: 'same.docx', file: { size: 10, lastModified: 1000 } },
+      { path: 'edited.xlsx', file: { size: 20, lastModified: 2000 } },
+      { path: 'new/plan.md', file: { size: 3, lastModified: 3000 } },
+    ]);
+    expect(out).toEqual({ put: ['work/edited.xlsx', 'work/new/plan.md'], remove: ['work/gone.txt'] });
+    expect(changesOf('work', new Map([['work/a.md', { size: 1, lastModified: 1 }]]),
+      [{ path: 'a.md', file: { size: 1, lastModified: 1 } }])).toEqual({ put: [], remove: [] });
   });
 });
