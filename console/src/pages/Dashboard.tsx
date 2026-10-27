@@ -3,7 +3,7 @@ import Async from '../components/Async';
 import { api } from '../lib/api';
 import { fmtBytes, fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
-import type { ApiKeyIssued, ScheduledJobRow } from '../lib/types';
+import type { ApiKeyIssued, ScheduledJobRow, StatusSnapshot, TopConsumer } from '../lib/types';
 
 function Gauge({ label, percent, detail }: { label: string; percent: number; detail?: string }) {
   const cls = percent >= 90 ? 'bad' : percent >= 70 ? 'warn' : '';
@@ -20,6 +20,76 @@ function Gauge({ label, percent, detail }: { label: string; percent: number; det
         <div className={cls} style={{ width: `${Math.min(percent, 100)}%` }} />
       </div>
     </div>
+  );
+}
+
+const KIND: Record<string, string> = { app: '앱', platform: '플랫폼', process: '프로세스' };
+
+/** 주요 점유 항목 — 게이지 아래 한 줄씩. 막대는 CPU·메모리는 전체 대비, 폴더는 가장 큰 폴더 대비다. */
+function TopList({ rows }: { rows: { key: string; kind: string; label: string; value: string; share: number; note?: string }[] }) {
+  if (!rows.length) return null;
+  return (
+    <table style={{ fontSize: 12, margin: '-6px 0 14px', width: '100%' }}>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.key}>
+            <td style={{ width: 64 }}><span className="status dim">{KIND[r.kind] ?? r.kind}</span></td>
+            <td title={r.note}>{r.label}{r.note ? <span className="mutedtext"> · {r.note}</span> : null}</td>
+            <td style={{ width: 160 }}>
+              <div className="gauge" style={{ height: 6 }}><div style={{ width: `${Math.min(r.share, 100)}%` }} /></div>
+            </td>
+            <td className="mono" style={{ width: 110, textAlign: 'right' }}>{r.value}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+const procNote = (c: TopConsumer) => (c.count > 1 ? `프로세스 ${c.count}개` : undefined);
+
+function CpuTop({ s }: { s: StatusSnapshot }) {
+  return <TopList rows={(s.top?.cpu ?? []).map((c) => ({
+    key: c.kind + c.label, kind: c.kind, label: c.label, value: `${c.cpu.toFixed(1)}%`, share: c.cpu, note: procNote(c),
+  }))} />;
+}
+
+function MemoryTop({ s }: { s: StatusSnapshot }) {
+  const total = s.memory?.total || 1;
+  return <TopList rows={(s.top?.memory ?? []).map((c) => ({
+    key: c.kind + c.label, kind: c.kind, label: c.label, value: fmtBytes(c.memory),
+    share: (c.memory / total) * 100, note: procNote(c),
+  }))} />;
+}
+
+/** 디스크 — 드라이브마다 사용률, 그리고 플랫폼이 쌓는 폴더(앱 배포 폴더마다·로그·저장소·색인)의 크기. */
+function DiskTop({ s }: { s: StatusSnapshot }) {
+  // 위의 "디스크"(플랫폼이 깔린 드라이브)와 같은 드라이브는 다시 보이지 않는다.
+  const disks = (s.top?.disks ?? []).filter((d) => !(d.total === s.disk?.total && d.used === s.disk?.used));
+  const folders = s.top?.folders;
+  // 폴더는 드라이브가 서로 다를 수 있어 가장 큰 폴더 대비로 막대를 그린다.
+  const biggest = Math.max(1, ...(folders?.items ?? []).map((f) => f.bytes));
+  return (
+    <>
+      {disks.map((d) => (
+        <Gauge key={d.mount} label={`드라이브 ${d.mount}`} percent={d.percent}
+          detail={`${fmtBytes(d.used)} / ${fmtBytes(d.total)}`} />
+      ))}
+      {folders && (
+        <>
+          <div className="mutedtext" style={{ fontSize: 12, margin: '-6px 0 8px' }}>
+            플랫폼 폴더 크기
+            {folders.measuring ? ' — 재는 중입니다. 잠시 뒤 새로고침하세요'
+              : folders.measured_at ? ` — ${fmtDate(folders.measured_at)}에 잼(10분마다 다시)` : ''}
+          </div>
+          <TopList rows={folders.items.map((f) => ({
+            key: f.path, kind: f.kind, label: f.label, share: (f.bytes / biggest) * 100,
+            value: `${fmtBytes(f.bytes)}${f.complete ? '' : '+'}`,
+            note: f.complete ? f.path : `${f.path} (항목이 많아 일부만 잼 — 실제는 더 크다)`,
+          }))} />
+        </>
+      )}
+    </>
   );
 }
 
@@ -53,6 +123,7 @@ export default function Dashboard() {
               )}
               {s.system && <p className="mutedtext">{s.system}</p>}
               {s.cpu_percent !== undefined && <Gauge label="CPU" percent={s.cpu_percent} />}
+              <CpuTop s={s} />
               {s.memory && (
                 <Gauge
                   label="메모리"
@@ -60,6 +131,7 @@ export default function Dashboard() {
                   detail={`${fmtBytes(s.memory.used)} / ${fmtBytes(s.memory.total)}`}
                 />
               )}
+              <MemoryTop s={s} />
               {s.disk && (
                 <Gauge
                   label="디스크"
@@ -67,6 +139,7 @@ export default function Dashboard() {
                   detail={`${fmtBytes(s.disk.used)} / ${fmtBytes(s.disk.total)}`}
                 />
               )}
+              <DiskTop s={s} />
               {s.gpus.length > 0 ? (
                 <table style={{ marginTop: 8 }}>
                   <thead>

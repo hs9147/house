@@ -741,8 +741,32 @@ export interface StatusSnapshot {
   cpu_percent?: number;
   memory?: { total: number; used: number; percent: number };
   disk?: { total: number; used: number; percent: number };
+  // 주요 점유 항목(services/monitor) — 프로세스는 누가 쓰는지로 묶는다(배포한 앱·플랫폼·그 밖의 프로세스).
+  // 폴더 크기는 뒤에서 재고 10분 동안 둔다 — 처음에는 measuring이 참이고 items가 비어 있다.
+  top?: {
+    cpu: TopConsumer[];
+    memory: TopConsumer[];
+    disks: { mount: string; total: number; used: number; percent: number }[];
+    folders: { items: TopFolder[]; measured_at: string | null; measuring: boolean };
+  };
   gpus: GpuInfo[];
   system?: string;
+}
+
+export interface TopConsumer {
+  kind: 'app' | 'platform' | 'process';
+  label: string;
+  cpu: number;      // 전체 CPU 대비 %
+  memory: number;   // 바이트(RSS)
+  count: number;    // 묶인 프로세스 수
+}
+
+export interface TopFolder {
+  kind: 'app' | 'platform';
+  label: string;
+  path: string;
+  bytes: number;
+  complete: boolean;  // 항목이 너무 많아 다 재지 못했으면 false — 실제는 이보다 크다
 }
 
 export interface HealthInfo {
