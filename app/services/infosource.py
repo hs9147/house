@@ -31,10 +31,13 @@ from __future__ import annotations
 import base64
 import binascii
 import copy
+import csv
 import difflib
 import hashlib
 import importlib.util
+import io
 import json
+import math
 import os
 import re
 import shutil
@@ -1354,6 +1357,7 @@ def from_browser(row: InfoSource, payload) -> dict:
         return {"origin": origin, "pages": pages, "skipped": skipped, "sitemap": 0, "browser": False,
                 "via": "browser", "menu_dom": (row.scan or {}).get("menu") or [], "replay": True,
                 "downloads": downloads, "collected": _collected_in(payload.get("collected"), origin),
+                "datasets": _datasets_in(payload.get("datasets"), origin),
                 "queries_version": _s(payload.get("queries_version"), 32)}
     pages, seen = [], set()
     for p in (payload.get("pages") if isinstance(payload.get("pages"), list) else [])[:MAX_PAGES * 2]:
@@ -1379,6 +1383,7 @@ def from_browser(row: InfoSource, payload) -> dict:
     return {"origin": origin, "pages": pages, "skipped": skipped, "sitemap": 0, "browser": False,
             "via": "browser", "menu_dom": _menu_in(payload.get("menu"), origin, [400]),
             "downloads": downloads, "collected": _collected_in(payload.get("collected"), origin),
+            "datasets": _datasets_in(payload.get("datasets"), origin),
             "queries_version": _s(payload.get("queries_version"), 32)}
 
 
@@ -1391,11 +1396,35 @@ def _collected_in(items, origin: str) -> list[dict]:
         counts = {k: c[k] if isinstance(c.get(k), int) and c[k] >= 0 else 0
                   for k in ("rows", "details", "files")}
         via = c.get("via") if c.get("via") in ("open", "path", "url") else ""
-        repair = _repair_in(c.get("repair"))
+        repair, data = _repair_in(c.get("repair")), _data_in(c.get("data"))
         out.append({"screen": _s(c.get("screen"), 200), "url": _same(c.get("url"), origin),
                     **counts, "notes": _strs(c.get("notes"), 10, 200), "via": via,
-                    **({"repair": repair} if repair else {})})
+                    **({"repair": repair} if repair else {}), **({"data": data} if data else {})})
     return out
+
+
+_ENDS = ("total", "short", "empty", "one", "repeat", "cap", "error", "stop")
+
+
+def _data_in(d) -> dict | None:
+    """목록을 조회 응답으로 받은 보고 — 몇 건을 받았고 전체가 몇 건이며 어디서 멈췄나, 그리고 그 요청의 모양
+    (경로·인자 이름 — 값은 없다). 수집 방법 분석(LLM)이 읽는다."""
+    if not isinstance(d, dict) or d.get("via") != "api":
+        return None
+    api = d.get("api") if isinstance(d.get("api"), dict) else {}
+    total = d.get("total")
+    return {"via": "api", "got": d["got"] if isinstance(d.get("got"), int) and d["got"] >= 0 else 0,
+            "total": total if isinstance(total, int) and not isinstance(total, bool) and total >= 0 else None,
+            "complete": d.get("complete") is True, "end": d.get("end") if d.get("end") in _ENDS else "",
+            "key": _s(d.get("key"), 120), "since": _date_in(d.get("since")),
+            "api": {"method": _s(api.get("method"), 8).upper(), "path": _s(api.get("path"), 300),
+                    "list": _s(api.get("list"), 120), "page": _s(api.get("page"), 120),
+                    "size": _s(api.get("size"), 120), "params": _strs(api.get("params"), 40, 120)}}
+
+
+def _date_in(v) -> str:
+    v = _s(v, 10)
+    return v if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v) else ""
 
 
 def _repair_in(r) -> dict | None:
@@ -1418,8 +1447,11 @@ def _repair_in(r) -> dict | None:
 def _collected_notes(collected: list[dict]) -> list[str]:
     notes = []
     for c in collected:
-        line = (f"수집 · {c['screen'] or c['url']}: 결과 {c['rows']}행 중 상세 {c['details']}건, "
-                f"파일 {c['files']}개")
+        d = c.get("data")
+        rows = (f"목록 {d['got']}건" + (f"/전체 {d['total']}건" if d["total"] is not None else "") +
+                (" 빠짐없음" if d["complete"] else f" 덜 받음({d['end']})") + f", 첫 쪽 {c['rows']}행"
+                if d else f"결과 {c['rows']}행")
+        line = f"수집 · {c['screen'] or c['url']}: {rows} 중 상세 {c['details']}건, 파일 {c['files']}개"
         notes.append(line + (f" — {' / '.join(c['notes'][:3])}" if c["notes"] else ""))
     return notes
 
@@ -1452,6 +1484,151 @@ def _browser_files(items, origin: str) -> tuple[list[dict], list[dict]]:
     return downloads, skipped
 
 
+# ---------------------------------------------------------------- 목록 누적(전체 + 증분)
+#
+# 북마크가 조회 응답에서 받은 목록(레코드)은 화면마다 **누적**한다. 처음에는 전체를 받고, 다음부터는 지난번에
+# 빠짐없이 받은 날(@last)부터 받아 키로 합친다(같은 키는 새 값으로). 누적본은 받아 둔 파일 자리(_file_dir — 스캔
+# 마다 비운다) 밖에 두고, 스캔마다 누적 전체를 CSV 한 장으로 만들어 다른 내려받은 파일과 같은 길(표 유형)로
+# 저장한다. 사이트에서 지워진 행은 지우지 않는다 — 증분 조회로는 지워진 것을 알 수 없다.
+
+MAX_DATASET_ROWS = 20_000    # 한 번에 받는 레코드(scanAgent.js MAX_RECORDS와 같다)
+MAX_DATASET_COLS = 200
+MAX_VALUE = 2000
+
+
+def _dataset_dir(source_id: int) -> Path:
+    root = Path(get_settings().storage_root or "./data/storage").resolve()
+    return root / ".infosource" / "datasets" / str(source_id)
+
+
+_DROP = object()
+
+
+def _value_in(v):
+    """값 하나 — 글자·숫자·참거짓·빈 값만. 객체·배열은 버린다(_DROP)."""
+    if v is None or isinstance(v, bool) or isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    return _s(v, MAX_VALUE) if isinstance(v, str) else _DROP
+
+
+def _datasets_in(items, origin: str) -> list[dict]:
+    """북마크가 받은 목록 — 같은 출처의 화면만, 값은 글자·숫자만(길이를 자른다)."""
+    out = []
+    for d in (items if isinstance(items, list) else [])[:MAX_QUERY_SCREENS]:
+        url = _same(d.get("url"), origin) if isinstance(d, dict) else ""
+        if not url:
+            continue
+        columns = [{"key": _s(c.get("key"), 120), "label": _s(c.get("label"), 80)}
+                   for c in (d.get("columns") if isinstance(d.get("columns"), list) else [])[:MAX_DATASET_COLS]
+                   if isinstance(c, dict) and _s(c.get("key"), 120)]
+        records = []
+        for r in (d.get("records") if isinstance(d.get("records"), list) else [])[:MAX_DATASET_ROWS]:
+            if isinstance(r, dict):
+                rec = {_s(k, 120): _value_in(v) for k, v in list(r.items())[:MAX_DATASET_COLS]
+                       if isinstance(k, str) and _s(k, 120)}
+                records.append({k: v for k, v in rec.items() if v is not _DROP})
+        key, total = _s(d.get("key"), 120), d.get("total")
+        out.append({"screen": _s(d.get("screen"), 200) or url, "url": url,
+                    "key": key if key in {c["key"] for c in columns} else "",
+                    "columns": columns, "records": records,
+                    "total": total if isinstance(total, int) and not isinstance(total, bool) and total >= 0 else None,
+                    "complete": d.get("complete") is True, "since": _date_in(d.get("since"))})
+    return out
+
+
+def _record_key(key: str, rec: dict) -> str:
+    v = rec.get(key) if key else None
+    if v not in (None, ""):
+        return f"k:{v}"
+    return "h:" + hashlib.sha256(json.dumps(rec, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:20]
+
+
+def _dataset_csv(columns: list[dict], records: list[dict]) -> bytes:
+    keys = [c["key"] for c in columns]
+    for r in records:
+        keys += [k for k in r if k not in keys]
+    label = {c["key"]: c["label"] for c in columns if c["label"]}
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow([label.get(k) or k for k in keys])
+    for r in records:
+        w.writerow(["" if r.get(k) is None else r.get(k) for k in keys])
+    return buf.getvalue().encode("utf-8-sig")   # 엑셀이 한글을 깨뜨리지 않게
+
+
+def merge_dataset(source_id: int, ds: dict, today: str) -> tuple[dict, dict]:
+    """받은 목록을 그 화면의 누적본에 합친다 — (저장할 CSV 파일[_stage가 받는 모양], 요약). 빠짐없이 받았으면 오늘을 다음 증분의
+    시작일(last)로 남긴다. 덜 받았으면 last를 그대로 둔다(다음에 그날부터 다시 받는다)."""
+    folder = _dataset_dir(source_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    tag = _tag(ds["url"])
+    path, meta_path = folder / f"{tag}.json", folder / f"{tag}.meta.json"
+    old = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    key = ds["key"] or old.get("key") or ""
+    rows = {_record_key(key, r): r for r in old.get("records") or []}
+    counts = {"new": 0, "changed": 0, "same": 0}
+    for r in ds["records"]:
+        k = _record_key(key, r)
+        prev = rows.get(k)
+        counts["new" if prev is None else "same" if prev == r else "changed"] += 1
+        rows[k] = r
+    labels = {c["key"]: c["label"] for c in old.get("columns") or [] if c.get("label")}
+    labels.update({c["key"]: c["label"] for c in ds["columns"] if c["label"]})
+    order = [c["key"] for c in ds["columns"]]
+    order += [c["key"] for c in old.get("columns") or [] if c["key"] not in order]
+    columns = [{"key": k, "label": labels.get(k, "")} for k in order]
+    last = today if ds["complete"] else old.get("last", "")
+    records = list(rows.values())
+    meta = {"screen": ds["screen"], "url": ds["url"], "key": key, "last": last, "rows": len(records),
+            "total": ds["total"], "complete": ds["complete"], "since": ds["since"], "updated": today}
+    path.write_text(json.dumps({**meta, "columns": columns, "records": records}, ensure_ascii=False),
+                    encoding="utf-8")
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    name = _folder_name(ds["screen"])[:60] + " 목록.csv"
+    sheet = {"url": f"{ds['url'].split('#')[0]}#{quote(ds['screen'] + ' 목록')}", "name": name,
+             "text": f"{ds['screen']} — 누적 목록", "page": ds["url"].split("#")[0], "ext": ".csv",
+             "data": _dataset_csv(columns, records)}
+    return sheet, {**meta, **counts, "got": len(ds["records"])}
+
+
+def _merge_datasets(row: InfoSource, datasets: list[dict]) -> tuple[list[dict], list[dict], list[str]]:
+    today = datetime.now().date().isoformat()   # 북마크가 날짜 칸에 넣는 날과 같은 달력(서버의 지역 날짜)
+    sheets, summaries, notes = [], [], []
+    for ds in datasets:
+        sheet, summary = merge_dataset(row.id, ds, today)
+        sheets.append(sheet)
+        summaries.append(summary)
+        whole = f"/전체 {summary['total']}건" if summary["total"] is not None else ""
+        done = " 빠짐없음" if summary["complete"] else " — 덜 받음(다음에 같은 날부터 다시 받습니다)"
+        start = f"{summary['since']}부터" if summary["since"] else "처음부터"
+        notes.append(f"목록 · {summary['screen']}: {start} 이번 {summary['got']}건{whole}{done}"
+                     f" · 누적 {summary['rows']}건(새 {summary['new']} · 바뀜 {summary['changed']})")
+    return sheets, summaries, notes
+
+
+def dataset_marks(row: InfoSource) -> dict[str, str]:
+    """화면마다 지난번에 빠짐없이 받은 날 — 북마크가 @last 자리에 넣는다."""
+    folder, out = _dataset_dir(row.id), {}
+    for s in query_screens(row):
+        meta = folder / f"{_tag(s['url'])}.meta.json"
+        try:
+            last = json.loads(meta.read_text(encoding="utf-8")).get("last") if meta.is_file() else ""
+        except (OSError, ValueError):
+            last = ""
+        if last:
+            out[s["url"]] = last
+    return out
+
+
+def served_screens(row: InfoSource) -> list[dict]:
+    """북마크에 보내는 수집 조건 — 저장한 조건에 화면마다 지난 수집일(last)을 붙인다. last는 판(queries_version)에
+    넣지 않는다: 수집할 때마다 바뀌는 값이라, 넣으면 늘 "옛 북마크"가 된다."""
+    marks = dataset_marks(row)
+    return [{**s, **({"last": marks[s["url"]]} if s["url"] in marks else {})} for s in query_screens(row)]
+
+
 def _submit_result(source_id: int, result: dict) -> None:
     """테스트에서 인라인으로 바꾸는 큐 경계(브라우저 스캔)."""
     jobs.submit(_result_job, source_id, result)
@@ -1478,10 +1655,12 @@ def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
     """검사는 지금(틀리면 바로 400), 정리(LLM)는 큐에서 — 정리는 수십 초 걸린다."""
     _refuse_if_running(row)
     result = from_browser(row, payload)
+    # 목록은 누적본에 합치고 누적 전체를 CSV로 — 우리가 만든 파일이라 받은 파일의 수·크기 상한을 거치지 않는다.
+    sheets, result["datasets"], data_notes = _merge_datasets(row, result.pop("datasets"))
     # 받은 파일은 지금 둔다 — 큐로 넘길 결과에 수십 MB의 본문을 싣지 않는다.
     got, missed = _download(result.pop("downloads"), {}, result["origin"], limit=MAX_BROWSER_FILES)
-    result["files"], result["stage_notes"] = _stage(row.id, got)
-    result["stage_notes"] = _collected_notes(result["collected"]) + result["stage_notes"]
+    result["files"], result["stage_notes"] = _stage(row.id, sheets + got)
+    result["stage_notes"] = _collected_notes(result["collected"]) + data_notes + result["stage_notes"]
     if result.pop("replay", False):
         result["stage_notes"].insert(0, "봇 실행 — 화면은 지난 스캔 그대로이고, 수집 조건(녹화한 길)대로 다시 받은 "
                                         "결과입니다.")
@@ -1503,10 +1682,11 @@ def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
 
 # ---------------------------------------------------------------- 수집 조건(사람이 확정)
 #
-# 사이트에서 모으는 것은 **조회 결과를 내려받은 파일과 첨부파일**이다. 화면마다 조회 조건을 정해
-# 두면 북마크릿이 그 화면에 채우고 조회한 뒤, 결과 파일(엑셀 버튼 — 없으면 결과 표를 CSV로)과
-# 행마다 상세를 열어 첨부를 받는다(scanAgent.js). 조건은 LLM이 스캔한 조회 항목을 보고 제안하고,
-# 사람이 고쳐 확정한다 — 확정한 조건이 북마크에 실린다.
+# 사이트에서 모으는 것은 **조회 결과 목록 전체와 첨부파일**이다. 화면마다 조회 조건을 정해 두면
+# 북마크릿이 그 화면에 채우고 조회한 뒤, 조회 응답에서 결과 목록을 찾아 쪽을 넘기며 전체를 받고(못 찾으면
+# 엑셀 버튼·결과 표로 첫 쪽), 행마다 상세를 열어 첨부를 받는다(scanAgent.js). 목록은 화면마다 누적한다 —
+# 날짜 칸을 @last로 두면 지난번에 빠짐없이 받은 날부터 받는다(증분). 조건은 LLM이 스캔한 조회 항목과 지난
+# 수집 결과를 보고 제안하고, 사람이 고쳐 확정한다 — 확정한 조건이 북마크에 실린다.
 
 MAX_QUERY_SCREENS = 10
 MAX_CONDITIONS = 15
@@ -1514,9 +1694,10 @@ _DATE_FIELD = re.compile(r"일자|날짜|일시|기간|등록일|작성일|date|
 _FROM_FIELD = re.compile(r"시작|부터|from|start|begin|~$", re.I)
 _TO_FIELD = re.compile(r"종료|까지|to$|end", re.I)
 
-QUERY_PROMPT = """사내 업무 사이트의 조회 화면마다 **수집 방법과 조회 조건**을 정한다. 목적은 그 화면의 조회 결과를
-내려받은 파일과 행마다 상세의 첨부파일을 모으는 것이다 — 결과가 너무 많지 않고(20건 안팎) 최근 것이 오도록.
-출력은 JSON 객체 하나다(설명·코드펜스 없이).
+QUERY_PROMPT = """사내 업무 사이트의 조회 화면마다 **수집 방법과 조회 조건**을 정한다. 목적은 그 화면이 보여 주는
+목록을 **빠짐없이** 모으고, 그다음부터는 새로 생긴 것만 더 받는 것이다(전체 + 증분). 조건은 표본을 고르는 것이
+아니라 "어떤 목록인가"를 정한다 — 목록을 좁히는 조건(부서·종류처럼 사람이 원하는 범위)만 쓰고, 상태·처리 여부처럼
+지나간 것을 빼는 조건은 쓰지 않는다(빠진다). 출력은 JSON 객체 하나다(설명·코드펜스 없이).
 
 {{"screens": [{{
   "url": "아래 화면의 url 그대로",
@@ -1527,6 +1708,7 @@ QUERY_PROMPT = """사내 업무 사이트의 조회 화면마다 **수집 방법
   "search": "조회를 실행하는 버튼의 글자(모르면 빈 값)",
   "detail_column": "결과 표에서 상세를 여는 열의 이름 — tables에 있는 이름 그대로(모르면 빈 값)",
   "export": "결과를 파일로 내려받는 버튼의 글자(없거나 모르면 빈 값)",
+  "key_column": "결과 표에서 한 건을 가르는 열의 이름(문서번호·요청번호처럼 겹치지 않는 것) — tables에 있는 이름 그대로(모르면 빈 값)",
   "risks": ["수집이 막힐 만한 점 — 짧게"]
 }}]}}
 
@@ -1540,8 +1722,12 @@ QUERY_PROMPT = """사내 업무 사이트의 조회 화면마다 **수집 방법
 규칙:
 - 조회할 가치가 있는 화면만(목록·조회 화면). 로그인·메인·설정·입력(등록) 화면은 뺀다.
 - field는 그 화면의 fields에 있는 이름 그대로 쓴다. 비워 둘 칸은 넣지 않는다.
-- 날짜·기간 칸은 상대 날짜로 쓴다: @today, @today-7d, @today-1m, @today-1y. 한 항목에 시작·끝 칸이
-  둘이면(기간) 같은 field를 두 번 쓴다 — 시작, 끝 순서로.
+- 날짜·기간 칸: 시작 칸은 @last|@today-3y(지난번에 빠짐없이 받은 날부터 — 처음이면 3년 전부터. 사이트가 기간을
+  더 짧게만 허용하면 그 길이로, 예: @last|@today-1y), 끝 칸은 @today. 한 항목에 시작·끝 칸이 둘이면(기간) 같은
+  field를 두 번 쓴다 — 시작, 끝 순서로. 고정된 날짜·@today-1m 같은 짧은 기간은 쓰지 않는다(전체가 아니다).
+- 지난 수집(last_collect)의 data는 조회 응답으로 받은 목록의 보고다: got(받은 건수)·total(전체 건수)·complete(빠짐
+  없음)·end(멈춘 까닭: total·short·empty·one은 끝까지 감, repeat은 쪽 인자를 무시하는 서버, cap은 상한, error는 실패)·
+  api(요청의 경로와 인자 이름). complete가 false면 그 까닭을 risks에 적고, 기간을 나누면 되는지 판단한다.
 - 목록에서 고르는 칸의 값을 모르면 쓰지 않는다(화면 기본값 그대로 둔다). 지어낸 코드값을 쓰지 마라.
 - search·export·detail_column은 사실(본문 발췌·표 머리글)에 보이는 것만 적는다. 지어내지 마라.
 
@@ -1607,6 +1793,8 @@ def clean_screens(row: InfoSource, screens) -> list[dict]:
         hints = {k: _s(hints.get(k), 40) for k in ("search", "export") if _s(hints.get(k), 40)}
         if hints:
             extra["hints"] = hints
+        if _s(s.get("key"), 80):   # 레코드를 가르는 열(표 머리글) — 목록을 누적할 때 같은 건을 알아본다
+            extra["key"] = _s(s.get("key"), 80)
         plan = s.get("plan") if isinstance(s.get("plan"), dict) else {}
         if plan.get("method") in METHODS:
             extra["plan"] = {"method": plan["method"], "reason": _s(plan.get("reason"), 300),
@@ -1753,8 +1941,12 @@ def set_queries(db: Session, row: InfoSource, screens: list[dict], actor: str) -
     return screens
 
 
+# 증분의 시작 — 지난번에 빠짐없이 받은 날, 처음이면 3년 전부터(scanAgent.js since).
+FIRST_SINCE = "@last|@today-3y"
+
+
 def _date_guess(fields: list[str]) -> list[dict]:
-    """LLM 없이 — 날짜 칸만 최근 한 달로(시작 칸은 한 달 전, 끝 칸은 오늘)."""
+    """LLM 없이 — 날짜 칸만 전체 + 증분으로(시작 칸은 지난 수집일·처음이면 3년 전, 끝 칸은 오늘)."""
     out = []
     for f in fields:
         if not _DATE_FIELD.search(f):
@@ -1762,9 +1954,9 @@ def _date_guess(fields: list[str]) -> list[dict]:
         if _TO_FIELD.search(f):
             out.append({"field": f, "value": "@today"})
         elif _FROM_FIELD.search(f):
-            out.append({"field": f, "value": "@today-1m"})
+            out.append({"field": f, "value": FIRST_SINCE})
         else:  # 한 칸 이름에 시작·끝이 함께 있다(기간) — 같은 이름을 두 번, 시작·끝 순서로
-            out += [{"field": f, "value": "@today-1m"}, {"field": f, "value": "@today"}]
+            out += [{"field": f, "value": FIRST_SINCE}, {"field": f, "value": "@today"}]
     return out
 
 
@@ -1779,7 +1971,7 @@ def _analysis_facts(row: InfoSource, pages: list[dict]) -> list[dict]:
             "url": p["url"], "title": p["title"], "kind": p["kind"], "info": p["info"][:200],
             "fields": p["fields"], "tables": p["tables"], "has_path": bool(p.get("path")),
             "text": str((by_url.get(p["url"]) or {}).get("text") or "")[:400],
-            **({"last_collect": {k: last.get(k) for k in ("via", "rows", "details", "files", "notes")}}
+            **({"last_collect": {k: last.get(k) for k in ("via", "rows", "details", "files", "notes", "data")}}
                if last else {}),
         })
     return out
@@ -1843,12 +2035,16 @@ def suggest_queries(db: Session, row: InfoSource) -> dict:
         if method == "path" and not page.get("path"):
             method, reason = "record", (reason + " — 찾은 길이 없어 녹화가 필요합니다").strip(" —")
         detail = _detail_of(page, _s(s.get("detail_column"), 80)) if s.get("detail_column") else None
+        key = _s(s.get("key_column"), 80)
+        if key and not any(key in t for t in page.get("tables") or []):
+            dropped.append(key)
+            key = ""
         screens.append({
             "screen": page["title"] or page["url"], "url": page["url"],
             "conditions": conditions[:MAX_CONDITIONS], "why": _s(s.get("why"), 300),
             "plan": {"method": method, "reason": reason, "risks": _strs(s.get("risks"), 4, 120)},
             "hints": {k: _s(s.get(k), 40) for k in ("search", "export") if _s(s.get(k), 40)},
-            **({"detail": detail} if detail else {}),
+            **({"detail": detail} if detail else {}), **({"key": key} if key else {}),
             **{k: page[k] for k in ("path", "start", "frame") if page.get(k)},
         })
     if not screens:
@@ -2130,3 +2326,4 @@ def shot_path(row: InfoSource, n: int) -> Path | None:
 def forget(row: InfoSource) -> None:
     shutil.rmtree(_shot_dir(row.id), ignore_errors=True)
     shutil.rmtree(_file_dir(row.id), ignore_errors=True)
+    shutil.rmtree(_dataset_dir(row.id), ignore_errors=True)

@@ -1086,10 +1086,17 @@ export interface SourceScan {
   sitemap?: number;
   browser?: boolean;
   via?: 'browser';
-  // 수집 결과 — 화면마다 결과 행·연 상세·받은 파일, 어떻게 열었는지, 막혔으면 막힌 곳의 보고
+  // 수집 결과 — 화면마다 결과 행·연 상세·받은 파일, 어떻게 열었는지, 막혔으면 막힌 곳의 보고,
+  // 조회 응답으로 받은 목록의 보고(data — 받은 건수·전체 건수·빠짐없음·멈춘 까닭·요청의 모양)
   collected?: {
     screen: string; url: string; rows: number; details: number; files: number; notes: string[];
     via: 'open' | 'path' | 'url' | ''; repair?: { kind: 'step' | 'fields' };
+    data?: { via: 'api'; got: number; total: number | null; complete: boolean; end: string; key: string; since: string };
+  }[];
+  // 화면마다 누적한 목록(services/infosource.merge_dataset) — 이번에 받은 건수와 누적, 다음 증분의 시작일(last)
+  datasets?: {
+    screen: string; url: string; key: string; last: string; rows: number; got: number; total: number | null;
+    complete: boolean; since: string; new: number; changed: number;
   }[];
   // api
   openapi?: string;

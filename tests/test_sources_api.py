@@ -4,6 +4,7 @@ HTTP 경계(infosource._http_get)를 가짜 사이트로 바꾸고, 스캔 큐�
 **헤더 값이 응답·감사 어디에도 나오지 않는지**를 함께 본다.
 """
 import json
+from datetime import datetime
 
 import httpx
 import pytest
@@ -575,9 +576,9 @@ def test_query_conditions_are_saved_for_the_bookmark_and_values_stay_out_of_audi
 def test_query_suggestion_keeps_only_real_screens_and_fields(client, monkeypatch):
     sid = _notice_scan(client, monkeypatch)
     url = f"{API}/sources/{sid}/queries/suggest"
-    # LLM 없이 — 날짜 칸만 최근 한 달로(한 칸 이름의 기간은 시작·끝 두 번)
+    # LLM 없이 — 날짜 칸만 전체 + 증분으로(지난 수집일부터, 처음이면 3년 전부터 · 한 칸 이름의 기간은 시작·끝 두 번)
     out = client.post(url, headers=ADMIN).json()
-    assert out["screens"][0]["conditions"] == [{"field": "등록일", "value": "@today-1m"},
+    assert out["screens"][0]["conditions"] == [{"field": "등록일", "value": "@last|@today-3y"},
                                                {"field": "등록일", "value": "@today"}]
 
     monkeypatch.setattr(llm, "default_provider", lambda db: object())
@@ -675,6 +676,65 @@ def test_collection_files_and_summary_arrive_with_the_browser_scan(client, monke
     assert scan["collected"][1] == {"screen": "남의 것", "url": "", "rows": 0, "details": 0,
                                     "files": 0, "notes": [], "via": ""}
     assert any(n.startswith("수집 · 공지 조회: 결과 30행 중 상세 20건, 파일 25개") for n in scan["notes"])
+
+
+def test_list_data_accumulates_full_then_incremental_and_marks_the_next_start(client, monkeypatch):
+    """조회 응답으로 받은 목록 — 화면마다 누적하고(키로 합친다) 누적 전체를 CSV 한 장으로 저장 대상에 올린다.
+    빠짐없이 받은 날이 북마크의 @last가 되고, 덜 받았으면 그날을 옮기지 않는다."""
+    sid = _notice_scan(client, monkeypatch)
+    screen = {"url": "https://intra.test/notice", "conditions": [{"field": "등록일", "value": "@last|@today-3y"}]}
+    client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [screen]})
+    cols = [{"key": "nttId", "label": "번호"}, {"key": "title", "label": "제목"}, {"key": "regDt", "label": ""}]
+
+    def upload(records, **over):
+        ds = {"screen": "공지 조회", "url": "https://intra.test/notice", "key": "nttId", "columns": cols,
+              "records": records, "total": len(records), "complete": True, "since": "", **over}
+        collected = [{"screen": "공지 조회", "url": "https://intra.test/notice", "rows": 10, "details": 0, "files": 0,
+                      "data": {"via": "api", "got": len(records), "total": ds["total"], "complete": ds["complete"],
+                               "end": "total", "key": "nttId", "api": {"method": "POST", "path": "/notice/list.do",
+                                                                     "list": "result.list", "page": "pageIndex",
+                                                                     "params": ["pageIndex", "searchWrd"]}}}]
+        res = client.post(f"{API}/sources/{sid}/browser-result", headers=ADMIN,
+                          files=_browser_file(sid, replay=True, datasets=[ds], collected=collected,
+                                              files=[]))
+        assert res.status_code == 202, res.text
+        return client.get(f"{API}/sources/{sid}", headers=ADMIN).json()
+
+    first = [{"nttId": i, "title": f"공지 {i}", "regDt": "2026-10-01", "nested": {"x": 1}} for i in range(1, 26)]
+    out = upload(first)
+    sheet = next(f for f in out["scan"]["files"] if f["name"] == "공지-조회 목록.csv")
+    assert sheet["category"] == "sheets"
+    assert any(n.startswith("목록 · 공지 조회: 처음부터 이번 25건/전체 25건 빠짐없음 · 누적 25건(새 25 · 바뀜 0)")
+               for n in out["scan"]["notes"])
+    assert any("목록 25건/전체 25건 빠짐없음" in n for n in out["scan"]["notes"])
+    today = datetime.now().date().isoformat()
+    assert out["queries"][0]["last"] == today        # 북마크가 다음에 @last 자리에 넣는 날
+    assert "last" not in client.get(f"{API}/sources/{sid}/queries", headers=ADMIN).json()["screens"][0]
+
+    # 증분 — 그날부터 받은 것을 합친다(같은 키는 새 값, 겹치지 않는 것은 그대로)
+    later = [{"nttId": 25, "title": "공지 25 (고침)", "regDt": "2026-10-01"},
+             {"nttId": 26, "title": "공지 26", "regDt": today}]
+    out = upload(later, since=today)
+    assert any(f"목록 · 공지 조회: {today}부터 이번 2건/전체 2건 빠짐없음 · 누적 26건(새 1 · 바뀜 1)" in n
+               for n in out["scan"]["notes"])
+    sheet = next(f for f in out["scan"]["files"] if f["name"] == "공지-조회 목록.csv")
+    from app.models import InfoSource
+    from app.db import SessionLocal
+    with SessionLocal() as s:
+        text = infosource.staged_file(s.get(InfoSource, sid), sheet).read_bytes().decode("utf-8-sig")
+    lines = text.splitlines()
+    assert lines[0] == "번호,제목,regDt" and len(lines) == 27     # 머리글을 모르는 열은 키 이름 · 객체 값은 버린다
+    assert "25,공지 25 (고침),2026-10-01" in lines
+
+    # 덜 받았으면 다음 시작일을 옮기지 않는다(같은 날부터 다시 받는다)
+    out = upload(later[:1], total=50, complete=False, since=today)
+    assert any("덜 받음" in n for n in out["scan"]["notes"])
+    ds = {"screen": "공지 조회", "url": "https://intra.test/notice", "key": "nttId", "columns": cols,
+          "records": later[:1], "total": 50, "complete": False, "since": today}
+    _, summary = infosource.merge_dataset(sid, ds, "2099-01-01")
+    assert summary["last"] == today and summary["rows"] == 26
+    _, summary = infosource.merge_dataset(sid, {**ds, "complete": True}, "2099-01-01")
+    assert summary["last"] == "2099-01-01"
 
 
 def test_scan_progress_streams_while_scanning(client):

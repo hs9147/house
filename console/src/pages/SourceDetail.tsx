@@ -250,10 +250,13 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
         돌고, 저장하면 다음 실행부터 바뀐 조건이 쓰입니다. 조건이 없으면 스캔만 합니다.
       </p>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
-        화면마다 — 여는 길, 조회 조건, 조회·엑셀 버튼, 상세를 여는 열. 북마크가 그 화면을 조회해 <b>결과 파일</b>(엑셀
-        버튼, 없으면 결과 표를 CSV로)과 <b>행마다 상세의 첨부파일</b>을 받습니다. 날짜는 <span className="mono">@today</span>·
-        <span className="mono">@today-7d</span>·<span className="mono">@today-1m</span>처럼 쓰면 북마크를 누른 날로
-        바뀝니다. 기간처럼 칸이 둘이면 같은 칸 이름을 두 번(시작, 끝 순서) 넣습니다.
+        화면마다 — 여는 길, 조회 조건, 조회·엑셀 버튼, 상세를 여는 열. 북마크가 그 화면을 조회하고, 화면이 받은 조회
+        응답에서 <b>결과 목록 전체</b>를 쪽을 넘기며 받습니다(전체 건수로 빠짐없는지 셉니다 — 응답에서 목록을 찾지 못하면
+        엑셀 버튼이나 결과 표로 첫 쪽). 목록은 화면마다 쌓여 저장할 때 CSV 한 장(「… 목록.csv」)이 되고, <b>행마다 상세의
+        첨부파일</b>도 받습니다. 날짜는 <span className="mono">@today</span>·<span className="mono">@today-7d</span>처럼
+        쓰면 북마크를 누른 날로 바뀝니다. 시작 날짜를 <span className="mono">@last|@today-3y</span>로 두면 처음에는 3년
+        전부터 전체를, 다음부터는 지난번에 빠짐없이 받은 날부터 받습니다(증분). 기간처럼 칸이 둘이면 같은 칸 이름을
+        두 번(시작, 끝 순서) 넣습니다.
       </p>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         화면을 여는 길: ① 그 화면을 열어 둔 채 북마크를 누르면 그 자리에서, ② 「녹화」나 메뉴 탐색이 찾은 길이
@@ -331,7 +334,7 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
                         <input value={c.field} placeholder="칸 이름" aria-label="칸"
                           onChange={(e) => setScreen(i, { ...s, conditions: s.conditions.map((x, m) => (m === k ? { ...x, field: e.target.value } : x)) })} />
                       )}
-                      <input value={c.value} placeholder="값 (예: @today-1m)" aria-label="값" style={{ flex: 1 }}
+                      <input value={c.value} placeholder="값 (예: @last|@today-3y)" aria-label="값" style={{ flex: 1 }}
                         onChange={(e) => setScreen(i, { ...s, conditions: s.conditions.map((x, m) => (m === k ? { ...x, value: e.target.value } : x)) })} />
                       <button className="small secondary"
                         onClick={() => setScreen(i, { ...s, conditions: s.conditions.filter((_, m) => m !== k) })}>×</button>

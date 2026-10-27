@@ -16,7 +16,7 @@
  * (id·이름·수집 조건)는 시작할 때 받는다 — 콘솔이 연 탭이면 콘솔이, 아니면 이 코드가 연 받는 창(콘솔의
  * #/agent)이 로그인한 콘솔 탭에서 사이트 주소로 찾아 보낸다(start).
  */
-(function (SOURCE) {
+(function (SOURCE, DATA) {
   var AGENT = 'gpax-scan/1';
   var MAX_FETCH = 25;
   /* 받는 파일 — 서버(services/infosource.FILE_TYPES)가 받는 형식과 같다. 크기는 올릴 파일이 너무
@@ -634,6 +634,156 @@
     });
   }
 
+  /* ---------------- 조회 응답 — 조회를 누르는 동안 화면이 보내는 요청(XHR·fetch)과 받은 응답을 적는다 ----------------
+   * 화면의 표는 목록의 첫 쪽일 뿐이다. 화면이 받은 응답에는 목록과 전체 건수·페이지 인자가 있어, 그 요청을 쪽만 바꿔
+   * 다시 보내면 같은 조건의 목록을 빠짐없이 받는다(어느 응답이 그 목록인지는 lib/scanData.js가 고른다).
+   * 응답 본문은 이 탭의 기억에만 둔다 — 결과에는 고른 목록의 레코드와 요청의 모양(경로·인자 이름)만 실린다. 요청
+   * 머리(CSRF 토큰 같은 것)는 같은 요청을 다시 보낼 때만 쓰고 결과에 싣지 않는다. 같은 출처의 요청만, 조회를 누른
+   * 동안만 적는다. 다 하면 untapAll이 되돌린다(사람의 화면에 건 것도). */
+  var MAX_RECORDS = 20000, MAX_PULL = 400, BIG_PAGE = 500, MAX_TEXT = 5000000;
+  var realFetch = window.fetch.bind(window), calls = [], listening = false, tapped = [];
+  function bodyOf(b) {
+    var kind = Object.prototype.toString.call(b);
+    if (b == null) return { body: null };
+    if (typeof b === 'string') return { body: b };
+    if (kind === '[object URLSearchParams]') return { body: b.toString() };
+    if (kind === '[object FormData]') {
+      var parts = [], plain = true;
+      b.forEach(function (v, k) {
+        if (typeof v === 'string') parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(v)); else plain = false;
+      });
+      return plain ? { body: parts.join('&'), multipart: true } : { body: null, opaque: true };
+    }
+    return { body: null, opaque: true };   /* 파일·바이트 본문 — 다시 보낼 수 없다 */
+  }
+  function headersOf(h) {
+    var out = {};
+    if (!h) return out;
+    if (Array.isArray(h)) h.forEach(function (kv) { out[kv[0]] = kv[1]; });
+    else if (typeof h.forEach === 'function') h.forEach(function (v, k) { out[k] = v; });
+    else Object.keys(h).forEach(function (k) { out[k] = h[k]; });
+    return out;
+  }
+  function ctypeOf(h) { return h['Content-Type'] || h['content-type'] || ''; }
+  function keep(c, text) {
+    c.text = text && text.length <= MAX_TEXT ? text : '';
+    if (!same(c.url)) return;
+    calls.push(c);
+    if (calls.length > 60) calls.shift();
+  }
+  function tap(w) {
+    try { if (!w || w.__gpaxTap || !w.XMLHttpRequest) return; } catch (e) { return; }
+    var X = w.XMLHttpRequest.prototype;
+    var saved = { fetch: w.fetch, open: X.open, send: X.send, header: X.setRequestHeader };
+    w.__gpaxTap = saved;
+    tapped.push(w);
+    if (saved.fetch) {
+      w.fetch = function (input, init) {
+        var p = saved.fetch.apply(this, arguments);
+        if (!listening) return p;
+        try {
+          var req = input && typeof input === 'object' && input.url ? input : null;
+          var heads = headersOf((init && init.headers) || (req && req.headers)), b = bodyOf(init && init.body);
+          var c = { method: String((init && init.method) || (req && req.method) || 'GET').toUpperCase(),
+                    url: new URL(req ? req.url : String(input), w.location.href).href, headers: heads,
+                    body: b.body, multipart: !!b.multipart, opaque: !!b.opaque || (!!req && !init), ctype: ctypeOf(heads) };
+          p.then(function (res) {
+            c.status = res.status;
+            c.rtype = res.headers.get('content-type') || '';
+            if (/html|image|octet|pdf|excel|spreadsheet|zip/i.test(c.rtype)) return;
+            return res.clone().text().then(function (t) { keep(c, t); });
+          }).catch(function () { /* 실패한 요청 */ });
+        } catch (e) { /* 적지 못한 요청은 그대로 보낸다 */ }
+        return p;
+      };
+    }
+    X.open = function (method, url) {
+      this.__gpax = listening ? { method: String(method || 'GET').toUpperCase(), url: String(url), headers: {} } : null;
+      return saved.open.apply(this, arguments);
+    };
+    X.setRequestHeader = function (k, v) {
+      if (this.__gpax) this.__gpax.headers[k] = v;
+      return saved.header.apply(this, arguments);
+    };
+    X.send = function (body) {
+      var c = this.__gpax, x = this;
+      if (c) {
+        try {
+          var b = bodyOf(body);
+          c.url = new URL(c.url, w.location.href).href;
+          c.body = b.body; c.multipart = !!b.multipart; c.opaque = !!b.opaque; c.ctype = ctypeOf(c.headers);
+          x.addEventListener('loadend', function () {
+            try {
+              c.status = x.status;
+              c.rtype = x.getResponseHeader('content-type') || '';
+              keep(c, x.responseType === '' || x.responseType === 'text' ? x.responseText
+                : x.responseType === 'json' ? JSON.stringify(x.response) : '');
+            } catch (e) { /* 읽지 못한 응답 */ }
+          });
+        } catch (e) { /* 적지 못한 요청은 그대로 보낸다 */ }
+      }
+      return saved.send.apply(this, arguments);
+    };
+  }
+  function untapAll() {
+    tapped.splice(0).forEach(function (w) {
+      try {
+        var s = w.__gpaxTap, X = w.XMLHttpRequest.prototype;
+        if (s.fetch) w.fetch = s.fetch;
+        X.open = s.open; X.send = s.send; X.setRequestHeader = s.header;
+        delete w.__gpaxTap;
+      } catch (e) { /* 이미 다른 화면으로 간 창 */ }
+    });
+  }
+  /* 잡은 요청을 인자만 바꿔 다시 — 머리는 같게(쿠키·길이처럼 브라우저가 정하는 것은 빼고). JSON이 아니면 undefined. */
+  var NO_HEAD = /^(cookie|content-length|host|origin|referer|connection|accept-encoding|user-agent)$/i;
+  async function resend(c) {
+    var heads = {}, body = c.body;
+    Object.keys(c.headers || {}).forEach(function (k) { if (!NO_HEAD.test(k)) heads[k] = c.headers[k]; });
+    if (c.multipart && body != null) {
+      var fd = new FormData();
+      new URLSearchParams(body).forEach(function (v, k) { fd.append(k, v); });
+      body = fd;
+      Object.keys(heads).forEach(function (k) { if (/^content-type$/i.test(k)) delete heads[k]; });
+    }
+    var res = await realFetch(c.url, { method: c.method, headers: heads, credentials: 'same-origin',
+                                       body: /^(GET|HEAD)$/.test(c.method) ? undefined : body });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return DATA.json(await res.text());
+  }
+  /* 목록 전체 — 잡은 요청의 쪽만 바꿔 끝까지 받는다. 먼저 쪽 크기를 키워 받아 보고(BIG_PAGE) 서버가 더 주면 **실제로
+   * 준 건수**를 쪽 크기로 다시 센다(서버가 상한으로 자르면 그 상한 — 요청한 크기로 세면 다음 쪽이 어긋난다). 멈추는 때(end): total 전체 건수만큼 · short 덜 찬 쪽 · empty 빈 쪽 · repeat 같은 쪽이 또 옴(쪽
+   * 인자를 무시하는 서버) · cap 상한 · error 요청 실패 · stop 사람이 멈춤. 쪽 인자가 없으면 one(한 번에 다 온 목록). */
+  async function pullAll(found, label) {
+    var recs = found.records.slice(), pg = found.paging, total = found.total;
+    if (!pg || found.call.opaque) return { records: recs, end: 'one' };
+    var size = 0, per = pg.size ? pg.size.value : pg.len, prev = recs, end = '';
+    if (pg.size && (total == null || total > recs.length)) {
+      var want = total ? Math.min(total, BIG_PAGE) : BIG_PAGE;
+      if (want > per) {
+        try {
+          var big = DATA.at(await resend(DATA.pageCall(found.call, pg, 0, want)), found.path);
+          if (Array.isArray(big) && big.length > recs.length) { recs = big.slice(); prev = big; size = per = big.length; }
+        } catch (e) { /* 쪽 크기를 못 바꾸는 서버 — 원래 크기로 받는다 */ }
+      }
+    }
+    for (var n = 1; !end; n++) {
+      if (ctl.stop) end = 'stop';
+      else if (total != null && recs.length >= total) end = 'total';
+      else if (prev.length < per) end = 'short';
+      else if (recs.length >= MAX_RECORDS || n >= MAX_PULL) end = 'cap';
+      if (end) break;
+      say(label + ' — 목록 받는 중 ' + recs.length + (total != null ? '/' + total : '') + '건');
+      var got;
+      try { got = DATA.at(await resend(DATA.pageCall(found.call, pg, n, size)), found.path); }
+      catch (e) { note('목록 ' + (n + 1) + '쪽을 받지 못했습니다: ' + clean(e && e.message, 80)); end = 'error'; break; }
+      if (!Array.isArray(got) || !got.length) end = 'empty';
+      else if (DATA.sameHead(got, prev)) end = 'repeat';
+      else { recs = recs.concat(got); prev = got; }
+    }
+    return { records: recs.slice(0, MAX_RECORDS), end: end };
+  }
+
   function press(el) {
     var w = el.ownerDocument.defaultView;
     if (el.tagName === 'TR' && el.getAttribute('ondblclick')) el.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true }));
@@ -760,12 +910,16 @@
 
   /* 상대 날짜(@today-1m)를 그 칸의 모양으로 — 지금 값·안내 글이 2024.01.01이면 점으로, 20240101이면 붙여서. */
   function dateValue(el, value) {
-    var m = /^@today(?:([+-]\d+)([dmy]))?$/i.exec(value);
-    if (!m) return value;
-    var d = new Date(), n = m[1] ? parseInt(m[1], 10) : 0, unit = (m[2] || '').toLowerCase();
-    if (unit === 'd') d.setDate(d.getDate() + n);
-    if (unit === 'm') d.setMonth(d.getMonth() + n);
-    if (unit === 'y') d.setFullYear(d.getFullYear() + n);
+    var m = /^@today(?:([+-]\d+)([dmy]))?$/i.exec(value), iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value), d;
+    if (iso) d = new Date(+iso[1], +iso[2] - 1, +iso[3]);   /* 지난 수집일(@last) — 그 칸의 모양으로 */
+    else if (!m) return value;
+    else {
+      var n = m[1] ? parseInt(m[1], 10) : 0, unit = (m[2] || '').toLowerCase();
+      d = new Date();
+      if (unit === 'd') d.setDate(d.getDate() + n);
+      if (unit === 'm') d.setMonth(d.getMonth() + n);
+      if (unit === 'y') d.setFullYear(d.getFullYear() + n);
+    }
     var y = String(d.getFullYear()), mo = ('0' + (d.getMonth() + 1)).slice(-2), da = ('0' + d.getDate()).slice(-2);
     if (el.type === 'date') return y + '-' + mo + '-' + da;
     var cur = clean(el.value || el.getAttribute('placeholder') || '', 40);
@@ -1011,10 +1165,10 @@
     var doc = docOf(t.frame);
     var map = fieldMap(doc), used = {}, missing = [];
     q.conditions.forEach(function (c) {
-      var n = used[c.field] || 0, el = (map[c.field] || [])[n];
+      var n = used[c.field] || 0, el = (map[c.field] || [])[n], value = since(c.value, q, t);
       used[c.field] = n + 1;
-      if (!el || !c.value) { if (!el) missing.push(c.field); return; }
-      if (!setValue(el, c.value)) missing.push(c.field + '=' + c.value);
+      if (!el || !value) { if (!el) missing.push(c.field); return; }
+      if (!setValue(el, value)) missing.push(c.field + '=' + value);
     });
     if (missing.length) {
       repair = { kind: 'fields', missing: missing.filter(function (m) { return m.indexOf('=') < 0; }),
@@ -1028,9 +1182,24 @@
     if (!btn || risky(btn)) return '조회 버튼을 찾지 못했습니다 — ' + describe(t.frame);
     arm(t.frame);
     mode = 'pass';
+    /* 조회가 보내는 요청을 적는다 — 버튼이 있는 틀이 아니라 바깥 틀의 함수로 보내는 사이트도 있어 틀마다 건다. */
+    frames(window, 0, []).forEach(function (f) { tap(f.win); });
+    calls = [];
+    listening = true;
     press(btn);
     await settle(t.frame);
+    await sleep(300);   /* 화면이 다 그려진 뒤에 오는 응답 */
+    listening = false;
+    t.calls = calls.splice(0);
     return '';
+  }
+  /* 증분 — @last는 이 화면을 지난번에 빠짐없이 받은 날(서버가 수집 조건에 실어 보낸다), 처음이면 | 뒤의 값
+   * (@last|@today-3y). 그날부터 받아 겹치는 것은 서버가 키로 합친다. */
+  function since(value, q, t) {
+    var m = /^@last(?:\|(.*))?$/i.exec(String(value || '').trim());
+    if (!m) return value;
+    if (q.last) { t.since = q.last; return q.last; }
+    return (m[1] || '').trim();
   }
 
   /* 결과 파일 — 엑셀 버튼이 있으면 그것으로, 없거나 받지 못하면 결과 표를 CSV로. */
@@ -1092,7 +1261,45 @@
     return { opened: opened, navigated: navigated };
   }
 
-  async function collectScreen(q, work, detail, files, budget) {
+  /* 결과 목록 — 조회 응답에서 화면 표의 목록을 찾아(lib/scanData.js) 전체를 받는다. 찾지 못하면 null — 그때는
+   * 엑셀·표로 첫 쪽을 받는다. 다 받았는지(complete)는 전체 건수와 키로 센다(건수가 없으면 끝 쪽까지 갔는지로). */
+  async function listData(q, t, rows) {
+    var table = rows.length ? rows[0].closest('table') : null, head = [];
+    var grid = rows.slice(0, 50).map(function (tr) { return Array.prototype.map.call(tr.querySelectorAll('td'), textOf); });
+    if (table) table.querySelectorAll('th').forEach(function (th) { head.push(textOf(th)); });
+    var found = DATA.findList(t.calls || [], [].concat.apply([], grid));
+    if (!found) {
+      note('조회 응답에서 결과 목록을 찾지 못했습니다(요청 ' + (t.calls || []).length + '개) — 엑셀·화면 표로 받습니다');
+      return null;
+    }
+    var path = new URL(found.call.url).pathname;
+    if (MUTATE_CODE.test(path)) {
+      note('목록 요청 주소가 무언가를 바꾸는 이름이라(' + path + ') 다시 보내지 않고 첫 쪽만 씁니다');
+      found.paging = null;
+    }
+    var got = await pullAll(found, q.screen), cols = DATA.columns(got.records, head, grid);
+    var want = q.key ? cols.filter(function (c) { return c.label === q.key || c.key === q.key; })[0] : null;
+    var key = DATA.keyOf(got.records, want && want.key), recs = got.records.map(DATA.flat), seen = {}, uniq = 0;
+    recs.forEach(function (r) {
+      var k = key ? String(r[key]) : JSON.stringify(r);
+      if (!seen[k]) { seen[k] = 1; uniq++; }
+    });
+    var complete = found.total != null ? uniq >= found.total : /^(short|empty|one)$/.test(got.end);
+    var pg = found.paging;
+    var rep = { via: 'api', got: uniq, total: found.total, complete: complete, end: got.end, key: key,
+                since: t.since || '',
+                api: { method: found.call.method, path: path, list: found.path.join('.'),
+                       page: pg ? pg.page.path.join('.') : '', size: pg && pg.size ? pg.size.path.join('.') : '',
+                       params: DATA.params(found.call).map(function (x) { return x.path.join('.'); }).slice(0, 40) } };
+    log(q.screen + ' — 조회 응답으로 목록 ' + uniq + '건' + (found.total != null ? ' / 전체 ' + found.total + '건' : '') +
+        (complete ? ' (빠짐없음)' : ' (덜 받음: ' + got.end + ')'));
+    if (!complete) note('목록을 다 받지 못했습니다 — ' + uniq + '건' + (found.total != null ? ' / 전체 ' + found.total : '') +
+                        ' · 멈춘 까닭 ' + got.end);
+    return { rep: rep, set: { screen: q.screen, url: q.url, key: key, columns: cols, records: recs,
+                              total: found.total, complete: complete, since: t.since || '' } };
+  }
+
+  async function collectScreen(q, work, detail, files, budget, sets) {
     var rep = { screen: q.screen, url: q.url, rows: 0, details: 0, files: 0, notes: [], via: '' };
     notes = rep.notes;
     repair = null;
@@ -1109,7 +1316,10 @@
     var rows = resultRows(docOf(t.frame));
     rep.rows = rows.length;
     log(q.screen + ' — 결과 ' + rows.length + '행');
-    await exportResult(q, t.frame, files, budget);
+    var list = await listData(q, t, rows);
+    if (list) { rep.data = list.rep; sets.push(list.set); }
+    /* 목록을 빠짐없이 받았으면 엑셀은 받지 않는다 — 서버가 누적한 목록으로 전체 표를 만든다. */
+    if (!list || !list.rep.complete) await exportResult(q, t.frame, files, budget);
     /* 한도(ctl.rows)는 도는 동안 바뀔 수 있다 — 행마다 다시 본다. */
     var i = 0;
     for (; i < Math.min(rep.rows, ctl.rows) && !ctl.stop; i++) {
@@ -1137,14 +1347,17 @@
   }
   function hasFieldsTop(q) { return q.conditions.length > 0 && hasFields(document, q); }
 
-  async function collect(files, budget) {
+  async function collect(files, budget, sets) {
     var queries = SOURCE.queries || [], out = [];
     if (!queries.length) return out;
     var work = makeFrame('gpax-work'), detail = makeFrame('gpax-detail');
     try {
-      for (var i = 0; i < queries.length && !ctl.stop; i++) out.push(await collectScreen(queries[i], work, detail, files, budget));
+      for (var i = 0; i < queries.length && !ctl.stop; i++) {
+        out.push(await collectScreen(queries[i], work, detail, files, budget, sets));
+      }
     } finally {
       disarmAll();
+      untapAll();
       work.remove();
       detail.remove();
     }
@@ -1352,13 +1565,14 @@
     controls();
     say('봇 실행 — 수집 조건 ' + (SOURCE.queries || []).length + '개를 녹화한 길대로 처음부터 다시 합니다');
     try {
-      var files = [], collected = await collect(files, { left: MAX_TOTAL_BYTES });
+      var files = [], sets = [], collected = await collect(files, { left: MAX_TOTAL_BYTES }, sets);
       var out = { agent: AGENT, replay: true, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
                   url: location.href.split('#')[0], at: new Date().toISOString(), menu: [], pages: [],
-                  files: files, collected: collected, queries_version: SOURCE.version || '' };
+                  files: files, collected: collected, datasets: sets, queries_version: SOURCE.version || '' };
       var sent = deliver('scan', out, 'gpax-scan');
       say('봇 끝 — ' + collected.map(function (c) {
-        return c.screen + ' 결과 ' + c.rows + '행 · 상세 ' + c.details + ' · 파일 ' + c.files;
+        return c.screen + (c.data ? ' 목록 ' + c.data.got + '건' + (c.data.complete ? '(빠짐없음)' : '(덜 받음)')
+          : ' 결과 ' + c.rows + '행') + ' · 상세 ' + c.details + ' · 파일 ' + c.files;
       }).join(' / ') + (sent ? '. 콘솔로 보냈습니다.' : '. 내려받은 파일을 콘솔에 올리세요.'));
     } catch (err) {
       say('봇 실패 — ' + (err && err.message));
@@ -1432,10 +1646,10 @@
       var explored = await explore(pages, seen);
       log('메뉴 탐색 — 조회 화면 ' + explored + '개를 찾았습니다');
     }
-    var collected = await collect(files, budget);
+    var sets = [], collected = await collect(files, budget, sets);
     var out = { agent: AGENT, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
                 url: location.href.split('#')[0], at: new Date().toISOString(), menu: menu, pages: pages,
-                files: files, collected: collected, queries_version: SOURCE.version || '' };
+                files: files, collected: collected, datasets: sets, queries_version: SOURCE.version || '' };
     var sent = deliver('scan', out, 'gpax-scan');
     running = false;
     say('끝 — 메뉴 ' + menuN + '개 · 화면 ' + pages.length + '장 · 파일 ' + files.length + '개. ' +
