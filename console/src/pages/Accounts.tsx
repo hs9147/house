@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import Async from '../components/Async';
+import KeyIssuePanel from '../components/KeyIssuePanel';
 import StatusPill from '../components/StatusPill';
 import { api } from '../lib/api';
 import { useApi } from '../lib/hooks';
@@ -42,6 +43,7 @@ export default function Accounts() {
   const orgList = orgs.data ?? [];
 
   return (
+    <>
     <div className="panel" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div>
         <h2 style={{ margin: 0 }}>👤 계정 관리 (Account Management)</h2>
@@ -233,5 +235,7 @@ export default function Accounts() {
         }}
       </Async>
     </div>
+    <KeyIssuePanel />
+    </>
   );
 }
