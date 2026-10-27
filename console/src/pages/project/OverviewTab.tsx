@@ -110,6 +110,9 @@ export default function OverviewTab() {
                   const scheme = health.data?.public_scheme
                     ?? window.location.protocol.replace(':', '');
                   const fullUrl = health.data ? `${scheme}://${health.data.base_domain}${pathUrl}` : pathUrl;
+                  // 떠 있거나(복합은 "running (2/2)"처럼 온다) 배포가 진행 중이면 이 프로필은 이미 배포된 것이다 —
+                  // 버튼은 「재배포」이고 재배포로 건다(진행 중인 배포가 있으면 취소하고, 멈추면 새로 배포).
+                  const again = deploying(profile) || (status[profile] ?? '').startsWith('running');
                   return (
                     <tr key={profile}>
                       <td><StatusPill value={profile} /></td>
@@ -154,10 +157,11 @@ export default function OverviewTab() {
                           <button
                             className="small"
                             disabled={busy}
-                            title={deploying(profile) ? '진행 중인 배포를 취소하고, 멈추면 처음부터 다시 배포합니다' : undefined}
-                            onClick={() => setAction({ kind: deploying(profile) ? 'redeploy' : 'deploy', profile })}
+                            title={deploying(profile) ? '진행 중인 배포를 취소하고, 멈추면 처음부터 다시 배포합니다'
+                              : again ? '떠 있는 앱을 새로 배포합니다 — 새 배포가 끝나면 바뀝니다' : undefined}
+                            onClick={() => setAction({ kind: again ? 'redeploy' : 'deploy', profile })}
                           >
-                            {deploying(profile) ? '재배포' : '배포'}
+                            {again ? '재배포' : '배포'}
                           </button>
                           <button
                             className="small secondary"
@@ -203,9 +207,11 @@ export default function OverviewTab() {
       {action && (
         <Confirm
           title={`${action.profile} ${labels[action.kind]}`}
-          message={action.kind === 'redeploy'
+          message={action.kind === 'redeploy' && deploying(action.profile)
             ? `${project.name}의 진행 중인 ${action.profile} 배포를 취소하고, 그것이 멈추면 처음부터 다시 배포합니다.`
-            : `${project.name}에 ${action.profile} 프로필로 "${labels[action.kind]}"을(를) 실행합니다.`}
+            : action.kind === 'redeploy'
+              ? `${project.name}의 떠 있는 ${action.profile} 앱을 새로 배포합니다 — 새 배포가 끝나면 바뀝니다.`
+              : `${project.name}에 ${action.profile} 프로필로 "${labels[action.kind]}"을(를) 실행합니다.`}
           confirmLabel={labels[action.kind]}
           danger={action.kind === 'stop'}
           busy={busy}
