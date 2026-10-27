@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import {
-  codeIndex, type CodeEdge, type CodeInfo, type CodeKind, hasMore, neighbors, ROOT, searchCode,
+  codeIndex, type CodeEdge, type CodeInfo, type CodeKind, expandAll, hasMore, MAX_SHOWN, neighbors, ROOT, searchCode,
 } from '../lib/codegraph';
 import type { CodeMapFile } from '../lib/types';
 import { fmt, VIZ } from '../lib/viz';
@@ -23,15 +23,16 @@ const kindOf = (kind: string) => KINDS.find((k) => k.key === kind)
   ?? (kind === 'root' ? ROOT_KIND : kind === 'query' ? QUERY_KIND : undefined);
 
 /**
- * code 레벨의 지식 그래프 — 리포에서 한 걸음씩 펼친다(lib/codegraph). 노드를 누르면 고르고, 테두리가 빈
- * 노드(더 있다)는 함께 펼친다. 이름으로 찾으면 찾은 것들이 검색어 노드를 둘러싼다.
+ * code 레벨의 지식 그래프 — 처음에는 다 펼쳐 보인다(lib/codegraph.expandAll, 상한 MAX_SHOWN). 노드를 누르면
+ * 고르고, 테두리가 빈 노드(더 있다)는 함께 펼친다. 이름으로 찾으면 찾은 것들이 검색어 노드를 둘러싼다.
  */
 export default function CodeGraph({ files }: { files: CodeMapFile[] }) {
   const idx = useMemo(() => codeIndex(files), [files]);
   const start = () => {
-    const first = neighbors(idx, ROOT, new Set([ROOT]));
-    return { ids: new Set([ROOT, ...first.edges.map((e) => e.target)]), edges: first.edges,
-             expanded: new Set([ROOT]), note: first.more ? `리포 아래 ${first.more}개는 더 펼치지 않았습니다` : '' };
+    const all = expandAll(idx);
+    return { ids: all.ids, edges: all.edges, expanded: all.expanded,
+             note: all.more ? `노드가 많아 리포에서 가까운 ${MAX_SHOWN}개까지 펼쳤습니다 — 남은 ${all.more}개는 테두리가 빈`
+               + ' 노드를 눌러 펼칩니다' : '' };
   };
   const [state, setState] = useState(start);
   const [query, setQuery] = useState('');

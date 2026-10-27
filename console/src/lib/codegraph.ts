@@ -2,10 +2,10 @@ import type { CodeMapFile, CodeMapNode } from './types';
 
 // 리포의 코드 구조(정적 파싱)를 **지식 그래프**로 — 온톨로지 조회와 같은 둘러보기(components/ForceGraph).
 //
-// 한 장에 다 그리지 않는다. 이 리포만 해도 선언이 2천 개를 넘는다(파일 225 · 클래스 181 · 함수 1739) —
-// 힘기반 배치에 그만큼 뿌리면 아무 질문에도 답하지 못한다. 온톨로지처럼 **한 걸음씩 펼친다**:
-// 리포 → 폴더 → 파일 → 클래스·함수, 클래스는 상위·하위 클래스로. 이름으로 찾으면 찾은 것들이
-// 검색어 노드를 둘러싼다.
+// 처음에는 **다 펼쳐 보인다**(expandAll) — 리포 → 폴더 → 파일 → 클래스·함수, 클래스는 상위·하위 클래스로.
+// 다만 힘기반 배치는 노드 수의 제곱으로 무거워지고 이 리포만 해도 선언이 2천 개를 넘는다(파일 225 · 클래스 181 ·
+// 함수 1739) — 그래서 MAX_SHOWN까지만 폴더·파일부터 너비 우선으로 펼치고, 남은 것은 온톨로지처럼 노드를 눌러
+// 한 걸음씩 펼친다. 이름으로 찾으면 찾은 것들이 검색어 노드를 둘러싼다.
 //
 // 선은 정적 파싱이 확실히 아는 것만 — 포함(폴더·파일), 정의(파일의 선언), 상속. 호출 관계는 없다
 // (없는 관계를 그리면 그 그림으로 설계를 잘못 판단하게 된다).
@@ -37,6 +37,8 @@ export interface CodeIndex {
 
 /** 한 번 펼칠 때 더하는 이웃 수 — 온톨로지 조회와 같은 상한. */
 export const EXPAND_LIMIT = 30;
+/** 처음 그림에 다 펼치는 노드 수의 상한 — 넘으면 남은 것은 눌러서 펼친다(components/ForceGraph는 n²). */
+export const MAX_SHOWN = 500;
 export const ROOT = 'root';
 
 const dirId = (path: string) => `dir:${path}`;
@@ -103,13 +105,41 @@ const ORDER: Record<CodeKind, number> = { query: 0, root: 1, dir: 2, class: 3, e
  * (폴더·클래스가 먼저, 같은 종류는 큰 것부터). 남은 수는 more로 알린다.
  */
 export function neighbors(idx: CodeIndex, id: string, shown: Set<string>): { edges: CodeEdge[]; more: number } {
+  const all = unshown(idx, id, shown);
+  return { edges: all.slice(0, EXPAND_LIMIT), more: Math.max(0, all.length - EXPAND_LIMIT) };
+}
+
+/** 그 노드에서 캔버스에 아직 없는 이웃으로 가는 선 — 폴더·클래스가 먼저, 같은 종류는 큰 것부터. */
+function unshown(idx: CodeIndex, id: string, shown: Set<string>): CodeEdge[] {
   // 위로도 간다(담고 있는 폴더·정의한 파일) — 찾기로 바로 연 노드에서 제자리를 찾아 올라갈 수 있게.
   // 위에서 내려온 둘러보기라면 위는 이미 캔버스에 있어 빠진다.
   const all = (idx.edges.get(id) ?? []).filter((e) => !shown.has(e.source === id ? e.target : e.source));
   const other = (e: CodeEdge) => idx.info.get(e.source === id ? e.target : e.source)!;
-  all.sort((a, b) => ORDER[other(a).kind] - ORDER[other(b).kind] || other(b).weight - other(a).weight
+  return all.sort((a, b) => ORDER[other(a).kind] - ORDER[other(b).kind] || other(b).weight - other(a).weight
     || other(a).label.localeCompare(other(b).label));
-  return { edges: all.slice(0, EXPAND_LIMIT), more: Math.max(0, all.length - EXPAND_LIMIT) };
+}
+
+/** 처음 그림 — 리포에서 닿는 것을 다 펼친다. 많으면 limit까지(리포에서 가까운 것부터 너비 우선), more는 남은 수.
+ *  선은 보이는 두 노드를 잇는 것을 다 넣는다(둘 다 이미 펼친 클래스 사이의 상속도). */
+export function expandAll(idx: CodeIndex, limit = MAX_SHOWN):
+  { ids: Set<string>; edges: CodeEdge[]; expanded: Set<string>; more: number } {
+  const ids = new Set([ROOT]), expanded = new Set<string>(), queue = [ROOT];
+  while (queue.length && ids.size < limit) {
+    const id = queue.shift()!;
+    const all = unshown(idx, id, ids);
+    for (const e of all) {
+      if (ids.size >= limit) break;
+      const next = e.source === id ? e.target : e.source;
+      ids.add(next);
+      queue.push(next);
+    }
+    if (unshown(idx, id, ids).length === 0) expanded.add(id);
+  }
+  const edges = new Set<CodeEdge>();
+  ids.forEach((id) => (idx.edges.get(id) ?? []).forEach((e) => {
+    if (ids.has(e.source) && ids.has(e.target)) edges.add(e);
+  }));
+  return { ids, edges: [...edges], expanded, more: idx.info.size - ids.size };
 }
 
 /** 펼칠 것이 남았는가 — 노드 테두리를 비워 "더 있다"를 보인다. */

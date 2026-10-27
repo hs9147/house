@@ -280,8 +280,8 @@ function CodeLevel({ projectId }: { projectId: number }) {
           <>
             <div className="mutedtext" style={{ fontSize: 12, marginBottom: 6 }}>
               리포 전체 · 파일 {files.length}개 · 선언{' '}
-              {files.reduce((n, f) => n + f.children.length, 0)}개 — 리포에서 폴더·파일·클래스로 한 걸음씩
-              펼칩니다. 선은 포함·정의·상속입니다
+              {files.reduce((n, f) => n + f.children.length, 0)}개 — 리포에서 폴더·파일·클래스까지 다 펼쳐
+              보입니다. 선은 포함·정의·상속입니다
             </div>
             {/* 온톨로지 조회와 같은 지식 그래프 — 고른 노드의 시그니처·설명은 그래프 아래에 그것만 보인다. */}
             <CodeGraph files={files} />

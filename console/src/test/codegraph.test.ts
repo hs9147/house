@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { codeIndex, EXPAND_LIMIT, neighbors, ROOT, searchCode } from '../lib/codegraph';
+import { codeIndex, EXPAND_LIMIT, expandAll, neighbors, ROOT, searchCode } from '../lib/codegraph';
 import type { CodeMapFile, CodeMapNode } from '../lib/types';
 
 function node(kind: CodeMapNode['kind'], name: string, extra: Partial<CodeMapNode> = {}): CodeMapNode {
@@ -49,5 +49,26 @@ describe('codeIndex', () => {
     const hits = searchCode(codeIndex(FILES), 'pay');
     expect(hits.map((h) => h.kind)).toEqual(['class', 'file']);
     expect(searchCode(codeIndex(FILES), '  ')).toEqual([]);
+  });
+
+  it('처음 그림은 다 펼친다 — 모든 노드와 그 사이의 선(펼친 두 클래스 사이의 상속까지)', () => {
+    const idx = codeIndex(FILES);
+    const all = expandAll(idx);
+    expect([...all.ids].sort()).toEqual([...idx.info.keys()].sort());
+    expect(all.more).toBe(0);
+    const edges = new Set([...idx.edges.values()].flat());
+    expect(all.edges).toHaveLength(edges.size);
+    expect(all.edges.filter((e) => e.rel === 'inherits')).toHaveLength(2);
+    expect([...all.expanded]).toContain(ROOT);
+  });
+
+  it('많으면 리포에서 가까운 것부터 상한까지만 — 남은 수를 알린다', () => {
+    const many = [file('big.py', Array.from({ length: 45 }, (_, i) => node('function', `f${i}`, { lineno: i })))];
+    const idx = codeIndex(many);
+    const some = expandAll(idx, 10);
+    expect(some.ids.size).toBe(10);
+    expect(some.ids.has('file:big.py')).toBe(true);           // 파일이 선언보다 먼저
+    expect(some.more).toBe(idx.info.size - 10);
+    expect(some.expanded.has('file:big.py')).toBe(false);      // 다 펼치지 못한 노드는 눌러서 이어 펼친다
   });
 });
