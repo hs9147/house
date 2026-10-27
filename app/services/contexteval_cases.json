@@ -1,0 +1,119 @@
+[
+  {
+    "id": "pronoun-table", "kind": "지시어",
+    "history": [
+      {"id": 1, "role": "user", "content": "2026 상반기 계약 협력사 단가 비교해 줘"},
+      {"id": 2, "role": "assistant", "content": "단가 비교를 오른쪽 화면에 띄웠습니다.",
+       "view": {"report": {"title": "협력사 단가 비교", "format": "html",
+                           "content": "<table><tr><th>업체</th><th>품목</th><th>단가</th></tr><tr><td>A사</td><td>모터</td><td>1,000</td></tr></table>"}}},
+      {"role": "user", "content": "그 표에 부서 열도 넣어 줘"}
+    ],
+    "expect": {"refers": ["r2"], "request_has": ["단가 비교", "부서"], "request_not": ["그 표"],
+               "requirements_has": ["부서"]}
+  },
+  {
+    "id": "latest-version", "kind": "판 고치기",
+    "history": [
+      {"id": 1, "role": "user", "content": "모터 구매 실적 보고서 써 줘"},
+      {"id": 2, "role": "assistant", "content": "보고서를 띄웠습니다.",
+       "view": {"report": {"title": "모터 구매 실적", "format": "html", "content": "<table><tr><th>월</th><th>금액(원)</th></tr></table>"}}},
+      {"id": 3, "role": "user", "content": "월별 말고 분기별로"},
+      {"id": 4, "role": "assistant", "content": "분기별로 고쳤습니다.",
+       "view": {"report": {"title": "모터 구매 실적", "format": "html", "content": "<table><tr><th>분기</th><th>금액(원)</th></tr></table>"}}},
+      {"role": "user", "content": "아까 그 보고서에서 금액 단위를 천원으로 바꿔 줘"}
+    ],
+    "expect": {"refers": ["r4"], "request_has": ["모터 구매 실적", "천원"], "requirements_has": ["분기", "천원"]}
+  },
+  {
+    "id": "sharded-requirements", "kind": "요구 분할",
+    "history": [
+      {"id": 1, "role": "user", "content": "협력사 평가 보고서 만들 거야"},
+      {"id": 2, "role": "assistant", "content": "어느 협력사·기간을 대상으로 할까요?"},
+      {"id": 3, "role": "user", "content": "대상은 2025년에 계약한 곳만"},
+      {"id": 4, "role": "assistant", "content": "알겠습니다. 평가 항목은 무엇으로 할까요?"},
+      {"id": 5, "role": "user", "content": "품질 불량률이랑 납기 준수율"},
+      {"id": 6, "role": "assistant", "content": "확인했습니다."},
+      {"role": "user", "content": "이제 만들어 줘"}
+    ],
+    "expect": {"refers": [], "request_has": ["협력사 평가", "2025"], "requirements_has": ["2025", "불량", "납기"]}
+  },
+  {
+    "id": "cancelled", "kind": "취소",
+    "history": [
+      {"id": 1, "role": "user", "content": "올해 구매 요청 현황을 부서별로 나눠서 정리해 줘"},
+      {"id": 2, "role": "assistant", "content": "부서별 현황을 띄웠습니다.",
+       "view": {"report": {"title": "구매 요청 현황", "format": "html", "content": "<table><tr><th>부서</th><th>건수</th></tr></table>"}}},
+      {"role": "user", "content": "아니다, 부서별은 빼고 전체 합계로만 다시"}
+    ],
+    "expect": {"refers": ["r2"], "request_has": ["구매 요청 현황", "전체|합계"], "requirements_has": ["전체|합계"],
+               "requirements_not": ["부서별로 나눠"]}
+  },
+  {
+    "id": "ambiguous", "kind": "모호",
+    "history": [
+      {"id": 1, "role": "user", "content": "협력사 단가 비교해 줘"},
+      {"id": 2, "role": "assistant", "content": "띄웠습니다.",
+       "view": {"report": {"title": "협력사 단가 비교", "format": "html", "content": "<table><tr><th>업체</th></tr></table>"}}},
+      {"id": 3, "role": "user", "content": "납기 현황도"},
+      {"id": 4, "role": "assistant", "content": "띄웠습니다.",
+       "view": {"report": {"title": "납기 현황", "format": "html", "content": "<table><tr><th>업체</th></tr></table>"}}},
+      {"role": "user", "content": "그거 엑셀로 줘"}
+    ],
+    "expect": {"open_nonempty": true}
+  },
+  {
+    "id": "old-attachment", "kind": "지시어",
+    "history": [
+      {"id": 1, "role": "user", "content": "이 견적 검토해 줘",
+       "attachments": [{"name": "B사 견적.md", "kind": "document", "text": "# B사 견적\n모터 100대 3,000만원"}]},
+      {"id": 2, "role": "assistant", "content": "검토 결과를 띄웠습니다.",
+       "view": {"report": {"title": "B사 견적 검토", "format": "html", "content": "<p>적정</p>"}}},
+      {"role": "user", "content": "그 견적서에 적힌 금액 다시 확인해 줘"}
+    ],
+    "expect": {"refers": ["a1-0"], "request_has": ["B사"]}
+  },
+  {
+    "id": "chosen-option", "kind": "선택",
+    "history": [
+      {"id": 1, "role": "user", "content": "지난주 계약 진행 정리해 줘"},
+      {"id": 2, "role": "assistant", "content": "어느 자료로 정리할까요?",
+       "view": {"choices": [{"label": "사내 문서", "prompt": "사내 문서로 정리해 줘"},
+                            {"label": "내 메일", "prompt": "내 메일로 정리해 줘"}]}},
+      {"role": "user", "content": "사내 문서로 정리해 줘"}
+    ],
+    "expect": {"request_has": ["계약", "사내 문서"], "decisions_has": ["사내 문서"]}
+  },
+  {
+    "id": "keep-old-brief", "kind": "긴 대화 회상",
+    "history": [
+      {"id": 10, "role": "assistant", "content": "환율 기준을 확인했습니다.",
+       "view": {"brief": {"goal": "수입 부품 원가 보고서", "requirements": ["금액은 VAT 제외", "환율은 매매기준율"],
+                          "decisions": ["대상은 2025년 수입분"], "open": []}}},
+      {"id": 11, "role": "user", "content": "품목 분류 기준표 좀 보여 줘"},
+      {"id": 12, "role": "assistant", "content": "기준표를 띄웠습니다."},
+      {"role": "user", "content": "좋아, 이제 최종본 만들어 줘"}
+    ],
+    "expect": {"requirements_has": ["VAT", "매매기준율"], "decisions_has": ["2025"]}
+  },
+  {
+    "id": "unaccepted-suggestion", "kind": "제안 미수락",
+    "history": [
+      {"id": 1, "role": "user", "content": "수입 부품 원가 계산해 줘"},
+      {"id": 2, "role": "assistant", "content": "환율 기준일을 1월 1일로 할까요? 일단 원가표를 띄웠습니다.",
+       "view": {"report": {"title": "수입 부품 원가", "format": "html", "content": "<table><tr><th>부품</th><th>원가</th></tr></table>"}}},
+      {"role": "user", "content": "부품별로 관세도 따로 보여 줘"}
+    ],
+    "expect": {"decisions_not": ["1월 1일"], "requirements_has": ["관세"]}
+  },
+  {
+    "id": "generated-file", "kind": "지시어",
+    "history": [
+      {"id": 1, "role": "user", "content": "모터 협력사 명단 엑셀로 만들어 줘"},
+      {"id": 2, "role": "assistant", "content": "파일을 띄웠습니다.",
+       "view": {"file": {"source": "generated", "name": "모터 협력사 명단.xlsx", "format": "xlsx",
+                         "sheets": [{"name": "명단", "rows": [["업체", "담당자"], ["A사", "김"]]}]}}},
+      {"role": "user", "content": "거기에 연락처 열 추가해 줘"}
+    ],
+    "expect": {"refers": ["f2"], "request_has": ["명단", "연락처"]}
+  }
+]

@@ -466,6 +466,27 @@ def converse(
         )
     frozen = _frozen(profile)
     timeout = timeout or get_settings().llm_timeout_seconds
+    # 모델 ID에는 `.`과 `:`이 들어간다(anthropic.claude-sonnet-4:0) — 경로 조각으로 인코딩한다.
+    url = f"{runtime_url(region)}/model/{quote(model_id, safe='')}/converse"
+    cache = bool(_CACHE_MODELS.search(model_id))
+    try:
+        return _from_converse(_post_signed(url, _body(messages, tools, cache), frozen, region, timeout))
+    except BedrockError as e:
+        if not (cache and re.search(r"cach", str(e), re.I)):
+            raise
+        # 캐시 지점을 받지 않는 모델·리전 — 캐시 없이 한 번 더(캐시는 비용·지연을 줄일 뿐 답은 같다).
+        return _from_converse(_post_signed(url, _body(messages, tools, False), frozen, region, timeout))
+
+
+# 프롬프트 캐시 — 도구 정의와 지시문은 턴마다 같다(스마트워크는 턴마다 바뀌는 업무 원장을 지시문이 아니라 이번
+# 요청 앞에 둔다). 그 뒤와 마지막 메시지 뒤에 캐시 지점을 두면 다음 호출(도구 왕복·다음 턴)이 그 앞을 다시 읽지
+# 않는다 — 도구 정의가 입력의 큰 몫이다(작업 로그 실측). 지점은 넷까지라 셋만 쓴다. Claude만: 다른 모델은
+# cachePoint를 거부할 수 있다. 앞부분이 모델의 최소 길이보다 짧으면 캐시가 걸리지 않을 뿐 거부되지 않는다.
+_CACHE_MODELS = re.compile(r"anthropic|claude", re.I)
+_CACHE_POINT = {"cachePoint": {"type": "default"}}
+
+
+def _body(messages: list[dict], tools: list[dict] | None, cache: bool) -> bytes:
     system, converse_messages = _to_converse(messages)
     body: dict = {"messages": converse_messages}
     # 출력 한도를 명시한다 — 안 주면 모델 기본값이 적용되고, 그 값이 작으면 산출물이
@@ -474,13 +495,14 @@ def converse(
     if limit > 0:
         body["inferenceConfig"] = {"maxTokens": limit}
     if system:
-        body["system"] = system
+        body["system"] = system + ([_CACHE_POINT] if cache else [])
     if tools:
         body["toolConfig"] = _tool_config(tools)
-    # 모델 ID에는 `.`과 `:`이 들어간다(anthropic.claude-sonnet-4:0) — 경로 조각으로 인코딩한다.
-    url = f"{runtime_url(region)}/model/{quote(model_id, safe='')}/converse"
-    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    return _from_converse(_post_signed(url, payload, frozen, region, timeout))
+        if cache:
+            body["toolConfig"]["tools"].append(_CACHE_POINT)
+    if cache and tools and converse_messages:
+        converse_messages[-1]["content"].append(_CACHE_POINT)
+    return json.dumps(body, ensure_ascii=False).encode("utf-8")
 
 
 def list_models(*, profile: str, region: str, timeout: int = 20) -> list[dict]:

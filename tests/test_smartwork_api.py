@@ -1012,3 +1012,100 @@ def test_the_steps_taken_while_answering_are_shown_and_kept(client, monkeypatch)
     # 다시 열어도 그 답의 진행 과정이 남는다
     last = client.get(f"{API}/smartwork/sessions/{sid}", headers=alice).json()["messages"][-1]
     assert last["steps"] == out["message"]["steps"]
+
+
+# ---------------------------------------------------------------- 대화 문맥(services/convcontext)
+
+class Restate:
+    """원장 고치기 대역 — 받은 프롬프트를 남기고 정해 둔 원장을 돌려준다."""
+
+    def __init__(self, answer: dict | str):
+        self.answer, self.prompts = answer, []
+
+    def __call__(self, provider, prompt, db):
+        self.prompts.append(prompt)
+        return self.answer if isinstance(self.answer, str) else json.dumps(self.answer, ensure_ascii=False)
+
+
+TABLE = "<h1>단가 비교</h1><table><tr><th>업체</th><th>단가</th></tr><tr><td>A사</td><td>1,000</td></tr></table>"
+
+
+def test_later_turns_see_earlier_results_and_the_brief_resolves_what_they_point_to(client, monkeypatch):
+    """"그 표에 부서 열 추가" — 다음 턴의 모델은 보고서를 본 적이 없다. 산출물 번호·제목·열을 대화에 남기고
+    본문은 session__read로 다시 연다. 원장(요구 통합본)과 풀어 쓴 요청은 이번 요청 바로 앞에 붙는다."""
+    alice = _user(client, "alice@corp.com")
+    sid = _session(client, alice)
+    restate = Restate({"goal": "협력사 단가 비교", "requirements": ["대상: 2026 상반기 계약", "부서 열 추가"],
+                       "decisions": [], "open": [],
+                       "request": "보고서 「단가 비교」(r0)에 부서 열을 추가해 다시 내 줘", "refers": ["r999"]})
+    monkeypatch.setattr(smartwork, "_restate_call", restate)
+    first, _ = _chat(client, alice, monkeypatch, [("show_report", {"title": "단가 비교", "content": TABLE})],
+                     text="2026 상반기 계약 협력사 단가 비교해 줘", sid=sid)
+    assert restate.prompts == []                       # 첫 요청은 풀어 쓸 기록이 없다
+    assert "brief" not in first["message"]
+    rid = f"r{first['message']['id']}"
+    restate.answer["refers"] = [rid, "r999"]           # 목록에 없는 번호는 버린다
+
+    out, script = _chat(client, alice, monkeypatch, [("session__read", {"id": rid})],
+                        text="그 표에 부서 열도 넣어 줘", sid=sid)
+    # 지난 답에는 낸 것이 번호로 붙는다
+    assert f"[결과: {rid} 보고서 「단가 비교」 · 열: 업체, 단가]" in script.messages[-2]["content"]
+    last = script.messages[-1]["content"]
+    assert last.startswith("[업무 원장") and last.endswith("[이번 요청]\n그 표에 부서 열도 넣어 줘")
+    assert "- 부서 열 추가" in last and f"가리키는 것: {rid})" in last
+    assert "session__read" in script.tool_names
+    assert TABLE in script.results["session__read"]     # 본문은 필요할 때 다시 연다
+    # 원장을 고칠 때 본 것: 지난 원장(없음)·산출물·대화·이번 요청
+    assert "(없음 — 처음 만든다)" in restate.prompts[0] and f"- {rid} 보고서 「단가 비교」" in restate.prompts[0]
+    assert "이번 요청:\n그 표에 부서 열도 넣어 줘" in restate.prompts[0]
+    saved = out["message"]
+    assert saved["brief"]["requirements"] == ["대상: 2026 상반기 계약", "부서 열 추가"]
+    assert saved["restated"] == {"request": restate.answer["request"], "refers": [rid]}
+
+    # 다음 턴은 지난 원장에서부터 고친다 — 그 앞의 대화는 다시 읽지 않는다
+    _chat(client, alice, monkeypatch, [], text="금액은 VAT 빼고", sid=sid)
+    assert '"부서 열 추가"' in restate.prompts[1]
+    assert "2026 상반기 계약 협력사 단가 비교해 줘" not in restate.prompts[1].split("지난 원장 이후의 대화:")[1]
+
+
+def test_a_brief_that_cannot_be_made_does_not_stop_the_turn(client, monkeypatch):
+    """원장 호출이 엉뚱한 글을 주면 원장 없이 답한다 — 원장은 남기지 않는다(다음 턴이 그 사이를 다시 읽는다)."""
+    alice = _user(client, "alice@corp.com")
+    sid = _session(client, alice)
+    monkeypatch.setattr(smartwork, "_restate_call", Restate("원장은 이렇습니다"))
+    _chat(client, alice, monkeypatch, [], text="첫 요청", sid=sid)
+    out, script = _chat(client, alice, monkeypatch, [], text="그거 다시", sid=sid)
+    assert "brief" not in out["message"] and not script.messages[-1]["content"].startswith("[업무 원장")
+
+
+def test_the_window_is_a_character_budget_and_old_attachments_are_not_resent(client, monkeypatch):
+    """창은 메시지 수가 아니라 글자 예산 — 넘친 앞 대화는 원장이 들고 간다. 지난 턴의 첨부 원문은 다시 싣지 않고
+    앞부분과 다시 읽을 번호만. 앞을 잘랐으면 여는 지시를 되살리지 않는다(대화 중간에 업무 제안부터 하지 않게)."""
+    import base64
+    from app.services import convcontext
+    alice = _user(client, "alice@corp.com")
+    sid = _session(client, alice)
+    monkeypatch.setattr(smartwork, "_restate_call", Restate({"goal": "견적 검토", "requirements": ["3천만원 이하"],
+                                                            "request": "견적 검토"}))
+    long = "가" * 5000
+    script = Script([])
+    monkeypatch.setattr(llm, "chat_completion", script)
+    r = client.post(f"{API}/smartwork/sessions/{sid}/messages", headers=alice, json={
+        "content": "이 견적 검토해 줘", "attachments": [
+            {"name": "견적.md", "type": "text/markdown",
+             "data": base64.b64encode(("# 견적\n금액 3천만원\n" + long).encode()).decode()}]})
+    assert r.status_code == 200, r.text
+    mid = r.json()["message"]["id"] - 1                # 이 요청(user) 메시지의 번호
+    _, script = _chat(client, alice, monkeypatch, [("session__read", {"id": f"a{mid}-0"})], text="금액만", sid=sid)
+    earlier = script.messages[1]["content"]
+    assert "금액 3천만원" in earlier and f"(전체는 session__read a{mid}-0)" in earlier
+    assert len(earlier) < 1000                          # 원문 5천 자는 다시 싣지 않는다
+    assert long in script.results["session__read"]
+
+    monkeypatch.setattr(convcontext, "HISTORY_CHARS", 300)
+    for i in range(4):
+        _, script = _chat(client, alice, monkeypatch, [], text=f"{i}번째 " + "나" * 100, sid=sid)
+    roles = [m["role"] for m in script.messages]
+    assert roles[0] == "system" and roles[1] == "user"
+    assert all(m["content"] != smartwork.OPENING_PROMPT for m in script.messages)
+    assert len(script.messages) < 10 and "- 3천만원 이하" in script.messages[-1]["content"]

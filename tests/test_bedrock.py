@@ -202,7 +202,39 @@ def test_converse_url_encodes_the_model_id(monkeypatch):
                      messages=[{"role": "system", "content": "s"},
                                {"role": "user", "content": "u"}])
     assert "anthropic.claude-sonnet-4%3A0/converse" in seen["url"]
-    assert seen["body"]["system"] == [{"text": "s"}]
+    assert seen["body"]["system"] == [{"text": "s"}, {"cachePoint": {"type": "default"}}]
+
+
+def test_prompt_cache_points_go_after_tools_system_and_the_last_message(monkeypatch):
+    """도구 정의·지시문은 턴마다 같다 — 그 뒤와 마지막 메시지 뒤에 캐시 지점(Claude만). 받지 않으면 빼고 다시."""
+    monkeypatch.setattr(bedrock, "botocore_available", lambda: True)
+    monkeypatch.setattr(bedrock, "_frozen", lambda profile: object())
+    bodies = []
+
+    def fake_post(url, payload, frozen, region, timeout):
+        bodies.append(json.loads(payload))
+        if len(bodies) == 1 and "refuse" in url:
+            raise bedrock.BedrockError("Bedrock 호출이 거부됐습니다 (400): prompt caching is not supported")
+        return {"output": {"message": {"content": [{"text": "ok"}]}}}
+
+    monkeypatch.setattr(bedrock, "_post_signed", fake_post)
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {"type": "object"}}}]
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+    point = {"cachePoint": {"type": "default"}}
+    bedrock.converse(profile="p", region="us-east-1", model_id="global.anthropic.claude-sonnet-4-5", messages=msgs,
+                     tools=tools)
+    body = bodies[-1]
+    assert body["toolConfig"]["tools"][-1] == point and body["system"][-1] == point
+    assert body["messages"][-1]["content"] == [{"text": "u"}, point]
+    # 다른 모델에는 넣지 않는다
+    bedrock.converse(profile="p", region="us-east-1", model_id="amazon.nova-pro-v1:0", messages=msgs, tools=tools)
+    assert "cachePoint" not in json.dumps(bodies[-1])
+    # 캐시를 거부하면 캐시 없이 한 번 더
+    bodies.clear()
+    out = bedrock.converse(profile="p", region="us-east-1", model_id="anthropic.claude-refuse", messages=msgs,
+                           tools=tools)
+    assert out["choices"][0]["message"]["content"] == "ok" and len(bodies) == 2
+    assert "cachePoint" not in json.dumps(bodies[1])
 
 
 def test_converse_without_botocore_says_how_to_install(monkeypatch):

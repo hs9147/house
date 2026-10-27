@@ -256,8 +256,10 @@ def send(db: Session, key: ApiKey, provider, session_id: int, content: str,
     """
     row, member = get(db, session_id, key.name)
     content = content.strip()[:smartwork.MAX_MESSAGE_CHARS]
-    history = [{"role": m.role, "content": m.content, "author": m.author,
-                "attachments": (m.view or {}).get("attachments") if m.role == "user" else None}
+    # 번호(id)·화면(view)까지 — 다음 턴이 지난 보고서·파일·원장을 알아본다(services/convcontext).
+    history = [{"id": m.id, "role": m.role, "content": m.content, "author": m.author,
+                "attachments": (m.view or {}).get("attachments") if m.role == "user" else None,
+                "view": m.view if m.role == "assistant" else None}
                for m in db.execute(select(SmartworkSessionMessage)
                                    .where(SmartworkSessionMessage.session_id == row.id)
                                    .order_by(SmartworkSessionMessage.id)).scalars()]
@@ -295,6 +297,8 @@ def send(db: Session, key: ApiKey, provider, session_id: int, content: str,
         # 세션 설정으로는 알 수 없다 — 평가(answer_ratings)가 이 값으로 묶인다.
         view={**{k: result[k] for k in ("agent", "report", "web", "file", "suggestions",
                                          "choices", "tools")},
+              # 업무 원장 — 이 턴에 고친 것만(다음 턴이 여기서부터 읽는다). 이번 요청을 풀어 쓴 것도 함께.
+              **{k: result[k] for k in ("brief", "restated") if result.get(k)},
               "model": provider.model, "provider": provider.name,
               # 어떤 과정을 거쳐 이 답이 나왔는지 — 다시 열어도 「진행 과정」으로 보인다.
               "steps": [s["label"] for s in steps]})

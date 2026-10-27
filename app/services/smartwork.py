@@ -27,7 +27,7 @@ from ..models import (
     WorkflowRunStatus,
 )
 from ..security import viewer_org_ids
-from . import agentreview, docready, docsearch, doctext, mcp_server, personal, telemetry
+from . import agentreview, convcontext, docready, docsearch, doctext, mcp_server, personal, telemetry
 from . import llm as llm_service
 from . import storage as storage_service
 from . import workflow as workflow_service
@@ -36,9 +36,7 @@ from .proxy import domain_for, path_prefix_for
 # (접두사, MCP 모양 도구 목록, 호출(도구명, 인자) -> 문자열)
 Toolset = tuple[str, list[dict], Callable[[str, dict], str]]
 
-# 모델에게 다시 보내는 대화 길이 — 화면은 전부 보여 주지만 매 턴 전부 보내면 토큰이
-# 대화 길이에 비례해 는다.
-MAX_HISTORY = 20
+# 메시지 하나의 상한. 다시 보내는 대화의 길이(글자 예산)·원장·산출물은 services/convcontext가 정한다.
 MAX_MESSAGE_CHARS = 20_000
 # 개인 문서 한 편을 도구 결과로 돌려줄 최대 글자 수(사내 문서 서버와 같은 값).
 _MAX_READ_CHARS = 40_000
@@ -598,12 +596,12 @@ def _view_tools(agent_names: list[str], has_files: bool = False) -> list[dict]:
     return tools
 
 
-# 대화 이력에 붙은 첨부의 머리(_clean_history) — 여기서 갈라 첨부를 따로 센다.
+# 대화 이력에 붙은 첨부의 머리(convcontext._user_text) — 여기서 갈라 첨부를 따로 센다.
 _ATTACH_MARK = "\n\n[첨부 "
 # 도구 접두사 → 자료 출처 이름(작업 로그의 입력 구성). 개인 자료는 내 문서·내 메일로만 —
 # 작업 로그는 관리자가 보는 화면이고 개인 업무 맥락은 그 사람만 본다.
 _SOURCES = {"graph": "온톨로지", "apis": "API 카탈로그", "code": "코드", "storage": "파일 저장소",
-            "dept": "부서 워크플로", "ops": "운영"}
+            "dept": "부서 워크플로", "ops": "운영", "session": "이 대화의 산출물"}
 
 
 # 도구 → 사람이 읽는 단계 이름(대화에 "진행 과정"으로 보인다). 인자 하나를 덧붙일 키.
@@ -614,7 +612,7 @@ _STEP_LABELS = {
     "show_report": ("결과 작성", "title"), "show_agent": ("에이전트 열기", "name"),
     "make_file": ("파일 만들기", "name"), "ask_user": ("확인 질문 준비", ""),
     "suggest_tasks": ("할 일 제안 정리", ""), "open_file": ("내 문서 열기", ""),
-    "show_web": ("웹 페이지 준비", "url"),
+    "show_web": ("웹 페이지 준비", "url"), "session__read": ("이 대화의 결과 다시 보기", "id"),
 }
 # 개인 자료 도구는 인자를 싣지 않는다 — 공유 세션에서는 다른 참여자도 진행 과정을 본다. 검색어와
 # 파일 이름이 남에게 보이면 개인 업무 맥락이 새는 것이다(개인 맥락은 그 사람만 본다).
@@ -654,7 +652,7 @@ def _source_of(tool: str, args: dict) -> str:
 
 
 def _history_sections(history: list[dict]) -> list[tuple[str, str]]:
-    """대화 이력을 구역으로 — 이번 요청·이전 대화·첨부 문서·여는 지시."""
+    """대화 이력을 구역으로 — 이번 요청·업무 원장·이전 대화·첨부 문서·여는 지시."""
     out: list[tuple[str, str]] = []
     last = len(history) - 1
     for i, m in enumerate(history):
@@ -662,6 +660,9 @@ def _history_sections(history: list[dict]) -> list[tuple[str, str]]:
         if text == OPENING_PROMPT:
             out.append(("여는 지시", text))
             continue
+        if text.startswith(convcontext.BRIEF_MARK) and convcontext.REQUEST_MARK in text:
+            brief, text = text.split(convcontext.REQUEST_MARK, 1)
+            out.append(("업무 원장", brief))
         head, *attached = text.split(_ATTACH_MARK)
         out.append(("이번 요청" if i == last and m.get("role") == "user" else "이전 대화", head))
         out += [("첨부 문서", _ATTACH_MARK + a) for a in attached]
@@ -941,25 +942,9 @@ def _agent_report(agent: dict, reply: str) -> dict:
             "content": "\n".join(lines).strip()}
 
 
-def _clean_history(history: list[dict], shared: bool = False) -> list[dict]:
-    out = []
-    for msg in history[-MAX_HISTORY:]:
-        role = msg.get("role")
-        content = str(msg.get("content") or "")[:MAX_MESSAGE_CHARS]
-        for a in msg.get("attachments") or []:
-            # 이미지는 그 턴에만 모델에게 갔다 — 뒤 턴에는 이름만 남는다.
-            content += (f"\n\n[첨부 문서: {a['name']}]\n{a['text']}" if a.get("kind") == "document"
-                        else f"\n\n[첨부 이미지: {a['name']}]")
-        if shared and role == "user" and msg.get("author"):
-            content = f"[{msg['author']}] {content}"
-        if role in ("user", "assistant") and content:
-            out.append({"role": role, "content": content})
-    # 첫 턴(빈 대화)은 여는 지시로, 그 뒤로도 대화가 제안(assistant)으로 시작하면 그 지시를
-    # 앞에 되살린다 — 대화가 assistant로 시작하면 거부하는 프로바이더가 있고(Bedrock),
-    # 무엇에 대한 제안이었는지도 모델이 알아야 한다.
-    if not out or out[0]["role"] != "user":
-        out.insert(0, {"role": "user", "content": OPENING_PROMPT})
-    return out
+def _restate_call(provider, prompt: str, db: Session) -> str:
+    """업무 원장을 고치는 호출 — 도구 없이 한 번(테스트가 바꿔 끼우는 경계)."""
+    return llm_service.chat_completion(provider, [{"role": "user", "content": prompt}], db)
 
 
 def chat(db: Session, key: ApiKey, provider, history: list[dict],
@@ -968,6 +953,7 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
          mail: bool = False, images: list[str] | None = None,
          on_step: Callable[[str], None] | None = None) -> dict:
     """대화 한 턴. history의 마지막이 이번 사용자 메시지다 — 비어 있으면 여는 턴이다.
+    history의 메시지: {id(이번 요청은 없음), role, content, author, attachments(user), view(assistant)}.
 
     세션 맥락: org_id·workflow(이름)는 소유자가 고른 업무, participants는 공유 참여자,
     folders·mail은 **지금 말하는 사람이** 이 세션에 고른 개인 맥락이다. images는 이번
@@ -997,8 +983,11 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
                          lambda n, a: json.dumps(dept, ensure_ascii=False))
     # 파일 뷰어가 열 수 있는 내 문서 — open_file의 허용 범위이기도 하다.
     files = {(f["folder"], f["path"]) for f in session_files(db, key.name, folders)}
+    # 이 대화에서 만든 결과·지난 첨부 — 번호로 가리키고 session__read로 다시 연다(services/convcontext).
+    artifacts = convcontext.artifacts_of(history)
+    again = convcontext.toolset(artifacts)
     sets = [("view", _view_tools(list(by_name), bool(files)), None), dept_set, *toolsets,
-            *([mine] if mine else [])]
+            *([mine] if mine else []), *([again] if again else [])]
 
     tools: list[dict] = []
     registry: dict[str, tuple[Callable | None, str]] = {}
@@ -1102,22 +1091,34 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
     shared = len(participants or []) > 1
     sections = _system_sections(key.name, agent_list, mine is not None, [w["name"] for w in dept],
                                 task, participants)
-    messages = [{"role": "system", "content": "\n".join(text for _, text in sections)},
-                *_clean_history(history, shared)]
-    # 작업 로그가 입력을 구역·출처로 나눠 보이게(services/telemetry.hints) — 이미지로 바꾸기 전에 잰다.
-    history_sections = _history_sections(messages[1:])
-    base_len = len(messages)
-    if images and messages[-1]["role"] == "user":
-        messages[-1] = {"role": "user", "content": [
-            {"type": "text", "text": messages[-1]["content"]},
-            *({"type": "image_url", "image_url": {"url": url}} for url in images)]}
+    # 지시문은 턴마다 같게 둔다(프롬프트 캐시가 걸리게) — 턴마다 바뀌는 원장은 이번 요청 바로 앞에 붙인다.
+    window, _ = convcontext.window(history, shared, OPENING_PROMPT)
+    messages = [{"role": "system", "content": "\n".join(text for _, text in sections)}, *window]
     # 왕복 한도를 넘기면 결과를 내는 도구만 돌린다(llm.WRAP_UP_ROUNDS) — 찾기만 하다 끝나지 않게.
     # 맨 앞이 기본 형식이다: 다른 화면이 맞지 않으면 결과는 show_report로.
     finish = ["show_report", *(t["name"] for t in _view_tools(list(by_name), bool(files))
                                if t["name"] != "show_report")]
-    with telemetry.turn() as turn_id, telemetry.hints(
-            system=sections, history=history_sections, base_len=base_len, source_of=_source_of):
-        reply = llm_service.chat_completion(provider, messages, db, tools, execute, finish_tools=finish)
+    restated = None
+    with telemetry.turn() as turn_id:
+        # 이전 요청이 있으면 먼저 원장을 고치고 이번 요청을 풀어 쓴다 — 지시어("그 표에")를 일하기 전에 푼다.
+        if convcontext.needs_restate(history):
+            if on_step is not None:
+                on_step("대화 문맥 정리")
+            restated = convcontext.restate(history, lambda prompt: _restate_call(provider, prompt, db))
+        brief = restated["brief"] if restated else convcontext.last_brief(history)[0]
+        block = convcontext.brief_block(brief, artifacts, restated)
+        if block and messages[-1]["role"] == "user":
+            messages[-1] = {"role": "user", "content": block + convcontext.REQUEST_MARK + messages[-1]["content"]}
+        # 작업 로그가 입력을 구역·출처로 나눠 보이게(services/telemetry.hints) — 이미지로 바꾸기 전에 잰다.
+        history_sections = _history_sections(messages[1:])
+        base_len = len(messages)
+        if images and messages[-1]["role"] == "user":
+            messages[-1] = {"role": "user", "content": [
+                {"type": "text", "text": messages[-1]["content"]},
+                *({"type": "image_url", "image_url": {"url": url}} for url in images)]}
+        with telemetry.hints(system=sections, history=history_sections, base_len=base_len,
+                             source_of=_source_of):
+            reply = llm_service.chat_completion(provider, messages, db, tools, execute, finish_tools=finish)
     if not any(view[k] for k in ("agent", "report", "web", "file", "suggestions", "choices")):
         reply = _fallback(reply, view, len(used))
     elif view["agent"] and not view["report"]:
@@ -1125,4 +1126,8 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
     telemetry.record_turn(turn_id, _outcome(view, reply), _citations(reads, view, reply))
     # 무엇을 물었는지는 남기지 않는다 — 개인 메일·문서 내용이 감사 기록으로 새면 안 된다.
     audit.record(db, key.name, "smartwork.chat", "-", {"tools": used})
-    return {"reply": reply, **view, "tools": used, "provider": provider.name}
+    # 원장은 새로 고친 것만 남긴다 — 고치지 못한 턴에 지난 원장을 다시 남기면, 다음 턴이 그 사이의 대화를
+    # 원장에 넣지 않고 건너뛴다(convcontext.last_brief 이후만 읽는다).
+    return {"reply": reply, **view, "tools": used, "provider": provider.name,
+            "brief": restated["brief"] if restated else None,
+            "restated": {k: restated[k] for k in ("request", "refers")} if restated else None}
