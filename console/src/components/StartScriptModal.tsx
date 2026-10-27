@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Modal from './Modal';
 import { api } from '../lib/api';
+import { isAdmin } from '../lib/auth';
 import type { BuildProfile, StartScriptOut } from '../lib/types';
 
 /**
@@ -21,6 +22,9 @@ import type { BuildProfile, StartScriptOut } from '../lib/types';
  * 「LLM으로 작성」은 **전체 배포 단위부터 확인한다** — 리포를 최신으로 두고 구조를 다시 감지해 유닛 목록에
  * 반영한 뒤, 고른 유닛이 그대로 있으면 그 유닛만, 없어졌으면 모든 유닛을 쓴다(결과에 어느 쪽인지 보인다).
  * 제안은 유닛별 초안으로 들고 있다가(저장 전), 유닛을 골라 확인하고 하나씩 저장한다.
+ *
+ * 작성·저장·되돌리기는 **관리자만** 한다(서버도 require_admin) — 배포는 구성원도 하므로 이 창은 누구나 열지만,
+ * 관리자가 아니면 지금 스크립트를 보기만 한다. 막지 않으면 눌렀을 때 "admin key required"만 보였다.
  */
 interface Props {
   projectId: number;
@@ -56,6 +60,7 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
   // 마지막 「LLM으로 작성」이 고친 범위 — 선택한 유닛만인지, 모든 유닛인지
   const [result, setResult] = useState<{ all: boolean; text: string } | null>(null);
   const showing = drafts.current[component] !== undefined && data === drafts.current[component];
+  const admin = isAdmin();
 
   // 유닛을 바꾸면 그 유닛의 스크립트를 다시 읽는다 — 화면에 남은 본문을 그대로 두면
   // 다른 컴포넌트의 스크립트를 이 컴포넌트에 저장하게 된다.
@@ -260,7 +265,7 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
           className="secondary"
           style={{ alignSelf: 'flex-end' }}
           onClick={propose}
-          disabled={!!busy || !providerId}
+          disabled={!!busy || !providerId || !admin}
         >
           LLM으로 작성
         </button>
@@ -272,6 +277,11 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
         {' · '}{profile} 프로필에만 적용됩니다{' · '}이 스크립트는 서버에서 서비스 권한으로
         실행됩니다 — 내용을 읽고 확인한 뒤 저장하세요.
       </p>
+      {!admin && (
+        <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 6px' }}>
+          기동 스크립트는 관리자만 작성·저장할 수 있습니다 — 지금 쓰이는 스크립트를 볼 수만 있습니다.
+        </p>
+      )}
 
       {(data?.problems.length ?? 0) > 0 && (
         <ul className="error" style={{ fontSize: 12, margin: '0 0 8px', paddingLeft: 18 }}>
@@ -283,6 +293,7 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
         className="mono"
         value={script}
         onChange={(e) => setScript(e.target.value)}
+        readOnly={!admin}
         spellCheck={false}
         style={{ width: '100%', height: 300, fontSize: 12, whiteSpace: 'pre' }}
       />
@@ -322,11 +333,11 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
             재배포
           </button>
         ) : (
-          <button onClick={save} disabled={!!busy || !script.trim() || blocked}>
+          <button onClick={save} disabled={!!busy || !script.trim() || blocked || !admin}>
             확인했습니다 — 저장
           </button>
         )}
-        <button className="secondary" onClick={reset} disabled={!!busy}>
+        <button className="secondary" onClick={reset} disabled={!!busy || !admin}>
           템플릿으로 되돌리기
         </button>
         <div className="spacer" />
