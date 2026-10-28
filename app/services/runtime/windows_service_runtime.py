@@ -46,6 +46,7 @@ UPSTREAM_HOST = "localhost"
 _QUERY_TIMEOUT = 10.0   # sc query — 단건 조회
 _LIST_TIMEOUT = 15.0    # sc query state= all — 전체 목록이라 출력이 크다
 _MANAGE_TIMEOUT = 30.0  # nssm install/set/start/stop/remove — 서비스 기동·정지를 기다린다
+PORT_FREE_TIMEOUT = 15.0  # 옛 슬롯을 멈춘 뒤 포트가 비기를 기다리는 시간
 
 
 def _read_log_tail(log_path, n: int = 40) -> str:
@@ -178,6 +179,22 @@ class WindowsServiceRuntime(Runtime):
         if self._exists(name):
             self._teardown(name)
 
+        # **옛 슬롯을 먼저 멈춘다.** 포트는 유닛마다 고정이라(services/ports) 옛 슬롯도 같은 포트로 떠 있다. 새 슬롯을
+        # 먼저 띄우면 새 앱은 포트를 못 잡아 죽고, 헬스체크는 아직 떠 있는 옛 앱의 응답을 받아 통과한 뒤 옛 슬롯을
+        # 내린다 — 그 포트에 아무도 남지 않아 프록시가 502를 낸다(실측: 떠 있는 앱을 재배포하면 502, 중지하고
+        # 배포하면 정상). 멈추기만 하고 지우지는 않는다 — 새 슬롯이 실패하면 옛 슬롯을 다시 띄운다. 새 앱이 뜨는
+        # 동안(헬스체크까지)은 내려가 있다 — 같은 포트를 쓰는 한 피할 수 없다.
+        old_name = f"{spec.unit_name}-{old_slot}" if old_slot is not None else None
+        if old_name is not None:
+            self._stop(old_name)
+        if not self._wait_port_free(host_port):
+            # 헬스체크가 남의 응답으로 통과하지 않게 — 포트를 쥔 것이 있으면 띄우지 않고 그렇다고 말한다.
+            restored = self._restore(old_name)
+            raise WindowsServiceError(
+                f"포트 {host_port}를 다른 프로세스가 쓰고 있어 새 서비스를 띄우지 않았습니다"
+                f"({UPSTREAM_HOST}:{host_port}에 아직 응답이 옵니다) — 그 포트를 쓰는 프로세스를 확인하세요."
+                + restored)
+
         log_path = settings.build_log_dir / f"{name}.log"
         env_pairs = "\n".join(
             f"{k}={v}" for k, v in {
@@ -204,18 +221,49 @@ class WindowsServiceRuntime(Runtime):
         if not self._wait_healthy(host_port, spec.health_check_path):
             tail = _read_log_tail(log_path)
             self._teardown(name)
+            restored = self._restore(old_name)
             probed = self._health_url(host_port, spec.health_check_path)
             raise WindowsServiceError(
                 f"health check failed — {probed} 로 헬스체크 시간 내 응답이 없습니다. "
                 f"앱이 HOST={UPSTREAM_HOST} PORT={host_port}를 지켜 리슨하는지 확인하세요"
-                f"(HOST를 무시하고 다른 주소에 바인드하면 여기서 못 찾습니다). "
+                f"(HOST를 무시하고 다른 주소에 바인드하면 여기서 못 찾습니다).{restored} "
                 f"아래 서비스 로그에 기동 오류가 그대로 남습니다.\n"
                 f"--- {log_path.name} ---\n{tail}"
             )
 
-        if old_slot is not None:
-            self._teardown(f"{spec.unit_name}-{old_slot}")
+        if old_name is not None:
+            self._teardown(old_name)
         return Endpoint(host=UPSTREAM_HOST, port=host_port)
+
+    def _stop(self, name: str) -> None:
+        """멈추기만 한다(지우지 않는다) — 새 슬롯이 실패하면 _restore가 다시 띄운다. 정리처럼 베스트 에포트다."""
+        try:
+            subprocess.run([_nssm_binary(), "stop", name], capture_output=True, text=True,
+                           timeout=_MANAGE_TIMEOUT)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    def _restore(self, old_name: str | None) -> str:
+        """새 슬롯이 뜨지 못했을 때 멈춰 둔 옛 슬롯을 다시 띄운다 — 오류 문구에 붙일 한 줄을 돌려준다."""
+        if old_name is None:
+            return ""
+        try:
+            self._nssm("start", old_name)
+        except WindowsServiceError as e:
+            return f" 멈춰 둔 이전 서비스({old_name})도 다시 띄우지 못했습니다: {str(e)[:200]}"
+        return f" 이전 서비스({old_name})를 다시 띄웠습니다 — 앱은 이전 판으로 돕니다."
+
+    @staticmethod
+    def _wait_port_free(port: int, timeout: float = 0) -> bool:
+        """포트에 아무도 응답하지 않을 때까지 — 멈춘 서비스의 자식 프로세스가 잠깐 남아 있을 수 있다."""
+        from .. import ports  # noqa: PLC0415
+
+        deadline = time.monotonic() + (timeout or PORT_FREE_TIMEOUT)
+        while ports.is_listening(UPSTREAM_HOST, port):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.5)
+        return True
 
     def stop(self, project_name: str, profile: BuildProfile) -> None:
         spec = RuntimeSpec(project_name, "", 0, profile, "")

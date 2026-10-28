@@ -106,6 +106,47 @@ def test_start_blue_green_switches_slot_and_tears_down_old(env):
     assert "paas-shop-a" not in env.installed  # 구 슬롯 정리됨
 
 
+def _nssm_calls(env):
+    return [(c[1], c[2]) for c in env.calls if "nssm" in c[0] and c[1] in ("install", "stop", "start", "remove")]
+
+
+def test_redeploy_stops_the_old_slot_before_the_new_one_takes_the_same_port(env):
+    """포트는 유닛마다 고정이다 — 옛 슬롯이 떠 있는 채로 새 슬롯을 띄우면 새 앱은 포트를 못 잡고, 헬스체크는
+    옛 앱의 응답으로 통과한 뒤 옛 슬롯을 내려 아무도 남지 않는다(실측 502). 옛 슬롯을 먼저 멈춘다."""
+    WindowsServiceRuntime().start(_spec())
+    env.calls.clear()
+    WindowsServiceRuntime().start(_spec())
+    calls = _nssm_calls(env)
+    assert calls.index(("stop", "paas-shop-a")) < calls.index(("install", "paas-shop-b"))
+    assert calls[-1] == ("remove", "paas-shop-a")           # 새 슬롯이 건강해진 뒤에 지운다
+    assert env.installed == {"paas-shop-b"}
+
+
+def test_failed_redeploy_brings_the_old_slot_back(env, monkeypatch):
+    WindowsServiceRuntime().start(_spec())
+    monkeypatch.setattr(wsr.WindowsServiceRuntime, "_wait_healthy", lambda self, *a, **kw: False)
+    env.calls.clear()
+    with pytest.raises(WindowsServiceError, match=r"이전 서비스\(paas-shop-a\)를 다시 띄웠습니다"):
+        WindowsServiceRuntime().start(_spec())
+    assert env.installed == {"paas-shop-a"}
+    assert _nssm_calls(env)[-1] == ("start", "paas-shop-a")
+
+
+def test_a_port_still_answering_after_the_stop_is_not_mistaken_for_the_new_app(env, monkeypatch):
+    """옛 슬롯을 멈췄는데도 포트에 응답이 오면 남의 프로세스다 — 띄우면 헬스체크가 그 응답으로 통과한다."""
+    import dataclasses
+    from app.services import ports
+    spec = dataclasses.replace(_spec(), host_port=9150)     # 포트는 대장이 정한 고정값이다
+    WindowsServiceRuntime().start(spec)
+    monkeypatch.setattr(ports, "is_listening", lambda host, port, timeout=0.2: True)
+    monkeypatch.setattr(wsr, "PORT_FREE_TIMEOUT", 0.01)
+    env.calls.clear()
+    with pytest.raises(WindowsServiceError, match="다른 프로세스가 쓰고 있어"):
+        WindowsServiceRuntime().start(spec)
+    assert ("install", "paas-shop-b") not in _nssm_calls(env)
+    assert _nssm_calls(env)[-1] == ("start", "paas-shop-a")
+
+
 def test_stop_removes_all_slots(env):
     WindowsServiceRuntime().start(_spec())
     assert env.installed
