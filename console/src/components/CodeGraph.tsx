@@ -103,7 +103,7 @@ export default function CodeGraph({ files }: { files: CodeMapFile[] }) {
       </div>
       <ForceGraph nodes={nodes} links={links} selected={selected} height={480}
         colorOf={(kind) => kindOf(kind)?.color ?? VIZ.series}
-        onSelect={setSelected} onExpand={expand} />
+        onSelect={setSelected} onExpand={expand} autoFit />
       {state.note && <p className="mutedtext" style={{ fontSize: 12, margin: '4px 0' }}>{state.note}</p>}
       {current && <Detail info={current} />}
     </div>

@@ -51,9 +51,14 @@ const CENTER = 0.004;    // 가운데로 모으는 힘(흩어져 날아가지 �
 const DAMP = 0.86;       // 속도 감쇠 — 이게 없으면 영원히 흔들린다
 const ALPHA_DECAY = 0.985;
 const MIN_ALPHA = 0.02;
+const MIN_K = 0.05;      // 가장 작게 — 노드 수백 개를 한 화면에 담는다
+const MAX_K = 2.5;
+const FIT_PAD = 40;      // 맞출 때 가장자리 여백(화면 픽셀)
+const FOCUS_MS = 1200;   // 고른 노드로 옮겨 가는 동안 — 펼친 이웃이 자리를 잡는 사이에도 따라 맞춘다
+const FOCUS_MAX_K = 1.6; // 고른 이웃이 몇 개뿐이어도 이보다 크게 당기지 않는다
 
 export default function ForceGraph({
-  nodes, links, selected, colorOf, onSelect, onExpand, height = 560,
+  nodes, links, selected, colorOf, onSelect, onExpand, height = 560, autoFit = false,
 }: {
   nodes: GraphNode[];
   links: GraphLink[];
@@ -62,6 +67,9 @@ export default function ForceGraph({
   onSelect?: (id: string) => void;
   onExpand?: (id: string) => void;
   height?: number;
+  /** 화면 맞추기 — 처음에는 전체가 들어오게(자리를 잡는 동안 계속, 사람이 움직이기 전까지), 노드를 고르면 그
+   *  노드와 이웃이 들어오게 옮겨 간다. 끄면 예전처럼 확대 1배에서 사람이 움직인다. */
+  autoFit?: boolean;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 800, h: height });
@@ -75,6 +83,12 @@ export default function ForceGraph({
   // 노드가 펼쳐진다.
   const dragged = useRef(false);
   const svg = useRef<SVGSVGElement>(null);
+  // 사람이 휠·끌기로 화면을 움직였나 — 그 뒤로는 전체 맞추기를 멈춘다(보던 자리를 빼앗지 않는다).
+  const moved = useRef(false);
+  // 고른 노드로 옮겨 가는 중이면 그 노드와 마감 시각.
+  const focus = useRef<{ id: string; until: number } | null>(null);
+  const linksRef = useRef(links);
+  linksRef.current = links;
 
   // 휠 확대. React의 onWheel은 passive로 붙어 preventDefault가 듣지 않는다 — 확대하는 동안
   // 페이지가 함께 스크롤된다. 그래서 직접 붙인다.
@@ -83,7 +97,9 @@ export default function ForceGraph({
     if (!target) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      setView((v) => ({ ...v, k: Math.min(2.5, Math.max(0.35, v.k * (e.deltaY < 0 ? 1.1 : 0.9))) }));
+      moved.current = true;
+      focus.current = null;
+      setView((v) => ({ ...v, k: Math.min(MAX_K, Math.max(MIN_K, v.k * (e.deltaY < 0 ? 1.1 : 0.9))) }));
     };
     target.addEventListener('wheel', onWheel, { passive: false });
     return () => target.removeEventListener('wheel', onWheel);
@@ -204,6 +220,65 @@ export default function ForceGraph({
     return () => cancelAnimationFrame(frame);
   }, [links, size.w, size.h]);
 
+  // 화면 맞추기(autoFit) — 노드가 다 들어오는 확대·위치. toScreen(cx) = 가운데가 되도록 x = (W/2 - cx)·k.
+  const fitOf = (maxK: number) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    [...bodies.current.keys()].forEach((id) => {
+      const b = bodies.current.get(id);
+      if (!b) return;
+      x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x); y1 = Math.max(y1, b.y);
+    });
+    if (!Number.isFinite(x0)) return null;
+    const k = Math.min(maxK, Math.max(MIN_K, Math.min((size.w - FIT_PAD * 2) / Math.max(1, x1 - x0),
+                                                    (size.h - FIT_PAD * 2) / Math.max(1, y1 - y0))));
+    return { k, x: (size.w / 2 - (x0 + x1) / 2) * k, y: (size.h / 2 - (y0 + y1) / 2) * k };
+  };
+  // 고른 노드로 — 그 노드를 가운데에 두고 이웃의 80%가 들어오는 거리에 맞춘다. 범위 전체로 맞추면 수백 개를 뿌린
+  // 그래프에서 멀리 떨어진 이웃 하나 때문에 거의 당겨지지 않는다.
+  const focusOf = (id: string) => {
+    const b = bodies.current.get(id);
+    if (!b) return null;
+    const far = linksRef.current
+      .filter((l) => l.source === id || l.target === id)
+      .map((l) => bodies.current.get(l.source === id ? l.target : l.source))
+      .filter((o): o is Body => !!o)
+      .map((o) => Math.hypot(o.x - b.x, o.y - b.y))
+      .sort((p, q) => p - q);
+    const r = Math.max(60, far.length ? far[Math.floor((far.length - 1) * 0.8)] : 0);
+    const k = Math.min(FOCUS_MAX_K, Math.max(MIN_K, (Math.min(size.w, size.h) / 2 - FIT_PAD) / r));
+    return { k, x: (size.w / 2 - b.x) * k, y: (size.h / 2 - b.y) * k };
+  };
+
+  // 처음에는 전체를, 고르면 그 이웃을 — 시뮬레이션과 따로 프레임마다 다가간다(잦아든 뒤에도 옮겨 가야 한다).
+  useEffect(() => {
+    if (!autoFit) return undefined;
+    let frame = 0;
+    const step = () => {
+      const f = focus.current;
+      if (f && performance.now() > f.until) focus.current = null;
+      const goal = focus.current ? focusOf(focus.current.id)
+        : !moved.current && alpha.current > MIN_ALPHA ? fitOf(1) : null;
+      if (goal) {
+        setView((v) => (focus.current
+          ? { k: v.k + (goal.k - v.k) * 0.15, x: v.x + (goal.x - v.x) * 0.15, y: v.y + (goal.y - v.y) * 0.15 }
+          : goal));
+      }
+      frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFit, size.w, size.h]);
+
+  // 고른 노드가 바뀌면 그리로 — 처음 값(그려지자마자 고른 것)은 전체 맞추기가 맡는다.
+  const firstSelected = useRef(selected);
+  useEffect(() => {
+    if (!autoFit || !selected || selected === firstSelected.current) return;
+    firstSelected.current = undefined;
+    moved.current = true;
+    focus.current = { id: selected, until: performance.now() + FOCUS_MS };
+  }, [autoFit, selected]);
+
   // 이웃 관계 — 마우스를 올리면 그 노드와 이웃만 남긴다(나머지는 흐린다).
   const neighbors = useMemo(() => {
     const focus = hover || selected || '';
@@ -250,6 +325,8 @@ export default function ForceGraph({
         alpha.current = Math.max(alpha.current, 0.35);  // 끌면 주변이 다시 자리를 잡는다
       }
     } else {
+      moved.current = true;
+      focus.current = null;
       setView((v) => ({ ...v, x: v.x + dx * view.k, y: v.y + dy * view.k }));
     }
     redraw((n) => n + 1);
@@ -326,8 +403,9 @@ export default function ForceGraph({
                 stroke={n.id === selected ? 'var(--text)' : color}
                 strokeWidth={n.id === selected ? 2.5 : 1.5}
               />
-              {/* 글자는 확대와 무관하게 고정 크기다 — 확대하면 8px이 되거나 19px이 된다. */}
-              {(lit || view.k > 1.2) && (
+              {/* 글자는 확대와 무관하게 고정 크기다 — 확대하면 8px이 되거나 19px이 된다. 많이 줄였을 때는(수백 개를
+                  한 화면에) 고른·올린 이웃의 이름만 — 다 쓰면 글자가 겹쳐 아무것도 읽히지 않는다. */}
+              {(view.k > 1.2 || (lit && (view.k >= 0.6 || (neighbors !== null && neighbors.size <= 40)))) && (
                 <text
                   x={p.x} y={p.y + r + 12}
                   textAnchor="middle"
