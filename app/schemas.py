@@ -251,6 +251,12 @@ class LlmProviderCreate(BaseModel):
         return self
 
 
+class LlmProviderUpdate(LlmProviderCreate):
+    """프로바이더 고치기 — 등록과 같은 검증. api_key는 비워 두면 그대로 두고(원문은 다시 내보내지 않는다 —
+    화면은 지금 키를 모른다), clear_api_key면 지운다."""
+    clear_api_key: bool = False
+
+
 class LlmProviderOut(BaseModel):
     id: int
     name: str

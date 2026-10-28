@@ -22,6 +22,7 @@ from ..models import (
 from ..schemas import (
     LlmProviderCreate,
     LlmProviderOut,
+    LlmProviderUpdate,
     ReviewRequest,
 )
 from ..security import encrypt_value, require_admin, require_api_key
@@ -103,6 +104,50 @@ def create_provider(
     db.add(row)
     db.commit()
     audit.record(db, admin.name, "llm.provider.create", body.name, {"kind": body.kind})
+    return _provider_out(row)
+
+
+@router.put("/llm/providers/{provider_id}", response_model=LlmProviderOut)
+def update_provider(
+    provider_id: int,
+    body: LlmProviderUpdate,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """프로바이더를 고친다 — 등록과 같은 규칙. 키는 비워 두면 그대로, clear_api_key면 지운다. 기본값 여부는
+    그대로다(기본값은 따로 정한다). 감사에는 바뀐 항목의 **이름만** 남긴다(키·주소 값은 남기지 않는다)."""
+    row = db.get(LlmProvider, provider_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="provider not found")
+    if body.name != row.name and db.execute(
+            select(LlmProvider).where(LlmProvider.name == body.name)).scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="provider name already exists")
+    if body.organization_id is not None and db.get(Organization, body.organization_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    base_url = body.base_url
+    if not base_url and body.aws_profile:
+        # 등록과 같다 — 비워 온 것은 프로필의 리전으로 정하라는 뜻이고, 그 주소를 지금 확정해 남긴다.
+        base_url = bedrock.runtime_url(bedrock.region_from_url("", body.aws_profile))
+    before = {"name": row.name, "kind": row.kind.value if hasattr(row.kind, "value") else str(row.kind),
+              "base_url": row.base_url, "model": row.model, "aws_profile": row.aws_profile,
+              "organization_id": row.organization_id}
+    row.name = body.name
+    row.kind = LlmProviderKind(body.kind)
+    row.base_url = base_url
+    row.model = body.model
+    row.aws_profile = body.aws_profile or None
+    row.organization_id = body.organization_id
+    key_change = ""
+    if body.clear_api_key:
+        row.api_key_encrypted, key_change = None, "cleared"
+    elif body.api_key:
+        row.api_key_encrypted, key_change = encrypt_value(body.api_key), "replaced"
+    db.commit()
+    after = {"name": row.name, "kind": body.kind, "base_url": row.base_url, "model": row.model,
+             "aws_profile": row.aws_profile, "organization_id": row.organization_id}
+    changed = sorted(k for k in after if after[k] != before[k]) + (["api_key"] if key_change else [])
+    audit.record(db, admin.name, "llm.provider.update", row.name, {"provider_id": row.id, "changed": changed})
+    db.refresh(row)
     return _provider_out(row)
 
 

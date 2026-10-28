@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import Async from '../components/Async';
 import StatusPill from '../components/StatusPill';
 import { api } from '../lib/api';
 import { isAdmin } from '../lib/auth';
 import { useApi } from '../lib/hooks';
-import type { ProviderCheck } from '../lib/types';
+import type { LlmProviderOut, ProviderCheck } from '../lib/types';
+
+const EMPTY = { name: '', kind: 'openai', base_url: '', api_key: '', model: '', aws_profile: '', organization_id: '' };
 
 export default function Providers() {
   const state = useApi(() => api.listProviders());
@@ -13,10 +15,24 @@ export default function Providers() {
   // 서버 ~/.aws의 프로필. admin 전용 엔드포인트라 일반 사용자에게는 아예 부르지 않는다
   // (403을 받아 화면에 오류만 남는다).
   const awsProfiles = useApi(() => (admin ? api.listAwsProfiles() : Promise.resolve(null)), []);
-  const [form, setForm] = useState({
-    name: '', kind: 'openai', base_url: '', api_key: '', model: '',
-    aws_profile: '', organization_id: '',
-  });
+  const [form, setForm] = useState(EMPTY);
+  // 목록에서 이름을 누르면 등록 카드가 그 프로바이더의 **수정** 카드가 된다(같은 자리·같은 입력).
+  const [editing, setEditing] = useState<LlmProviderOut | null>(null);
+  const [clearKey, setClearKey] = useState(false);
+  const card = useRef<HTMLDivElement>(null);
+  const edit = (p: LlmProviderOut) => {
+    setEditing(p);
+    setClearKey(false);
+    setError('');
+    setForm({ name: p.name, kind: String(p.kind), base_url: p.base_url, api_key: '', model: p.model,
+              aws_profile: p.aws_profile ?? '', organization_id: p.organization_id ? String(p.organization_id) : '' });
+    card.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  const stopEditing = () => {
+    setEditing(null);
+    setClearKey(false);
+    setForm(EMPTY);
+  };
   const selectedProfile = (awsProfiles.data?.profiles ?? [])
     .find((p) => p.name === form.aws_profile);
   // 모델 ID는 손으로 적으면 틀린다(리전에 따라 inference profile ID를 넣어야 한다) —
@@ -80,17 +96,16 @@ export default function Providers() {
     setBusy(true);
     setError('');
     try {
-      await api.createProvider({
+      const body = {
         ...form,
         api_key: form.api_key || undefined,
         // 종류를 aws에서 바꿔 놓고 제출하면 서버가 거부한다 — 안 쓰는 값은 보내지 않는다.
         aws_profile: form.kind === 'aws' ? form.aws_profile || undefined : undefined,
         organization_id: form.organization_id ? Number(form.organization_id) : null,
-      });
-      setForm({
-        name: '', kind: 'openai', base_url: '', api_key: '', model: '',
-        aws_profile: '', organization_id: '',
-      });
+      };
+      if (editing) await api.updateProvider(editing.id, { ...body, clear_api_key: clearKey && !form.api_key });
+      else await api.createProvider(body);
+      stopEditing();
       state.reload();
     } catch (err) {
       setError((err as Error).message);
@@ -124,8 +139,17 @@ export default function Providers() {
               </thead>
               <tbody>
                 {rows.map((p) => (
-                  <tr key={p.id}>
-                    <td>{p.name}</td>
+                  <tr key={p.id} style={editing?.id === p.id ? { background: 'rgba(56,189,248,0.08)' } : undefined}>
+                    <td>
+                      {admin ? (
+                        /* 누를 수 있다는 것을 밑줄로 보인다 — 누르면 아래 카드가 이 프로바이더의 수정 카드가 된다. */
+                        <button type="button" onClick={() => edit(p)} title="눌러서 이 프로바이더를 고칩니다"
+                          style={{ background: 'none', border: 0, padding: 0, color: 'inherit', font: 'inherit',
+                                   textDecoration: 'underline', textUnderlineOffset: 3, cursor: 'pointer', textAlign: 'left' }}>
+                          {p.name}
+                        </button>
+                      ) : p.name}
+                    </td>
                     <td>
                       <StatusPill value={p.kind === 'internal' ? 'release' : 'proposed'} />{' '}
                       <span style={{ fontWeight: 600, textTransform: 'uppercase', fontSize: 12 }}>{p.kind}</span>
@@ -210,8 +234,14 @@ export default function Providers() {
         </Async>
       </div>
       {admin && (
-        <div className="panel">
-          <h2>프로바이더 등록 (admin)</h2>
+        <div className="panel" ref={card}>
+          <h2>{editing ? `프로바이더 수정 — ${editing.name}` : '프로바이더 등록 (admin)'}</h2>
+          {editing && (
+            <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
+              목록에서 고른 프로바이더를 고칩니다. API 키는 다시 보여 주지 않습니다 — 비워 두면 지금 키를 그대로
+              씁니다. 기본값 여부는 목록에서 따로 정합니다.
+            </p>
+          )}
           <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div className="row">
               <label className="field" style={{ flex: 1 }}>
@@ -343,7 +373,16 @@ export default function Providers() {
                     type="password"
                     value={form.api_key}
                     onChange={(e) => set('api_key', e.target.value)}
+                    disabled={clearKey}
+                    placeholder={editing ? (editing.has_api_key ? '비워 두면 지금 키 그대로 — 새 키를 넣으면 바꿉니다'
+                      : '설정된 키 없음') : undefined}
                   />
+                  {editing?.has_api_key && (
+                    <span style={{ fontWeight: 400, fontSize: 12 }}>
+                      <input type="checkbox" checked={clearKey} onChange={(e) => setClearKey(e.target.checked)} />
+                      {' '}키 지우기
+                    </span>
+                  )}
                 </label>
               )}
             </div>
@@ -458,8 +497,13 @@ export default function Providers() {
             {error && <p className="error">{error}</p>}
             <div className="row">
               <button type="submit" disabled={busy}>
-                {busy ? '등록 중...' : '등록'}
+                {editing ? (busy ? '저장 중...' : '저장') : (busy ? '등록 중...' : '등록')}
               </button>
+              {editing && (
+                <button type="button" className="secondary" disabled={busy} onClick={stopEditing}>
+                  취소 — 새로 등록하기
+                </button>
+              )}
             </div>
           </form>
         </div>

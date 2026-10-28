@@ -350,3 +350,29 @@ def test_provider_check_is_admin_only():
 def test_provider_check_404_for_unknown_provider():
     c = _client()
     assert c.post(f"{API}/llm/providers/9999/check", headers=ADMIN).status_code == 404
+
+
+def test_provider_update_keeps_the_key_unless_replaced_or_cleared():
+    """고치기 — 등록과 같은 검증. 키는 비워 두면 그대로(화면은 지금 키를 모른다), 새로 주면 바꾸고, 지우라면 지운다.
+    감사에는 바뀐 항목의 이름만 — 키·주소 값은 남기지 않는다."""
+    c = _client()
+    pid = _create_provider(c)
+    other = _create_provider(c, name="gpt")
+    body = {"name": "claude-main", "kind": "openai", "base_url": "https://api.example.com/v2", "model": "m2"}
+    r = c.put(f"{API}/llm/providers/{pid}", json=body, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert (out["name"], out["base_url"], out["model"], out["has_api_key"]) == \
+        ("claude-main", "https://api.example.com/v2", "m2", True)
+    events = [e for e in c.get(f"{API}/audit", headers=ADMIN).json() if e["action"] == "llm.provider.update"]
+    assert events[0]["detail"]["changed"] == ["base_url", "model", "name"]
+    assert "api.example.com" not in json.dumps(events[0]["detail"])
+
+    assert c.put(f"{API}/llm/providers/{pid}", json={**body, "api_key": "sk-new"}, headers=ADMIN).json()["has_api_key"]
+    cleared = c.put(f"{API}/llm/providers/{pid}", json={**body, "clear_api_key": True}, headers=ADMIN).json()
+    assert cleared["has_api_key"] is False
+    # 이름이 겹치면·없는 프로바이더·같은 검증(aws 외에 프로필)
+    assert c.put(f"{API}/llm/providers/{pid}", json={**body, "name": "gpt"}, headers=ADMIN).status_code == 409
+    assert c.put(f"{API}/llm/providers/9999", json=body, headers=ADMIN).status_code == 404
+    assert c.put(f"{API}/llm/providers/{pid}", json={**body, "aws_profile": "p"}, headers=ADMIN).status_code == 422
+    assert c.put(f"{API}/llm/providers/{other}", json=body, headers={"x-api-key": "nope"}).status_code in (401, 403)

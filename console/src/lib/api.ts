@@ -788,6 +788,11 @@ export const api = {
     name: string; kind: string; base_url: string; api_key?: string; model: string;
     aws_profile?: string; organization_id?: number | null;
   }) => request<LlmProviderOut>('POST', '/llm/providers', body),
+  // 고치기 — api_key는 비우면 그대로, clear_api_key면 지운다(서버는 키 원문을 다시 내보내지 않는다).
+  updateProvider: (id: number, body: {
+    name: string; kind: string; base_url: string; api_key?: string; model: string;
+    aws_profile?: string; organization_id?: number | null; clear_api_key?: boolean;
+  }) => request<LlmProviderOut>('PUT', `/llm/providers/${id}`, body),
   // Bedrock이 쓸 AWS 자격증명 프로필과 지금 유효한지. 사내 SSO 토큰은 보통 8시간이면
   // 만료되므로 '재로그인 필요'와 그 명령까지 서버가 말해 준다.
   // 로그인된 자격증명으로 지금 부를 수 있는 모델 — 손으로 적으면 틀리는 값이다
