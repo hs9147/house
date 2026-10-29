@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -158,10 +158,12 @@ def search_external_apis(
     keyword: str = "",
     category: str = "",
     source: str = "",
+    page: int = Query(1, ge=1),
+    per_page: int = Query(30, ge=1, le=100),
     db: Session = Depends(get_db),
     _: ApiKey = Depends(require_admin),
 ):
-    """키워드·카테고리로 외부 API 카탈로그를 검색한다.
+    """키워드·카테고리로 외부 API 카탈로그를 검색한다. page·per_page로 나눠 받는다(total = 맞는 전체 건수).
 
     아웃바운드 조회가 아니다 — 수집해 둔 표(api_catalog)만 읽는다. admin으로 두는 것은
     이 화면이 모듈 등록(admin 전용)으로 이어지기 때문이고, 읽기만 필요한 쪽에는 같은
@@ -172,7 +174,9 @@ def search_external_apis(
     (공공데이터만 보기 = source=publicdata — 값은 /modules/search/status에서 얻는다).
     반환된 항목은 POST /modules/import로 external_api 모듈에 추가할 수 있다."""
     try:
-        return apisearch.search_apis(db, keyword, category, source)
+        result = apisearch.search_apis(db, keyword, category, source,
+                                       limit=per_page, offset=(page - 1) * per_page)
+        return {**result, "page": page, "per_page": per_page}
     except apisearch.ApiSearchError as e:
         # 여기서 나는 오류는 상류 장애가 아니라 인자가 틀린 것이다(모르는 source).
         raise HTTPException(status_code=400, detail=str(e))

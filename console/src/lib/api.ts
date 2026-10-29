@@ -533,12 +533,16 @@ export const api = {
   getPlatformModuleReport: () =>
     request<PlatformModuleReportOut>('GET', '/modules/usage-report'),
   // 외부 API 카탈로그 검색 + external_api 모듈 자동 추가 (admin)
-  searchApis: (keyword: string, category?: string, source?: string) =>
+  searchApis: (keyword: string, category?: string, source?: string, page = 1, perPage = 30) =>
     // 검색은 수집해 둔 표만 읽는다(아웃바운드 아님). warnings = 카탈로그가 비어 있다는
     // 사실. 결과가 적은 것이 "그런 API가 없다"인지 "아직 수집하지 않았다"인지 화면에서
     // 구분되어야 한다.
-    request<{ results: ApiSearchResult[]; warnings: string[] }>('GET', '/modules/search', undefined, {
+    // 나눠 받는다 — total은 조건에 맞는 전체 건수(공공데이터 오픈 API만 1만 2천 건이다).
+    request<{ results: ApiSearchResult[]; warnings: string[]; total: number; page: number; per_page: number }>(
+      'GET', '/modules/search', undefined, {
       keyword,
+      page,
+      per_page: perPage,
       // 빈 값이면 조건을 안 건다(= 전체). 서버 기본값과 같은 뜻이라 굳이 보내지 않는다.
       ...(category ? { category } : {}),
       ...(source ? { source } : {}),

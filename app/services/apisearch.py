@@ -401,7 +401,7 @@ def _live(query):
 
 
 def search_apis(db: Session, keyword: str, category: str = "", source: str = "",
-                limit: int = 30) -> dict:
+                limit: int = 30, offset: int = 0) -> dict:
     """키워드·카테고리·소스로 카탈로그를 찾는다. 셋은 AND, 각각 비우면 그 조건은 안 건다.
 
     keyword는 이름·설명·카테고리뿐 아니라 **주소(홈페이지·스펙 URL)에도 걸린다** —
@@ -415,6 +415,9 @@ def search_apis(db: Session, keyword: str, category: str = "", source: str = "",
 
     모르는 source는 빈 목록이 아니라 오류다: 라벨("공공데이터")을 키 자리에 넣는 실수가
     조용히 "그런 API가 없다"로 보이면 원인을 찾을 방법이 없다.
+
+    **나눠 본다.** offset부터 limit건을 돌려주고 total에 조건에 맞는 전체 건수를 싣는다 — 공공데이터
+    오픈 API만 1만 2천 건이라, 앞의 limit건에서 끊으면 나머지는 키워드를 맞히지 않는 한 볼 수 없다.
     """
     # 넣을 때와 같은 방법으로 다듬는다 — 주소를 그대로 붙여 넣어도 걸리게.
     kw = _url_text(keyword)
@@ -424,7 +427,7 @@ def search_apis(db: Session, keyword: str, category: str = "", source: str = "",
         raise ApiSearchError(
             f"모르는 소스입니다: {src} (쓸 수 있는 값: {', '.join(SOURCE_LABELS)})")
     if not kw and not cat and not src:
-        return {"results": [], "warnings": []}
+        return {"results": [], "warnings": [], "total": 0}
 
     query = _live(select(ApiCatalogEntry))
     if src:
@@ -432,17 +435,20 @@ def search_apis(db: Session, keyword: str, category: str = "", source: str = "",
     if kw:
         # 카테고리는 리스트라 SQL에서 걸 수 없다 — 키워드로 먼저 좁히고 아래에서 본다.
         query = query.where(ApiCatalogEntry.search_text.contains(kw))
+    offset = max(0, offset)
     results = []
+    total = 0
+    # 카테고리는 SQL에서 걸 수 없어서 건수도 여기서 센다 — 끝까지 훑는다(1만여 건이라 감당된다).
     for row in db.execute(query.order_by(ApiCatalogEntry.title, ApiCatalogEntry.id)).scalars():
         if not _matches_category(_as_categories(row.categories), cat):
             continue
-        results.append(_to_result(row))
-        if len(results) >= limit:
-            break
+        if offset <= total < offset + limit:
+            results.append(_to_result(row))
+        total += 1
 
     # 결과가 없는 것과 아직 아무 것도 안 받은 것은 다른 문제다 — 구분해서 알려 준다.
-    warnings = [] if results or catalog_size(db) else [EMPTY_CATALOG]
-    return {"results": results, "warnings": warnings}
+    warnings = [] if total or catalog_size(db) else [EMPTY_CATALOG]
+    return {"results": results, "warnings": warnings, "total": total}
 
 
 def _matches_category(categories: list, category: str) -> bool:

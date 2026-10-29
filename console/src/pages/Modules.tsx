@@ -309,6 +309,11 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   const [categories, setCategories] = useState<import('../lib/types').ApiCategory[]>([]);
   const [status, setStatus] = useState<import('../lib/types').ApiCatalogStatus | null>(null);
   const [results, setResults] = useState<ApiSearchResult[] | null>(null);
+  // 나눠 본다 — 검색한 조건(asked)으로 쪽만 바꿔 다시 받는다. 입력칸을 고친 뒤 「다음」을 누르면
+  // 고친 조건의 2쪽이 아니라 보던 결과의 다음 쪽이 나와야 한다.
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [asked, setAsked] = useState<{ keyword: string; category: string; source: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [added, setAdded] = useState<Record<string, string>>({});
@@ -352,15 +357,15 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
     }
   };
 
-  const search = async (e: React.FormEvent) => {
-    e.preventDefault();
-    // 셋 다 비면 서버가 빈 목록을 준다 — 미리 막는다(소스만 골라도 조건이다).
-    if (!keyword.trim() && !category && !source) return;
+  const load = async (q: { keyword: string; category: string; source: string }, to: number) => {
     setBusy(true);
     setError('');
     try {
       setNotice('');
-      const res = await api.searchApis(keyword.trim(), category, source);
+      const res = await api.searchApis(q.keyword, q.category, q.source, to, PER_PAGE);
+      setAsked(q);
+      setPage(to);
+      setTotal(res.total);
       setResults(res.results);
       // 아직 수집하지 않았으면 그렇다고 말한다 — 그 사실을 감추면 결과가 없는 이유를
       // 알 수 없다.
@@ -371,6 +376,15 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
       setBusy(false);
     }
   };
+
+  const search = (e: React.FormEvent) => {
+    e.preventDefault();
+    // 셋 다 비면 서버가 빈 목록을 준다 — 미리 막는다(소스만 골라도 조건이다).
+    if (!keyword.trim() && !category && !source) return;
+    void load({ keyword: keyword.trim(), category, source }, 1);
+  };
+  const pages = Math.max(1, Math.ceil(total / PER_PAGE));
+  const go = (to: number) => { if (asked) void load(asked, Math.min(pages, Math.max(1, to))); };
 
   const add = async (r: ApiSearchResult) => {
     setError('');
@@ -456,6 +470,8 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
         <p className="mutedtext">검색 결과가 없습니다.</p>
       )}
       {results && results.length > 0 && (
+        <>
+        <Pager page={page} pages={pages} total={total} busy={busy} onGo={go} />
         <table>
           <thead>
             <tr>
@@ -488,8 +504,38 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
             ))}
           </tbody>
         </table>
+        {pages > 1 && <Pager page={page} pages={pages} total={total} busy={busy} onGo={go} />}
+        </>
       )}
     </Modal>
+  );
+}
+
+const PER_PAGE = 30;
+
+/** 쪽 넘기기 — 몇 번째 건을 보고 있는지와 전체 건수, 쪽 번호를 바로 넣어 갈 자리. */
+function Pager({ page, pages, total, busy, onGo }: {
+  page: number; pages: number; total: number; busy: boolean; onGo: (page: number) => void;
+}) {
+  const [typed, setTyped] = useState('');
+  const from = (page - 1) * PER_PAGE + 1;
+  return (
+    <div className="row" style={{ gap: 6, fontSize: 12, margin: '6px 0' }}>
+      <span className="mutedtext">
+        {from.toLocaleString()}–{Math.min(total, page * PER_PAGE).toLocaleString()} / 전체 {total.toLocaleString()}건
+      </span>
+      <button className="small secondary" disabled={busy || page <= 1} onClick={() => onGo(1)}>처음</button>
+      <button className="small secondary" disabled={busy || page <= 1} onClick={() => onGo(page - 1)}>이전</button>
+      <span>{page.toLocaleString()} / {pages.toLocaleString()}쪽</span>
+      <button className="small secondary" disabled={busy || page >= pages} onClick={() => onGo(page + 1)}>다음</button>
+      <button className="small secondary" disabled={busy || page >= pages} onClick={() => onGo(pages)}>끝</button>
+      <form className="row" style={{ gap: 4 }}
+        onSubmit={(e) => { e.preventDefault(); if (Number(typed) >= 1) onGo(Number(typed)); setTyped(''); }}>
+        <input value={typed} onChange={(e) => setTyped(e.target.value.replace(/\D/g, ''))}
+          placeholder="쪽" inputMode="numeric" style={{ width: 56 }} />
+        <button type="submit" className="small secondary" disabled={busy || !typed}>이동</button>
+      </form>
+    </div>
   );
 }
 

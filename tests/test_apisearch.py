@@ -242,6 +242,28 @@ def test_category_endpoints(monkeypatch, db):
                  params={"category": "기타"}, headers=ADMIN).json()["results"][0]["id"] == "acme.io"
 
 
+def test_search_pages_through_every_match_with_the_total(monkeypatch, db):
+    """조건에 맞는 것을 나눠 본다 — 앞의 limit건에서 끊으면 나머지(공공데이터 1만 2천 건)는 볼 길이 없다."""
+    _synced(monkeypatch, db)
+    first = apisearch.search_apis(db, "", source=apisearch.SOURCE_APISGURU, limit=2)
+    assert first["total"] == 3
+    assert [h["title"] for h in first["results"]] == ["Acme", "Calendar API"]       # 이름순
+    rest = apisearch.search_apis(db, "", source=apisearch.SOURCE_APISGURU, limit=2, offset=2)
+    assert (rest["total"], [h["title"] for h in rest["results"]]) == (3, ["Stripe"])
+    beyond = apisearch.search_apis(db, "", source=apisearch.SOURCE_APISGURU, limit=2, offset=10)
+    assert (beyond["total"], beyond["results"], beyond["warnings"]) == (3, [], [])  # 끝을 넘으면 빈 쪽
+    # 카테고리 조건도 건수에 들어간다(SQL 밖에서 거른다)
+    assert apisearch.search_apis(db, "", "financial", limit=1)["total"] == 1
+
+    c = TestClient(create_app())
+    body = c.get(f"{API}/modules/search", params={"source": "apisguru", "page": 2, "per_page": 2},
+                 headers=ADMIN).json()
+    assert (body["total"], body["page"], body["per_page"]) == (3, 2, 2)
+    assert [h["id"] for h in body["results"]] == ["stripe.com"]
+    assert c.get(f"{API}/modules/search", params={"source": "apisguru", "per_page": 1000},
+                 headers=ADMIN).status_code == 422                                     # 한 쪽은 100건까지
+
+
 def test_search_endpoint_admin_only(monkeypatch, db):
     _stub_directory(monkeypatch)
     c = TestClient(create_app())
