@@ -59,7 +59,8 @@ export default function Layout() {
         </div>
 
         <nav>
-          <NavLink to="/smartwork">스마트워크</NavLink>
+          {/* 일반 사용자 메뉴에는 숨긴다 — 주소(/smartwork)와 북마크·메일에서 넘어오는 길은 그대로 열려 있다. */}
+          {admin && <NavLink to="/smartwork">스마트워크</NavLink>}
           {admin && <NavLink to="/">대시보드</NavLink>}
           {admin && <NavLink to="/accounts">계정 관리</NavLink>}
           {admin && <NavLink to="/orgs">조직 관리</NavLink>}
