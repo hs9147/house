@@ -1670,10 +1670,23 @@
     try { win.postMessage({ gpax: 'hello', origin: origin, title: clean(document.title, 120) }, SOURCE.console); }
     catch (e) { /* 끊긴 창 */ }
   }
+  /* 사이트가 window.open을 바꿔 둔 경우가 있다 — GPS4(MSUIT4)는 빈 창을 열고 주소의 ? 뒤를 떼어 POST 폼으로
+   * 보낸다. 그러면 받는 창이 해시(#/agent) 없이 POST로 열려 콘솔이 404였다(실측). 브라우저 원래의 open을 쓴다 —
+   * 창의 메서드는 창 객체 자신에 있어(Window.prototype이 아니다) 사이트가 덮으면 남지 않으므로, 새 틀(iframe)의
+   * 깨끗한 open을 이 창에 대고 부른다(열린 창의 opener는 이 창이다). */
+  function nativeOpen(url, name, features) {
+    var frame = document.createElement('iframe');
+    frame.style.display = 'none';
+    document.documentElement.appendChild(frame);
+    try { return frame.contentWindow.open.call(window, url, name, features); }
+    catch (e) { return window.open(url, name, features); }
+    finally { frame.remove(); }
+  }
+
   function openReceiver() {
     if (link) return;
     /* 열려 있던 받는 창도 새로 읽게 — 같은 주소면 브라우저가 다시 읽지 않아 「준비됨」이 오지 않는다. */
-    var w = window.open(SOURCE.receive.replace('#', '?r=' + Date.now() + '#'), 'gpax-agent', 'width=560,height=680');
+    var w = nativeOpen(SOURCE.receive.replace('#', '?r=' + Date.now() + '#'), 'gpax-agent', 'width=560,height=680');
     if (!w) {
       say('콘솔 받는 창이 막혔습니다 — 이 사이트의 팝업을 허용하고 북마크를 다시 누르세요.');
       finish();
