@@ -236,7 +236,8 @@ def test_merging_reviews_every_group_and_can_be_undone(store):
     assert any(n["name"] == "A-Electronics" for n in semantic.search("docs", "협력사"))
 
 
-def test_the_default_provider_must_be_allowed_for_the_store(store):
+def test_an_admin_uses_the_default_provider_of_any_organization(store):
+    """내용 분석은 관리자만 시작한다 — 관리자는 모든 조직의 프로바이더를 쓴다."""
     from app.models import LlmProvider, Organization
     with _db() as db:
         org = Organization(name="sem-other")
@@ -244,8 +245,7 @@ def test_the_default_provider_must_be_allowed_for_the_store(store):
         db.commit()
         db.query(LlmProvider).update({"organization_id": org.id})
         db.commit()
-        with pytest.raises(semantic.SemanticError, match="다른 조직"):
-            semantic.provider_for(db, "docs")
+        assert semantic.provider_for(db, "docs").name == "sem-default"
 
 
 def test_api_runs_proposals_in_the_background_and_guards_admin_actions(store):

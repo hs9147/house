@@ -114,13 +114,11 @@ def _digest(value) -> str:
 # --- LLM ---
 
 def provider_for(db: Session, store_name: str):
-    """기본 LLM — 저장소 조직에 묶인 프로바이더면 그 조직 저장소에서만(다른 LLM 사용과 같은 규칙)."""
+    """기본 LLM. 조직 범위는 보지 않는다 — 내용 분석은 관리자만 시작하고(제안·확정·분석·묶기 모두 관리자 창구),
+    관리자는 모든 조직의 프로바이더를 쓴다(다른 LLM 사용과 같은 규칙, llm.require_provider_access)."""
     provider = llm_service.default_provider(db)
     if provider is None:
         raise SemanticError("기본 LLM 프로바이더가 없습니다 — LLM 관리에서 기본값을 정하세요.")
-    store = storage_service.store(store_name, db)
-    if provider.organization_id is not None and (store is None or store.organization_id != provider.organization_id):
-        raise SemanticError(f"기본 프로바이더 '{provider.name}'는 다른 조직 전용이라 이 저장소에 쓸 수 없습니다.")
     return provider
 
 

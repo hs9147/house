@@ -3,7 +3,7 @@ import Async from '../components/Async';
 import GpaxBookmark from '../components/GpaxBookmark';
 import Split from '../components/Split';
 import { api } from '../lib/api';
-import { getEmail } from '../lib/auth';
+import { getEmail, isAdmin } from '../lib/auth';
 import { copyText } from '../lib/clipboard';
 import { type AsyncState, useApi, usePolling } from '../lib/hooks';
 import { canKeepFolders, forget, pickFolder, type PickedFolder, remember, reopenFolder } from '../lib/localfiles';
@@ -323,9 +323,9 @@ export default function Smartwork() {
     }
   };
 
-  // 전역 프로바이더와 이 업무의 조직 것만 — 서버도 같은 규칙으로 막는다.
+  // 전역 프로바이더와 이 업무의 조직 것만 — 서버도 같은 규칙으로 막는다. 관리자는 모든 조직의 것을 쓴다.
   const usable = (providers.data ?? []).filter(
-    (p) => p.organization_id == null || p.organization_id === session?.organization_id);
+    (p) => isAdmin() || p.organization_id == null || p.organization_id === session?.organization_id);
   // 다른 조직의 업무로 옮겨 고른 모델을 쓸 수 없게 되면 기본으로 돌아간다.
   const chosenProvider = usable.some((p) => p.id === providerId) ? providerId : 0;
   const submit = () => {

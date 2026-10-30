@@ -755,6 +755,11 @@ def test_conversation_runs_on_the_chosen_provider_within_its_organization(client
     assert send(finance_only).status_code == 200 and used[-1] == "fin"
     assert send(sales_only).status_code == 403                      # 다른 조직 전용 모델
     assert send(9999).status_code == 404
+    # 관리자는 모든 조직의 프로바이더를 쓴다(다른 LLM 사용과 같은 규칙)
+    admin_sid = _session(client, ADMIN)
+    reply = client.post(f"{API}/smartwork/sessions/{admin_sid}/messages",
+                        json={"content": "질문", "provider_id": sales_only}, headers=ADMIN)
+    assert reply.status_code == 200 and used[-1] == "sal"
 
 
 def test_eml_mail_files_are_searchable_and_not_kept(client):
