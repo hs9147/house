@@ -409,3 +409,28 @@ def test_relations_are_found_batch_by_batch_without_a_cap(store, monkeypatch):
             "relations": [{"name": f"관계{i}", "from": "개념0", "to": f"개념{i % 60}"} for i in range(120)]}
     assert semantic.check_schema(many) == []                    # 개수 상한이 없다
     semantic.confirm_schema("docs", draft["revised"], "admin")
+
+
+def test_no_step_holds_the_index_locked_while_the_llm_thinks(store, monkeypatch):
+    """실측: 「같은 개체 묶기: database is locked」 — 묶기가 별칭을 넣고 끝에서야 커밋해, LLM을 기다리는 몇 분 내내 쓰기
+    잠금을 쥐고 있었다. 그동안 같은 색인 파일에 쓰는 것(진행 보고·주기 색인·분석)이 모두 막혔다."""
+    import sqlite3
+    monkeypatch.setattr(semantic, "REVIEW_EVERY", 1)       # 표본 검토도 지나가게
+    real = store.answer
+
+    def meanwhile(role, user):
+        if True:    # 어느 LLM 호출이든 — 기다리는 동안 다른 쪽이 같은 파일에 쓸 수 있어야 한다
+            other = sqlite3.connect(docsearch.index_path("docs"), timeout=0.2)
+            try:
+                other.execute("INSERT OR REPLACE INTO sem_meta (key, value) VALUES ('probe', '1')")
+                other.commit()
+            finally:
+                other.close()
+        return real(role, user)
+
+    store.answer = meanwhile
+    _confirm_schema_and_form()            # 스키마·양식 제안·검토
+    with _db() as db:
+        semantic.analyze(db, "docs")      # 추출·표본 검토
+        result = semantic.propose_merges(db, "docs")
+    assert ("A-Electronics", "에이전자") in {(a["alias"], a["canonical"]) for a in result["applied"]}

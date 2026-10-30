@@ -850,7 +850,10 @@ def submit(store_name: str, label: str, fn) -> bool:
         put(done=False, progress="시작하는 중", step=0, steps=None)
 
         def report(text: str, step: int | None = None, steps: int | None = None) -> None:
-            put(done=False, progress=text, step=step, steps=steps)
+            try:
+                put(done=False, progress=text, step=step, steps=steps)
+            except Exception:  # noqa: BLE001 — 진행 문구 하나 때문에 작업을 실패로 끝내지 않는다(다음 보고가 덮는다)
+                pass
 
         def run():
             db = SessionLocal()
@@ -909,6 +912,9 @@ def propose_merges(db: Session, store_name: str, report=_quiet) -> dict:
             if alias != canonical and (cls, alias) not in aliases:
                 conn.execute("INSERT OR REPLACE INTO sem_aliases (cls, alias, canonical, reason) VALUES (?, ?, ?, ?)",
                              (cls, alias, canonical, reason))
+                # 바로 커밋한다 — 끝에서 한 번 커밋하면 LLM을 기다리는 몇 분 내내 쓰기 잠금을 쥐어, 같은 색인 파일에
+                # 쓰는 것(진행 보고·주기 색인·분석)이 「database is locked」로 실패했다(실측).
+                conn.commit()
                 aliases[(cls, alias)] = canonical
                 applied.append({"cls": cls, "alias": alias, "canonical": canonical, "reason": reason})
 
