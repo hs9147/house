@@ -400,7 +400,7 @@ def get_start_script(
 async def start_script_units(
     project_id: int,
     db: Session = Depends(get_db),
-    admin: ApiKey = Depends(require_admin),
+    caller: ApiKey = Depends(require_api_key),
 ):
     """「LLM으로 작성」의 첫 단계 — **늘 구조부터 다시 확인하고, 다르면 바꾼다.**
 
@@ -421,7 +421,7 @@ async def start_script_units(
             f"리포를 최신으로 받지 못해 구조를 다시 확인할 수 없습니다 — 스크립트를 쓰지 않습니다: {str(e)[:300]}"))
     before = structure.summary(project.structure)
     detected, changed = await asyncio.to_thread(
-        structure.refresh, db, project, workdir, actor=admin.name, source="repo", git_sha=git_sha)
+        structure.refresh, db, project, workdir, actor=caller.name, source="repo", git_sha=git_sha)
     if not detected.get("components"):
         raise HTTPException(status_code=409, detail=(
             "리포에서 배포 단위를 찾지 못했습니다 — 루트나 하위 폴더에 "
@@ -439,7 +439,7 @@ async def propose_start_script(
     component: str = "",
     profile: BuildProfile = BuildProfile.release,
     db: Session = Depends(get_db),
-    admin: ApiKey = Depends(require_admin),
+    caller: ApiKey = Depends(require_api_key),
 ):
     """LLM이 리포를 보고 기동 스크립트를 쓴다 — **저장하지 않는다.**
 
@@ -458,6 +458,8 @@ async def propose_start_script(
             status_code=404,
             detail=("LLM 프로바이더를 찾을 수 없습니다 — 기본 프로바이더를 지정하거나 "
                     "provider_id를 주세요."))
+    # 구성원도 쓴다 — 조직에 묶인 프로바이더는 그 조직 과제에서만(다른 LLM 사용과 같은 규칙).
+    llm_service.require_provider_access(provider, project, caller)
     try:
         workdir = await asyncio.to_thread(workspace.code_workdir, project)
     except Exception as e:  # noqa: BLE001
@@ -469,7 +471,7 @@ async def propose_start_script(
             startscript.propose, db, project, provider, workdir, component, profile, failure)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"스크립트 작성 실패: {str(e)[:500]}")
-    audit.record(db, admin.name, "project.start_script.propose", project.name,
+    audit.record(db, caller.name, "project.start_script.propose", project.name,
                  {"provider": provider.name, "component": component,
                   "profile": profile.value, "problems": len(result["problems"]),
                   "failure_deployment": failed.id if failed else None})
@@ -517,7 +519,7 @@ def set_start_script(
     component: str = "",
     profile: BuildProfile = BuildProfile.release,
     db: Session = Depends(get_db),
-    admin: ApiKey = Depends(require_admin),
+    caller: ApiKey = Depends(require_api_key),
 ):
     """확인한 스크립트를 저장한다 — 검증을 통과하지 못하면 거부한다.
 
@@ -534,7 +536,7 @@ def set_start_script(
     key = build_module.script_key(profile, component)
     project.start_scripts = {**(project.start_scripts or {}), key: body.script}
     db.commit()
-    audit.record(db, admin.name, "project.start_script.set", project.name,
+    audit.record(db, caller.name, "project.start_script.set", project.name,
                  {"component": component, "profile": profile.value,
                   "chars": len(body.script)})
     return StartScriptOut(script=body.script, source="project", component=component,
@@ -548,7 +550,7 @@ def reset_start_script(
     component: str = "",
     profile: BuildProfile = BuildProfile.release,
     db: Session = Depends(get_db),
-    admin: ApiKey = Depends(require_admin),
+    caller: ApiKey = Depends(require_api_key),
 ):
     """이 프로필·유닛의 지정을 지우고 템플릿으로 되돌린다 — 되돌릴 길이 없으면 아무도
     지정하지 않는다. 다른 프로필의 스크립트는 건드리지 않는다."""
@@ -558,7 +560,7 @@ def reset_start_script(
     remaining = {k: v for k, v in (project.start_scripts or {}).items() if k != key}
     project.start_scripts = remaining or None
     db.commit()
-    audit.record(db, admin.name, "project.start_script.reset", project.name,
+    audit.record(db, caller.name, "project.start_script.reset", project.name,
                  {"component": component, "profile": profile.value})
     return StartScriptOut(script=build_module._START_SCRIPT, source="template",
                           component=component, profile=profile,

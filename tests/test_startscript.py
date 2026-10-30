@@ -734,3 +734,40 @@ def test_propose_reads_the_last_failure_of_this_unit(client, monkeypatch, tmp_pa
         db.close()
     body = client.post(url, json={"provider_id": prov}, headers=ADMIN).json()
     assert body["failure_deployment_id"] is None and "FAILED" not in seen["prompt"]
+
+
+def test_members_write_save_and_reset_start_scripts(client, monkeypatch, tmp_path):
+    """배포를 하는 구성원이 기동 스크립트도 쓴다 — 검증 통과 규칙은 그대로, 남의 조직 프로바이더는 못 쓴다."""
+    from app.models import Organization
+
+    _write(tmp_path, "app.py", "print(1)")
+    _git_repo(tmp_path)
+    db = SessionLocal()
+    try:
+        mine, other = Organization(name="ss-mine"), Organization(name="ss-other")
+        db.add_all([mine, other])
+        db.commit()
+        project = _project(db, "script-api-member", organization_id=mine.id)
+        shared = LlmProvider(name="ss-global", kind="openai", base_url="http://x", model="m")
+        foreign = LlmProvider(name="ss-foreign", kind="openai", base_url="http://x", model="m",
+                              organization_id=other.id)
+        db.add_all([shared, foreign])
+        db.commit()
+        shared_id, foreign_id = shared.id, foreign.id
+    finally:
+        db.close()
+    member = {"x-api-key": client.post(f"{API}/keys", json={"name": "ss-dev"}, headers=ADMIN).json()["key"]}
+    monkeypatch.setattr(startscript.workspace, "code_workdir", lambda p: tmp_path)
+    monkeypatch.setattr("app.services.workspace.code_workdir", lambda p: tmp_path)
+    monkeypatch.setattr(startscript.llm_service, "chat_completion",
+                        lambda *a, **kw: f"설명입니다.\n```bat\n{GOOD}```\n")
+    url = f"{API}/projects/{project.id}/start-script"
+
+    proposed = client.post(f"{url}/propose", json={"provider_id": shared_id}, headers=member)
+    assert proposed.status_code == 200, proposed.text
+    assert client.post(f"{url}/propose", json={"provider_id": foreign_id}, headers=member).status_code == 403
+    assert client.put(url, json={"script": "@echo off\nshutdown /r\n"}, headers=member).status_code == 422
+    assert client.put(url, json={"script": GOOD}, headers=member).status_code == 200
+    assert client.get(url, headers=member).json()["source"] == "project"
+    assert client.delete(url, headers=member).status_code == 200
+    assert client.get(url, headers=member).json()["source"] == "template"
