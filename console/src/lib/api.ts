@@ -259,6 +259,15 @@ async function requestGetBlob(path: string, query: Record<string, string>): Prom
   return res.blob();
 }
 
+// html 보고서 → PDF(서버가 인쇄). 서버에 브라우저가 없으면 available이 false — 그때는 HTML 다운로드만 보인다.
+export function smartworkReportPdfAvailable(): Promise<{ available: boolean }> {
+  return request('GET', '/smartwork/report-pdf');
+}
+export function smartworkReportPdf(title: string, html: string): Promise<Blob> {
+  return requestBlob('/smartwork/report-pdf',
+    new Blob([JSON.stringify({ title, html })], { type: 'application/json' }), {});
+}
+
 // 본문을 그대로 보내고 바이너리(PDF 등)를 받는다 — request()는 응답을 JSON으로 읽는다.
 async function requestBlob(path: string, body: Blob, query: Record<string, string>): Promise<Blob> {
   const res = await fetch(`${apiUrl(path)}?${new URLSearchParams(query)}`, {

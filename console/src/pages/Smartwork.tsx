@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import Async from '../components/Async';
 import GpaxBookmark from '../components/GpaxBookmark';
 import Split from '../components/Split';
-import { api } from '../lib/api';
+import { api, ApiError, smartworkReportPdf, smartworkReportPdfAvailable } from '../lib/api';
 import { getEmail, isAdmin } from '../lib/auth';
 import { copyText } from '../lib/clipboard';
 import { type AsyncState, useApi, usePolling } from '../lib/hooks';
@@ -995,7 +995,52 @@ function AgentView({ agent, health }: { agent: SmartworkAgent; health: HealthInf
 const REPORT_CSP =
   '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data:">';
 
+// 내려받는 문서의 머리 — 화면 표시와 같은 CSP(스크립트·바깥 자원 없음). 내려받은 HTML을 PC에서 열어도 보고서의
+// 스크립트는 돌지 않는다. 인쇄할 때를 위해 A4 여백도 둔다.
+const PRINT_CSS = '<style>@page { size: A4; margin: 14mm; } html { -webkit-print-color-adjust: exact; '
+  + 'print-color-adjust: exact; }</style>';
+const fileName = (title: string, ext: string) => `${(title || '보고서').replace(/[\\/:*?"<>|]/g, '_')}.${ext}`;
+
+function save(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+// 서버가 PDF를 만들 수 있는지 — 한 번 물어 두면 된다(설치가 바뀌는 일은 드물다).
+let pdfAvailable: Promise<boolean> | null = null;
+
 function ReportView({ report }: { report: SmartworkReport }) {
+  const [canPdf, setCanPdf] = useState(false);
+  const [pdf, setPdf] = useState<'' | 'making' | string>('');
+  useEffect(() => {
+    if (report.format !== 'html') return;
+    pdfAvailable ??= smartworkReportPdfAvailable().then((r) => r.available).catch(() => false);
+    void pdfAvailable.then(setCanPdf);
+  }, [report.format]);
+  const downloadHtml = () => {
+    const doc = `<!doctype html><html><head><meta charset="utf-8">${REPORT_CSP}${PRINT_CSS}`
+      + `<title>${report.title.replace(/[<>]/g, '')}</title></head><body>${report.content}</body></html>`;
+    save(new Blob([doc], { type: 'text/html;charset=utf-8' }), fileName(report.title, 'html'));
+  };
+  const downloadPdf = async () => {
+    setPdf('making');
+    try {
+      save(await smartworkReportPdf(report.title, report.content), fileName(report.title, 'pdf'));
+      setPdf('');
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 503) {
+        pdfAvailable = Promise.resolve(false);   // 그 사이 서버의 브라우저가 없어졌다 — PDF 단추를 감춘다
+        setCanPdf(false);
+        setPdf('서버에서 PDF를 만들 수 없게 되었습니다 — HTML로 내려받으세요.');
+      } else {
+        setPdf(`PDF를 만들지 못했습니다: ${(e as Error).message}`);
+      }
+    }
+  };
   let body;
   if (report.format === 'html') {
     body = <iframe title={report.title} sandbox="" srcDoc={REPORT_CSP + report.content}
@@ -1021,7 +1066,24 @@ function ReportView({ report }: { report: SmartworkReport }) {
       <div className="row" style={{ marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>{report.title}</h2>
         <span className="status dim">{report.format}</span>
+        {report.format === 'html' && (
+          <>
+            <div className="spacer" />
+            {/* PDF는 서버가 만들 수 있을 때만 — 없으면 HTML 다운로드만 보인다. */}
+            {canPdf && (
+              <button className="small secondary" disabled={pdf === 'making'} onClick={() => void downloadPdf()}
+                title="이 보고서를 PDF로 내려받습니다(글자가 그대로 남는 PDF)">
+                {pdf === 'making' ? 'PDF 만드는 중…' : 'PDF 다운로드'}
+              </button>
+            )}
+            <button className="small secondary" onClick={downloadHtml}
+              title="이 보고서를 HTML 파일로 내려받습니다(스크립트는 돌지 않게 막아 둡니다)">
+              HTML 다운로드
+            </button>
+          </>
+        )}
       </div>
+      {pdf && pdf !== 'making' && <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 8px' }}>{pdf}</p>}
       {body}
     </div>
   );

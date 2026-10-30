@@ -236,6 +236,9 @@ class Settings(BaseSettings):
     # (예: C:\Program Files\LibreOffice\program\soffice.exe). 비우면 PATH의 soffice를
     # 찾고, 그것도 없으면 해당 형식만 "추출 불가"로 표시된다(docx류·pdf는 무관).
     soffice_path: str = ""
+    # 스마트워크 html 보고서의 PDF 내려받기(services/htmlpdf)에 쓸 Chrome·Edge 실행 파일. 비우면 Playwright,
+    # 그다음 PATH와 기본 설치 위치의 Chrome·Edge를 찾는다. 없으면 화면이 브라우저의 인쇄 창으로 대신한다.
+    pdf_browser_path: str = ""
     # 스캔(이미지) PDF와 텍스트가 깨진 PDF(HWP 계열의 사설영역 인코딩)를 OCR로 추출할 때
     # 쓰는 Tesseract 실행 파일 경로(예: C:\Program Files\Tesseract-OCR\tesseract.exe).
     # kor 언어 데이터와 pip 패키지 pypdfium2(페이지 렌더링)가 함께 필요하다. 비우면

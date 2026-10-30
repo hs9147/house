@@ -18,12 +18,43 @@ from .. import audit
 from ..db import get_db
 from ..models import ApiKey, LlmProvider
 from ..security import require_api_key
-from ..services import bedrock, doctext, msgraph, personal, smartwork, worksession
+from ..services import bedrock, doctext, htmlpdf, msgraph, personal, smartwork, worksession
 from ..services import llm as llm_service
 from . import mcp_servers as mcp
 from .llm import provider_error
 
 router = APIRouter(prefix="/smartwork", tags=["smartwork"])
+
+
+class ReportPdfIn(BaseModel):
+    title: str = Field(default="", max_length=200)
+    html: str
+
+
+@router.get("/report-pdf")
+def report_pdf_available(_: ApiKey = Depends(require_api_key)):
+    """서버가 PDF를 만들 수 있는가(Playwright 또는 Chrome·Edge) — 화면은 이것이 참일 때만 「PDF 다운로드」를 보인다."""
+    return {"available": bool(htmlpdf.engine())}
+
+
+@router.post("/report-pdf")
+async def report_pdf(body: ReportPdfIn, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """html 보고서를 PDF로 — 서버가 브라우저 인쇄 엔진으로 만든다(글자가 그대로 남는 PDF, services/htmlpdf).
+
+    보고서는 화면이 이미 갖고 있다(대화의 산출물) — 그 HTML을 그대로 받아 인쇄만 한다. 스크립트·바깥 자원은 막는다.
+    만들 브라우저가 없으면 503 — 화면은 미리 물어(GET) 그때는 HTML 다운로드만 보인다."""
+    try:
+        pdf = await run_in_threadpool(htmlpdf.render, body.html, body.title)
+    except htmlpdf.PdfUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except htmlpdf.PdfFailed as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    audit.record(db, key.name, "smartwork.report.pdf", body.title[:120] or "(제목 없음)", {"bytes": len(pdf)})
+    from urllib.parse import quote  # noqa: PLC0415
+
+    name = (body.title.strip() or "보고서")[:120].replace("/", "_").replace("\\", "_") + ".pdf"
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename=\"report.pdf\"; filename*=UTF-8''{quote(name)}"})
 
 
 def _personal_error(e: personal.PersonalError) -> HTTPException:
