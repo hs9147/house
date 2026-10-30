@@ -1568,7 +1568,8 @@ export interface SemanticStatus {
   schema: SemanticSchema | null;
   paused: string | null;
   review: { items: number; wrong: number; error_rate: number | null; stop_rate: number;
-            notes: { path: string; item: string; evidence: string; problem: string }[] };
+            notes: { path: string; item: string; evidence: string; problem: string; sampled?: boolean }[];
+            check_items: number; check_wrong: number };   // 이름이 근거에 없는 항목의 검토(오류율에 넣지 않는다)
   last_run: (Record<string, unknown> & { at: string }) | null;
   outside: Record<string, number>;
   last_merge: { applied: { cls: string; alias: string; canonical: string; reason: string }[];

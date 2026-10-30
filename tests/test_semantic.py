@@ -6,6 +6,7 @@
 """
 import json
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -136,6 +137,7 @@ def store(monkeypatch, tmp_path, fresh_settings):
     docsearch.reindex("docs", root)
     fake = FakeLlm()
     monkeypatch.setattr(semantic.llm_service, "chat_completion", fake)
+    monkeypatch.setattr(semantic, "MIN_CHARS", 0)      # 시험 문서는 짧다 — 「읽을 글이 거의 없다」로 건너뛰지 않게
     return fake
 
 
@@ -434,3 +436,110 @@ def test_no_step_holds_the_index_locked_while_the_llm_thinks(store, monkeypatch)
         semantic.analyze(db, "docs")      # 추출·표본 검토
         result = semantic.propose_merges(db, "docs")
     assert ("A-Electronics", "에이전자") in {(a["alias"], a["canonical"]) for a in result["applied"]}
+
+
+# --- 비용 최적화(문서 6천 건 기준) ---
+
+class _Recorder:
+    """가짜 LLM에 들어간 system·user를 역할별로 남긴다."""
+    def __init__(self, fake):
+        self.fake, self.seen = fake, []
+
+    def __call__(self, provider, messages, db=None, *a, **kw):
+        self.seen.append((self.fake.role(messages[0]["content"]), messages[0]["content"], messages[1]["content"]))
+        return self.fake(provider, messages, db)
+
+
+def test_review_sends_only_items_and_their_evidence_not_the_document(store, monkeypatch):
+    """① 검토에 문서를 다시 보내지 않는다 — 항목과 근거 문장만. 표본이 아니면 이름이 근거에 없는 항목만 검토한다."""
+    rec = _Recorder(store)
+    monkeypatch.setattr(semantic.llm_service, "chat_completion", rec)
+    monkeypatch.setattr(semantic, "_sampled", lambda path: False)
+    real = store.answer
+
+    def abstract(role, user):
+        out = real(role, user)
+        if role == "extract" and "에이전자는" in user:
+            out["entities"].append({"class": "품목", "name": "전지류", "evidence": "에이전자는 배터리를 공급한다."})
+        return out
+
+    store.answer = abstract
+    semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+    with _db() as db:
+        semantic.analyze(db, "docs")
+    reviews = [user for role, _system, user in rec.seen if role == "doc_review"]
+    assert len(reviews) == 1
+    items = json.loads(reviews[0][reviews[0].index("항목:") + 3:])
+    assert [it.get("entity", {}).get("name") for it in items] == ["전지류"]     # 이름이 근거에 없는 것만
+    assert "구매팀이 배터리를 담당한다" not in reviews[0]                       # 문서 본문은 보내지 않는다
+    assert "anchored" not in reviews[0]
+
+
+def test_unchanged_prompt_parts_come_first_so_they_can_be_cached(store, monkeypatch):
+    """④ 지시·스키마(문서마다 같다)는 system에, 문서는 user에만 — 앞부분이 같아야 프롬프트 캐시가 걸린다."""
+    rec = _Recorder(store)
+    monkeypatch.setattr(semantic.llm_service, "chat_completion", rec)
+    semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+    with _db() as db:
+        semantic.analyze(db, "docs")
+    extracts = [(system, user) for role, system, user in rec.seen if role == "extract"]
+    assert len(extracts) >= 2 and len({system for system, _ in extracts}) == 1      # 모든 문서에 같은 system
+    assert all("협력사" in system for system, _ in extracts)                       # 스키마가 system에
+    assert all(user.startswith("문서 ") and "스키마" not in user for _, user in extracts)
+
+
+def test_same_body_is_analyzed_once_and_copied(store):
+    """② 본문이 같은 문서(경로만 다름)는 한 번만 LLM에 보내고 결과를 옮긴다."""
+    root = Path(get_settings().doc_roots.split("=")[-1] if "=" in get_settings().doc_roots else get_settings().doc_roots)
+    (root / "사본").mkdir()
+    (root / "사본" / "공급계약.md").write_bytes((root / "공급계약.md").read_bytes())
+    docsearch.reindex("docs", root)
+    semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+    with _db() as db:
+        result = semantic.analyze(db, "docs")
+    assert result["copied"] == 1
+    assert store.calls.count("extract") == 2 + semantic.FORM_MIN_DOCS        # 사본은 부르지 않는다
+    conn = semantic._conn("docs")
+    try:
+        a = sorted(map(tuple, conn.execute("SELECT cls, name FROM sem_nodes WHERE path = '공급계약.md'")))
+        b = sorted(map(tuple, conn.execute("SELECT cls, name FROM sem_nodes WHERE path = '사본/공급계약.md'")))
+    finally:
+        conn.close()
+    assert a and a == b
+    assert semantic.status("docs")["analyzed"]["copy"] == 1
+
+
+def test_work_files_and_near_empty_documents_are_not_sent(store, monkeypatch):
+    """③ 업무 내용이 아닌 작업 파일(로그·설정)과 읽을 글이 거의 없는 문서는 LLM에 보내지 않는다."""
+    monkeypatch.setattr(semantic, "MIN_CHARS", 30)
+    root = Path(get_settings().doc_roots.split("=")[-1] if "=" in get_settings().doc_roots else get_settings().doc_roots)
+    (root / "build.log").write_text("에이전자는 배터리를 공급한다. " * 20, encoding="utf-8")
+    (root / "제목만.md").write_text("# 표지", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+    with _db() as db:
+        result = semantic.analyze(db, "docs")
+    assert result["skipped"] >= 2
+    conn = semantic._conn("docs")
+    try:
+        reasons = {r["path"]: r["error"] for r in conn.execute("SELECT path, error FROM sem_docs WHERE status = 'skipped'")}
+    finally:
+        conn.close()
+    assert "(.log)" in reasons["build.log"] and "읽을 글이 거의 없습니다" in reasons["제목만.md"]
+
+
+def test_the_stop_rate_counts_only_the_random_sample(store, monkeypatch):
+    """이름이 근거에 없는 항목은 원래 틀리기 쉽다 — 그 검토를 오류율에 섞으면 멈춤 기준을 괜히 넘는다."""
+    monkeypatch.setattr(semantic, "_sampled", lambda path: False)
+    monkeypatch.setattr(semantic, "STOP_MIN_ITEMS", 1)
+    store.review_wrong_all = True
+    real = store.answer
+    store.answer = lambda role, user: ({**real(role, user), "entities": real(role, user)["entities"] + [
+        {"class": "품목", "name": "전지류", "evidence": "에이전자는 배터리를 공급한다."}]}
+        if role == "extract" and "에이전자는" in user else real(role, user))
+    semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+    with _db() as db:
+        result = semantic.analyze(db, "docs")
+    status = semantic.status("docs")
+    assert result["paused"] is None and status["review"]["items"] == 0     # 표본 검토는 없었다 — 멈추지 않는다
+    assert status["review"]["check_items"] == 1 and status["review"]["check_wrong"] == 1

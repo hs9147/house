@@ -91,7 +91,8 @@ export default function SemanticTab() {
         const done = Object.values(s.analyzed).reduce((n, v) => n + v, 0);
         h.set({ sent: done, total: s.documents,
                 progress: `${done.toLocaleString()} / ${s.documents.toLocaleString()}건 — LLM ${s.analyzed.ok ?? 0} · `
-                  + `양식 ${s.analyzed.form ?? 0} · 실패 ${s.analyzed.failed ?? 0}` });
+                  + `양식 ${s.analyzed.form ?? 0} · 중복 ${s.analyzed.copy ?? 0} · 건너뜀 ${s.analyzed.skipped ?? 0}`
+                  + ` · 실패 ${s.analyzed.failed ?? 0}` });
         if (!s.running) {
           if (s.paused) throw new Error(`멈춤 — ${s.paused}`);
           break;
@@ -276,9 +277,12 @@ function AnalyzeStep({ status, onAction }: { status: SemanticStatus; onAction: (
       <h3 style={{ fontSize: 14 }}>③ 문서 분석</h3>
       <p style={{ fontSize: 12, margin: '4px 0' }}>
         {done.toLocaleString()} / {status.documents.toLocaleString()}건 — LLM {status.analyzed.ok ?? 0} · 양식 규칙{' '}
-        {status.analyzed.form ?? 0} · 실패 {status.analyzed.failed ?? 0}
+        {status.analyzed.form ?? 0} · 같은 본문 옮김 {status.analyzed.copy ?? 0} · 건너뜀(작업 파일·빈 문서){' '}
+        {status.analyzed.skipped ?? 0} · 실패 {status.analyzed.failed ?? 0}
         {' · '}표본 검토 {status.review.items}개 중 틀림 {status.review.wrong}
         {rate !== null && ` (${Math.round(rate * 100)}%, 멈춤 기준 ${Math.round(status.review.stop_rate * 100)}%)`}
+        {status.review.check_items > 0
+          && ` · 이름이 근거에 없는 항목 검토 ${status.review.check_items}개 중 틀림 ${status.review.check_wrong}`}
         {' · '}개념 {Object.values(status.counts.nodes).reduce((n, v) => n + v, 0).toLocaleString()} · 관계{' '}
         {Object.values(status.counts.edges).reduce((n, v) => n + v, 0).toLocaleString()}
       </p>

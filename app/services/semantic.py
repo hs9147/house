@@ -37,6 +37,11 @@ from . import storage as storage_service
 # 당사자를 말한다. 잘렸다는 사실은 기록한다(truncated).
 SAMPLE_CHARS = 2_500
 DOC_CHARS = 12_000
+# 분석하지 않는 문서 — 업무 내용이 아니라 작업 파일(로그·설정·코드)이거나, 읽을 글이 거의 없는 것(제목만 남은 슬라이드).
+# 문서마다 LLM 한 번이라 6천 건이면 수천만 토큰이다 — 뽑을 것이 없는 문서에 쓰지 않는다.
+SKIP_EXTENSIONS = {".log", ".json", ".xml", ".yml", ".yaml", ".ini", ".cfg", ".conf", ".toml", ".env",
+                   ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".cs", ".ps1", ".bat", ".cmd", ".sh", ".sql"}
+MIN_CHARS = 100
 SAMPLE_DOCS = 12
 # 이만큼 많은 문서에 되풀이되는 표가 "양식"이다.
 FORM_MIN_DOCS = 5
@@ -326,9 +331,10 @@ def propose_schema(db: Session, store_name: str, report=_quiet) -> dict:
         for k, batch in enumerate(batches):
             anchors = [c["name"] for c in batch]
             report(f"관계 찾기 {k + 1}/{len(batches)}: {'·'.join(anchors)}", 5 + 2 * k, total)
+            # 표본·개념 목록은 묶음마다 같다 — system 앞에 두어 캐시되게 하고, 바뀌는 것(기준 개념·이미 정한 관계)만 뒤에.
             found = _clean_relations(_ask(db, provider,
+                f"{material}\n\n개념 목록: {json.dumps(classes, ensure_ascii=False)}\n\n"
                 f"아래 **기준 개념에서 나가는** 관계 종류를 찾는다(to는 개념 목록 어디든). {_RELATION_RULES}\n{_KO}",
-                f"{material}\n\n개념 목록: {json.dumps(classes, ensure_ascii=False)}\n"
                 f"기준 개념: {json.dumps(anchors, ensure_ascii=False)}\n"
                 f"이미 정한 관계: {json.dumps(relations, ensure_ascii=False)}").get("relations"))
             found = [r for r in found if r["from"] in anchors and r["to"] in names]
@@ -337,11 +343,11 @@ def propose_schema(db: Session, store_name: str, report=_quiet) -> dict:
                 continue
             report(f"관계 검토 {k + 1}/{len(batches)}({len(found)}개)", 6 + 2 * k, total)
             checked = _ask(db, provider,
+                f"{material}\n\n개념 목록: {json.dumps(classes, ensure_ascii=False)}\n\n"
                 "다른 사람이 찾은 관계 종류를 검토한다. 표본에 근거가 없는 것, 방향이 틀린 것, 이미 정한 관계와 뜻이 같은데"
                 " 이름만 다른 것을 찾아 고친다. 고친 **목록 전체**를 relations에 낸다(문제가 없으면 그대로).\n"
                 'JSON: {"issues":[{"target":"관계 이름","problem":"","suggestion":""}],'
                 ' "relations":[{"name":"","from":"","to":"","description":""}]}\n' + _KO,
-                f"{material}\n\n개념 목록: {json.dumps(names, ensure_ascii=False)}\n"
                 f"이미 정한 관계: {json.dumps(relations, ensure_ascii=False)}\n"
                 f"검토할 관계(기준 개념 {anchors}):\n{json.dumps(found, ensure_ascii=False)}")
             issues += [i for i in checked.get("issues") or [] if isinstance(i, dict)]
@@ -590,7 +596,7 @@ def check_extraction(data: dict, schema: dict, text: str) -> tuple[list[dict], l
             dropped += 1
             continue
         unanchored += not anchored
-        nodes.append({"cls": cls, "name": _space(name)[:200], "evidence": _space(ev)[:400]})
+        nodes.append({"cls": cls, "name": _space(name)[:200], "evidence": _space(ev)[:400], "anchored": anchored})
     for r in data.get("relations") or []:
         if not isinstance(r, dict) or not isinstance(r.get("from"), dict) or not isinstance(r.get("to"), dict):
             dropped += 1
@@ -605,7 +611,8 @@ def check_extraction(data: dict, schema: dict, text: str) -> tuple[list[dict], l
             continue
         unanchored += not anchored
         edges.append({"src_cls": key[1], "src": _space(names[0])[:200], "rel": key[0],
-                      "dst_cls": key[2], "dst": _space(names[1])[:200], "evidence": _space(ev)[:400]})
+                      "dst_cls": key[2], "dst": _space(names[1])[:200], "evidence": _space(ev)[:400],
+                      "anchored": anchored})
     return nodes, edges, dropped, unanchored
 
 
@@ -613,32 +620,72 @@ def _sampled(path: str) -> bool:
     return int(hashlib.sha1(path.encode()).hexdigest(), 16) % REVIEW_EVERY == 0
 
 
+def _schema_text(schema: dict) -> str:
+    return json.dumps({k: schema[k] for k in ("classes", "relations")}, ensure_ascii=False)
+
+
+# 지시문과 스키마는 문서마다 같다 — **system에 함께 두고 문서는 뒤(user)에만** 둔다. 그러면 앞부분이 매번 같아
+# 프롬프트 캐시가 걸린다(Bedrock은 system 끝의 캐시 지점, OpenAI 계열은 같은 앞부분을 저절로 캐시한다). 예전에는
+# 스키마를 문서와 함께 user에 넣어 6천 건이면 같은 스키마를 6천 번 새로 읽혔다.
+_EXTRACT_RULES = (
+    "사내 문서의 **내용**에서 개념과 관계를 뽑는다. 확정한 스키마의 개념·관계 종류만 쓴다. evidence는 문서의"
+    " 문장을 **글자 그대로** 옮긴다(요약·번역 금지) — 되도록 개체 이름이 들어 있는 문장으로. outside에는 스키마에"
+    " 없는 **개념 종류**(예: 인증·공장)만 적는다 — 개별 회사명·등급 값 같은 개체는 적지 않는다.\n"
+    'JSON: {"entities":[{"class":"","name":"","evidence":""}],'
+    ' "relations":[{"from":{"class":"","name":""},"rel":"","to":{"class":"","name":""},"evidence":""}],'
+    ' "outside":[{"name":"","note":""}]}\n' + _KO)
+_REVIEW_RULES = (
+    "다른 사람이 문서에서 뽑은 개념·관계를 검토한다. 항목마다 **그 근거 문장이** 그것을 실제로 말하는지, 개념 종류가"
+    " 맞는지 본다(근거 문장만 보고 판단한다). 틀린 항목의 i만 적는다.\n"
+    'JSON: {"wrong":[{"i":0,"problem":""}]}\n' + _KO)
+
+
 def _extract_doc(db, provider, schema: dict, path: str, text: str) -> dict:
-    return _ask(db, provider,
-        "사내 문서의 **내용**에서 개념과 관계를 뽑는다. 확정한 스키마의 개념·관계 종류만 쓴다. evidence는 문서의"
-        " 문장을 **글자 그대로** 옮긴다(요약·번역 금지) — 되도록 개체 이름이 들어 있는 문장으로. outside에는 스키마에"
-        " 없는 **개념 종류**(예: 인증·공장)만 적는다 — 개별 회사명·등급 값 같은 개체는 적지 않는다.\n"
-        'JSON: {"entities":[{"class":"","name":"","evidence":""}],'
-        ' "relations":[{"from":{"class":"","name":""},"rel":"","to":{"class":"","name":""},"evidence":""}],'
-        ' "outside":[{"name":"","note":""}]}\n' + _KO,
-        f"스키마: {json.dumps({k: schema[k] for k in ('classes', 'relations')}, ensure_ascii=False)}\n\n"
-        f"문서 {path}:\n{text}")
+    return _ask(db, provider, f"{_EXTRACT_RULES}\n\n스키마: {_schema_text(schema)}", f"문서 {path}:\n{text}")
 
 
-def _review_doc(db, provider, schema: dict, text: str, nodes: list[dict], edges: list[dict]) -> dict[int, str]:
-    """표본 검토 — 근거 문장이 그 관계·개체를 실제로 말하는지. 틀린 항목의 번호(개체 먼저, 관계 이어서)와 이유."""
-    items = ([{"i": i, "entity": n} for i, n in enumerate(nodes)]
-             + [{"i": len(nodes) + i, "relation": e} for i, e in enumerate(edges)])
+def _review_items(db, provider, schema: dict, path: str, items: list[dict]) -> dict[int, str]:
+    """검토 — 문서 전체가 아니라 **항목과 근거 문장만** 보낸다. 근거가 원문에 있는지는 기계 검사가 이미 봤고, 남은
+    질문은 "이 문장이 이것을 말하는가"라 문장으로 답할 수 있다(문서를 다시 보내면 검토 한 번이 추출만큼 든다).
+    items는 [{"entity"|"relation": …}] — 돌려주는 번호는 items의 자리다."""
     if not items:
         return {}
-    out = _ask(db, provider,
-        "다른 사람이 문서에서 뽑은 개념·관계를 검토한다. 항목마다 근거 문장이 그것을 실제로 말하는지, 개념 종류가"
-        " 맞는지 본다. 틀린 항목의 i만 적는다.\n"
-        'JSON: {"wrong":[{"i":0,"problem":""}]}\n' + _KO,
-        f"스키마: {json.dumps({k: schema[k] for k in ('classes', 'relations')}, ensure_ascii=False)}\n\n"
-        f"문서:\n{text}\n\n항목:\n{json.dumps(items, ensure_ascii=False)}")
+    numbered = [{"i": i, **item} for i, item in enumerate(items)]
+    out = _ask(db, provider, f"{_REVIEW_RULES}\n\n스키마: {_schema_text(schema)}",
+               f"문서 {path}의 항목:\n{json.dumps(numbered, ensure_ascii=False)}")
     return {int(w["i"]): str(w.get("problem", ""))[:200] for w in out.get("wrong") or []
-            if isinstance(w, dict) and str(w.get("i", "")).isdigit()}
+            if isinstance(w, dict) and str(w.get("i", "")).isdigit() and int(w["i"]) < len(items)}
+
+
+def _public(item: dict) -> dict:
+    """저장·검토에 보내는 모양 — 기계 검사가 붙인 표시(anchored)는 뺀다."""
+    return {k: v for k, v in item.items() if k != "anchored"}
+
+
+def _skip_reason(path: str, body: str) -> str:
+    ext = ("." + path.rsplit(".", 1)[-1].lower()) if "." in path.rsplit("/", 1)[-1] else ""
+    if ext in SKIP_EXTENSIONS:
+        return f"분석 대상이 아닌 형식({ext})"
+    if len(_compact(body)) < MIN_CHARS:
+        return f"읽을 글이 거의 없습니다({len(_compact(body))}자)"
+    return ""
+
+
+def _record(conn, path: str, fp: str, status: str, *, error: str | None = None, truncated: int = 0,
+            dropped: int = 0, reviewed: int = 0) -> None:
+    conn.execute("INSERT OR REPLACE INTO sem_docs (path, fp, status, error, truncated, dropped, reviewed, analyzed_at)"
+                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (path, fp, status, error, truncated, dropped, reviewed, time.time()))
+
+
+def _copy(conn, source: str, target: str) -> None:
+    """본문이 같은 문서의 결과를 옮긴다(LLM 없이). 근거 문장도 같은 본문의 것이라 그대로 맞다."""
+    conn.execute("DELETE FROM sem_nodes WHERE path = ?", (target,))
+    conn.execute("DELETE FROM sem_edges WHERE path = ?", (target,))
+    conn.execute("INSERT INTO sem_nodes (path, cls, name, evidence, origin)"
+                 " SELECT ?, cls, name, evidence, origin FROM sem_nodes WHERE path = ?", (target, source))
+    conn.execute("INSERT INTO sem_edges (path, src_cls, src, rel, dst_cls, dst, evidence, origin)"
+                 " SELECT ?, src_cls, src, rel, dst_cls, dst, evidence, origin FROM sem_edges WHERE path = ?",
+                 (target, source))
 
 
 def _write(conn, path: str, nodes: list[dict], edges: list[dict], origin: str) -> None:
@@ -672,7 +719,10 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
         for r in conn.execute("SELECT DISTINCT path, name FROM nodes WHERE kind = 'table'"):
             if r["name"] in confirmed_forms:
                 form_of.setdefault(r["path"], []).append(r["name"])
-        known = {r["path"]: r["fp"] for r in conn.execute("SELECT path, fp FROM sem_docs")}
+        rows = list(conn.execute("SELECT path, fp, status FROM sem_docs"))
+        known = {r["path"]: r["fp"] for r in rows}
+        # ② 같은 본문은 한 번만 — 경로만 다르고 본문·스키마 판·대응표 판이 같으면(지문이 같으면) 앞의 결과를 옮긴다.
+        done_fp = {r["fp"]: r["path"] for r in rows if r["status"] in ("ok", "form")}
         paths = _paths(conn)
         # 지워진 문서의 내용 그래프는 함께 지운다
         for gone in set(known) - set(paths):
@@ -680,7 +730,7 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
             conn.execute("DELETE FROM sem_docs WHERE path = ?", (gone,))
         conn.commit()
 
-        stats = {"analyzed": 0, "form_docs": 0, "failed": 0, "reviewed": 0, "dropped": 0}
+        stats = {"analyzed": 0, "form_docs": 0, "failed": 0, "reviewed": 0, "dropped": 0, "copied": 0, "skipped": 0}
         outside: dict = _get(conn, "outside", {})
         remaining = 0
         for path in paths:
@@ -694,6 +744,23 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                 remaining += 1
                 continue
             try:
+                twin = done_fp.get(fp)
+                if twin and twin != path:
+                    _copy(conn, twin, path)
+                    _record(conn, path, fp, "copy")
+                    stats["copied"] += 1
+                    stats["analyzed"] += 1
+                    conn.commit()
+                    continue
+                # ③ 분석할 것이 없는 문서 — 작업 파일(확장자)이나 읽을 글이 거의 없는 것
+                reason = _skip_reason(path, body)
+                if reason:
+                    _write(conn, path, [], [], "llm")
+                    _record(conn, path, fp, "skipped", error=reason)
+                    stats["skipped"] += 1
+                    stats["analyzed"] += 1
+                    conn.commit()
+                    continue
                 markdown = _markdown(store_name, path, root)
                 form_nodes, form_edges = [], []
                 for f in fms:
@@ -711,37 +778,46 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                     data = _extract_doc(db, provider, schema, path, text)
                     nodes, edges, dropped, unanchored = check_extraction(data, schema, text)
                     reviewed = 0
-                    # 표본이거나, 이름이 근거에 없는 항목이 있거나(남겨 둔 대신 판정을 받는다), 버린 것이 더 많으면
-                    if _sampled(path) or unanchored or (dropped and dropped >= (len(nodes) + len(edges))):
-                        wrong = _review_doc(db, provider, schema, text, nodes, edges)
+                    # ① 검토할 것만 고른다. 표본(10%)이면 전부 — 이것이 오류율(멈춤 조건)의 표본이다. 표본이 아니면
+                    # 이름이 근거에 없는 항목만(남겨 둔 대신 판정을 받는다). 버린 것이 더 많으면 전부.
+                    sampled = _sampled(path)
+                    every = sampled or (dropped and dropped >= (len(nodes) + len(edges)))
+                    targets = [("n", i) for i, n in enumerate(nodes) if every or not n["anchored"]] + \
+                              [("e", i) for i, e in enumerate(edges) if every or not e["anchored"]]
+                    if targets:
+                        items = [{"entity": _public(nodes[i])} if k == "n" else {"relation": _public(edges[i])}
+                                 for k, i in targets]
+                        wrong = _review_items(db, provider, schema, path, items)
                         reviewed = 1
-                        state["review_items"] = state.get("review_items", 0) + len(nodes) + len(edges)
-                        state["review_wrong"] = state.get("review_wrong", 0) + len(wrong)
-                        first = len(nodes)   # 관계 번호는 개체 뒤에 이어진다 — 거르기 전의 개수로
+                        # 오류율은 **무작위 표본만**으로 잰다 — 이름이 근거에 없는 항목은 원래 틀리기 쉬워, 섞으면
+                        # 멈춤 기준을 괜히 넘는다. 그쪽은 따로 센다.
+                        bucket = "review" if sampled else "check"
+                        state[f"{bucket}_items"] = state.get(f"{bucket}_items", 0) + len(items)
+                        state[f"{bucket}_wrong"] = state.get(f"{bucket}_wrong", 0) + len(wrong)
                         # 무엇을 왜 틀렸다고 했는지 남긴다 — 멈췄을 때 관리자가 스키마를 고칠지, 그냥 다시 시작할지 고를 근거다.
                         notes = state.get("review_notes", [])
-                        for i, problem in wrong.items():
-                            item = nodes[i] if i < first else (edges[i - first] if i - first < len(edges) else None)
-                            if item:
-                                label = (f'{item["cls"]}:{item["name"]}' if "cls" in item
-                                         else f'{item["src"]} —{item["rel"]}→ {item["dst"]}')
-                                notes.append({"path": path, "item": label, "evidence": item["evidence"][:160],
-                                              "problem": problem})
+                        for j, problem in wrong.items():
+                            item = items[j].get("entity") or items[j].get("relation")
+                            label = (f'{item["cls"]}:{item["name"]}' if "cls" in item
+                                     else f'{item["src"]} —{item["rel"]}→ {item["dst"]}')
+                            notes.append({"path": path, "item": label, "evidence": item["evidence"][:160],
+                                          "problem": problem, "sampled": sampled})
                         state["review_notes"] = notes[-30:]
-                        nodes = [n for i, n in enumerate(nodes) if i not in wrong]
-                        edges = [e for i, e in enumerate(edges) if first + i not in wrong]
+                        drop = {targets[j] for j in wrong}
+                        nodes = [n for i, n in enumerate(nodes) if ("n", i) not in drop]
+                        edges = [e for i, e in enumerate(edges) if ("e", i) not in drop]
                         stats["reviewed"] += 1
                     for o in data.get("outside") or []:
                         if isinstance(o, dict) and o.get("name"):
                             name = str(o["name"])[:60]
                             outside[name] = outside.get(name, 0) + 1
-                    _write(conn, path, form_nodes + nodes, form_edges + edges, "llm")
+                    _write(conn, path, form_nodes + [_public(n) for n in nodes], form_edges + [_public(e) for e in edges],
+                           "llm")
                     status = "ok"
                     stats["dropped"] += dropped
-                conn.execute("INSERT OR REPLACE INTO sem_docs (path, fp, status, error, truncated, dropped, reviewed,"
-                             " analyzed_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
-                             (path, fp, status, int(status == "ok" and len(rest) > DOC_CHARS), dropped, reviewed,
-                              time.time()))
+                _record(conn, path, fp, status, truncated=int(status == "ok" and len(rest) > DOC_CHARS),
+                        dropped=dropped, reviewed=reviewed)
+                done_fp.setdefault(fp, path)
                 stats["analyzed"] += 1
             except Exception as e:  # noqa: BLE001 — 한 문서의 실패가 나머지를 막지 않게, 사유를 남긴다
                 conn.execute("INSERT OR REPLACE INTO sem_docs (path, fp, status, error, analyzed_at)"
@@ -767,7 +843,8 @@ def resume(store_name: str) -> None:
     """멈춘 분석을 다시 — 표본 오류 집계도 비운다(고친 스키마·대응표로 새로 잰다)."""
     conn = _conn(store_name)
     try:
-        _put(conn, "state", {"paused": None, "review_items": 0, "review_wrong": 0, "review_notes": []})
+        _put(conn, "state", {"paused": None, "review_items": 0, "review_wrong": 0, "review_notes": [],
+                             "check_items": 0, "check_wrong": 0})
     finally:
         conn.close()
 
@@ -994,7 +1071,8 @@ def status(store_name: str) -> dict:
             "paused": state.get("paused"),
             "review": {"items": items, "wrong": state.get("review_wrong", 0),
                        "error_rate": (state.get("review_wrong", 0) / items) if items else None,
-                       "stop_rate": STOP_ERROR_RATE, "notes": state.get("review_notes", [])},
+                       "stop_rate": STOP_ERROR_RATE, "notes": state.get("review_notes", []),
+                       "check_items": state.get("check_items", 0), "check_wrong": state.get("check_wrong", 0)},
             "last_run": _get(conn, "last_run"), "outside": _get(conn, "outside", {}),
             "task": {**(_get(conn, "task") or {}), "running": task_running(store_name)},
             "last_merge": _get(conn, "last_merge"),
