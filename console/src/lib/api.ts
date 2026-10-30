@@ -829,8 +829,18 @@ export const api = {
     profiles: {
       name: string; region: string; sso_session: string; sso_start_url: string;
       ok: boolean | null; reason: string;
-      expires_at: string | null; // SSO 액세스 토큰 만료(재로그인이 필요해지는 시각)
+      // SSO 액세스 토큰 만료. 갱신 토큰이 있으면(refreshable) 1시간짜리라 곧 지나지만 그때 끊기지 않는다 —
+      // 없을 때만(구형 프로필) 재로그인이 필요해지는 시각이다.
+      expires_at: string | null;
+      refreshable: boolean;
       login_command: string;
+      // 서버가 이 프로필의 토큰을 갱신하고 있는가(services/awssso) — Bedrock 프로바이더가 쓰는 프로필만
+      keepalive: {
+        status: 'ok' | 'failed' | 'skipped' | null; checked_at: string | null; next_in_seconds: number;
+        reason?: string | null; error?: string | null; login_at?: string | null; ended_at?: string | null;
+        session_seconds?: [number, number] | null;   // 배운 세션 시간(하한·상한, 초)
+        session_ends?: [string, string] | null;      // 그로 본 이번 세션의 끝(이르면·늦으면)
+      } | null;
     }[];
   }>('GET', '/llm/aws/profiles'),
   review: (projectId: number, provider_id: number, diff?: string, base_ref?: string) =>

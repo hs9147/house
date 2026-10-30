@@ -152,7 +152,7 @@ def update_provider(
 
 
 @router.get("/llm/aws/profiles")
-def aws_profiles(_: ApiKey = Depends(require_admin)):
+def aws_profiles(db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
     """서버 ~/.aws에 있는 자격증명 프로필과 지금 쓸 수 있는지 여부.
 
     Bedrock은 정적 키가 없어 어떤 프로필을 쓸지 골라야 하고, 사내 SSO 토큰은 보통
@@ -169,7 +169,28 @@ def aws_profiles(_: ApiKey = Depends(require_admin)):
         # C:\Windows\system32\config\systemprofile) — 그러면 `aws sso login`을 해도
         # 목록이 비어 있고, 경로를 보여 주지 않으면 왜 비었는지 알 방법이 없다.
         **bedrock.config_state(),
-        "profiles": [{**entry, **bedrock.profile_status(entry["name"])} for entry in profiles],
+        "profiles": [{**entry, **bedrock.profile_status(entry["name"]),
+                      "refreshable": bool(bedrock.sso_token_state(entry["name"]).get("refreshable")),
+                      "keepalive": _keepalive(db, entry["name"])} for entry in profiles],
+    }
+
+
+def _keepalive(db: Session, profile: str) -> dict | None:
+    """서버가 이 프로필의 토큰을 갱신하고 있나(services/awssso) — 그 job의 마지막 결과에서 화면이 읽을 것만.
+    Bedrock 프로바이더가 이 프로필을 쓰지 않으면 job이 없다(None)."""
+    from ..models import JobKind, ScheduledJob  # noqa: PLC0415
+    from ..services import scheduler  # noqa: PLC0415
+
+    job = db.execute(select(ScheduledJob).where(
+        ScheduledJob.name == scheduler.job_name(JobKind.aws_sso, profile))).scalar_one_or_none()
+    if job is None:
+        return None
+    detail = job.last_detail or {}
+    return {
+        "status": job.last_status.value if job.last_status else None,
+        "checked_at": job.last_run_at.isoformat() if job.last_run_at else None,
+        "next_in_seconds": job.interval_seconds,
+        **{k: detail.get(k) for k in ("reason", "error", "login_at", "session_seconds", "session_ends", "ended_at")},
     }
 
 

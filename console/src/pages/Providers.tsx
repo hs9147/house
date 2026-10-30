@@ -473,12 +473,18 @@ export default function Providers() {
                      리전 문제다. 모델 칸은 직접 입력으로 남는다. */
                   <>⚠️ 모델 목록을 받지 못했습니다: {awsModels.error}{' '}
                     — 모델 ID를 직접 입력하세요.</>
+                ) : selectedProfile.refreshable ? (
+                  /* 갱신 토큰이 있는 SSO 세션 — 액세스 토큰(1시간)은 서버가 다시 받는다. 끊기는 때는 Identity Center
+                     세션 시간이 끝날 때이고 그 값은 어디에도 없어 서버가 배운다(services/awssso). */
+                  <>✅ 자격증명 유효 · <KeepAlive k={selectedProfile.keepalive} />
+                    {' '}· 세션이 끝나면 서버에서{' '}
+                    <span className="mono">{selectedProfile.login_command}</span>
+                  </>
                 ) : (
-                  /* 자격증명(STS) 만료가 아니라 **SSO 토큰** 만료다 — 재로그인이
-                     필요해지는 시각은 이쪽이고 보통 8시간이다. */
+                  /* 구형 프로필(갱신 토큰 없음) — 토큰 만료가 곧 재로그인 시각이다. */
                   <>✅ 자격증명 유효
                     {selectedProfile.expires_at
-                      && ` · SSO 토큰 만료 ${new Date(selectedProfile.expires_at).toLocaleString()}`}
+                      && ` · SSO 토큰 만료(재로그인 필요) ${new Date(selectedProfile.expires_at).toLocaleString()}`}
                     {' '}· 만료되면 서버에서{' '}
                     <span className="mono">{selectedProfile.login_command}</span>
                   </>
@@ -512,6 +518,26 @@ export default function Providers() {
   );
 }
 
+
+type KeepAliveState = NonNullable<Awaited<ReturnType<typeof api.listAwsProfiles>>['profiles'][number]['keepalive']>;
+
+/** 서버의 토큰 유지 상태 한 줄 — 갱신하고 있는지, 배운 세션 시간과 이번 세션이 끝날 때. */
+function KeepAlive({ k }: { k: KeepAliveState | null }) {
+  const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const hours = (s: number) => `${(s / 3600).toFixed(1)}시간`;
+  if (!k) return <>이 프로필을 쓰는 Bedrock 프로바이더를 등록하면 서버가 토큰을 갱신해 둡니다</>;
+  if (k.status === 'failed') return <>⚠️ 서버 토큰 유지: {k.reason || k.error}</>;
+  if (k.status === 'skipped') return <>서버 토큰 유지 안 함: {k.reason}</>;
+  const ends = k.session_ends;
+  return (
+    <>
+      서버가 토큰을 갱신하고 있습니다(다음 확인 {Math.round(k.next_in_seconds / 60)}분 뒤)
+      {ends ? <> · 세션 종료 예상 {time(ends[0])}~{time(ends[1])}
+        {k.session_seconds && <> (배운 세션 시간 {hours(k.session_seconds[0])}~{hours(k.session_seconds[1])})</>}</>
+        : <> · 세션 시간은 아직 배우는 중입니다(다시 로그인한 세션부터 잽니다)</>}
+    </>
+  );
+}
 
 /** 점검 결과 한 줄 — 실패 사유는 그 줄에 남긴다(alert은 닫으면 사라져 비교가 안 된다). */
 function CheckResult({ result }: { result: ProviderCheck | string | undefined }) {

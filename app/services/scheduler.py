@@ -25,7 +25,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import JobKind, JobStatus, Module, ModuleType, ScheduledJob, utcnow
+from ..models import (
+    JobKind, JobStatus, LlmProvider, LlmProviderKind, Module, ModuleType, ScheduledJob, utcnow,
+)
 
 # tick 간격. job의 주기와 다르다 — tick마다 "지금 돌 때가 된 job"만 고른다.
 TICK_SECONDS = 30.0
@@ -42,6 +44,8 @@ DEFAULT_INTERVALS = {
     JobKind.db_backup: 86_400,
     # 만료된 권한을 거두는 주기이기도 하다 — 만료일이 지나고 최대 한 시간 안에 거둔다.
     JobKind.db_grants: 3_600,
+    # 처음 한 번의 값일 뿐이다 — 돌 때마다 토큰 만료와 배운 세션 시간으로 다음 간격을 다시 정한다(services/awssso).
+    JobKind.aws_sso: 600,
 }
 
 _lock = threading.Lock()
@@ -67,6 +71,12 @@ def _wanted(db: Session) -> list[tuple[JobKind, str]]:
             wanted.append((JobKind.mcp_probe, module.name))
         elif module.type == ModuleType.external_api:
             wanted.append((JobKind.api_probe, module.name))
+    # Bedrock 프로바이더가 쓰는 AWS 프로필마다 하나 — 여러 사람이 같은 토큰을 쓰므로 서버가 살려 둔다.
+    profiles = db.execute(
+        select(LlmProvider.aws_profile).where(
+            LlmProvider.kind == LlmProviderKind.aws, LlmProvider.aws_profile.is_not(None))
+    ).scalars()
+    wanted += [(JobKind.aws_sso, p) for p in sorted({p for p in profiles if p})]
     from . import shareddb  # noqa: PLC0415
 
     if shareddb.configured():
@@ -169,6 +179,16 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
             return (JobStatus.ok if changed else JobStatus.skipped), result
         except shareddb.SharedDbError as e:
             return JobStatus.failed, {"error": str(e)}
+
+    if job.kind == JobKind.aws_sso:
+        from . import awssso  # noqa: PLC0415
+
+        try:
+            status, detail, seconds = awssso.keep_alive(job.target, job.last_detail)
+        except Exception as e:  # noqa: BLE001 — run()에 맡기면 detail이 오류 한 줄로 바뀌어 배운 세션 시간을 잃는다
+            return JobStatus.failed, {**(job.last_detail or {}), "error": f"{type(e).__name__}: {e}"[:300]}
+        job.interval_seconds = seconds   # 간격은 매번 다시 정한다 — 토큰 만료·배운 세션 시간에 맞춰
+        return JobStatus(status), detail
 
     if job.kind == JobKind.doc_index:
         store = storage.store(job.target)

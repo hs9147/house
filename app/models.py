@@ -551,6 +551,7 @@ class JobKind(str, enum.Enum):
     api_probe = "api_probe"      # external_api 모듈 주소가 살아 있는지
     db_backup = "db_backup"      # 공용 DB를 pg_dump로 백업(services/shareddb.backup)
     db_grants = "db_grants"      # 공용 DB의 표 권한을 권한 표에 맞춤(services/shareddb.reconcile)
+    aws_sso = "aws_sso"          # Bedrock 프로바이더의 AWS SSO 토큰을 서버가 갱신해 둠(services/awssso)
 
 
 class JobStatus(str, enum.Enum):
