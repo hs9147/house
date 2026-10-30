@@ -639,12 +639,11 @@ async def docs_mcp_server(
 
 
 def _all_stores(db: Session | None = None, key: ApiKey | None = None) -> list[storage_service.Store]:
-    """**숨긴 저장소까지 포함한 전부.** /mcp/docs는 "사내 문서 전체에서 찾아라"는 창구라
-    목록에 안 보이는 저장소의 파일도 찾혀야 한다 — 숨긴 것은 고르는 자리에서 뺀 것이지
-    없는 것이 아니다."""
+    """/mcp/docs·/mcp/graph가 찾는 범위 — **색인 대상 저장소(PAAS_DOC_ROOTS)만**(storage.indexed). 내부
+    저장소(internal)는 플랫폼 파일 자리라 색인하지 않으므로 여기서도 빠진다."""
     try:
-        return accessible_document_stores(db, key, include_internal=True) if db is not None and key is not None \
-            else storage_service.stores()
+        return [s for s in accessible_document_stores(db, key) if storage_service.indexed(s)] \
+            if db is not None and key is not None else storage_service.indexed_stores()
     except storage_service.StorageError as e:
         raise mcp_server.McpToolError(str(e))
 
@@ -764,7 +763,9 @@ def _read_document(db: Session, actor: str, store: storage_service.Store, path: 
     # "./a/b.txt"가 같은 캐시를 쓴다.
     rel = target.relative_to(store.root).as_posix()
     try:
-        text = docready.read(store.name, rel, target)
+        # 색인 대상이 아닌 저장소(internal)는 .ready를 남기지 않는다 — 읽을 때마다 추출한다.
+        text = (docready.read(store.name, rel, target) if storage_service.indexed(store)
+                else doctext.extract(target)[0])
     except doctext.ExtractError as e:
         raise mcp_server.McpToolError(str(e))
     audit.record(db, actor, "mcp.storage.read", store.name, {"path": rel})
@@ -947,6 +948,11 @@ def _storage_call(db: Session, actor: str, store: storage_service.Store, name: s
 
     if name == "list_files":
         return _dump(_file_listing(root, args))
+
+    if name in ("index_status", "reindex_docs", "search_docs") and not storage_service.indexed(store):
+        raise mcp_server.McpToolError(
+            f"'{store.name}'은 내부 저장소라 색인하지 않습니다 — 파일은 list_files·read_file로 보세요."
+            " 검색은 문서 저장소(PAAS_DOC_ROOTS)에서 합니다.")
 
     if name == "index_status":
         return _dump(docsearch.status(store.name))

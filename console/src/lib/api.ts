@@ -88,7 +88,7 @@ import type {
   StorageListing,
   StorageStore,
   UserAccountOut,
-  UserOrgOut, SemanticForm, SemanticHit, SemanticMapping, SemanticNeighbors, SemanticSchema, SemanticStatus,
+  UserOrgOut, OntologyCleanse, SemanticForm, SemanticHit, SemanticMapping, SemanticNeighbors, SemanticSchema, SemanticStatus,
 } from './types';
 
 // 백엔드 라우터는 모두 /paas 아래 마운트된다. /health, /status는 버전 prefix 없이
@@ -536,6 +536,9 @@ export const api = {
     request<OntologyNeighborhood>(
       'GET', `/ontology/stores/${encodeURIComponent(store)}/graph/neighbors`, undefined,
       { kind, name, limit }),
+  // 클린징 — 색인 디렉터리의 파생 데이터 찌꺼기. GET은 세기만(미리보기), POST가 지운다(같은 함수).
+  ontologyCleansePreview: () => request<OntologyCleanse>('GET', '/ontology/cleanse'),
+  ontologyCleanse: () => request<OntologyCleanse>('POST', '/ontology/cleanse'),
   reindexOntology: (store: string, force = false) =>
     request<{ done: boolean; indexed?: number; remaining?: number; retried?: number }>(
       'POST', `/ontology/stores/${encodeURIComponent(store)}/reindex`, undefined,

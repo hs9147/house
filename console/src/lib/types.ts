@@ -1584,3 +1584,12 @@ export interface SemanticNeighbors {
                evidence: { path: string; text: string; origin: string }[] }[];
   mentions: { path: string; evidence: string; origin: string }[];
 }
+
+export interface OntologyCleanse {
+  applied: boolean;
+  total: number;
+  orphan_index: { store: string; bytes: number; error?: string }[];   // 색인 대상이 아닌 저장소의 색인 파일
+  orphan_ready: { store: string; bytes: number }[];                   // 그 저장소의 .ready 폴더
+  stores: Record<string, { stale_nodes: number; stale_edges: number; stale_semantic: number;
+                           stale_ready: number; stale_ready_bytes: number }>;
+}

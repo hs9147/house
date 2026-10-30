@@ -281,22 +281,34 @@ def test_code_server_unknown_project_points_at_the_right_discovery_tool(
 
 # --- 파일 저장소 서버 ---
 
-def _storage_client(monkeypatch, tmp_path):
-    """플랫폼 저장소 'internal' 하나로 저장소 서버의 기본 동작을 본다.
+def _only_these_stores() -> None:
+    """저장소 표를 비운다 — 같은 시험 DB에 다른 시험(또는 개발자 PC의 .env)이 이관한 저장소가 남아 있으면
+    PAAS_DOC_ROOTS가 다시 이관되지 않아(최초 기동에만 이관한다) 시험 순서에 따라 결과가 갈린다."""
+    from app.db import Base, SessionLocal, engine
+    from app.models import DocumentStore, DocumentStoreRegistry
 
-    이 저장소는 목록에서 숨겨져 있지만 서버는 그대로 산다 — 숨긴 것은 고르는 자리에서
-    뺀 것이지 닿지 못하게 한 것이 아니다.
-    """
-    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "assets"))
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        db.query(DocumentStore).delete()
+        db.query(DocumentStoreRegistry).delete()
+        db.commit()
+
+
+def _storage_client(monkeypatch, tmp_path):
+    """문서 저장소 'assets'(PAAS_DOC_ROOTS) 하나로 저장소 서버의 기본 동작을 본다. 내부 저장소(internal)는
+    따로 둔다 — 색인 대상이 아니라 검색 흐름을 볼 수 없다(test_internal_store_server_keeps_files_but_not_an_index)."""
+    (tmp_path / "assets").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
-    monkeypatch.setenv("PAAS_DOC_ROOTS", "")
+    monkeypatch.setenv("PAAS_DOC_ROOTS", f"assets={tmp_path / 'assets'}")
     get_settings.cache_clear()
+    _only_these_stores()
     return _client()
 
 
 def test_storage_server_write_list_read_delete(monkeypatch, fresh_settings, tmp_path):
     c = _storage_client(monkeypatch, tmp_path)
-    path = "/mcp/storage/internal"
+    path = "/mcp/storage/assets"
     names = [t["name"] for t in _rpc(c, path, "tools/list")["result"]["tools"]]
     assert names == ["list_files", "read_file", "search_docs", "reindex_docs",
                      "index_status", "write_file", "delete_file"]
@@ -323,7 +335,7 @@ def test_storage_server_write_list_read_delete(monkeypatch, fresh_settings, tmp_
 def test_storage_server_cannot_escape_store_root(monkeypatch, fresh_settings, tmp_path):
     """이 서버의 존재 이유가 이 가둠이다 — 공개 filesystem MCP는 호스트 디스크를 그대로 연다."""
     c = _storage_client(monkeypatch, tmp_path)
-    path = "/mcp/storage/internal"
+    path = "/mcp/storage/assets"
     for escape in ("../outside.txt", "/etc/passwd"):
         reply = _call(c, path, "write_file", {"path": escape, "content": "x"})
         assert reply["error"]["code"] == -32602, escape
@@ -396,20 +408,20 @@ def test_storage_list_files_filters_and_caps(monkeypatch, fresh_settings, tmp_pa
 
     import json
 
-    everything = json.loads(_text(_call(c, "/mcp/storage/internal", "list_files")))
+    everything = json.loads(_text(_call(c, "/mcp/storage/assets", "list_files")))
     assert everything["total"] == 7
     assert everything["truncated"] is False
 
     # 대소문자 무시 — .PDF와 .pdf가 섞인 폴더가 흔하다
-    pdfs = json.loads(_text(_call(c, "/mcp/storage/internal", "list_files", {"glob": "*.pdf"})))
+    pdfs = json.loads(_text(_call(c, "/mcp/storage/assets", "list_files", {"glob": "*.pdf"})))
     assert pdfs["total"] == 5
 
     # 파일명 패턴은 하위 폴더 파일에도 걸린다
-    rules = json.loads(_text(_call(c, "/mcp/storage/internal", "list_files", {"glob": "*규정*"})))
+    rules = json.loads(_text(_call(c, "/mcp/storage/assets", "list_files", {"glob": "*규정*"})))
     assert [f["path"] for f in rules["files"]] == ["규정/휴가규정.docx"]
 
     capped = json.loads(
-        _text(_call(c, "/mcp/storage/internal", "list_files", {"glob": "*.pdf", "limit": 2})))
+        _text(_call(c, "/mcp/storage/assets", "list_files", {"glob": "*.pdf", "limit": 2})))
     assert len(capped["files"]) == 2
     assert capped["total"] == 5 and capped["truncated"] is True
 
@@ -422,7 +434,7 @@ def test_storage_read_file_extracts_document_text(monkeypatch, fresh_settings, t
     from tests.test_doctext import _docx
 
     _docx(root / "규정.docx", [["매출 정산 규정"], ["분기 마감 후 5일"]])
-    text = _text(_call(c, "/mcp/storage/internal", "read_file", {"path": "규정.docx"}))
+    text = _text(_call(c, "/mcp/storage/assets", "read_file", {"path": "규정.docx"}))
     # 마크다운이므로 단락 사이가 빈 줄이다 — 줄바꿈 하나는 같은 문단의 이어짐을 뜻한다
     assert text == "매출 정산 규정\n\n분기 마감 후 5일"
 
@@ -435,7 +447,7 @@ def test_storage_read_file_truncates_instead_of_refusing(monkeypatch, fresh_sett
     from app.api import mcp_servers
 
     (root / "긴문서.txt").write_text("가" * (mcp_servers._MAX_TEXT_CHARS + 500), encoding="utf-8")
-    text = _text(_call(c, "/mcp/storage/internal", "read_file", {"path": "긴문서.txt"}))
+    text = _text(_call(c, "/mcp/storage/assets", "read_file", {"path": "긴문서.txt"}))
     assert "만 표시" in text
     assert str(mcp_servers._MAX_TEXT_CHARS + 500) in text
 
@@ -449,7 +461,7 @@ def test_storage_read_file_reports_unreadable_format(monkeypatch, fresh_settings
     from app.services import doctext
 
     monkeypatch.setattr(doctext, "_soffice", lambda: None)
-    reply = _call(c, "/mcp/storage/internal", "read_file", {"path": "old.doc"})
+    reply = _call(c, "/mcp/storage/assets", "read_file", {"path": "old.doc"})
     assert reply["error"]["code"] == -32602
     assert "97-2003" in reply["error"]["message"]
 
@@ -464,7 +476,7 @@ def test_storage_search_docs_flow(monkeypatch, fresh_settings, tmp_path):
 
     _docx(root / "A-2025-11.docx", [["반출 승인 절차"], ["담당: 총무팀"]])
     (root / "메모.txt").write_text("휴가규정 개정", encoding="utf-8")
-    path = "/mcp/storage/internal"
+    path = "/mcp/storage/assets"
 
     import json
 
@@ -638,6 +650,7 @@ def _docs_client(monkeypatch, tmp_path, sources=("company-docs",)):
     monkeypatch.setenv("PAAS_DOC_ROOTS",
                        ",".join(str(tmp_path / "shared" / n) for n in sources))
     get_settings.cache_clear()
+    _only_these_stores()
     return _client()
 
 
@@ -656,7 +669,7 @@ def test_docs_server_searches_across_every_source(monkeypatch, fresh_settings, t
 
     built = json.loads(_text(_call(c, "/mcp/docs", "reindex_docs")))
     assert built["done"] is True
-    assert set(built["sources"]) == {"internal", "hr-docs", "fin-docs"}
+    assert set(built["sources"]) == {"hr-docs", "fin-docs"}     # 내부 저장소(internal)는 색인 대상이 아니다
 
     hits = json.loads(_text(_call(c, "/mcp/docs", "search_docs", {"query": "총무팀"})))["hits"]
     # 어느 저장소인지가 결과에 실려 온다 — 그래야 read_doc을 부를 수 있다
@@ -731,8 +744,8 @@ def test_docs_server_lists_sources_with_coverage(monkeypatch, fresh_settings, tm
     # "등록 도구가 없다"로 결론 내고 멈춘다(실측). 호스트는 설정이 정하므로 꼬리만 본다.
     assert row["write_to"].endswith("/api/v1/mcp/storage/company-docs")
     assert "write_file" in listing["note"]
-    # 숨긴 저장소도 여기서는 나온다 — /mcp/docs는 "전체에서 찾아라"는 창구다
-    assert sources["internal"]["read_only"] is False
+    # 내부 저장소(internal)는 나오지 않는다 — 색인 대상(PAAS_DOC_ROOTS)만 찾는 창구다
+    assert "internal" not in sources
     status = json.loads(_text(_call(c, "/mcp/docs", "index_status")))
     assert "97-2003" in " ".join(status["company-docs"]["failure_reasons"])
 
@@ -927,3 +940,21 @@ def test_apis_server_sync_refreshes_on_request(monkeypatch, fresh_settings):
     apisearch.reset_sync_throttle()
     third = json.loads(_text(_call(c, "/mcp/apis", "sync_catalog")))
     assert (third["added"], third["updated"], third["unchanged"]) == (0, 0, 1)
+
+
+def test_internal_store_server_keeps_files_but_not_an_index(monkeypatch, fresh_settings, tmp_path):
+    """내부 저장소(internal)는 플랫폼 파일 자리다 — 파일은 그대로 쓰고 읽되, 색인·.ready·검색 대상이 아니다.
+    문서 검색(/mcp/docs)에도 나오지 않는다."""
+    import json
+
+    c = _storage_client(monkeypatch, tmp_path)
+    path = "/mcp/storage/internal"
+    assert "wrote memo.md" in _text(_call(c, path, "write_file", {"path": "memo.md", "content": "# 내부 메모"}))
+    assert _text(_call(c, path, "read_file", {"path": "memo.md"})).strip() == "# 내부 메모"
+    for tool in ("search_docs", "reindex_docs", "index_status"):
+        reply = _call(c, path, tool, {"query": "메모"} if tool == "search_docs" else {})
+        assert "내부 저장소라 색인하지 않습니다" in reply["error"]["message"], tool
+    assert not (tmp_path / "index" / "internal.db").exists()
+    assert not list((tmp_path / "index").glob("**/internal/**/*.md"))          # .ready를 남기지 않는다
+    sources = json.loads(_text(_call(c, "/mcp/docs", "list_sources")))["sources"]
+    assert [row["source"] for row in sources] == ["assets"]

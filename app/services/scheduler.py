@@ -62,8 +62,8 @@ def _wanted(db: Session) -> list[tuple[JobKind, str]]:
 
     wanted: list[tuple[JobKind, str]] = [(JobKind.api_catalog, "")]
     try:
-        # 문서 색인은 숨긴 저장소(internal)까지 전부 돈다 — /mcp/docs가 검색하는 범위와 같다.
-        wanted += [(JobKind.doc_index, s.name) for s in storage.stores()]
+        # 문서 색인은 PAAS_DOC_ROOTS의 문서 저장소만 — 내부 저장소(internal)는 색인 대상이 아니다(storage.indexed).
+        wanted += [(JobKind.doc_index, s.name) for s in storage.indexed_stores()]
     except storage.StorageError:
         pass  # 환경변수가 잘못돼 있으면 문서 job만 빠지고 나머지는 그대로 돈다
     for module in db.execute(select(Module).order_by(Module.name)).scalars():

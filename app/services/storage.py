@@ -179,6 +179,22 @@ def visible_stores(db: Session | None = None) -> list[Store]:
     return [s for s in stores(db) if not s.hidden]
 
 
+def indexed(store: Store) -> bool:
+    """색인(검색·.ready·온톨로지) 대상인가 — **PAAS_DOC_ROOTS에서 온 문서 저장소(DB 등록)만.**
+
+    내부 저장소(internal = PAAS_STORAGE_ROOT)는 플랫폼이 파일을 쓰는 자리다(데이터 수집의 내려받은 파일 등) —
+    업무 문서의 자리가 아니다. 예전에는 그것도 색인했는데, 그 경로가 문서 폴더들의 상위로 설정되면 같은 문서가
+    두 번 색인되고(검색에 두 출처로, 내용 분석이면 LLM 비용도 두 번), 그 아래의 작업 폴더(배포 폴더·빌드 로그·
+    DB 백업)까지 문서로 색인됐다(실측: 내부 저장소가 D:/gp, 문서 폴더가 그 아래). 파일 자체는 저장소 창구로 그대로 닿는다.
+    """
+    return not store.hidden
+
+
+def indexed_stores(db: Session | None = None) -> list[Store]:
+    """색인 대상 저장소 전부 — 주기 색인·문서 검색·온톨로지가 같은 목록을 쓴다."""
+    return [s for s in stores(db) if indexed(s)]
+
+
 def store(name: str, db: Session | None = None) -> Store | None:
     """이름으로 찾는다 — 숨긴 저장소도 찾힌다. 숨긴 것은 고르는 목록에서 뺀 것이지
     닿지 못하게 한 것이 아니다."""
@@ -232,6 +248,8 @@ def _touch_index(store: "Store", rel: str, *, removed: bool = False) -> None:
     """
     from . import docsearch  # noqa: PLC0415 — 색인은 저장소의 파생 데이터다(역참조 최소화)
 
+    if not indexed(store):
+        return   # 내부 저장소 — 색인 대상이 아니다(indexed)
     try:
         if removed:
             docsearch.forget_one(store.name, rel)

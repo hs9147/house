@@ -12,10 +12,19 @@ from ..db import get_db
 from ..models import ApiKey
 from ..security import (accessible_document_stores, require_admin, require_api_key,
                         require_document_store)
-from ..services import docsearch, ontology_status, semantic
+from ..services import docsearch, indexclean, ontology_status, semantic
 from ..services import storage as storage_service
 
 router = APIRouter(tags=["ontology"])
+
+
+def _indexed_store(db: Session, key: ApiKey, store_name: str):
+    """권한과 함께 **색인 대상인지**(storage.indexed) — 내부 저장소(internal)는 색인하지 않아 그래프가 없다.
+    없는 저장소와 같은 404로 답한다."""
+    found = require_document_store(db, key, store_name)
+    if not storage_service.indexed(found):
+        raise HTTPException(status_code=404, detail=f"'{store_name}'은 색인 대상이 아닙니다(내부 저장소)")
+    return found
 
 # 재색인 한 번에 쓸 시간 예산(초). MCP 경로와 같은 이유로 나눠 돈다 — 한 번에 끝내지 않고
 # 남은 개수를 돌려주면 화면이 진행을 보여 줄 수 있다(docsearch.reindex).
@@ -30,7 +39,7 @@ def ontology_overview(db: Session = Depends(get_db), key: ApiKey = Depends(requi
     준다 — "전환율 86%"보다 "이 문서들이 안 됐다"가 고치는 데 쓸모 있다.
     """
     try:
-        return ontology_status.overview(accessible_document_stores(db, key, include_internal=True))
+        return ontology_status.overview(accessible_document_stores(db, key))
     except storage_service.StorageError as e:
         # 저장소 설정 오류다 — 요청이 잘못된 것이 아니다.
         raise HTTPException(status_code=500, detail=str(e))
@@ -40,7 +49,7 @@ def ontology_overview(db: Session = Depends(get_db), key: ApiKey = Depends(requi
 def ontology_store(store_name: str, db: Session = Depends(get_db),
                    key: ApiKey = Depends(require_api_key)):
     """저장소 하나의 전환 현황(목록 화면에서 펼쳐 볼 때)."""
-    require_document_store(db, key, store_name)
+    _indexed_store(db, key, store_name)
     return {
         **ontology_status.store_summary(store_name),
         "index_bytes": ontology_status.index_file_size(store_name),
@@ -61,7 +70,7 @@ def ontology_store_graph(
     종류 수준(문서·절·용어·표)과 관계 종류는 overview가 이미 준다. 여기서는 그 아래,
     실제 노드 몇 개를 본다 — 수치가 맞는지는 결국 이름을 봐야 믿을 수 있다.
     """
-    require_document_store(db, key, store_name)
+    _indexed_store(db, key, store_name)
     nodes = docsearch.node_search(store_name, kind, q, max(1, min(limit, 200)))
     return {"store": store_name, "kind": kind, "q": q, "nodes": nodes}
 
@@ -81,7 +90,7 @@ def ontology_store_neighbors(
     털뭉치가 되고, 그래서 탐색의 규약은 **찾고(검색) · 문맥을 보고(이웃) · 필요한 데서만
     펼친다**(van Ham & Perer 2009). 서버가 주는 단위도 그 한 걸음이다.
     """
-    require_document_store(db, key, store_name)
+    _indexed_store(db, key, store_name)
     if not name:
         raise HTTPException(status_code=422, detail="name이 필요합니다")
     return docsearch.neighborhood(store_name, kind, name, max(1, min(limit, 200)))
@@ -101,11 +110,29 @@ def ontology_reindex(
     돌려주므로, 화면이 이어서 다시 부르면 된다.
     """
     store = storage_service.store(store_name)
-    if store is None:
+    if store is None or not storage_service.indexed(store):
         raise HTTPException(status_code=404, detail=f"storage '{store_name}' not found")
     result = docsearch.reindex(store.name, store.root, force=force,
                               budget_seconds=_REINDEX_BUDGET)
     audit.record(db, admin.name, "ontology.reindex", store.name, result)
+    return result
+
+
+@router.get("/ontology/cleanse")
+def ontology_cleanse_preview(admin: ApiKey = Depends(require_admin)):
+    """클린징 미리보기 — 지울 찌꺼기(색인 대상이 아닌 저장소의 색인·.ready, 옛 노드, 빠진 문서의 내용 그래프·.ready)를
+    세기만 한다. 실제로 지우는 것(POST)과 같은 함수다."""
+    return indexclean.cleanse(apply=False)
+
+
+@router.post("/ontology/cleanse")
+def ontology_cleanse(db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    """클린징 — 파생 데이터의 찌꺼기만 지운다(원본 문서는 건드리지 않는다). 지운 것은 감사에 남긴다."""
+    result = indexclean.cleanse(apply=True)
+    audit.record(db, admin.name, "ontology.cleanse", "*", {
+        "orphan_index": [i["store"] for i in result["orphan_index"]],
+        "orphan_ready": [i["store"] for i in result["orphan_ready"]],
+        "stores": result["stores"]})
     return result
 
 
@@ -120,7 +147,7 @@ def _semantic(fn, *args):
 
 def _store_or_404(store_name: str):
     store = storage_service.store(store_name)
-    if store is None:
+    if store is None or not storage_service.indexed(store):
         raise HTTPException(status_code=404, detail=f"storage '{store_name}' not found")
     return store
 
@@ -133,7 +160,7 @@ def _submit(store_name: str, label: str, fn) -> None:
 @router.get("/ontology/stores/{store_name}/semantic")
 def semantic_status(store_name: str, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
     """스키마(초안·확정)·분석 진행·표본 검토·스키마 밖 후보·묶기 — 화면이 이것 하나를 다시 읽는다."""
-    require_document_store(db, key, store_name)
+    _indexed_store(db, key, store_name)
     return semantic.status(store_name)
 
 
@@ -162,7 +189,7 @@ def semantic_confirm_schema(store_name: str, schema: dict = Body(...), db: Sessi
 @router.get("/ontology/stores/{store_name}/semantic/forms")
 def semantic_forms(store_name: str, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
     """② 되풀이 양식과 각각의 열 대응표(제안·검토·확정)."""
-    require_document_store(db, key, store_name)
+    _indexed_store(db, key, store_name)
     return {"forms": semantic.forms(store_name)}
 
 
@@ -228,12 +255,12 @@ def semantic_unmerge(store_name: str, cls: str, alias: str, db: Session = Depend
 @router.get("/ontology/stores/{store_name}/semantic/search")
 def semantic_search(store_name: str, cls: str = "", q: str = "", limit: int = 40,
                     db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
-    require_document_store(db, key, store_name)
+    _indexed_store(db, key, store_name)
     return {"nodes": semantic.search(store_name, cls, q, max(1, min(limit, 200)))}
 
 
 @router.get("/ontology/stores/{store_name}/semantic/neighbors")
 def semantic_neighbors(store_name: str, cls: str, name: str, limit: int = 60,
                        db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
-    require_document_store(db, key, store_name)
+    _indexed_store(db, key, store_name)
     return semantic.neighbors(store_name, cls, name, max(1, min(limit, 200)))

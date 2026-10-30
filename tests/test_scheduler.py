@@ -23,9 +23,18 @@ def db(monkeypatch, tmp_path):
     호스트에 무엇이 깔려 있든 job 개수가 흔들리지 않게."""
     from app.db import SessionLocal
 
+    from app.db import Base, engine
+    from app.models import DocumentStore, DocumentStoreRegistry
+
+    (tmp_path / "docs").mkdir()
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
-    monkeypatch.setenv("PAAS_DOC_ROOTS", "")
+    monkeypatch.setenv("PAAS_DOC_ROOTS", f"docs={tmp_path / 'docs'}")
     get_settings.cache_clear()
+    Base.metadata.create_all(engine)
+    with SessionLocal() as s:     # 다른 시험이 남긴 저장소를 비우고 이 하나만 이관되게
+        s.query(DocumentStore).delete()
+        s.query(DocumentStoreRegistry).delete()
+        s.commit()
     create_app()
     session = SessionLocal()
     try:
@@ -43,8 +52,8 @@ def _names(db) -> set[str]:
 
 def test_reconcile_builds_jobs_from_registered_things(db, fresh_settings):
     scheduler.reconcile(db)
-    # 카탈로그 하나 + 숨긴 internal 저장소 하나. 모듈이 없으니 probe도 없다.
-    assert _names(db) == {"api_catalog", "doc_index:internal"}
+    # 카탈로그 하나 + 문서 저장소(PAAS_DOC_ROOTS) 하나. 내부 저장소(internal)는 색인하지 않는다. 모듈이 없으니 probe도 없다.
+    assert _names(db) == {"api_catalog", "doc_index:docs"}
 
     db.add_all([
         Module(name="mcp-ops", type=ModuleType.mcp, config={"url": "http://x/mcp"}),
@@ -56,7 +65,7 @@ def test_reconcile_builds_jobs_from_registered_things(db, fresh_settings):
     result = scheduler.reconcile(db)
     assert result["added"] == 2  # database 모듈은 갱신할 것이 없다
     assert _names(db) == {
-        "api_catalog", "doc_index:internal", "mcp_probe:mcp-ops", "api_probe:news-api",
+        "api_catalog", "doc_index:docs", "mcp_probe:mcp-ops", "api_probe:news-api",
     }
 
 
@@ -125,7 +134,7 @@ def test_a_job_that_could_not_finish_runs_again_next_tick(db, fresh_settings):
     재우면 900초당 20초 — 듀티 사이클 2%다. 문서 수천 건짜리 저장소는 첫 색인이 하루를
     넘긴다. (예전에는 사람이 reindex_docs를 done이 될 때까지 다시 눌렀다.)"""
     scheduler.reconcile(db)
-    job = db.query(ScheduledJob).filter_by(name="doc_index:internal").one()
+    job = db.query(ScheduledJob).filter_by(name="doc_index:docs").one()
     job.last_run_at = utcnow()
     job.last_detail = {"indexed": 12, "remaining": 300, "done": False}
     db.commit()
@@ -258,7 +267,7 @@ def test_tick_reconciles_then_runs_due_jobs(db, monkeypatch, fresh_settings):
 
     result = scheduler.tick(db)
     assert result["reconciled"]["added"] == 2
-    assert {r["job"] for r in result["ran"]} == {"api_catalog", "doc_index:internal"}
+    assert {r["job"] for r in result["ran"]} == {"api_catalog", "doc_index:docs"}
     # 방금 돌았으니 다음 tick에서는 아무것도 안 돈다
     assert scheduler.tick(db)["ran"] == []
 
@@ -291,18 +300,15 @@ def test_snapshot_counts_failing_and_overdue(db, fresh_settings):
 
 # --- REST 창구 ---
 
-def test_scheduler_endpoint_readable_by_any_key_and_reconciles(monkeypatch, tmp_path):
-    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
-    monkeypatch.setenv("PAAS_DOC_ROOTS", "")
-    get_settings.cache_clear()
-    c = TestClient(create_app())
+def test_scheduler_endpoint_readable_by_any_key_and_reconciles(db):
+    c = TestClient(create_app())   # 문서 저장소는 db 픽스처가 하나(docs)로 고정한다
 
     # 배포된 앱에 심어 주는 키는 admin이 아니다 — 그 키로도 현황은 보여야 한다.
     member = c.post(f"{API}/keys", json={"name": "app"}, headers=ADMIN).json()["key"]
     body = c.get(f"{API}/scheduler", headers={"x-api-key": member})
     assert body.status_code == 200, body.text
     # 목록은 사람이 등록하지 않는다 — 처음 열어도 이미 채워져 있다.
-    assert {j["name"] for j in body.json()["jobs"]} == {"api_catalog", "doc_index:internal"}
+    assert {j["name"] for j in body.json()["jobs"]} == {"api_catalog", "doc_index:docs"}
 
     job_id = body.json()["jobs"][0]["id"]
     assert c.post(f"{API}/scheduler/jobs/{job_id}/toggle",
@@ -312,24 +318,21 @@ def test_scheduler_endpoint_readable_by_any_key_and_reconciles(monkeypatch, tmp_
     get_settings.cache_clear()
 
 
-def test_toggle_and_run_are_audited(monkeypatch, tmp_path):
-    monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
-    monkeypatch.setenv("PAAS_DOC_ROOTS", "")
-    get_settings.cache_clear()
-    c = TestClient(create_app())
+def test_toggle_and_run_are_audited(db):
+    c = TestClient(create_app())   # 문서 저장소는 db 픽스처가 하나(docs)로 고정한다
 
     jobs = c.get(f"{API}/scheduler", headers=ADMIN).json()["jobs"]
-    job = next(j for j in jobs if j["name"] == "doc_index:internal")
+    job = next(j for j in jobs if j["name"] == "doc_index:docs")
 
     off = c.post(f"{API}/scheduler/jobs/{job['id']}/toggle", headers=ADMIN)
-    assert off.json() == {"id": job["id"], "name": "doc_index:internal", "enabled": False}
+    assert off.json() == {"id": job["id"], "name": "doc_index:docs", "enabled": False}
     assert c.post(f"{API}/scheduler/jobs/{job['id']}/toggle",
                   headers=ADMIN).json()["enabled"] is True
 
     # 실패해도 200이다 — 결과가 곧 답이고, 그것을 모니터가 읽는다.
     ran = c.post(f"{API}/scheduler/jobs/{job['id']}/run", headers=ADMIN)
     assert ran.status_code == 200, ran.text
-    assert ran.json()["job"] == "doc_index:internal"
+    assert ran.json()["job"] == "doc_index:docs"
 
     assert c.post(f"{API}/scheduler/jobs/99999/run", headers=ADMIN).status_code == 404
 
@@ -337,3 +340,14 @@ def test_toggle_and_run_are_audited(monkeypatch, tmp_path):
     assert "scheduler.toggle" in actions
     assert "scheduler.run" in actions
     get_settings.cache_clear()
+
+
+def test_the_internal_store_is_never_indexed(db, tmp_path):
+    """색인 대상은 PAAS_DOC_ROOTS의 문서 저장소뿐이다 — 내부 저장소(internal)는 플랫폼 파일 자리다. 그 경로가 문서
+    폴더들의 상위로 설정돼도(실측) 같은 문서가 두 번, 작업 폴더까지 문서로 색인되지 않게 job 자체를 만들지 않는다."""
+    from app.services import storage
+
+    assert storage.store(storage.INTERNAL_STORE) is not None          # 파일 창구로는 여전히 닿는다
+    assert [s.name for s in storage.indexed_stores()] == ["docs"]
+    scheduler.reconcile(db)
+    assert not [n for n in _names(db) if n.startswith("doc_index:internal")]

@@ -165,3 +165,55 @@ def test_neighbors_expand_one_step_and_report_truncation(monkeypatch, tmp_path, 
                  params={"kind": "document", "name": ""}, headers=ADMIN).status_code == 422
     assert c.get(f"{API}/ontology/stores/x/graph/neighbors",
                  params={"kind": "document", "name": "규정"}, headers=ADMIN).status_code == 404
+
+
+def test_internal_store_is_not_an_ontology_target(monkeypatch, tmp_path, fresh_settings):
+    """색인 대상은 PAAS_DOC_ROOTS의 문서 저장소뿐 — 내부 저장소(internal)는 현황에도 없고 그래프 창구도 404다."""
+    root = _store(monkeypatch, tmp_path)
+    (root / "a.md").write_text("# 문서\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    c = TestClient(create_app())
+    stores = [s["store"] for s in c.get(f"{API}/ontology/overview", headers=ADMIN).json()["stores"]]
+    assert stores == ["docs"]
+    for url in ("", "/graph", "/semantic"):
+        assert c.get(f"{API}/ontology/stores/internal{url}", headers=ADMIN).status_code == 404, url
+    assert c.post(f"{API}/ontology/stores/internal/reindex", headers=ADMIN).status_code == 404
+
+
+def test_cleanse_previews_then_removes_only_derived_leftovers(monkeypatch, tmp_path, fresh_settings):
+    """클린징 — 색인 대상이 아닌 저장소의 색인·.ready(예: internal을 뺀 뒤의 internal.db), 옛 노드, 빠진 문서의
+    .ready를 미리 보여 주고 지운다. 원본 문서와 살아 있는 색인은 그대로."""
+    from app.services import docready
+    root = _store(monkeypatch, tmp_path)
+    (root / "a.md").write_text("# 문서\n## 제1조(목적)\n본문\n", encoding="utf-8")
+    (root / "b.md").write_text("# 지울 문서\n## 제2조(정의)\n본문\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    index = tmp_path / "index"
+    (index / "internal.db").write_bytes(b"x" * 10)                       # 예전 internal 색인
+    (docready.root() / "internal").mkdir(parents=True, exist_ok=True)
+    (docready.root() / "internal" / "old.md").write_text("x", encoding="utf-8")
+    conn = docsearch._connect("docs")
+    try:   # b.md를 색인에서 지운 상태 — 노드와 .ready가 남는다(원본을 밖에서 지운 경우)
+        conn.execute("DELETE FROM docs WHERE path = 'b.md'")
+        conn.commit()
+    finally:
+        conn.close()
+    assert docready.path_for("docs", "b.md").exists()
+
+    c = TestClient(create_app())
+    member = {"x-api-key": c.post(f"{API}/keys", json={"name": "cl-dev"}, headers=ADMIN).json()["key"]}
+    assert c.get(f"{API}/ontology/cleanse", headers=member).status_code == 403
+    preview = c.get(f"{API}/ontology/cleanse", headers=ADMIN).json()
+    assert preview["applied"] is False
+    assert [i["store"] for i in preview["orphan_index"]] == ["internal"]
+    assert [i["store"] for i in preview["orphan_ready"]] == ["internal"]
+    assert preview["stores"]["docs"]["stale_nodes"] > 0 and preview["stores"]["docs"]["stale_ready"] == 1
+    assert (index / "internal.db").exists()                               # 미리보기는 지우지 않는다
+
+    done = c.post(f"{API}/ontology/cleanse", headers=ADMIN).json()
+    assert done["applied"] is True and done["total"] == preview["total"]
+    assert not (index / "internal.db").exists() and not (docready.root() / "internal").exists()
+    assert not docready.path_for("docs", "b.md").exists() and docready.path_for("docs", "a.md").exists()
+    assert c.get(f"{API}/ontology/cleanse", headers=ADMIN).json()["total"] == 0
+    assert (root / "a.md").exists() and (root / "b.md").exists()          # 원본은 건드리지 않는다
+    assert docsearch.status("docs")["total"] == 1

@@ -131,7 +131,7 @@ def overview(stores: list[storage_service.Store] | None = None) -> dict:
     """
     summaries: list[dict] = []
     errors: list[dict] = []
-    for store in (stores if stores is not None else storage_service.stores()):
+    for store in (stores if stores is not None else storage_service.indexed_stores()):
         try:
             summaries.append(store_summary(store.name))
         except Exception as e:  # noqa: BLE001
