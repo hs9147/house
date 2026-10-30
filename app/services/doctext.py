@@ -815,8 +815,58 @@ def _soffice() -> str | None:
 
 # --- 평문 ---
 
+# 메일 속 이미지 — 본문에 붙인 캡처(표·화면)가 흔하고, 그 안의 글자가 메일의 요점인 경우가 많다. 서명 로고·추적
+# 픽셀 같은 작은 그림은 읽지 않고(글자가 없다), 많으면 앞의 것만 읽는다(메일 하나에 OCR 시간이 몰리지 않게).
+_MAIL_IMAGE_MIN_BYTES = 8 * 1024
+_MAIL_IMAGE_MAX = 10
+_MAIL_IMAGE_TYPES = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "gif": ".gif", "bmp": ".bmp", "tiff": ".tif"}
+
+
+def _ocr_image(data: bytes, suffix: str) -> str | None:
+    """그림 한 장을 Tesseract로 읽는다(kor+eng). 도구가 없으면 None, 읽은 글자가 없으면 빈 문자열."""
+    exe = _tesseract()
+    if exe is None:
+        return None
+    with tempfile.TemporaryDirectory() as workdir:
+        image = Path(workdir) / f"image{suffix}"
+        image.write_bytes(data)
+        try:
+            done = subprocess.run([exe, str(image), "stdout", "-l", "kor+eng", "--psm", "3"],
+                                  capture_output=True, timeout=_OCR_PAGE_TIMEOUT, check=False)
+        except subprocess.TimeoutExpired:
+            return ""
+        return done.stdout.decode("utf-8", "replace").strip() if done.returncode == 0 else ""
+
+
+def _mail_images(msg) -> list[str]:
+    """메일 속 이미지(본문에 붙인 것·첨부)를 읽어 마크다운 구역으로 — 그림마다 「이미지 n: 이름」과 읽은 글자."""
+    images = []
+    for part in msg.walk():
+        if part.get_content_maintype() != "image":
+            continue
+        suffix = _MAIL_IMAGE_TYPES.get(part.get_content_subtype().lower())
+        data = part.get_payload(decode=True) or b""
+        if suffix and len(data) >= _MAIL_IMAGE_MIN_BYTES:
+            images.append((part.get_filename() or f"그림{suffix}", suffix, data))
+    if not images:
+        return []
+    shown = images[:_MAIL_IMAGE_MAX]
+    lines = ["", "## 메일 속 이미지", ""]
+    if _tesseract() is None:
+        # 도구가 생기면 다시 읽는다(추출 능력 지문에 tesseract가 들어 있다 — capability_fingerprint).
+        return lines + [f"- 이미지 {len(images)}개 — 글자를 읽을 도구(Tesseract)가 없어 내용은 읽지 않았습니다: "
+                        + ", ".join(name for name, _, _ in shown)]
+    for n, (name, suffix, data) in enumerate(shown, 1):
+        text = _ocr_image(data, suffix) or ""
+        lines += [f"### 이미지 {n}: {name}", "", text if text else "(읽을 글자가 없는 그림)", ""]
+    if len(images) > len(shown):
+        lines.append(f"(이미지는 앞 {len(shown)}개만 읽었습니다 — 전체 {len(images)}개)")
+    return lines
+
+
 def _eml_markdown(path: Path) -> str:
-    """메일 한 통(.eml) — 제목·보낸 사람·받는 사람·시각과 본문. 첨부는 이름만 남긴다.
+    """메일 한 통(.eml) — 제목·보낸 사람·받는 사람·시각과 본문. 첨부는 이름을 남기고, **메일 속 이미지는 글자를
+    읽어(OCR) 마크다운 구역으로 붙인다**(_mail_images) — 본문에 붙인 캡처가 메일의 요점인 경우가 많다.
 
     웹 Outlook에서 메일을 내려받으면 이 형식이다. 본문은 MIME(base64·인코딩된 헤더)이라
     평문으로 읽으면 알아볼 수 없으므로 파서로 푼다.
@@ -838,7 +888,7 @@ def _eml_markdown(path: Path) -> str:
         ]
         if names:
             lines.append(f"- 첨부: {', '.join(names)}")
-        return "\n".join([*lines, "", content.strip(), ""])
+        return "\n".join([*lines, "", content.strip(), *_mail_images(msg), ""])
     except (OSError, ValueError, LookupError) as e:
         raise ExtractError(f"메일을 읽을 수 없습니다: {e}")
 

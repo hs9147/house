@@ -690,3 +690,36 @@ def test_eml_with_only_html_body_is_stripped_to_text(tmp_path):
     path.write_bytes(_eml(html="<style>p{color:red}</style><p>펠리컨&nbsp;일정</p><script>x()</script>"))
     text = doctext.extract_text(path)
     assert "펠리컨" in text and "일정" in text and "color" not in text and "x()" not in text
+
+
+def _mail_with_images(tmp_path):
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = "견적 비교", "kim@corp.com", "lee@corp.com"
+    msg.set_content("아래 캡처를 확인해 주세요.")
+    msg.add_alternative("<p>아래 캡처를 확인해 주세요.</p><img src='cid:cap1'>", subtype="html")
+    html = msg.get_payload()[1]
+    html.add_related(b"\x89PNG" + b"0" * 20_000, "image", "png", cid="<cap1>", filename="캡처.png")
+    msg.add_attachment(b"\x89PNG" + b"1" * 500, maintype="image", subtype="png", filename="서명로고.png")
+    path = tmp_path / "견적.eml"
+    path.write_bytes(msg.as_bytes())
+    return path
+
+
+def test_mail_images_are_read_into_markdown(tmp_path, monkeypatch):
+    """메일 속 캡처의 글자를 읽어 마크다운 구역으로 — 서명 로고 같은 작은 그림은 읽지 않는다."""
+    read = []
+    monkeypatch.setattr(doctext, "_tesseract", lambda: "tesseract")
+    monkeypatch.setattr(doctext, "_ocr_image",
+                        lambda data, suffix: read.append(len(data)) or "업체 | 단가\n에이전자 | 1,200")
+    text = doctext.extract(_mail_with_images(tmp_path))[0]
+    assert "## 메일 속 이미지" in text and "### 이미지 1: 캡처.png" in text
+    assert "에이전자 | 1,200" in text and "서명로고" not in text.split("## 메일 속 이미지")[1]
+    assert len(read) == 1                                                  # 작은 그림은 읽지 않았다
+
+
+def test_mail_images_without_ocr_say_so(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctext, "_tesseract", lambda: None)
+    text = doctext.extract(_mail_with_images(tmp_path))[0]
+    assert "이미지 1개 — 글자를 읽을 도구(Tesseract)가 없어" in text and "캡처.png" in text
