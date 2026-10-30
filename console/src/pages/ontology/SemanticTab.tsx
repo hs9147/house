@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../lib/api';
 import { useApi, usePolling } from '../../lib/hooks';
+import { runTask } from '../../lib/tasks';
 import type {
   SemanticForm, SemanticHit, SemanticMapping, SemanticNeighbors, SemanticReview, SemanticSchema, SemanticStatus,
 } from '../../lib/types';
@@ -53,6 +54,53 @@ export default function SemanticTab() {
     }
   };
 
+  // 오래 걸리는 일(LLM 여러 번)은 **작업 트레이**에서 진행을 보인다 — 폴더 업로드와 같은 자리. 서버가 뒤에서 돌고
+  // 단계·문구를 남기므로(semantic.submit) 브라우저는 그것을 읽어 옮긴다. 다른 메뉴로 가도 트레이에서 계속 보인다.
+  const track = (label: string, start: () => Promise<unknown>) => {
+    setError('');
+    setNotice('');
+    const where = store;
+    runTask(`semantic:${where}`, { label: `${label} · ${where}`, to: '/ontology/semantic' }, async (h) => {
+      await start();
+      if (where === store) await reload();   // 탭도 「진행 중」으로 — 버튼이 잠기고 화면이 따라 갱신된다
+      for (;;) {
+        await new Promise((ok) => setTimeout(ok, 2000));
+        const s = await api.semanticStatus(where);
+        const t = s.task;
+        h.set({ progress: t.progress || '진행 중…', sent: t.step ?? undefined, total: t.steps ?? undefined });
+        if (t.done && !t.running) {
+          if (t.error) throw new Error(t.error);
+          h.set({ progress: '끝났습니다 — 결과를 확인하세요' });
+          break;
+        }
+      }
+      if (where === store) await reload();
+    }).catch((e) => setError((e as Error).message));
+  };
+  // 문서 분석 — 분석한 문서 수로 진행을 보인다. 멈춤 조건에 걸리면 그 사유로 끝난다.
+  const trackAnalysis = (action: 'start' | 'resume') => {
+    setError('');
+    setNotice('');
+    const where = store;
+    runTask(`semantic-analyze:${where}`, { label: `내용 분석 · ${where}`, to: '/ontology/semantic' }, async (h) => {
+      await api.semanticAnalyze(where, action);
+      if (where === store) await reload();
+      for (;;) {
+        await new Promise((ok) => setTimeout(ok, 3000));
+        const s = await api.semanticStatus(where);
+        const done = Object.values(s.analyzed).reduce((n, v) => n + v, 0);
+        h.set({ sent: done, total: s.documents,
+                progress: `${done.toLocaleString()} / ${s.documents.toLocaleString()}건 — LLM ${s.analyzed.ok ?? 0} · `
+                  + `양식 ${s.analyzed.form ?? 0} · 실패 ${s.analyzed.failed ?? 0}` });
+        if (!s.running) {
+          if (s.paused) throw new Error(`멈춤 — ${s.paused}`);
+          break;
+        }
+      }
+      if (where === store) await reload();
+    }).catch((e) => setError((e as Error).message));
+  };
+
   const busy = !!status?.task.running;
   return (
     <div className="panel">
@@ -82,19 +130,20 @@ export default function SemanticTab() {
       {status && (
         <>
           <SchemaStep status={status} busy={busy}
-            onPropose={() => act('스키마 제안·검토를 시작했습니다.', () => api.semanticProposeSchema(store))}
+            onPropose={() => track('스키마 제안·검토', () => api.semanticProposeSchema(store))}
             onConfirm={(s) => act('스키마를 확정했습니다 — ② 양식과 ③ 분석으로 넘어가세요.', () => api.semanticConfirmSchema(store, s))} />
           {status.schema && (
             <>
               <FormsStep forms={forms} schemaVersion={status.schema.version ?? ''} busy={busy}
-                onPropose={(f) => act('양식 대응 제안·검토를 시작했습니다.', () => api.semanticProposeForm(store, f))}
+                onPropose={(f) => track('양식 대응 제안·검토', () => api.semanticProposeForm(store, f))}
                 onConfirm={(f, m) => act('대응표를 확정했습니다 — 분석하면 이 양식의 모든 문서에 규칙으로 적용됩니다.',
                   () => api.semanticConfirmForm(store, f, m))} />
               <AnalyzeStep status={status}
-                onAction={(a) => act(a === 'stop' ? '멈추라고 했습니다(지금 문서까지는 끝냅니다).' : '분석을 시작했습니다.',
-                  () => api.semanticAnalyze(store, a))} />
+                onAction={(a) => (a === 'stop'
+                  ? act('멈추라고 했습니다(지금 문서까지는 끝냅니다).', () => api.semanticAnalyze(store, a))
+                  : trackAnalysis(a))} />
               <MergeStep status={status} busy={busy}
-                onMerge={() => act('묶기 제안·검토를 시작했습니다.', () => api.semanticMerge(store))}
+                onMerge={() => track('같은 개체 묶기·검토', () => api.semanticMerge(store))}
                 onUnmerge={(cls, alias) => act(`'${alias}' 묶음을 풀었습니다.`, () => api.semanticUnmerge(store, cls, alias))} />
               <Explore store={store} schema={status.schema} />
             </>

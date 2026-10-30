@@ -170,7 +170,7 @@ def semantic_propose_schema(store_name: str, db: Session = Depends(get_db),
     """① 스키마 제안 → LLM 검토 → 한 번 고침. 뒤에서 돈다(LLM 여러 번) — 상태의 task·schema_draft로 본다."""
     _store_or_404(store_name)
     _semantic(semantic.provider_for, db, store_name)   # 프로바이더가 없으면 지금 말한다(뒤에서 실패하지 않게)
-    _submit(store_name, "스키마 제안·검토", lambda s: semantic.propose_schema(s, store_name))
+    _submit(store_name, "스키마 제안·검토", lambda s, report: semantic.propose_schema(s, store_name, report))
     audit.record(db, admin.name, "ontology.semantic.schema.propose", store_name, {})
     return {"started": True}
 
@@ -198,7 +198,7 @@ def semantic_propose_mapping(store_name: str, form: str = Body(..., embed=True),
                              admin: ApiKey = Depends(require_admin)):
     _store_or_404(store_name)
     _semantic(semantic.provider_for, db, store_name)
-    _submit(store_name, f"양식 대응 제안·검토: {form[:60]}", lambda s: semantic.propose_mapping(s, store_name, form))
+    _submit(store_name, f"양식 대응 제안·검토: {form[:60]}", lambda s, report: semantic.propose_mapping(s, store_name, form, report))
     audit.record(db, admin.name, "ontology.semantic.form.propose", store_name, {"form": form[:200]})
     return {"started": True}
 
@@ -237,7 +237,7 @@ def semantic_merge(store_name: str, db: Session = Depends(get_db), admin: ApiKey
     """④ 같은 개체 묶기 — 정규화가 같은 것은 바로, 애매한 것은 LLM 제안 → 묶음마다 LLM 검토."""
     _store_or_404(store_name)
     _semantic(semantic.provider_for, db, store_name)
-    _submit(store_name, "같은 개체 묶기", lambda s: semantic.propose_merges(s, store_name))
+    _submit(store_name, "같은 개체 묶기", lambda s, report: semantic.propose_merges(s, store_name, report))
     audit.record(db, admin.name, "ontology.semantic.merge", store_name, {})
     return {"started": True}
 

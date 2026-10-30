@@ -1561,7 +1561,8 @@ export interface SemanticStatus {
   documents: number;
   analyzed: Record<string, number>;     // ok·form·failed별 문서 수
   running: boolean;
-  task: { label?: string; running: boolean; done?: boolean; error?: string | null; started_at?: string; finished_at?: string };
+  task: { label?: string; running: boolean; done?: boolean; error?: string | null; started_at?: string; finished_at?: string;
+          progress?: string; step?: number | null; steps?: number | null };   // 단계·문구 — 작업 트레이가 읽는다
   schema_draft: { proposal: SemanticSchema; review: SemanticReview; revised: SemanticSchema; problems: string[];
                   samples: string[]; provider: string; created_at: string } | null;
   schema: SemanticSchema | null;

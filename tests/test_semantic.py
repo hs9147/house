@@ -30,6 +30,7 @@ FORM = ["업체명", "품목", "금액"]
 class FakeLlm:
     def __init__(self):
         self.calls: list[str] = []
+        self.known: list[str] = []      # 관계 찾기마다 받은 「이미 정한 관계」
         self.review_wrong_all = False
         self.merge_groups = [{"canonical": "에이전자", "names": ["A-Electronics"], "reason": "영문 표기"},
                              {"canonical": "비상사", "names": ["에이전자"], "reason": "둘 다 견적서에 나온다"}]
@@ -42,8 +43,10 @@ class FakeLlm:
 
     @staticmethod
     def role(system: str) -> str:
-        for key, role in (("스키마를 설계", "schema"), ("스키마를 검토", "schema_review"),
-                          ("검토 의견을 반영해 스키마", "schema_revise"), ("양식 표의 열을", "map"),
+        for key, role in (("개념 종류를 설계", "schema"), ("정한 개념 종류를 검토", "schema_review"),
+                          ("검토 의견을 반영해 개념 종류", "schema_revise"),
+                          ("기준 개념에서 나가는", "relations"), ("찾은 관계 종류를 검토", "relations_review"),
+                          ("양식 표의 열을", "map"),
                           ("열 대응표를", "map_review"), ("검토 의견으로 대응표", "map_revise"),
                           ("**내용**에서 개념과 관계를 뽑는다", "extract"), ("뽑은 개념·관계를 검토", "doc_review"),
                           ("같은 대상**을 가리키는 이름들을 묶는다", "merge"), ("같은 대상으로 묶자고", "merge_review")):
@@ -53,13 +56,21 @@ class FakeLlm:
 
     def answer(self, role: str, user: str):
         if role == "schema":   # 일부러 겹친 개념 — 검토가 잡아야 한다
-            return {**GOOD_SCHEMA, "classes": GOOD_SCHEMA["classes"] + [
+            return {"classes": GOOD_SCHEMA["classes"] + [
                 {"name": "공급업체", "description": "협력사와 같다", "examples": []}]}
         if role == "schema_review":
             return {"verdict": "revise", "issues": [{"target": "공급업체", "problem": "협력사와 겹친다",
                                                      "suggestion": "협력사로 합친다"}]}
         if role == "schema_revise":
-            return GOOD_SCHEMA
+            return {"classes": GOOD_SCHEMA["classes"]}
+        if role == "relations":   # 기준 개념에서 나가는 것만 — 목록 밖 개념으로 가는 것은 버려져야 한다
+            anchors = json.loads(user[user.index("기준 개념:") + 6:].split(chr(10))[0])
+            self.known.append(user[user.index("이미 정한 관계:"):].split(chr(10))[0])
+            return {"relations": [r for r in GOOD_SCHEMA["relations"] if r["from"] in anchors]
+                    + [{"name": "속한다", "from": anchors[0], "to": "없는개념"}]}
+        if role == "relations_review":   # 고친 목록 전체를 낸다 — 여기서는 그대로
+            found = json.loads(user[user.index("검토할 관계"):].split(chr(10), 1)[1])
+            return {"issues": [], "relations": found}
         if role == "map":       # 일부러 틀린 대응 — 금액 열을 협력사로
             return {"columns": {"업체명": "협력사", "품목": "품목", "금액": "협력사"},
                     "relations": [{"from": "업체명", "rel": "공급한다", "to": "품목"}]}
@@ -144,10 +155,12 @@ def _confirm_schema_and_form():
 def test_schema_proposal_is_reviewed_and_revised_before_the_admin_confirms(store):
     with _db() as db:
         draft = semantic.propose_schema(db, "docs")
-    assert store.calls == ["schema", "schema_review", "schema_revise"]
+    # 개념 종류(제안·검토·고침) 뒤 관계는 묶음마다 찾고 검토한다(개념 3개 = 한 묶음)
+    assert store.calls == ["schema", "schema_review", "schema_revise", "relations", "relations_review"]
     assert "공급업체" in [c["name"] for c in draft["proposal"]["classes"]]       # 원안·검토·고친 안을 함께 남긴다
     assert draft["review"]["issues"][0]["target"] == "공급업체"
     assert [c["name"] for c in draft["revised"]["classes"]] == ["협력사", "품목", "부서"]
+    assert [r["name"] for r in draft["revised"]["relations"]] == ["공급한다", "담당한다"]   # 목록 밖으로 가는 것은 버림
     assert draft["problems"] == []
     # 표본은 양식을 하나만 — 견적서 다섯 건이 표본을 다 먹지 않는다
     assert sum(p.startswith("견적서") for p in draft["samples"]) == 1
@@ -377,3 +390,22 @@ def test_a_raw_line_break_inside_a_json_string_is_not_a_failure():
     """실측: 모델이 근거 문장을 옮기다 문자열 안에 줄바꿈을 그대로 넣었다 — 엄밀한 JSON이 아니어서 문서가 실패했다."""
     broken = '{"entities":[{"class":"협력사","name":"A","evidence":"1. 기업신용평가 요약' + chr(10) + '- 발행번호"}]}'
     assert semantic._json_of(broken)["entities"][0]["evidence"] == "1. 기업신용평가 요약" + chr(10) + "- 발행번호"
+
+
+def test_relations_are_found_batch_by_batch_without_a_cap(store, monkeypatch):
+    """관계는 한 번에 다 찾지 않는다 — 개념을 묶어 차례로 찾고 묶음마다 검토한다. 상한은 없다(실측: 한 번에 내게 하니
+    40개 상한을 넘어 확정할 수 없었다). 뒤 묶음은 앞에서 정한 관계를 받아 같은 이름을 쓴다. 진행은 단계마다 보고한다."""
+    monkeypatch.setattr(semantic, "RELATION_BATCH", 1)          # 개념 하나씩 = 세 묶음
+    steps: list[tuple] = []
+    with _db() as db:
+        draft = semantic.propose_schema(db, "docs", report=lambda text, step=None, total=None: steps.append((step, total)))
+    # 품목에서 나가는 관계는 없다 — 찾을 것이 없으면 검토를 부르지 않는다
+    assert store.calls == ["schema", "schema_review", "schema_revise",
+                           "relations", "relations_review", "relations", "relations", "relations_review"]
+    assert draft["batches"] == 3 and [r["name"] for r in draft["revised"]["relations"]] == ["공급한다", "담당한다"]
+    assert "공급한다" not in store.known[0] and "공급한다" in store.known[1] and "공급한다" in store.known[2]
+    assert [s[0] for s in steps][:4] == [1, 2, 3, 4] and steps[-1] == (10, 10)   # 4 + 묶음마다 2단계(찾기·검토)
+    many = {"classes": [{"name": f"개념{i}"} for i in range(60)],
+            "relations": [{"name": f"관계{i}", "from": "개념0", "to": f"개념{i % 60}"} for i in range(120)]}
+    assert semantic.check_schema(many) == []                    # 개수 상한이 없다
+    semantic.confirm_schema("docs", draft["revised"], "admin")

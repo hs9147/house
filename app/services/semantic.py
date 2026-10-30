@@ -8,7 +8,8 @@
 네 단계이고, **한 번 정해 많은 문서에 퍼지는 결과는 LLM이 전부 검토**하고 문서 하나에 그치는 결과는 표본만
 검토한다(모든 결과를 다시 읽으면 비용이 두 배다):
 
-  ① 스키마   표본 문서 → 개념·관계 종류 제안 → 검토 → 한 번 고침 → 관리자 확정(판 번호가 생긴다)
+  ① 스키마   표본 문서 → 개념 종류 제안 → 검토 → 고침 → 관계는 개념 몇 개씩 묶어 차례로 제안 → 묶음마다 검토
+             → 관리자 확정(판 번호가 생긴다). 관계 수에 상한을 두지 않는다
   ② 양식     되풀이되는 표(견적서 양식 하나가 320개 문서에 있다)는 LLM이 문서마다 읽지 않는다. 열이 어떤
              개념인지 대응표를 제안 → 실제 값 표본과 대조해 검토 → 관리자 확정 → **규칙으로** 전부 뽑는다
   ③ 문서     나머지 문서 → 추출 → 기계 검사(전부: 근거 문장이 원문에 있나·스키마에 있나) → 표본 검토(10%)
@@ -51,8 +52,10 @@ STOP_MIN_ITEMS = 30
 STOP_ERROR_RATE = 0.2
 # 묶기 — 한 번에 LLM에게 보이는 이름 수(종류마다).
 MERGE_NAMES = 150
-MAX_CLASSES = 30
-MAX_RELATIONS = 40
+# 관계는 한 번에 다 찾지 않는다 — 개념을 이만큼씩 묶어(그 개념에서 나가는 관계) 차례로 제안·검토한다. 관계 수에
+# 상한을 두지 않는다: 업무가 넓은 저장소는 관계가 많고, 한 번에 다 내게 하면 상한에 걸리거나(실측: 40개 초과로
+# 확정 불가) 뒤쪽이 대충 채워진다.
+RELATION_BATCH = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sem_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -146,6 +149,10 @@ def _ask(db: Session, provider, system: str, user: str) -> dict:
 _KO = "모든 이름과 설명은 한국어로. 응답은 JSON 하나만(설명 문장 없이)."
 
 
+def _quiet(text: str, step: int | None = None, steps: int | None = None) -> None:
+    """진행 보고의 기본값 — 뒤에서 돌 때는 submit이 task에 남기는 함수로 바꾼다(화면 트레이가 읽는다)."""
+
+
 # --- 문서 읽기 ---
 
 def _paths(conn) -> list[str]:
@@ -217,13 +224,16 @@ def _format_hints(conn) -> dict:
     return {"terms": top("term", 40), "sections": top("section", 40), "tables": top("table", 20)}
 
 
-_SCHEMA_RULES = (
-    "스키마 = 개념 종류(classes)와 관계 종류(relations). 이 저장소의 업무에 실제로 등장하는 대상만"
-    " (예: 협력사·품목·계약·부서·규정·업무절차). 문서 형식(절·표·문단)은 개념이 아니다."
-    f" 개념은 {MAX_CLASSES}개, 관계는 {MAX_RELATIONS}개 이하. 관계는 from·to가 개념 이름이고 방향이 뜻이다"
-    " (협력사 —공급한다→ 품목). 같은 것을 두 이름으로 나누지 말 것.\n"
-    'JSON: {"classes":[{"name":"","description":"","examples":[""]}],'
-    ' "relations":[{"name":"","from":"","to":"","description":""}]}'
+_CLASS_RULES = (
+    "개념 종류(classes) — 이 저장소의 업무에 실제로 등장하는 대상만(예: 협력사·품목·계약·부서·규정·업무절차)."
+    " 문서 형식(절·표·문단)은 개념이 아니다. 같은 것을 두 이름으로 나누지 말 것.\n"
+    'JSON: {"classes":[{"name":"","description":"","examples":[""]}]}'
+)
+_RELATION_RULES = (
+    "관계 종류 — from·to는 개념 목록의 이름이고 방향이 뜻이다(협력사 —공급한다→ 품목). 표본에 근거가 있는 것만."
+    " 이미 정한 관계와 뜻이 같으면 새 이름을 만들지 말고 **그 이름을 그대로** 쓴다(승인받는다·결재받는다를 둘로"
+    " 두지 않는다).\n"
+    'JSON: {"relations":[{"name":"","from":"","to":"","description":""}]}'
 )
 
 
@@ -232,71 +242,122 @@ def _samples_text(samples: list[dict]) -> str:
 
 
 def check_schema(schema: dict) -> list[str]:
-    """스키마의 기계 검사 — 이름 중복, 관계 끝이 개념에 있는지, 개수 상한."""
+    """스키마의 기계 검사 — 이름 중복, 관계의 끝이 개념 목록에 있는지. **개수 상한은 두지 않는다**(RELATION_BATCH)."""
     problems = []
     classes = [c.get("name", "").strip() for c in schema.get("classes", []) if isinstance(c, dict)]
     if not classes:
         problems.append("개념 종류가 없습니다.")
     if len(set(classes)) != len(classes):
         problems.append("개념 이름이 겹칩니다.")
-    if len(classes) > MAX_CLASSES:
-        problems.append(f"개념이 {MAX_CLASSES}개를 넘습니다.")
-    rels = [r for r in schema.get("relations", []) if isinstance(r, dict)]
-    if len(rels) > MAX_RELATIONS:
-        problems.append(f"관계가 {MAX_RELATIONS}개를 넘습니다.")
-    for r in rels:
-        if not r.get("name") or r.get("from") not in classes or r.get("to") not in classes:
-            problems.append(f"관계 '{r.get('name')}'의 from/to가 개념 목록에 없습니다.")
+    for r in schema.get("relations", []):
+        if not isinstance(r, dict) or not r.get("name") or r.get("from") not in classes or r.get("to") not in classes:
+            problems.append(f"관계 '{r.get('name') if isinstance(r, dict) else r}'의 from/to가 개념 목록에 없습니다.")
     return problems
 
 
+def _clean_classes(classes) -> list[dict]:
+    return [{"name": str(c["name"]).strip(), "description": str(c.get("description", ""))[:300],
+             "examples": [str(x)[:60] for x in (c.get("examples") or [])][:5]}
+            for c in (classes or []) if isinstance(c, dict) and c.get("name")]
+
+
+def _clean_relations(relations) -> list[dict]:
+    return [{"name": str(r["name"]).strip(), "from": str(r.get("from", "")).strip(), "to": str(r.get("to", "")).strip(),
+             "description": str(r.get("description", ""))[:300]}
+            for r in (relations or []) if isinstance(r, dict) and r.get("name")]
+
+
 def _clean_schema(schema: dict) -> dict:
-    return {
-        "classes": [{"name": str(c["name"]).strip(), "description": str(c.get("description", ""))[:300],
-                     "examples": [str(x)[:60] for x in (c.get("examples") or [])][:5]}
-                    for c in schema.get("classes", []) if isinstance(c, dict) and c.get("name")],
-        "relations": [{"name": str(r["name"]).strip(), "from": str(r["from"]).strip(), "to": str(r["to"]).strip(),
-                       "description": str(r.get("description", ""))[:300]}
-                      for r in schema.get("relations", []) if isinstance(r, dict) and r.get("name")],
-    }
+    return {"classes": _clean_classes(schema.get("classes")), "relations": _clean_relations(schema.get("relations"))}
 
 
-def propose_schema(db: Session, store_name: str) -> dict:
-    """① 표본으로 스키마를 제안하고, LLM이 검토하고, 검토 의견으로 한 번 고친다. 확정은 하지 않는다."""
+def propose_schema(db: Session, store_name: str, report=_quiet) -> dict:
+    """① 스키마를 제안한다 — 확정은 하지 않는다.
+
+    개념 종류를 먼저 정하고(제안 → LLM 검토 → 고침), 관계는 **개념 몇 개씩(RELATION_BATCH) 묶어 차례로** 찾는다 —
+    묶음마다 그 개념에서 나가는 관계를 제안하고 LLM이 검토한다. 뒤 묶음은 앞에서 정한 관계를 보고 같은 뜻이면 그
+    이름을 쓴다(이름이 갈리지 않게). 관계 수에 상한은 없다."""
     provider = provider_for(db, store_name)
     conn = _conn(store_name)
     try:
+        report("표본 문서를 고르는 중", 1, 4)
         samples = _sample(store_name, conn)
         if not samples:
             raise SemanticError("읽을 수 있는 문서가 없습니다 — 먼저 색인하세요.")
         hints = _format_hints(conn)
         material = (f"형식 그래프가 아는 것(되풀이 순): {json.dumps(hints, ensure_ascii=False)}\n\n"
                     f"표본 문서 {len(samples)}건(앞부분):\n{_samples_text(samples)}")
-        proposal = _clean_schema(_ask(db, provider,
-            f"사내 문서 저장소의 내용 온톨로지 스키마를 설계한다. {_SCHEMA_RULES}\n{_KO}", material))
-        review = _review_schema(db, provider, material, proposal)
-        revised = proposal
-        if review.get("verdict") == "revise" or check_schema(proposal):
-            revised = _clean_schema(_ask(db, provider,
-                f"검토 의견을 반영해 스키마를 고친다. 의견이 틀렸다고 보면 그 항목은 그대로 두되 이유를 남기지 말고"
-                f" 고친 스키마만 낸다. {_SCHEMA_RULES}\n{_KO}",
-                f"{material}\n\n원안:\n{json.dumps(proposal, ensure_ascii=False)}\n\n"
-                f"검토 의견:\n{json.dumps(review, ensure_ascii=False)}\n\n기계 검사: {check_schema(proposal)}"))
-        draft = {"proposal": proposal, "review": review, "revised": revised, "problems": check_schema(revised),
+
+        report(f"LLM이 개념 종류를 제안하는 중(표본 {len(samples)}건)", 2, 4)
+        class_proposal = _clean_classes(_ask(db, provider,
+            f"사내 문서 저장소의 내용 온톨로지에서 개념 종류를 설계한다. {_CLASS_RULES}\n{_KO}", material).get("classes"))
+        report(f"LLM이 개념 종류를 검토하는 중(개념 {len(class_proposal)})", 3, 4)
+        class_review = _ask(db, provider,
+            "다른 사람이 정한 개념 종류를 검토한다. 표본 문서와 대조해: 겹치는 개념, 표본에 있는데 빠진 개념, 너무 잘게"
+            " 나눈 개념, 문서 형식을 개념으로 둔 것을 찾는다. 근거가 표본에 있는 것만 지적한다.\n"
+            'JSON: {"verdict":"ok|revise","issues":[{"target":"개념 이름","problem":"","suggestion":""}]}\n' + _KO,
+            f"{material}\n\n검토할 개념 종류:\n{json.dumps(class_proposal, ensure_ascii=False)}")
+        classes = class_proposal
+        if class_review.get("verdict") == "revise" or check_schema({"classes": classes}):
+            report(f"검토 의견 {len(class_review.get('issues') or [])}건으로 개념 종류를 고치는 중", 4, 4)
+            classes = _clean_classes(_ask(db, provider,
+                "검토 의견을 반영해 개념 종류를 고친다. 의견이 틀렸다고 보면 그 항목은 그대로 둔다. 고친 목록만 낸다."
+                f" {_CLASS_RULES}\n{_KO}",
+                f"{material}\n\n원안:\n{json.dumps(class_proposal, ensure_ascii=False)}\n\n"
+                f"검토 의견:\n{json.dumps(class_review, ensure_ascii=False)}").get("classes")) or class_proposal
+        names = [c["name"] for c in classes]
+
+        batches = [classes[i:i + RELATION_BATCH] for i in range(0, len(classes), RELATION_BATCH)]
+        total = 4 + 2 * len(batches)
+        relations: list[dict] = []
+        proposed: list[dict] = []
+        issues = list(class_review.get("issues") or [])
+        seen: set[tuple] = set()
+
+        def keep(found: list[dict], anchors: list[str]) -> list[dict]:
+            out = []
+            for r in found:
+                key = (r["name"], r["from"], r["to"])
+                if r["from"] in anchors and r["to"] in names and key not in seen:
+                    seen.add(key)
+                    out.append(r)
+            return out
+
+        for k, batch in enumerate(batches):
+            anchors = [c["name"] for c in batch]
+            report(f"관계 찾기 {k + 1}/{len(batches)}: {'·'.join(anchors)}", 5 + 2 * k, total)
+            found = _clean_relations(_ask(db, provider,
+                f"아래 **기준 개념에서 나가는** 관계 종류를 찾는다(to는 개념 목록 어디든). {_RELATION_RULES}\n{_KO}",
+                f"{material}\n\n개념 목록: {json.dumps(classes, ensure_ascii=False)}\n"
+                f"기준 개념: {json.dumps(anchors, ensure_ascii=False)}\n"
+                f"이미 정한 관계: {json.dumps(relations, ensure_ascii=False)}").get("relations"))
+            found = [r for r in found if r["from"] in anchors and r["to"] in names]
+            proposed += found
+            if not found:
+                continue
+            report(f"관계 검토 {k + 1}/{len(batches)}({len(found)}개)", 6 + 2 * k, total)
+            checked = _ask(db, provider,
+                "다른 사람이 찾은 관계 종류를 검토한다. 표본에 근거가 없는 것, 방향이 틀린 것, 이미 정한 관계와 뜻이 같은데"
+                " 이름만 다른 것을 찾아 고친다. 고친 **목록 전체**를 relations에 낸다(문제가 없으면 그대로).\n"
+                'JSON: {"issues":[{"target":"관계 이름","problem":"","suggestion":""}],'
+                ' "relations":[{"name":"","from":"","to":"","description":""}]}\n' + _KO,
+                f"{material}\n\n개념 목록: {json.dumps(names, ensure_ascii=False)}\n"
+                f"이미 정한 관계: {json.dumps(relations, ensure_ascii=False)}\n"
+                f"검토할 관계(기준 개념 {anchors}):\n{json.dumps(found, ensure_ascii=False)}")
+            issues += [i for i in checked.get("issues") or [] if isinstance(i, dict)]
+            reviewed = (_clean_relations(checked["relations"]) if isinstance(checked.get("relations"), list)
+                        else found)
+            relations += keep(reviewed, anchors)
+
+        proposal = {"classes": class_proposal, "relations": proposed}
+        revised = {"classes": classes, "relations": relations}
+        draft = {"proposal": proposal, "review": {"verdict": "revise" if issues else "ok", "issues": issues},
+                 "revised": revised, "problems": check_schema(revised), "batches": len(batches),
                  "samples": [s["path"] for s in samples], "provider": provider.name, "created_at": _now()}
         _put(conn, "schema_draft", draft)
         return draft
     finally:
         conn.close()
-
-
-def _review_schema(db, provider, material: str, proposal: dict) -> dict:
-    return _ask(db, provider,
-        "다른 사람이 만든 내용 온톨로지 스키마를 검토한다. 표본 문서와 대조해: 겹치는 개념, 표본에 있는데 빠진 개념,"
-        " 관계 방향·이름의 일관성, 너무 잘게 나눈 개념, 문서 형식을 개념으로 둔 것을 찾는다. 근거가 표본에 있는"
-        " 것만 지적한다.\n"
-        'JSON: {"verdict":"ok|revise","issues":[{"target":"개념·관계 이름","problem":"","suggestion":""}]}\n' + _KO,
-        f"{material}\n\n검토할 스키마:\n{json.dumps(proposal, ensure_ascii=False)}")
 
 
 def confirm_schema(store_name: str, schema: dict, actor: str) -> dict:
@@ -384,7 +445,7 @@ def _form_samples(store_name: str, conn, form: dict) -> list[dict]:
     return rows
 
 
-def propose_mapping(db: Session, store_name: str, form_name: str) -> dict:
+def propose_mapping(db: Session, store_name: str, form_name: str, report=_quiet) -> dict:
     """② 양식 하나의 열 대응표 — 제안 → 실제 값 표본과 대조한 검토 → 한 번 고침. 확정은 관리자가."""
     provider = provider_for(db, store_name)
     conn = _conn(store_name)
@@ -393,6 +454,7 @@ def propose_mapping(db: Session, store_name: str, form_name: str) -> dict:
         form = next((f for f in _form_tables(conn) if f["name"] == form_name), None)
         if form is None:
             raise SemanticError(f"양식이 없습니다: {form_name}")
+        report("실제 값 표본을 모으는 중", 1, 4)
         rows = _form_samples(store_name, conn, form)
         material = (f"스키마: {json.dumps({k: schema[k] for k in ('classes', 'relations')}, ensure_ascii=False)}\n"
                     f"양식 열: {form['columns']} ({form['documents']}개 문서)\n"
@@ -401,7 +463,9 @@ def propose_mapping(db: Session, store_name: str, form_name: str) -> dict:
                 " 같은 행의 두 열 사이에 스키마의 어떤 관계가 있는지.\n"
                 'JSON: {"columns":{"열 이름":"개념 이름 또는 null"},"relations":[{"from":"열","rel":"관계","to":"열"}]}\n'
                 + _KO)
+        report("LLM이 열 대응표를 제안하는 중", 2, 4)
         proposal = _ask(db, provider, "되풀이되는 사내 양식 표의 열을 온톨로지에 대응시킨다. " + rule, material)
+        report("LLM이 실제 값 표본과 대조해 검토하는 중", 3, 4)
         review = _ask(db, provider,
             "다른 사람이 만든 양식 열 대응표를 **실제 값 표본과 대조해** 검토한다. 값이 그 개념의 이름이 맞는지"
             " (예: '금액' 열을 협력사로 둔 것, 날짜가 든 열을 품목으로 둔 것), 관계 방향이 맞는지.\n"
@@ -409,6 +473,7 @@ def propose_mapping(db: Session, store_name: str, form_name: str) -> dict:
             f"{material}\n\n검토할 대응표:\n{json.dumps(proposal, ensure_ascii=False)}")
         revised = proposal
         if review.get("verdict") == "revise" or check_mapping(proposal, form["columns"], schema):
+            report("검토 의견으로 고치는 중", 4, 4)
             revised = _ask(db, provider, "검토 의견으로 대응표를 고친다. " + rule,
                 f"{material}\n\n원안: {json.dumps(proposal, ensure_ascii=False)}\n"
                 f"검토 의견: {json.dumps(review, ensure_ascii=False)}\n"
@@ -765,32 +830,38 @@ def task_running(store_name: str) -> bool:
 
 
 def submit(store_name: str, label: str, fn) -> bool:
-    """fn(db)를 뒤에서 돌린다 — 이미 무엇이 돌고 있으면 False."""
+    """fn(db, report)를 뒤에서 돌린다 — 이미 무엇이 돌고 있으면 False. report(문구, 단계, 단계 수)가 task에 남아
+    화면 트레이가 진행을 보인다(폴더 업로드와 같은 자리)."""
     from ..db import SessionLocal  # noqa: PLC0415
 
     with _lock:
         if task_running(store_name):
             return False
+        started = _now()
 
-        def run():
+        def put(**extra):
             conn = _conn(store_name)
             try:
-                _put(conn, "task", {"label": label, "started_at": _now(), "done": False})
+                _put(conn, "task", {"label": label, "started_at": started, **extra})
             finally:
                 conn.close()
+
+        # 스레드보다 **먼저** 남긴다 — 화면이 곧바로 읽어도 지난 작업의 「끝」을 이번 것으로 보지 않게.
+        put(done=False, progress="시작하는 중", step=0, steps=None)
+
+        def report(text: str, step: int | None = None, steps: int | None = None) -> None:
+            put(done=False, progress=text, step=step, steps=steps)
+
+        def run():
             db = SessionLocal()
             error = None
             try:
-                fn(db)
+                fn(db, report)
             except Exception as e:  # noqa: BLE001 — 사유를 화면에 남긴다
                 error = f"{e}"[:500]
             finally:
                 db.close()
-            conn = _conn(store_name)
-            try:
-                _put(conn, "task", {"label": label, "done": True, "error": error, "finished_at": _now()})
-            finally:
-                conn.close()
+            put(done=True, error=error, finished_at=_now(), progress="실패" if error else "끝났습니다")
 
         thread = threading.Thread(target=run, daemon=True, name=f"semantic-task-{store_name}")
         _tasks[store_name] = thread
@@ -822,7 +893,7 @@ def canonical_map(conn) -> dict[tuple[str, str], str]:
     return {key: value for key, value in resolved.items() if key[1] != value}
 
 
-def propose_merges(db: Session, store_name: str) -> dict:
+def propose_merges(db: Session, store_name: str, report=_quiet) -> dict:
     """④ 같은 개체 묶기. 정규화가 같은 이름은 바로 묶는다(기계적이라 검토하지 않는다). 그 밖의 애매한 것은 LLM이
     묶음을 제안하고 **묶음마다** 검토한다 — 합치기는 되돌리기 어렵다(되돌리기는 별칭 삭제로 할 수 있다)."""
     provider = provider_for(db, store_name)
@@ -841,7 +912,8 @@ def propose_merges(db: Session, store_name: str) -> dict:
                 aliases[(cls, alias)] = canonical
                 applied.append({"cls": cls, "alias": alias, "canonical": canonical, "reason": reason})
 
-        for cls, names in names_by_cls.items():
+        for n, (cls, names) in enumerate(names_by_cls.items(), 1):
+            report(f"'{cls}' 이름 묶기·검토 중", n, len(names_by_cls))
             groups: dict[str, list[str]] = {}
             for name in names:
                 groups.setdefault(normalize(name), []).append(name)
