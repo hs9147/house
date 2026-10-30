@@ -141,7 +141,8 @@ def test_graph_server_answers_across_stores(monkeypatch, tmp_path, fresh_setting
     tools = {t["name"] for t in c.post(f"{API}/mcp/graph", headers=ADMIN, json={
         "jsonrpc": "2.0", "id": 1, "method": "tools/list",
     }).json()["result"]["tools"]}
-    assert tools == {"graph_schema", "find_nodes", "neighbors"}
+    assert tools == {"graph_schema", "find_nodes", "neighbors",
+                     "concept_schema", "find_concepts", "concept_relations"}   # 내용 그래프(services/semantic)
 
     schema = json.loads(_text(_rpc(c, "graph_schema")))
     assert schema["schema"]["rules"]["table_schemas"][0]["columns"] == ["구분", "대상", "비고"]

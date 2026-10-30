@@ -1382,6 +1382,53 @@ _GRAPH_TOOLS = [
             "required": ["kind", "name"],
         },
     },
+    # 내용 그래프(services/semantic) — 형식이 아니라 내용에서 LLM이 뽑은 개념·관계. 관리자가 확정한 스키마의
+    # 종류만 있고, 관계마다 문서의 근거 문장이 붙는다. 형식 그래프(위 셋)와 따로 있다.
+    {
+        "name": "concept_schema",
+        "description": (
+            "내용 그래프에 **무엇이 있는지** — 관리자가 확정한 개념 종류(예: 협력사·품목·계약)와 관계 종류,"
+            " 종류별 개수. 문서의 형식(절·표)이 아니라 내용에서 뽑은 것이다. 비어 있으면 그 저장소는 아직"
+            " 내용 분석을 하지 않았다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"source": {"type": "string", "description": "저장소 이름(생략 = 전체)"}},
+        },
+    },
+    {
+        "name": "find_concepts",
+        "description": (
+            "내용 그래프에서 개체를 이름으로 찾는다(별칭으로 묶은 이름까지). cls는 concept_schema의 개념"
+            " 종류. 많은 문서에 나오는 것부터."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "이름 부분 일치"},
+                "cls": {"type": "string"},
+                "source": {"type": "string"},
+                "limit": {"type": "integer", "description": f"기본 20, 최대 {_MAX_LIST}"},
+            },
+        },
+    },
+    {
+        "name": "concept_relations",
+        "description": (
+            "개체 하나의 관계(예: 협력사 —공급한다→ 품목)와 **근거 문장·문서**. 답에 쓸 때는 근거 문장과 문서"
+            " 경로를 함께 밝힌다. cls와 name은 find_concepts 결과의 값을 그대로 쓴다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cls": {"type": "string"},
+                "name": {"type": "string"},
+                "source": {"type": "string"},
+                "limit": {"type": "integer", "description": f"기본 30, 최대 {_MAX_LIST}"},
+            },
+            "required": ["cls", "name"],
+        },
+    },
 ]
 
 
@@ -1414,6 +1461,9 @@ def _graph_sources(args: dict, db: Session | None = None,
 def _graph_call(name: str, args: dict, *, db: Session | None = None,
                 key: ApiKey | None = None) -> str:
     sources = _graph_sources(args, db, key)
+
+    if name in ("concept_schema", "find_concepts", "concept_relations"):
+        return _concept_call(name, args, sources)
 
     if name == "graph_schema":
         out = {store.name: docsearch.graph_schema(store.name) for store in sources}
@@ -1452,6 +1502,43 @@ def _graph_call(name: str, args: dict, *, db: Session | None = None,
         raise mcp_server.McpToolError(
             f"그 노드에 붙은 관계가 없습니다: {kind}:{node_name}"
             " (find_nodes로 kind와 name을 정확히 확인하세요)")
+    return _dump(found)
+
+
+def _concept_call(name: str, args: dict, sources) -> str:
+    from ..services import semantic  # noqa: PLC0415
+
+    if name == "concept_schema":
+        out = {}
+        for store in sources:
+            status = semantic.status(store.name)
+            if status["schema"]:
+                out[store.name] = {"classes": status["schema"]["classes"], "relations": status["schema"]["relations"],
+                                   "counts": status["counts"]}
+        if not out:
+            raise mcp_server.McpToolError(
+                "내용 그래프가 없습니다 — 관리자가 온톨로지 관리의 「내용 분석」에서 스키마를 확정하고 분석해야 합니다."
+                " 그 전에는 형식 그래프(graph_schema·find_nodes)를 쓰세요.")
+        return _dump(out)
+
+    if name == "find_concepts":
+        limit = _int_arg(args, "limit", 20, _MAX_LIST)
+        hits: list[dict] = []
+        for store in sources:
+            if len(hits) >= limit:
+                break
+            hits += [{"source": store.name, **row} for row in semantic.search(
+                store.name, _str_arg(args, "cls", required=False), _str_arg(args, "q", required=False),
+                limit - len(hits))]
+        return _dump(hits)
+
+    cls, node = _str_arg(args, "cls"), _str_arg(args, "name")
+    limit = _int_arg(args, "limit", 30, _MAX_LIST)
+    found = [{"source": store.name, **semantic.neighbors(store.name, cls, node, limit)} for store in sources]
+    found = [f for f in found if f["relations"] or f["mentions"]]
+    if not found:
+        raise mcp_server.McpToolError(
+            f"그 개체가 없습니다: {cls}:{node} (find_concepts로 cls와 name을 정확히 확인하세요)")
     return _dump(found)
 
 

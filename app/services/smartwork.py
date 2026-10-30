@@ -608,6 +608,7 @@ _SOURCES = {"graph": "온톨로지", "apis": "API 카탈로그", "code": "코드
 _STEP_LABELS = {
     "docs__search_docs": ("사내 문서 검색", "query"), "docs__read_doc": ("사내 문서 읽기", "path"),
     "graph__find_nodes": ("온톨로지 찾기", "query"), "apis__search_apis": ("API 카탈로그 검색", "keyword"),
+    "graph__find_concepts": ("내용 온톨로지 찾기", "q"), "graph__concept_relations": ("내용 관계 보기", "name"),
     "storage__list_files": ("파일 저장소 보기", "path"), "dept__workflows": ("부서 워크플로 확인", ""),
     "show_report": ("결과 작성", "title"), "show_agent": ("에이전트 열기", "name"),
     "make_file": ("파일 만들기", "name"), "ask_user": ("확인 질문 준비", ""),

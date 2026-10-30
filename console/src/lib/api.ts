@@ -88,7 +88,7 @@ import type {
   StorageListing,
   StorageStore,
   UserAccountOut,
-  UserOrgOut,
+  UserOrgOut, SemanticForm, SemanticHit, SemanticMapping, SemanticNeighbors, SemanticSchema, SemanticStatus,
 } from './types';
 
 // 백엔드 라우터는 모두 /paas 아래 마운트된다. /health, /status는 버전 prefix 없이
@@ -509,6 +509,29 @@ export const api = {
     request<{ nodes: OntologyNode[] }>(
       'GET', `/ontology/stores/${encodeURIComponent(store)}/graph`, undefined,
       { q, kind, limit }),
+  // 내용 온톨로지(services/semantic) — 제안은 뒤에서 돌고(202) status의 task로 끝을 본다.
+  semanticStatus: (store: string) =>
+    request<SemanticStatus>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic`),
+  semanticProposeSchema: (store: string) =>
+    request<{ started: boolean }>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/schema/propose`),
+  semanticConfirmSchema: (store: string, schema: SemanticSchema) =>
+    request<SemanticSchema>('PUT', `/ontology/stores/${encodeURIComponent(store)}/semantic/schema`, schema),
+  semanticForms: (store: string) =>
+    request<{ forms: SemanticForm[] }>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/forms`),
+  semanticProposeForm: (store: string, form: string) =>
+    request<{ started: boolean }>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/forms/propose`, { form }),
+  semanticConfirmForm: (store: string, form: string, mapping: SemanticMapping) =>
+    request<SemanticForm>('PUT', `/ontology/stores/${encodeURIComponent(store)}/semantic/forms`, { form, mapping }),
+  semanticAnalyze: (store: string, action: 'start' | 'stop' | 'resume') =>
+    request<{ running: boolean }>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/analyze`, undefined, { action }),
+  semanticMerge: (store: string) =>
+    request<{ started: boolean }>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/merge`),
+  semanticUnmerge: (store: string, cls: string, alias: string) =>
+    request<void>('DELETE', `/ontology/stores/${encodeURIComponent(store)}/semantic/aliases`, undefined, { cls, alias }),
+  semanticSearch: (store: string, cls: string, q: string) =>
+    request<{ nodes: SemanticHit[] }>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/search`, undefined, { cls, q }),
+  semanticNeighbors: (store: string, cls: string, name: string) =>
+    request<SemanticNeighbors>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/neighbors`, undefined, { cls, name }),
   ontologyNeighbors: (store: string, kind: string, name: string, limit = 40) =>
     request<OntologyNeighborhood>(
       'GET', `/ontology/stores/${encodeURIComponent(store)}/graph/neighbors`, undefined,

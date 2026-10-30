@@ -1532,3 +1532,55 @@ export type ProviderCheck = {
   elapsed_ms: number;
   reply: string;
 };
+
+
+// --- 내용 온톨로지(services/semantic) ---
+export interface SemanticSchema {
+  classes: { name: string; description: string; examples: string[] }[];
+  relations: { name: string; from: string; to: string; description: string }[];
+  version?: string;
+  confirmed_at?: string;
+  confirmed_by?: string;
+}
+export interface SemanticIssue { target?: string; column?: string; problem: string; suggestion?: string }
+export interface SemanticReview { verdict?: string; issues?: SemanticIssue[] }
+export interface SemanticMapping {
+  columns: Record<string, string | null>;
+  relations: { from: string; rel: string; to: string }[];
+}
+export interface SemanticForm {
+  name: string;
+  columns: string[];
+  documents: number;
+  draft?: { proposal: SemanticMapping; review: SemanticReview; revised: SemanticMapping; problems: string[];
+            sample_rows: Record<string, string>[]; created_at: string };
+  confirmed?: SemanticMapping & { version: string; schema_version: string; confirmed_at: string };
+}
+export interface SemanticStatus {
+  store: string;
+  documents: number;
+  analyzed: Record<string, number>;     // ok·form·failed별 문서 수
+  running: boolean;
+  task: { label?: string; running: boolean; done?: boolean; error?: string | null; started_at?: string; finished_at?: string };
+  schema_draft: { proposal: SemanticSchema; review: SemanticReview; revised: SemanticSchema; problems: string[];
+                  samples: string[]; provider: string; created_at: string } | null;
+  schema: SemanticSchema | null;
+  paused: string | null;
+  review: { items: number; wrong: number; error_rate: number | null; stop_rate: number;
+            notes: { path: string; item: string; evidence: string; problem: string }[] };
+  last_run: (Record<string, unknown> & { at: string }) | null;
+  outside: Record<string, number>;
+  last_merge: { applied: { cls: string; alias: string; canonical: string; reason: string }[];
+                rejected: { cls: string; canonical: string; names: string[]; reason: string }[]; at: string } | null;
+  aliases: { cls: string; alias: string; canonical: string; reason: string }[];
+  failed: { path: string; error: string }[];
+  counts: { nodes: Record<string, number>; edges: Record<string, number> };
+}
+export interface SemanticHit { cls: string; name: string; documents: number; aliases: string[] }
+export interface SemanticNeighbors {
+  cls: string;
+  name: string;
+  relations: { rel: string; direction: 'out' | 'in'; cls: string; name: string;
+               evidence: { path: string; text: string; origin: string }[] }[];
+  mentions: { path: string; evidence: string; origin: string }[];
+}

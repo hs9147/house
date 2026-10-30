@@ -16,6 +16,7 @@ const TABS: [string, string][] = [
   ['/ontology', '정보 조회'],
   ['/ontology/workflows', '워크플로 연결'],
   ['/ontology/conversion', '전환 현황'],
+  ['/ontology/semantic', '내용 분석'],
 ];
 
 export default function Ontology() {

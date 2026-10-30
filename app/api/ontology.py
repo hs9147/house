@@ -4,7 +4,7 @@
 재색인이고, 그건 이미 있는 경로를 그대로 쓴다(docsearch.reindex) — 온톨로지는 색인의
 파생물이라 별도의 "전환" 작업이 따로 있지 않다.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from .. import audit
@@ -12,7 +12,7 @@ from ..db import get_db
 from ..models import ApiKey
 from ..security import (accessible_document_stores, require_admin, require_api_key,
                         require_document_store)
-from ..services import docsearch, ontology_status
+from ..services import docsearch, ontology_status, semantic
 from ..services import storage as storage_service
 
 router = APIRouter(tags=["ontology"])
@@ -107,3 +107,133 @@ def ontology_reindex(
                               budget_seconds=_REINDEX_BUDGET)
     audit.record(db, admin.name, "ontology.reindex", store.name, result)
     return result
+
+
+# --- 내용 온톨로지(services/semantic) — 형식 그래프와 따로, LLM이 내용에서 뽑는다 ---
+
+def _semantic(fn, *args):
+    try:
+        return fn(*args)
+    except semantic.SemanticError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+def _store_or_404(store_name: str):
+    store = storage_service.store(store_name)
+    if store is None:
+        raise HTTPException(status_code=404, detail=f"storage '{store_name}' not found")
+    return store
+
+
+def _submit(store_name: str, label: str, fn) -> None:
+    if not semantic.submit(store_name, label, fn):
+        raise HTTPException(status_code=409, detail="이 저장소에서 이미 돌고 있는 제안이 있습니다 — 끝난 뒤에 다시 하세요.")
+
+
+@router.get("/ontology/stores/{store_name}/semantic")
+def semantic_status(store_name: str, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """스키마(초안·확정)·분석 진행·표본 검토·스키마 밖 후보·묶기 — 화면이 이것 하나를 다시 읽는다."""
+    require_document_store(db, key, store_name)
+    return semantic.status(store_name)
+
+
+@router.post("/ontology/stores/{store_name}/semantic/schema/propose", status_code=202)
+def semantic_propose_schema(store_name: str, db: Session = Depends(get_db),
+                            admin: ApiKey = Depends(require_admin)):
+    """① 스키마 제안 → LLM 검토 → 한 번 고침. 뒤에서 돈다(LLM 여러 번) — 상태의 task·schema_draft로 본다."""
+    _store_or_404(store_name)
+    _semantic(semantic.provider_for, db, store_name)   # 프로바이더가 없으면 지금 말한다(뒤에서 실패하지 않게)
+    _submit(store_name, "스키마 제안·검토", lambda s: semantic.propose_schema(s, store_name))
+    audit.record(db, admin.name, "ontology.semantic.schema.propose", store_name, {})
+    return {"started": True}
+
+
+@router.put("/ontology/stores/{store_name}/semantic/schema")
+def semantic_confirm_schema(store_name: str, schema: dict = Body(...), db: Session = Depends(get_db),
+                            admin: ApiKey = Depends(require_admin)):
+    """관리자가 확정 — 판이 바뀌면 문서 분석은 새 판으로 다시 돈다."""
+    _store_or_404(store_name)
+    out = _semantic(semantic.confirm_schema, store_name, schema, admin.name)
+    audit.record(db, admin.name, "ontology.semantic.schema.confirm", store_name,
+                 {"version": out["version"], "classes": len(out["classes"]), "relations": len(out["relations"])})
+    return out
+
+
+@router.get("/ontology/stores/{store_name}/semantic/forms")
+def semantic_forms(store_name: str, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """② 되풀이 양식과 각각의 열 대응표(제안·검토·확정)."""
+    require_document_store(db, key, store_name)
+    return {"forms": semantic.forms(store_name)}
+
+
+@router.post("/ontology/stores/{store_name}/semantic/forms/propose", status_code=202)
+def semantic_propose_mapping(store_name: str, form: str = Body(..., embed=True), db: Session = Depends(get_db),
+                             admin: ApiKey = Depends(require_admin)):
+    _store_or_404(store_name)
+    _semantic(semantic.provider_for, db, store_name)
+    _submit(store_name, f"양식 대응 제안·검토: {form[:60]}", lambda s: semantic.propose_mapping(s, store_name, form))
+    audit.record(db, admin.name, "ontology.semantic.form.propose", store_name, {"form": form[:200]})
+    return {"started": True}
+
+
+@router.put("/ontology/stores/{store_name}/semantic/forms")
+def semantic_confirm_mapping(store_name: str, form: str = Body(...), mapping: dict = Body(...),
+                             db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    _store_or_404(store_name)
+    out = _semantic(semantic.confirm_mapping, store_name, form, mapping, admin.name)
+    audit.record(db, admin.name, "ontology.semantic.form.confirm", store_name, {"form": form[:200]})
+    return out
+
+
+@router.post("/ontology/stores/{store_name}/semantic/analyze")
+def semantic_analyze(store_name: str, action: str = "start", db: Session = Depends(get_db),
+                     admin: ApiKey = Depends(require_admin)):
+    """③ 문서 분석 — start(뒤에서 끝까지)·stop·resume(멈춤 조건으로 멈춘 것을 다시, 표본 집계를 비운다)."""
+    _store_or_404(store_name)
+    if action == "stop":
+        semantic.stop(store_name)
+    elif action in ("start", "resume"):
+        _semantic(semantic.provider_for, db, store_name)
+        if not semantic.status(store_name)["schema"]:
+            raise HTTPException(status_code=409, detail="확정한 스키마가 없습니다 — ① 스키마를 먼저 확정하세요.")
+        if action == "resume":
+            semantic.resume(store_name)
+        semantic.start(store_name)
+    else:
+        raise HTTPException(status_code=422, detail="action은 start·stop·resume 중 하나입니다.")
+    audit.record(db, admin.name, f"ontology.semantic.analyze.{action}", store_name, {})
+    return {"running": semantic.running(store_name)}
+
+
+@router.post("/ontology/stores/{store_name}/semantic/merge", status_code=202)
+def semantic_merge(store_name: str, db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    """④ 같은 개체 묶기 — 정규화가 같은 것은 바로, 애매한 것은 LLM 제안 → 묶음마다 LLM 검토."""
+    _store_or_404(store_name)
+    _semantic(semantic.provider_for, db, store_name)
+    _submit(store_name, "같은 개체 묶기", lambda s: semantic.propose_merges(s, store_name))
+    audit.record(db, admin.name, "ontology.semantic.merge", store_name, {})
+    return {"started": True}
+
+
+@router.delete("/ontology/stores/{store_name}/semantic/aliases", status_code=204)
+def semantic_unmerge(store_name: str, cls: str, alias: str, db: Session = Depends(get_db),
+                     admin: ApiKey = Depends(require_admin)):
+    """묶음 풀기 — 별칭 하나를 지운다(그 이름은 다시 따로 보인다)."""
+    _store_or_404(store_name)
+    semantic.remove_alias(store_name, cls, alias)
+    audit.record(db, admin.name, "ontology.semantic.unmerge", store_name, {"cls": cls, "alias": alias})
+    return None
+
+
+@router.get("/ontology/stores/{store_name}/semantic/search")
+def semantic_search(store_name: str, cls: str = "", q: str = "", limit: int = 40,
+                    db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    require_document_store(db, key, store_name)
+    return {"nodes": semantic.search(store_name, cls, q, max(1, min(limit, 200)))}
+
+
+@router.get("/ontology/stores/{store_name}/semantic/neighbors")
+def semantic_neighbors(store_name: str, cls: str, name: str, limit: int = 60,
+                       db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    require_document_store(db, key, store_name)
+    return semantic.neighbors(store_name, cls, name, max(1, min(limit, 200)))
