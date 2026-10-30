@@ -651,6 +651,9 @@ export interface LlmCallBucket {
   failed: number;
   avg_ms: number;
   tokens: number;
+  /** 단가를 아는 호출만 더한 비용(USD) — 하나도 모르면 null. */
+  cost_usd: number | null;
+  priced_calls: number;
 }
 
 export interface LlmTelemetry {
@@ -664,7 +667,13 @@ export interface LlmTelemetry {
     p95_ms: number;
     prompt_tokens: number;
     completion_tokens: number;
+    /** 서버가 직접 단가를 얻은 프로바이더(지금은 Azure)의 호출만 더한 비용. 하나도 없으면 null. */
+    cost_usd: number | null;
+    priced_calls: number;
   };
+  /** 비용 계산에 쓴 단가 — 출처(Azure Retail Prices API)·미터·적용일. */
+  prices: { provider: string; input: number; cached_input: number; output: number; unit: string; source: string;
+            tier: string; effective: string; meters: Record<string, string> }[];
   by_model: LlmCallBucket[];
   by_route: LlmCallBucket[];
   daily: LlmCallBucket[];

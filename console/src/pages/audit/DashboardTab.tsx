@@ -5,6 +5,9 @@ import { fmtDate } from '../../lib/format';
 import { useApi } from '../../lib/hooks';
 import { BarList, StackedBars, StatTile, VIZ, fmt } from '../../lib/viz';
 
+/** 비용 — 작은 값은 센트 아래까지(호출 몇 번이면 몇 센트다). */
+const usd = (v: number) => `$${v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(4)}`;
+
 /**
  * 작업 로그 · 대시보드 — 모델 호출의 숫자(llm_calls).
  *
@@ -66,7 +69,23 @@ export default function DashboardTab() {
               <StatTile label="토큰" value={fmt(t.totals.prompt_tokens + t.totals.completion_tokens)}
                         sub={`입력 ${fmt(t.totals.prompt_tokens)} · 출력 ${fmt(t.totals.completion_tokens)}`
                           + (t.cached_tokens ? ` · 캐시 ${fmt(t.cached_tokens)}` : '')} />
+              {/* 비용은 서버가 직접 단가를 얻은 프로바이더(지금은 Azure 공개 가격)의 호출만 — 나머지는 셈에서 빠진다. */}
+              {t.totals.cost_usd !== null && (
+                <StatTile label="비용" value={usd(t.totals.cost_usd)}
+                          sub={t.totals.priced_calls < t.totals.calls
+                            ? `단가를 아는 호출 ${fmt(t.totals.priced_calls)}/${fmt(t.totals.calls)}건만`
+                            : 'Azure 공개 가격 기준'} />
+              )}
             </div>
+            {t.prices.length > 0 && (
+              <p className="mutedtext" style={{ fontSize: 11, margin: '-8px 0 12px' }}>
+                단가({t.prices[0].unit}, {t.prices[0].source}, {t.prices[0].tier}):{' '}
+                {t.prices.map((p) => `${p.provider} 입력 $${p.input} · 캐시 입력 $${p.cached_input} · 출력 $${p.output}`
+                  + ` (${p.effective}~)`).join(' / ')}
+                {' '}— 배포 유형이 Global Standard가 아니면(Data Zone·Flex 등) 실제 청구와 다를 수 있습니다.
+                단가를 직접 얻을 수 없는 프로바이더(Bedrock·사내 LLM 등)의 호출은 비용에 넣지 않습니다.
+              </p>
+            )}
             {t.truncated && (
               <p className="mutedtext">
                 행이 너무 많아 최근 구간만 셌습니다 — 기간을 좁혀 보세요.
@@ -92,7 +111,8 @@ export default function DashboardTab() {
             <BarList rows={t.by_model.map((m) => ({
               label: m.key,
               value: m.calls,
-              hint: `실패 ${fmt(m.failed)} · 평균 ${fmt(m.avg_ms)}ms · 토큰 ${fmt(m.tokens)}`,
+              hint: `실패 ${fmt(m.failed)} · 평균 ${fmt(m.avg_ms)}ms · 토큰 ${fmt(m.tokens)}`
+                + (m.cost_usd !== null ? ` · ${usd(m.cost_usd)}` : ''),
             }))} />
 
             <h3>기능별</h3>
@@ -100,7 +120,8 @@ export default function DashboardTab() {
             <BarList rows={t.by_route.map((r) => ({
               label: r.key,
               value: r.calls,
-              hint: `실패 ${fmt(r.failed)} · 평균 ${fmt(r.avg_ms)}ms · 토큰 ${fmt(r.tokens)}`,
+              hint: `실패 ${fmt(r.failed)} · 평균 ${fmt(r.avg_ms)}ms · 토큰 ${fmt(r.tokens)}`
+                + (r.cost_usd !== null ? ` · ${usd(r.cost_usd)}` : ''),
             }))} />
 
             <h3>입력 구성 <span className="mutedtext" style={{ fontSize: 12 }}>(추정)</span></h3>

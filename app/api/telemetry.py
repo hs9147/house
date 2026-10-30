@@ -15,8 +15,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import AnswerRating, ApiKey, LlmCallDetail, LlmCallLog, LlmTurn
+from ..models import AnswerRating, ApiKey, LlmCallDetail, LlmCallLog, LlmProvider, LlmTurn
 from ..security import require_admin
+from ..services import llmprice
 
 router = APIRouter(tags=["telemetry"])
 
@@ -41,13 +42,16 @@ def _median(values: list[int]) -> int:
     return round(statistics.median(values)) if values else 0
 
 
-def _bucket(store: dict, key: str, row) -> None:
+def _bucket(store: dict, key: str, row, cost: float | None = None) -> None:
     """키별 누적 한 칸 — 모델별·경로별 표가 같은 모양이어야 화면이 한 부품으로 그린다."""
-    cell = store.setdefault(key, {"key": key, "calls": 0, "failed": 0, "ms": 0, "tokens": 0})
+    cell = store.setdefault(key, {"key": key, "calls": 0, "failed": 0, "ms": 0, "tokens": 0, "cost": 0.0, "priced": 0})
     cell["calls"] += 1
     cell["failed"] += 0 if row.ok else 1
     cell["ms"] += row.ms or 0
     cell["tokens"] += (row.prompt_tokens or 0) + (row.completion_tokens or 0)
+    if cost is not None:
+        cell["cost"] += cost
+        cell["priced"] += 1
 
 
 def _ranked(store: dict) -> list[dict]:
@@ -55,8 +59,30 @@ def _ranked(store: dict) -> list[dict]:
     for cell in store.values():
         out.append({"key": cell["key"], "calls": cell["calls"], "failed": cell["failed"],
                     "avg_ms": round(cell["ms"] / cell["calls"]) if cell["calls"] else 0,
-                    "tokens": cell["tokens"]})
+                    "tokens": cell["tokens"],
+                    # 단가를 아는 호출만 더한다 — 하나도 모르면 None(0달러로 보이면 공짜로 읽힌다)
+                    "cost_usd": round(cell["cost"], 4) if cell.get("priced") else None,
+                    "priced_calls": cell.get("priced", 0)})
     return sorted(out, key=lambda c: c["calls"], reverse=True)
+
+
+def _prices(db: Session, rows) -> dict[str, dict | None]:
+    """창 안에 나온 프로바이더마다 단가 — 서버가 직접 얻을 수 있을 때만(없으면 None). 이름으로 찾는다(기록은 이름을 남긴다)."""
+    names = {r.provider for r in rows if r.provider}
+    if not names:
+        return {}
+    providers = db.execute(select(LlmProvider).where(LlmProvider.name.in_(names))).scalars().all()
+    return {p.name: llmprice.price_for(p) for p in providers}
+
+
+def _cached_tokens(db: Session, rows) -> dict[int, int]:
+    ids = [r.id for r in rows]
+    out: dict[int, int] = {}
+    for start in range(0, len(ids), 900):     # sqlite의 IN 인자 상한 아래로
+        for call_id, cached in db.execute(select(LlmCallDetail.call_id, LlmCallDetail.cached_tokens)
+                                          .where(LlmCallDetail.call_id.in_(ids[start:start + 900]))):
+            out[call_id] = cached or 0
+    return out
 
 
 @router.get("/telemetry/llm")
@@ -79,10 +105,18 @@ def llm_summary(
     by_day: dict = {}
     latencies: list[int] = []
     prompt_tokens = completion_tokens = failed = 0
+    prices = _prices(db, rows)
+    cached = _cached_tokens(db, rows) if prices else {}
+    total_cost, priced = 0.0, 0
     for r in rows:
-        _bucket(by_model, f"{r.provider} / {r.model}", r)
-        _bucket(by_route, r.route or "(요청 밖)", r)
-        _bucket(by_day, r.created_at.date().isoformat(), r)
+        cost = llmprice.cost(prices.get(r.provider), r.prompt_tokens or 0, r.completion_tokens or 0,
+                             cached.get(r.id, 0))
+        if cost is not None:
+            total_cost += cost
+            priced += 1
+        _bucket(by_model, f"{r.provider} / {r.model}", r, cost)
+        _bucket(by_route, r.route or "(요청 밖)", r, cost)
+        _bucket(by_day, r.created_at.date().isoformat(), r, cost)
         latencies.append(r.ms or 0)
         prompt_tokens += r.prompt_tokens or 0
         completion_tokens += r.completion_tokens or 0
@@ -95,7 +129,10 @@ def llm_summary(
             "calls": len(rows), "failed": failed,
             "p50_ms": _pct(latencies, 0.5), "p95_ms": _pct(latencies, 0.95),
             "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            # 비용은 **서버가 직접 단가를 얻은** 프로바이더의 호출만(services/llmprice — 지금은 Azure). 나머지는 빠진다.
+            "cost_usd": round(total_cost, 4) if priced else None, "priced_calls": priced,
         },
+        "prices": [{"provider": name, **price} for name, price in sorted(prices.items()) if price],
         "by_model": _ranked(by_model),
         "by_route": _ranked(by_route)[:12],
         # 일별은 시간 순으로 — 추세는 순서가 있어야 읽힌다.

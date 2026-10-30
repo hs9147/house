@@ -123,7 +123,8 @@ def test_summary_counts_on_the_server(clean_calls):
     assert out["totals"]["calls"] == 2 and out["totals"]["failed"] == 1
     assert out["totals"]["prompt_tokens"] == 10 and out["totals"]["completion_tokens"] == 5
     assert out["by_model"] == [{"key": "a / m1", "calls": 2, "failed": 1,
-                               "avg_ms": 200, "tokens": 15}]
+                               "avg_ms": 200, "tokens": 15, "cost_usd": None, "priced_calls": 0}]
+    assert out["totals"]["cost_usd"] is None and out["prices"] == []   # 단가를 모르는 프로바이더 — 0달러가 아니라 모름
     assert out["by_route"][0]["key"] == "/smartwork/sessions/:id/messages"
     assert len(out["daily"]) == 1
     assert out["failures"][0]["error"] == "LlmCallFailed: 400"
@@ -249,3 +250,33 @@ def test_summary_compares_output_within_each_outcome_and_counts_citations(clean_
     assert out["truncated_calls"] == 1
     assert out["composition_detail"][0]["key"] == "tool_result:사내 문서 · contracts"
     assert {t["outcome"] for t in out["turns"]} == {"보고서", "질문"}
+
+
+def test_cost_only_for_providers_whose_price_the_server_fetched(clean_calls, monkeypatch):
+    """비용은 서버가 직접 단가를 얻은 프로바이더(Azure)의 호출만 — 캐시된 입력은 캐시 단가로. 나머지는 셈에서 빠진다."""
+    from app.services import llmprice
+    price = {"input": 2.0, "cached_input": 0.1, "output": 10.0, "unit": "USD / 1M tokens",
+             "source": llmprice.SOURCE, "tier": "Global Standard · 짧은 문맥", "effective": "2026-10-01",
+             "meters": {"input": "6.1-sol ShortCo Inp Std Gl 1M Tokens"}}
+    monkeypatch.setattr(llmprice, "azure_price", lambda model: price if model == "gpt-6.1-sol" else None)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with SessionLocal() as db:
+        db.add_all([LlmProvider(name="az", kind=LlmProviderKind.azure, base_url="https://x.openai.azure.com",
+                                model="gpt-6.1-sol"),
+                    LlmProvider(name="br", kind=LlmProviderKind.aws, base_url="https://x", model="claude")])
+        db.commit()
+        call = LlmCallLog(created_at=now, provider="az", model="gpt-6.1-sol", ok=True, ms=10,
+                          prompt_tokens=1_000_000, completion_tokens=100_000)
+        db.add_all([call, LlmCallLog(created_at=now, provider="br", model="claude", ok=True, ms=10,
+                                     prompt_tokens=500_000, completion_tokens=50_000)])
+        db.commit()
+        db.add(LlmCallDetail(call_id=call.id, cached_tokens=400_000, parts=[]))
+        db.commit()
+    out = TestClient(create_app()).get(f"{API}/telemetry/llm?days=7", headers=ADMIN).json()
+    # 60만 × $2 + 40만 × $0.1 + 10만 × $10 = 1.2 + 0.04 + 1.0
+    assert out["totals"]["cost_usd"] == pytest.approx(2.24)
+    assert out["totals"]["priced_calls"] == 1 and out["totals"]["calls"] == 2
+    models = {m["key"]: m for m in out["by_model"]}
+    assert models["az / gpt-6.1-sol"]["cost_usd"] == pytest.approx(2.24)
+    assert models["br / claude"]["cost_usd"] is None                      # Bedrock — 단가를 직접 얻지 못한다
+    assert [p["provider"] for p in out["prices"]] == ["az"] and out["prices"][0]["source"] == llmprice.SOURCE
