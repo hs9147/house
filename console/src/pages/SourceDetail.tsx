@@ -100,7 +100,7 @@ export default function SourceDetail() {
         {row.status === 'failed' && row.error && <p className="error">{row.error}</p>}
         {error && <p className="error">{error}</p>}
       </div>
-      {row.kind === 'web' && <BookmarkPanel row={row} onChange={setRow} />}
+      {row.kind === 'web' && <BookmarkPanel />}
       {row.kind === 'web' && <ScanPanel row={row} live={live} onServerScan={rescan} />}
       {row.kind === 'web' && <RecordPanel row={row} live={live} />}
       {row.kind === 'web' && <QueryPanel row={row} onChange={setRow} />}
@@ -568,11 +568,10 @@ function LiveStatus({ live, modes }: { live: Live; modes: LiveMode[] }) {
 /**
  * ① 북마크 추가 — SSO 뒤의 사이트는 서버가 로그인할 수 없으니 로그인한 탭에서 북마크릿이 읽는다. 북마크는
  * 하나(통합 「GPAX」 — 스마트워크의 웹 Outlook 메일도 같은 것)이고 한 번만 끌어다 놓는다. 출처와 수집 조건은
- * 누를 때 콘솔이 보낸다. 예전 출처별 북마크가 내려받은 파일은 여기서 올린다.
+ * 누를 때 콘솔이 보낸다.
  */
-function BookmarkPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut) => void }) {
+function BookmarkPanel() {
   const [copied, setCopied] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
 
   const copy = () => {
@@ -585,25 +584,6 @@ function BookmarkPanel({ row, onChange }: { row: SourceOut; onChange: (r: Source
     area.remove();
     setCopied(ok);
     if (!ok) setError('복사하지 못했습니다 — 북마크로 끌어다 놓아 쓰세요.');
-  };
-
-  // 내려받은 파일 — 스캔·녹화를 한 곳에서 받는다. 맨 앞의 agent로 가른다(파일 전체를 읽지 않는다).
-  const upload = async (file: File | undefined) => {
-    if (!file) return;
-    setUploading(true);
-    setError('');
-    try {
-      if ((await file.slice(0, 200).text()).includes('"gpax-record/')) {
-        await api.uploadSourceRecording(row.id, file);
-        onChange(await api.getSource(row.id));
-      } else {
-        onChange(await api.uploadBrowserScan(row.id, file));
-      }
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setUploading(false);
-    }
   };
 
   return (
@@ -622,17 +602,6 @@ function BookmarkPanel({ row, onChange }: { row: SourceOut; onChange: (r: Source
         콘솔이 지금 것을 보내므로 조건을 고쳐도 다시 끌어다 놓지 않습니다. 이 브라우저의 다른 탭에 콘솔이 로그인돼
         있어야 합니다.
       </p>
-      <details style={{ fontSize: 12 }}>
-        <summary style={{ cursor: 'pointer' }}>예전 북마크가 내려받은 파일 올리기</summary>
-        <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
-          예전 출처별 북마크(「GPAX 스캔 · 이름」)를 콘솔 없이 누르면 결과가{' '}
-          <span className="mono">gpax-scan-{row.id}-*.json</span>·<span className="mono">gpax-record-{row.id}-*.json</span>으로
-          내려받아집니다. 그 파일을 여기에 올립니다(녹화는 수집 조건에 더해진다):{' '}
-          <input type="file" accept=".json,application/json" disabled={uploading || row.status === 'scanning'}
-                 onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ''; }} />
-          {uploading && ' 올리는 중…'}
-        </p>
-      </details>
       {error && <p className="error">{error}</p>}
     </div>
   );
