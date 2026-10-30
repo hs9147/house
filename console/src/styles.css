@@ -322,6 +322,8 @@ pre.logbox {
   max-height: 85vh;
   overflow: auto;
 }
+/* 넓은 팝업 — 화면보다 넓어지지 않게(작은 창에서는 창 폭에 맞춘다). */
+.modal.modal-wide { width: min(960px, 94vw); max-width: 94vw; }
 .modal h3 { margin: 0; font-size: 15px; }
 /* 팝업은 바깥 클릭으로 닫지 않는다 — 닫는 길은 이 버튼 하나뿐이라 항상 눈에 띄어야 한다. */
 .modal-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }

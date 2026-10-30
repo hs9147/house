@@ -5,15 +5,17 @@ interface Props {
   onClose: () => void;
   /** 닫으면 안 되는 팝업(진행 중인 작업 등)은 false — 닫기 버튼을 아예 감춘다. */
   closable?: boolean;
+  /** 표가 여러 열인 보고서처럼 넓어야 하는 팝업 — 기본 폭(560px)을 넘으면 내용이 상자 밖으로 삐져나온다. */
+  wide?: boolean;
   children: ReactNode;
 }
 
-export default function Modal({ title, onClose, closable = true, children }: Props) {
+export default function Modal({ title, onClose, closable = true, wide = false, children }: Props) {
   return (
     // 바깥을 눌러도 닫지 않는다 — 입력하던 내용이 클릭 한 번에 사라지는 사고를 막는다.
     // 닫는 길은 우상단 버튼 하나뿐이다.
     <div className="modal-backdrop">
-      <div className="modal">
+      <div className={wide ? 'modal modal-wide' : 'modal'}>
         <div className="modal-head">
           <h3>{title}</h3>
           {closable && (
