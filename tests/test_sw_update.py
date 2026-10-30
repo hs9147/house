@@ -56,6 +56,13 @@ def test_sw_update_schedules_git_pull_and_restart():
             # 빌드가 실패해도 서비스 재시작까지는 간다 — 대신 실패를 말한다
             assert script.index("npm run build") < script.index("Restart-Service")
             assert "콘솔 빌드 실패" in script
+            # dist에 바로 빌드하지 않는다 — vite가 빌드 내내 dist를 비워 /console/이 404였다(실측: 북마크 창).
+            # 옆 폴더에 빌드하고 index.html이 생겼을 때만 바꿔 끼우며, 막히면 예전 것을 되돌린다.
+            assert "npm run build -- --outDir dist.next --emptyOutDir" in script
+            build = script.index("npm run build -- --outDir dist.next")
+            assert build < script.index("Test-Path 'dist.next/index.html'") < script.index("Rename-Item 'dist.next' 'dist'")
+            assert "Rename-Item 'dist.old' 'dist'" in script
+            assert script.index("Rename-Item 'dist.next' 'dist'") < script.index("Restart-Service")
             # 분리된 프로세스라 stdout이 어디에도 닿지 않는다 — 로그로 남겨야 읽을 수 있다
             assert "Start-Transcript" in script and "sw-update.log" in script
             # 파이썬 의존성도 설치한다. "어느 venv인가"는 sys.executable로 답이 정해진다 —

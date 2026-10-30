@@ -10,5 +10,8 @@ node_modules/
 # 루트의 것만. console/package-lock.json은 추적 대상이다(의존성 고정).
 /package-lock.json
 console/dist/
+# SW 업데이트가 옆에 빌드한 뒤 바꿔 끼우는 자리(api/system.sw_update)
+console/dist.next/
+console/dist.old/
 .pytest_cache/
 logs/

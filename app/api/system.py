@@ -966,10 +966,27 @@ def sw_update(
         "    if ($LASTEXITCODE -ne 0) { "
         "      Write-Host '[SW Update] !! npm install 실패 — 새 패키지가 없으면 콘솔이 그 화면에서 깨집니다'; } "
         "    git checkout -- package-lock.json; "
-        "    Write-Host '[SW Update] console: npm run build...'; "
-        "    npm run build; "
-        "    if ($LASTEXITCODE -ne 0) { "
-        "      Write-Host '[SW Update] !! 콘솔 빌드 실패 — 이전 dist가 그대로 서빙됩니다'; } "
+        # **dist에 바로 빌드하지 않는다.** vite는 빌드를 시작하면서 dist를 비운다 — 그동안(설치·빌드 내내)
+        # /console/에 index.html이 없어 404가 나고(실측: GPAX 북마크가 연 창이 「페이지를 찾을 수 없음」),
+        # 빌드가 중간에 실패하면 dist가 빈 채로 남아 콘솔이 내려간다. 옆 폴더에 빌드하고, index.html이
+        # 생겼을 때만 바꿔 끼운다(이름 바꾸기 두 번 — 틈이 없다시피 하다). 실패하면 예전 dist가 그대로 남는다.
+        "    Write-Host '[SW Update] console: npm run build (dist.next에 빌드한 뒤 바꿔 끼웁니다)...'; "
+        "    if (Test-Path 'dist.next') { Remove-Item 'dist.next' -Recurse -Force -ErrorAction SilentlyContinue }; "
+        "    npm run build -- --outDir dist.next --emptyOutDir; "
+        "    if ($LASTEXITCODE -eq 0 -and (Test-Path 'dist.next/index.html')) { "
+        "      if (Test-Path 'dist.old') { Remove-Item 'dist.old' -Recurse -Force -ErrorAction SilentlyContinue }; "
+        "      if (Test-Path 'dist') { Rename-Item 'dist' 'dist.old' -ErrorAction SilentlyContinue }; "
+        "      Rename-Item 'dist.next' 'dist' -ErrorAction SilentlyContinue; "
+        # 바꿔 끼우기가 막혔으면(파일이 잠겨 이름을 못 바꿨으면) 예전 것을 되돌려 놓는다 — 콘솔이 비지 않게.
+        "      if (-not (Test-Path 'dist/index.html') -and (Test-Path 'dist.old/index.html')) { "
+        "        Write-Host '[SW Update] !! 새 dist로 바꾸지 못해 예전 dist를 되돌렸습니다'; "
+        "        if (Test-Path 'dist') { Remove-Item 'dist' -Recurse -Force -ErrorAction SilentlyContinue }; "
+        "        Rename-Item 'dist.old' 'dist'; } "
+        "      else { Write-Host '[SW Update] console: 새 dist로 바꿨습니다'; "
+        "        Remove-Item 'dist.old' -Recurse -Force -ErrorAction SilentlyContinue; } "
+        "    } else { "
+        "      Write-Host '[SW Update] !! 콘솔 빌드 실패 — 이전 dist가 그대로 서빙됩니다'; "
+        "      Remove-Item 'dist.next' -Recurse -Force -ErrorAction SilentlyContinue; } "
         "    Pop-Location; "
         "  } else { Write-Host '[SW Update] npm이 없어 콘솔 빌드를 건너뜁니다'; } "
         "} else { Write-Host '[SW Update] 콘솔 소스가 없어 빌드를 건너뜁니다'; } "
