@@ -647,6 +647,14 @@ def test_session_task_is_an_own_organization_and_its_workflow(client, monkeypatc
         return client.post(f"{API}/smartwork/sessions", json=body, headers=alice).status_code
 
     assert create(organization_id=sales) == 403  # 소속이 아닌 조직
+    # 관리자는 모든 조직의 업무와 워크플로를 고른다(워크플로 관리와 같은 규칙)
+    admin_orgs = {o["name"]: [w["name"] for w in o["workflows"]]
+                  for o in client.get(f"{API}/smartwork/orgs", headers=ADMIN).json()}
+    assert admin_orgs["finance"] == ["예산 집행"] and admin_orgs["sales"] == ["견적 발송"]
+    assert client.post(f"{API}/smartwork/sessions", json={"organization_id": sales, "workflow_id": quote},
+                       headers=ADMIN).status_code == 201
+    assert client.post(f"{API}/smartwork/sessions", json={"organization_id": 99999},
+                       headers=ADMIN).status_code == 404
     assert create(organization_id=finance, workflow_id=quote) == 422  # 남의 조직 워크플로
     assert create(workflow_id=budget) == 422  # 조직 없이 워크플로만
 

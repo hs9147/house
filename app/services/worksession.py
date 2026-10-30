@@ -52,12 +52,17 @@ def require_owner(db: Session, session_id: int, email: str) -> SmartworkSession:
 
 
 def org_choices(db: Session, key: ApiKey) -> list[dict]:
-    """세션에 고를 수 있는 조직 = 내 소속 조직, 워크플로 = 그 조직의 것."""
-    ids = viewer_org_ids(db, key)
-    if not ids:
-        return []
-    orgs = db.execute(select(Organization).where(Organization.id.in_(ids))
-                      .order_by(Organization.name)).scalars().all()
+    """세션에 고를 수 있는 조직 = 내 소속 조직(관리자는 모든 조직), 워크플로 = 그 조직의 것.
+
+    관리자는 모든 조직의 워크플로에 닿는다(워크플로 관리 화면·API와 같은 규칙) — 그 조직의 업무로 대화를 열어
+    워크플로를 확인하고 돕는 자리다."""
+    query = select(Organization).order_by(Organization.name)
+    if not key.is_admin:
+        ids = viewer_org_ids(db, key)
+        if not ids:
+            return []
+        query = query.where(Organization.id.in_(ids))
+    orgs = db.execute(query).scalars().all()
     out = []
     for org in orgs:
         flows = db.execute(select(Workflow).where(Workflow.organization_id == org.id)
@@ -69,8 +74,10 @@ def org_choices(db: Session, key: ApiKey) -> list[dict]:
 
 
 def _check_context(db: Session, key: ApiKey, org_id: int | None, workflow_id: int | None) -> None:
-    if org_id is not None and org_id not in viewer_org_ids(db, key):
+    if org_id is not None and not key.is_admin and org_id not in viewer_org_ids(db, key):
         raise SessionError(403, "소속 조직만 고를 수 있습니다.")
+    if org_id is not None and db.get(Organization, org_id) is None:   # 관리자는 소속 검사를 건너뛰므로 따로 본다
+        raise SessionError(404, "조직을 찾을 수 없습니다.")
     if workflow_id is not None:
         flow = db.get(Workflow, workflow_id)
         if flow is None or org_id is None or flow.organization_id != org_id:
