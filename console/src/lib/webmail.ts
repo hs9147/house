@@ -1,3 +1,5 @@
+import type { SmartworkSession } from './types';
+
 // 통합 북마크 「GPAX」(lib/agentCode.ts)가 연 받는 창(pages/AgentReceive)과 로그인한 콘솔 탭
 // (components/AgentRelay)이 같은 브라우저 안에서 이 채널로 주고받는다. 같은 출처(콘솔)만 쓸 수 있다.
 export const AGENT_CHANNEL = 'gpax-agent';
@@ -25,35 +27,58 @@ export function webMailOf(raw: unknown): WebMail | null {
   return mail.body || mail.header ? mail : null;
 }
 
-// 받는 창에서 「대화 시작」 — 메일(개인 맥락에 넣은 것)이나 화면(넣지 않고 붙이기만)으로 스마트워크 대화를 잇는다.
-// 콘솔 탭 하나가 맡아(components/AgentRelay) 스마트워크 화면으로 가고, 화면(pages/Smartwork)이 꺼내 보낸다.
-export interface MailChat {
-  kind: 'mail' | 'page';
-  sessionId: number | null;  // null = 새 업무
-  text: string;
-  mail: WebMail;
-  path: string;              // 메일: 개인 저장소에 넣은 자리(outlook/web_….md)
-  from: string;              // 보낸 사이트(출처 주소)
-}
+// 받는 창의 스마트워크 대화 — 메일(개인 맥락에 넣은 것)이나 화면(넣지 않고 붙이기만)으로 시작해 **받는 창에서**
+// 이어 간다. 콘솔 API는 콘솔 탭 하나가 부르고(components/AgentRelay) 대화는 받는 창(pages/AgentReceive)에 보인다.
+export type ChatKind = 'mail' | 'page';
 
-export const MAIL_CHAT_EVENT = 'gpax-mail-chat';
 export const DEFAULT_MAIL_ASK = '이 메일을 읽고 요지와 내가 할 일을 정리해 줘';
 export const DEFAULT_PAGE_ASK = '이 화면의 내용을 정리하고 내가 할 일을 알려 줘';
-let pendingChat: MailChat | null = null;
 
-export function offerMailChat(chat: MailChat): void {
-  pendingChat = chat;
-  window.dispatchEvent(new Event(MAIL_CHAT_EVENT));
+// 받는 창에 보이는 대화 — 글·진행 과정·첨부 이름·고를 것. 보고서·웹·파일·에이전트 화면(panel)은 콘솔에서 본다.
+export interface PopupMessage {
+  id: number;
+  role: 'user' | 'assistant';
+  author: string;
+  content: string;
+  steps: string[];
+  attachments: string[];
+  choices: { label: string; prompt: string }[];
+  suggestions: { title: string; prompt: string }[];
+  panel: boolean;
+}
+export interface PopupSession { id: number; title: string; messages: PopupMessage[] }
+const POPUP_MESSAGES = 40;
+
+export function popupSession(s: SmartworkSession): PopupSession {
+  return {
+    id: s.id, title: s.title,
+    messages: s.messages.slice(-POPUP_MESSAGES).map((m) => ({
+      id: m.id, role: m.role, author: m.author, content: m.content, steps: m.steps ?? [],
+      attachments: (m.attachments ?? []).map((a) => a.name),
+      choices: (m.choices ?? []).map((c) => ({ label: c.label, prompt: c.prompt })),
+      suggestions: (m.suggestions ?? []).map((x) => ({ title: x.title, prompt: x.prompt })),
+      panel: !!(m.report || m.web || m.file || m.agent),
+    })),
+  };
 }
 
-export function takeMailChat(): MailChat | null {
-  const chat = pendingChat;
-  pendingChat = null;
-  return chat;
+// 받는 창의 「콘솔에서 보기」 — 콘솔 탭이 스마트워크로 가서 그 업무를 연다(pages/Smartwork가 꺼낸다).
+export const OPEN_SESSION_EVENT = 'gpax-open-session';
+let pendingSession: number | null = null;
+
+export function offerSession(id: number): void {
+  pendingSession = id;
+  window.dispatchEvent(new Event(OPEN_SESSION_EVENT));
+}
+
+export function takeSession(): number | null {
+  const id = pendingSession;
+  pendingSession = null;
+  return id;
 }
 
 // 대화에 붙이는 첨부 — 개인 저장소에 넣은 것과 같은 모양(services/personal.mail_save_page)
-export function mailAttachment(mail: WebMail, kind: MailChat['kind'] = 'mail'): { name: string; type: string; data: string } {
+export function mailAttachment(mail: WebMail, kind: ChatKind = 'mail'): { name: string; type: string; data: string } {
   const subject = mail.subject.trim() || '(제목 없음)';
   const head = mail.header ? `- ${kind === 'page' ? '주소' : '머리글'}: ${mail.header.split(/\s+/).join(' ')}` : '';
   const text = [`# ${subject}`, '', head, '', mail.body, ''].join('\n');

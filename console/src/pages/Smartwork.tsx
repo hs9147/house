@@ -9,7 +9,7 @@ import { type AsyncState, useApi, usePolling } from '../lib/hooks';
 import { canKeepFolders, forget, pickFolder, type PickedFolder, remember, reopenFolder } from '../lib/localfiles';
 import { cancelTask, dismissTask, runTask, type TaskHandle, useTask } from '../lib/tasks';
 import { parseCsv, renderMarkdown } from '../lib/markdown';
-import { MAIL_CHAT_EVENT, type MailChat, mailAttachment, takeMailChat } from '../lib/webmail';
+import { OPEN_SESSION_EVENT, takeSession } from '../lib/webmail';
 import type {
   HealthInfo,
   MailLogin,
@@ -242,38 +242,20 @@ export default function Smartwork() {
     return s;
   };
 
-  // 웹 Outlook 메일 받는 창의 「대화 시작」(components/MailRelay가 넘긴다) — 고른 업무를 열거나 새로 만들고,
-  // 그 업무의 맥락에 「메일」을 켠 뒤 메일을 첨부로 붙여 보낸다. 다른 화면에 있다가 와도 받는다.
-  const mailChat = async (c: MailChat) => {
-    opened.current = true;   // 처음 들어올 때 최근 업무를 여는 것보다 앞선다
-    setLeftTab('chat');
-    const mail = c.kind === 'mail';
-    let s = c.sessionId ? await open(c.sessionId) : await start(null, null, { folders: [], mail });
-    if (!s) return;
-    // 메일은 개인 맥락에 넣었으니 그 업무의 「메일」을 켠다 — 화면은 이번 요청에만 붙인다.
-    if (mail && !s.my_context.mail) {
-      try {
-        const ctx = await api.setSessionContext(s.id, { ...s.my_context, mail: true });
-        s = { ...s, my_context: ctx };
-        setSession((cur) => (cur && cur.id === s!.id ? { ...cur, my_context: ctx } : cur));
-      } catch {
-        /* 맥락을 못 켜도 이번 요청은 첨부로 간다 */
-      }
-    }
-    current.current = s;
-    const title = c.mail.subject || '(제목 없음)';
-    const where = mail ? `웹 Outlook 메일 「${title}」${c.path ? ` (내 업무 맥락 ${c.path})` : ''}`
-      : `화면 「${title}」 (${c.mail.header || c.from})`;
-    await send(s, `${c.text}\n\n— ${where}`, [mailAttachment(c.mail, c.kind)]);
-  };
+  // 받는 창의 「콘솔에서 보기」(components/AgentRelay가 넘긴다) — 받는 창에서 이어 온 업무를 연다(보고서·화면은
+  // 여기서 본다). 다른 화면에 있다가 와도 받는다.
   useEffect(() => {
     const take = () => {
-      const c = takeMailChat();
-      if (c) void mailChat(c);
+      const id = takeSession();
+      if (!id) return;
+      opened.current = true;   // 처음 들어올 때 최근 업무를 여는 것보다 앞선다
+      setLeftTab('chat');
+      sessions.reload();       // 받는 창에서 새로 만든 업무가 목록에 없을 수 있다
+      void open(id);
     };
     take();
-    window.addEventListener(MAIL_CHAT_EVENT, take);
-    return () => window.removeEventListener(MAIL_CHAT_EVENT, take);
+    window.addEventListener(OPEN_SESSION_EVENT, take);
+    return () => window.removeEventListener(OPEN_SESSION_EVENT, take);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
-import { AGENT_CHANNEL, offerMailChat, webMailOf } from '../lib/webmail';
+import { AGENT_CHANNEL, mailAttachment, offerSession, popupSession, webMailOf } from '../lib/webmail';
 
 /**
  * 로그인한 콘솔 탭에서 — 통합 북마크가 연 받는 창(pages/AgentReceive)과 같은 브라우저 안에서 주고받는다.
@@ -13,7 +13,10 @@ import { AGENT_CHANNEL, offerMailChat, webMailOf } from '../lib/webmail';
  *   source      → 그 사이트(주소)로 등록한 데이터 수집 출처와 수집 조건
  *   upload      → 북마크의 스캔·녹화·봇 결과를 그 출처에 올린다.
  *   sessions    → 고를 수 있는 스마트워크 업무 목록
- *   chat        → 스마트워크로 가서 그 업무를 열고 메일·화면을 붙여 보낸다(pages/Smartwork).
+ *   session     → 대화할 업무를 열거나 만든다(메일이면 그 업무의 「메일」 맥락을 켠다)
+ *   say         → 받는 창에서 한 말을 보내고 답이 나오면 대화를 돌려준다 — 대화는 받는 창에서 이어진다
+ *   progress    → 답을 만드는 동안 거친 단계
+ *   open        → 「콘솔에서 보기」 — 이 탭이 스마트워크로 가서 그 업무를 연다(보고서·화면은 콘솔에서 본다)
  */
 export default function AgentRelay() {
   const navigate = useNavigate();
@@ -66,14 +69,33 @@ export default function AgentRelay() {
             id: s.id,
             label: `${s.title || '(새 업무)'}${s.workflow ?? s.organization ? ` · ${s.workflow ?? s.organization}` : ''}`,
           })) });
-        } else if (m.gpax === 'chat') {
+        } else if (m.gpax === 'session') {
+          // 대화할 업무 — 고른 것을 열거나 새로 만든다. 메일이면 그 업무의 맥락에 「메일」을 켠다(개인 맥락에 넣었으니
+          // 다음 대화에서도 찾아 쓴다). 화면은 맥락에 넣지 않고 그 요청에만 붙인다.
+          let s = typeof m.sessionId === 'number' ? await api.getSession(m.sessionId)
+            : await api.createSession({ organization_id: null, workflow_id: null });
+          if (m.kind === 'mail' && !s.my_context.mail) {
+            try {
+              s = { ...s, my_context: await api.setSessionContext(s.id, { ...s.my_context, mail: true }) };
+            } catch {
+              /* 맥락을 못 켜도 이번 요청은 첨부로 간다 */
+            }
+          }
+          reply({ gpax: 'session-ack', id: m.id, ok: true, session: popupSession(s) });
+        } else if (m.gpax === 'say') {
+          // 받는 창에서 한 말 — 답이 나올 때까지 기다려 대화를 돌려준다. 메일·화면이 실려 오면 첨부로 붙인다.
+          const sessionId = Number(m.sessionId);
           const mail = webMailOf(m.mail);
-          if (!mail) throw new Error('붙일 내용이 비어 있습니다.');
-          offerMailChat({ kind: m.kind === 'page' ? 'page' : 'mail',
-                          sessionId: typeof m.sessionId === 'number' ? m.sessionId : null,
-                          text: String(m.text || ''), mail, path: String(m.path || ''), from: String(m.from || '') });
+          await api.sendSessionMessage(sessionId, String(m.text || ''),
+            mail ? [mailAttachment(mail, m.kind === 'page' ? 'page' : 'mail')] : []);
+          reply({ gpax: 'say-ack', id: m.id, ok: true, session: popupSession(await api.getSession(sessionId)) });
+        } else if (m.gpax === 'progress') {
+          const p = await api.sessionProgress(Number(m.sessionId));
+          reply({ gpax: 'progress-ack', id: m.id, ok: true, steps: p.steps.map((x) => x.label) });
+        } else if (m.gpax === 'open') {
+          offerSession(Number(m.sessionId));
           navigate('/smartwork');
-          reply({ gpax: 'chat-ack', id: m.id, ok: true });
+          reply({ gpax: 'open-ack', id: m.id, ok: true });
         }
       } catch (err) {
         reply({ gpax: `${m.gpax}-ack`, id: m.id, ok: false, text: (err as Error).message });
