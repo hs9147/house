@@ -552,6 +552,7 @@ class JobKind(str, enum.Enum):
     db_backup = "db_backup"      # 공용 DB를 pg_dump로 백업(services/shareddb.backup)
     db_grants = "db_grants"      # 공용 DB의 표 권한을 권한 표에 맞춤(services/shareddb.reconcile)
     aws_sso = "aws_sso"          # Bedrock 프로바이더의 AWS SSO 토큰을 서버가 갱신해 둠(services/awssso)
+    semantic_tune = "semantic_tune"  # 내용 분석의 기준 다시 배우기 — 사람 정답으로(services/semantic.tune)
 
 
 class JobStatus(str, enum.Enum):

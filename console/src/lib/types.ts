@@ -1565,6 +1565,51 @@ export interface SemanticForm {
             sample_rows: Record<string, string>[]; created_at: string };
   confirmed?: SemanticMapping & { version: string; schema_version: string; confirmed_at: string };
 }
+// 같은 틀로 되풀이되는 문서(템플릿)의 추출 규칙 — 필드는 정규식(첫 괄호 묶음이 이름), 관계는 필드 번호를 잇는다
+export interface SemanticTemplateRules {
+  fields: { class: string; pattern: string; required: boolean; note?: string }[];
+  relations: { from: number; rel: string; to: number }[];
+}
+export interface SemanticTemplateEval {
+  precision: number;
+  recall: number;
+  escalated?: number;
+  docs: { path: string; found?: number; expected?: number; hit?: number; extra: string[]; missed: string[];
+          missing_required: number[] }[];
+}
+export interface SemanticTemplate {
+  id: string;
+  label: string;
+  skeleton: string[];
+  documents: number;
+  example: string;
+  draft: { proposal: SemanticTemplateRules; first: SemanticTemplateEval | null; revised: SemanticTemplateRules;
+           evaluation: SemanticTemplateEval | null; problems: string[]; precision_needed: number; train: string[];
+           check: { path: string }[]; created_at: string } | null;
+  confirmed: { rules: SemanticTemplateRules; version: string; schema_version: string; precision: number; recall: number;
+               confirmed_by: string; confirmed_at: string } | null;
+  suspended?: { reason: string; at: string } | null;     // 기준 다시 배우기가 멈춘 규칙 — 그 문서들은 LLM이 읽는다
+}
+// 사람 정답 — 짝은 「같은 대상인가」, 개체·관계는 「맞게 뽑았나」
+export type SemanticGoldKind = 'pair' | 'node' | 'edge';
+export interface SemanticGoldItem {
+  kind: SemanticGoldKind;
+  item: string;
+  cls?: string; a?: string; b?: string; decision?: string; source?: string; score?: number; reason?: string;
+  a_evidence?: { evidence: string; path: string } | null; b_evidence?: { evidence: string; path: string } | null;
+  path?: string; name?: string; src?: string; rel?: string; dst?: string; evidence?: string; origin?: string;
+}
+export type SemanticGoldMetrics = Record<SemanticGoldKind, {
+  labeled: number; by: Record<string, { n: number; correct: number; accuracy: number }> }>;
+export interface SemanticTuneEntry {
+  at: string;
+  actor: string;
+  merge: { status: 'promoted' | 'kept' | 'skipped'; reason: string;
+           champion?: { n: number; wrong: number; gray: number }; challenger?: { n: number; wrong: number; gray: number };
+           previous?: Partial<SemanticMergeRules>; version?: string };
+  templates: { id: string; status: 'kept' | 'suspended'; check_precision: number | null; human_precision: number | null;
+               human_labels: number }[];
+}
 export interface SemanticStatus {
   store: string;
   documents: number;
@@ -1582,10 +1627,28 @@ export interface SemanticStatus {
   last_run: (Record<string, unknown> & { at: string }) | null;
   outside: Record<string, number>;
   last_merge: { applied: { cls: string; alias: string; canonical: string; reason: string }[];
-                rejected: { cls: string; canonical: string; names: string[]; reason: string }[]; at: string } | null;
+                rejected: { cls: string; a: string; b: string; reason: string }[];
+                stats?: Record<'pairs' | 'id' | 'rule' | 'llm' | 'human' | 'cached' | 'gray' | 'llm_calls', number>;
+                rules_version?: string; at: string } | null;
+  merge_rules: SemanticMergeRules;
+  merge_rules_draft: { translit: Record<string, string>; strip: string[]; from_pairs: number; created_at: string } | null;
+  pairs: Record<string, number>;        // 「출처:결정」별 짝 수 — id·rule·llm·human × same·different
+  gold: SemanticGoldMetrics;
+  tune_history: SemanticTuneEntry[];
   aliases: { cls: string; alias: string; canonical: string; reason: string }[];
   failed: { path: string; error: string }[];
   counts: { nodes: Record<string, number>; edges: Record<string, number> };
+}
+// 같은 개체 묶기의 기준(JSON) — 식별자 패턴·떼어 낼 꼬리·음역표·점수 가중치·문턱(services/semantic_merge)
+export interface SemanticMergeRules {
+  id_patterns: string[];
+  strip: string[];
+  translit: Record<string, string>;
+  weights: Record<string, number>;
+  thresholds: { merge: number; reject: number };
+  version: string;
+  confirmed_by?: string;
+  confirmed_at?: string;
 }
 export interface SemanticHit { cls: string; name: string; documents: number; aliases: string[] }
 export interface SemanticNeighbors {

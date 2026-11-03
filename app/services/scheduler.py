@@ -46,6 +46,8 @@ DEFAULT_INTERVALS = {
     JobKind.db_grants: 3_600,
     # 처음 한 번의 값일 뿐이다 — 돌 때마다 토큰 만료와 배운 세션 시간으로 다음 간격을 다시 정한다(services/awssso).
     JobKind.aws_sso: 600,
+    # 사람 정답은 하루에 몇 십 개 쌓인다 — 하루에 한 번 배우면 된다(LLM을 부르지 않는다).
+    JobKind.semantic_tune: 86_400,
 }
 
 _lock = threading.Lock()
@@ -63,7 +65,12 @@ def _wanted(db: Session) -> list[tuple[JobKind, str]]:
     wanted: list[tuple[JobKind, str]] = [(JobKind.api_catalog, "")]
     try:
         # 문서 색인은 PAAS_DOC_ROOTS의 문서 저장소만 — 내부 저장소(internal)는 색인 대상이 아니다(storage.indexed).
-        wanted += [(JobKind.doc_index, s.name) for s in storage.indexed_stores()]
+        stores = storage.indexed_stores()
+        wanted += [(JobKind.doc_index, s.name) for s in stores]
+        from . import semantic  # noqa: PLC0415
+
+        # 내용 분석의 스키마를 확정한 저장소만 — 배울 기준이 있는 곳
+        wanted += [(JobKind.semantic_tune, s.name) for s in stores if semantic.has_schema(s.name)]
     except storage.StorageError:
         pass  # 환경변수가 잘못돼 있으면 문서 job만 빠지고 나머지는 그대로 돈다
     for module in db.execute(select(Module).order_by(Module.name)).scalars():
@@ -189,6 +196,16 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
             return JobStatus.failed, {**(job.last_detail or {}), "error": f"{type(e).__name__}: {e}"[:300]}
         job.interval_seconds = seconds   # 간격은 매번 다시 정한다 — 토큰 만료·배운 세션 시간에 맞춰
         return JobStatus(status), detail
+
+    if job.kind == JobKind.semantic_tune:
+        from . import semantic  # noqa: PLC0415
+
+        result = semantic.tune(job.target, "scheduler")
+        changed = result["merge"]["status"] == "promoted" or any(
+            t["status"] == "suspended" for t in result["templates"])
+        return (JobStatus.ok if changed else JobStatus.skipped), {
+            "merge": result["merge"]["status"], "reason": result["merge"]["reason"],
+            "templates_suspended": [t["id"] for t in result["templates"] if t["status"] == "suspended"]}
 
     if job.kind == JobKind.doc_index:
         store = storage.store(job.target)

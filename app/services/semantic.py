@@ -30,6 +30,7 @@ from html import unescape
 from sqlalchemy.orm import Session
 
 from . import docsearch, docready, ontology
+from . import semantic_template as st
 from . import llm as llm_service
 from . import storage as storage_service
 
@@ -50,13 +51,21 @@ FORM_SAMPLE_DOCS = 3
 # 양식 표 몇 개를 품은 보고서) 나머지 글은 LLM이 읽는다. 문서 전체를 건너뛰면 그 본문의 관계가 통째로 빠진다(실측).
 FORM_REST_CHARS = 1_500
 FORM_SAMPLE_ROWS = 8
+# 템플릿(③′) — 같은 틀의 문서가 이만큼이면 규칙을 짤 만하다. 규칙은 표본 몇 건(정답은 LLM 추출)으로 짜고 **다른**
+# 몇 건으로 검증한다. 검증 정밀도가 기준을 넘어야 확정할 수 있다.
+TEMPLATE_MIN_DOCS = 5
+TEMPLATE_TRAIN_DOCS = 3
+TEMPLATE_CHECK_DOCS = 3
+TEMPLATE_PRECISION = 0.9
+TEMPLATE_SAMPLE_CHARS = 4_000
+# 템플릿 규칙이 뽑은 항목에 사람 정답이 이만큼 쌓이면 그 정밀도로도 잰다(기준 다시 배우기).
+TEMPLATE_GOLD_MIN = 10
+GOLD_KINDS = ("pair", "node", "edge")
 # 표본 검토 — 10%. 경로의 해시로 고른다(돌 때마다 같은 문서가 고르게 뽑힌다).
 REVIEW_EVERY = 10
 # 멈춤 조건 — 표본으로 이만큼 본 뒤에 틀린 비율이 기준을 넘으면.
 STOP_MIN_ITEMS = 30
 STOP_ERROR_RATE = 0.2
-# 묶기 — 한 번에 LLM에게 보이는 이름 수(종류마다).
-MERGE_NAMES = 150
 # 관계는 한 번에 다 찾지 않는다 — 개념을 이만큼씩 묶어(그 개념에서 나가는 관계) 차례로 제안·검토한다. 관계 수에
 # 상한을 두지 않는다: 업무가 넓은 저장소는 관계가 많고, 한 번에 다 내게 하면 상한에 걸리거나(실측: 40개 초과로
 # 확정 불가) 뒤쪽이 대충 채워진다.
@@ -86,7 +95,19 @@ CREATE INDEX IF NOT EXISTS ix_sem_nodes_path ON sem_nodes(path);
 CREATE INDEX IF NOT EXISTS ix_sem_nodes_name ON sem_nodes(cls, name);
 CREATE INDEX IF NOT EXISTS ix_sem_edges_path ON sem_edges(path);
 CREATE INDEX IF NOT EXISTS ix_sem_edges_src ON sem_edges(src_cls, src);
-CREATE INDEX IF NOT EXISTS ix_sem_edges_dst ON sem_edges(dst_cls, dst)
+CREATE INDEX IF NOT EXISTS ix_sem_edges_dst ON sem_edges(dst_cls, dst);
+-- 묶기의 짝 결정(semantic_merge) — 같은 짝을 다시 묻지 않고, 사람이 「풀기」한 짝은 다시 묶지 않는다.
+CREATE TABLE IF NOT EXISTS sem_pairs (
+  cls TEXT NOT NULL, a TEXT NOT NULL, b TEXT NOT NULL, decision TEXT NOT NULL, source TEXT NOT NULL,
+  score REAL NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', decided_at TEXT NOT NULL,
+  PRIMARY KEY (cls, a, b)
+);
+-- 사람이 확인한 정답 — 짝(pair)·개체(node)·관계(edge)가 맞는지. 기준을 다시 배우고 재는 근거다(semantic_tune).
+CREATE TABLE IF NOT EXISTS sem_gold (
+  kind TEXT NOT NULL, item TEXT NOT NULL, label INTEGER NOT NULL, detail TEXT NOT NULL DEFAULT '{}',
+  labeled_by TEXT NOT NULL DEFAULT '', labeled_at TEXT NOT NULL,
+  PRIMARY KEY (kind, item)
+)
 """
 
 
@@ -558,6 +579,172 @@ def extract_form(markdown: str, columns: list[str], mapping: dict) -> tuple[list
     return nodes, edges
 
 
+# --- ③′ 템플릿 ---
+
+def _template_groups(conn) -> dict[str, dict]:
+    """템플릿 → {skeleton, paths}. 문서마다 앞부분을 읽어야 해서, 색인이 바뀌지 않았으면 지난 결과를 쓴다."""
+    saved = _get(conn, "templates", {})
+    row = conn.execute("SELECT COUNT(*) AS n, MAX(indexed_at) AS at FROM docs WHERE body IS NOT NULL").fetchone()
+    key = [row["n"], row["at"], sorted(saved)]
+    cached = _get(conn, "template_groups")
+    if cached and cached.get("key") == key:
+        return cached["groups"]
+    docs = {r["path"]: st.lines_of(r["head"]) for r in conn.execute(
+        "SELECT path, substr(body, 1, ?) AS head FROM docs WHERE body IS NOT NULL", (st.LINE_CHARS,))
+        if not _skip_reason(r["path"], r["head"])}
+    groups = st.cluster(docs, {tid: t["skeleton"] for tid, t in saved.items()}, TEMPLATE_MIN_DOCS)
+    _put(conn, "template_groups", {"key": key, "groups": groups})
+    return groups
+
+
+def templates(store_name: str) -> list[dict]:
+    """템플릿 목록 — 뼈대(되풀이되는 줄)·문서 수·규칙(제안·검증·확정)."""
+    conn = _conn(store_name)
+    try:
+        saved = _get(conn, "templates", {})
+        out = [{"id": tid, "label": " · ".join(g["skeleton"][:4]), "skeleton": g["skeleton"],
+                "documents": len(g["paths"]), "example": (g["paths"] or [""])[0],
+                "draft": saved.get(tid, {}).get("draft"), "confirmed": saved.get(tid, {}).get("confirmed"),
+                "suspended": saved.get(tid, {}).get("suspended")}
+               for tid, g in _template_groups(conn).items()]
+        return sorted(out, key=lambda t: (-t["documents"], t["id"]))
+    finally:
+        conn.close()
+
+
+_TEMPLATE_RULES = (
+    "같은 틀로 되풀이되는 사내 문서에서 개념을 뽑는 **정규식 규칙**을 짠다. 표본 문서들과 그 문서에서 뽑아야 할"
+    " 항목(정답)을 준다. 틀이 정한 자리(라벨 다음 줄, 「라벨: 값」 등)에 오는 개념만 규칙으로 만든다 — 문장 속에서"
+    " 그때그때 나오는 것은 만들지 않는다(그것은 규칙이 아니라 LLM이 읽는다). pattern은 파이썬 정규식(re.M — ^·$는 줄의"
+    " 처음·끝)이고 첫 괄호 묶음이 이름이다. 값이 아니라 **라벨에 기대어** 짠다(특정 회사명·숫자를 넣지 말 것)."
+    " 모든 문서에 꼭 있는 필드는 required: true — 그것을 못 찾는 문서는 틀이 다른 것으로 보고 LLM에 넘긴다."
+    " relations는 필드 번호(0부터)를 스키마의 관계로 잇는다(from 필드의 첫 값 → to 필드의 값마다).\n"
+    'JSON: {"fields":[{"class":"","pattern":"","required":false,"note":""}],"relations":[{"from":0,"rel":"","to":1}]}\n'
+    + _KO)
+_TEMPLATE_REVISE = (
+    "\n\n이번에는 **검증 결과로 규칙을 고친다.** 규칙을 다른 문서들에 돌려 정답과 견준 결과를 준다 — extra는 규칙이"
+    " 더 뽑은 것(정답에 없다), missed는 놓친 것, missing_required는 못 찾은 필수 필드다. 정밀도가 재현율보다 중요하다"
+    " — 확실하지 않은 필드는 뺀다. 고친 규칙 전체를 같은 JSON으로 낸다.")
+
+
+def _clean_template_rules(data: dict) -> dict:
+    def num(v):
+        return int(v) if isinstance(v, int) or (isinstance(v, str) and v.isdigit()) else v
+    fields = [{"class": str(f.get("class", "")), "pattern": str(f.get("pattern", "")),
+               "required": f.get("required") is True, "note": str(f.get("note", ""))[:200]}
+              for f in data.get("fields") or [] if isinstance(f, dict)]
+    relations = [{"from": num(r.get("from")), "rel": str(r.get("rel", "")), "to": num(r.get("to"))}
+                 for r in data.get("relations") or [] if isinstance(r, dict)]
+    return {"fields": fields, "relations": relations}
+
+
+def _reference(db, provider, conn, schema: dict, store_name: str, path: str) -> dict:
+    """정답 — 이 문서에서 LLM이 뽑은 것. 이미 분석했으면 그 결과(LLM 몫만), 아니면 지금 뽑는다(기계 검사까지)."""
+    text = _markdown(store_name, path)[:DOC_CHARS]
+    row = conn.execute("SELECT status FROM sem_docs WHERE path = ?", (path,)).fetchone()
+    if row and row["status"] == "ok":
+        nodes = [dict(r) for r in conn.execute(
+            "SELECT cls, name, evidence FROM sem_nodes WHERE path = ? AND origin = 'llm'", (path,))]
+        edges = [dict(r) for r in conn.execute(
+            "SELECT src_cls, src, rel, dst_cls, dst, evidence FROM sem_edges WHERE path = ? AND origin = 'llm'", (path,))]
+    else:
+        nodes, edges, _dropped, _unanchored = check_extraction(
+            _extract_doc(db, provider, schema, path, text), schema, text)
+        nodes, edges = [_public(n) for n in nodes], [_public(e) for e in edges]
+    return {"path": path, "text": text, "nodes": nodes, "edges": edges}
+
+
+def _template_samples(refs: list[dict]) -> str:
+    return "\n\n".join(
+        f"문서 {r['path']}:\n{st.plain(r['text'])[:TEMPLATE_SAMPLE_CHARS]}\n정답: " + json.dumps(
+            {"entities": [{"class": n["cls"], "name": n["name"]} for n in r["nodes"]],
+             "relations": [{"from": e["src"], "rel": e["rel"], "to": e["dst"]} for e in r["edges"]]},
+            ensure_ascii=False) for r in refs)
+
+
+def _brief(evaluation: dict | None) -> dict | None:
+    """고침에 보내는 검증 결과 — 문서마다 틀린 것만."""
+    if not evaluation:
+        return None
+    return {"precision": round(evaluation["precision"], 3), "recall": round(evaluation["recall"], 3),
+            "docs": [{k: d[k] for k in ("path", "extra", "missed", "missing_required")} for d in evaluation["docs"]]}
+
+
+def propose_template(db: Session, store_name: str, tid: str, report=_quiet) -> dict:
+    """③′ 템플릿 하나의 추출 규칙 — 정답 만들기(LLM 추출) → 규칙 짜기(LLM) → 다른 문서로 검증 → 모자라면 한 번 고침.
+    확정은 관리자가(confirm_template — 검증을 다시 통과해야 한다)."""
+    provider = provider_for(db, store_name)
+    conn = _conn(store_name)
+    try:
+        schema = _schema(conn)
+        group = _template_groups(conn).get(tid)
+        if not group or len(group["paths"]) < TEMPLATE_TRAIN_DOCS + 1:
+            raise SemanticError(f"템플릿이 없거나 문서가 {TEMPLATE_TRAIN_DOCS + 1}건보다 적습니다: {tid}")
+        paths = group["paths"]
+        want = TEMPLATE_TRAIN_DOCS + TEMPLATE_CHECK_DOCS
+        picked = paths[::max(1, len(paths) // want)][:want]
+        steps = len(picked) + 3
+        refs = []
+        for i, path in enumerate(picked, 1):
+            report(f"정답 만들기 — 문서 {i}/{len(picked)} LLM 추출", i, steps)
+            refs.append(_reference(db, provider, conn, schema, store_name, path))
+        train, check = refs[:TEMPLATE_TRAIN_DOCS], refs[TEMPLATE_TRAIN_DOCS:]
+        system = f"{_TEMPLATE_RULES}\n\n스키마: {_schema_text(schema)}"
+        report("규칙 짜기(LLM)", len(picked) + 1, steps)
+        proposal = _clean_template_rules(_ask(db, provider, system, _template_samples(train)))
+        problems = st.check_rules(proposal, schema)
+        first = None if problems else st.evaluate(proposal, check)
+        revised, final = proposal, first
+        if problems or first["precision"] < TEMPLATE_PRECISION or first["escalated"]:
+            report("검증 결과로 고치기(LLM)", len(picked) + 2, steps)
+            revised = _clean_template_rules(_ask(
+                db, provider, system + _TEMPLATE_REVISE,
+                _template_samples(train + check) + "\n\n" + json.dumps(
+                    {"규칙": proposal, "기계 검사": problems, "검증": _brief(first)}, ensure_ascii=False)))
+            problems = st.check_rules(revised, schema)
+            final = None if problems else st.evaluate(revised, check)
+        report("검증 끝", steps, steps)
+        draft = {"proposal": proposal, "first": _brief(first), "revised": revised, "evaluation": final,
+                 "problems": problems, "precision_needed": TEMPLATE_PRECISION,
+                 "train": [r["path"] for r in train],
+                 "check": [{"path": r["path"], "nodes": r["nodes"], "edges": r["edges"]} for r in check],
+                 "created_at": _now()}
+        saved = _get(conn, "templates", {})
+        saved[tid] = {**saved.get(tid, {}), "skeleton": group["skeleton"], "draft": draft}
+        _put(conn, "templates", saved)
+        return draft
+    finally:
+        conn.close()
+
+
+def confirm_template(store_name: str, tid: str, rules: dict, actor: str) -> dict:
+    """관리자가 규칙을 확정 — 고친 규칙이어도 **검증 문서로 다시 재고** 정밀도가 기준을 넘어야 한다(LLM 없이)."""
+    rules = _clean_template_rules(rules)
+    conn = _conn(store_name)
+    try:
+        schema = _schema(conn)
+        problems = st.check_rules(rules, schema)
+        if problems:
+            raise SemanticError(" / ".join(problems[:5]))
+        saved = _get(conn, "templates", {})
+        t = saved.get(tid)
+        if not t or not t.get("draft"):
+            raise SemanticError("검증할 표본이 없습니다 — 먼저 규칙 제안·검증을 하세요.")
+        check = [{**c, "text": _markdown(store_name, c["path"])[:DOC_CHARS]} for c in t["draft"]["check"]]
+        ev = st.evaluate(rules, check)
+        if ev["precision"] < TEMPLATE_PRECISION:
+            raise SemanticError(f"검증 문서에서 정밀도 {ev['precision']:.0%} — 기준 {TEMPLATE_PRECISION:.0%}에 못"
+                                " 미칩니다. 규칙을 고치세요.")
+        t["confirmed"] = {"rules": rules, "version": st.rules_version(rules), "schema_version": schema["version"],
+                          "precision": ev["precision"], "recall": ev["recall"], "confirmed_by": actor,
+                          "confirmed_at": _now()}
+        t.pop("suspended", None)
+        _put(conn, "templates", saved)
+        return t["confirmed"]
+    finally:
+        conn.close()
+
+
 # --- ③ 문서 ---
 
 def _compact(text: str) -> str:
@@ -657,6 +844,22 @@ def _review_items(db, provider, schema: dict, path: str, items: list[dict]) -> d
             if isinstance(w, dict) and str(w.get("i", "")).isdigit() and int(w["i"]) < len(items)}
 
 
+def _tally_review(state: dict, path: str, items: list[dict], wrong: dict[int, str], sampled: bool) -> None:
+    """검토 결과를 센다. 오류율은 **무작위 표본만**으로 잰다 — 이름이 근거에 없는 항목은 원래 틀리기 쉬워, 섞으면
+    멈춤 기준을 괜히 넘는다. 그쪽은 따로 센다. 무엇을 왜 틀렸다고 했는지 남긴다 — 멈췄을 때 관리자가 스키마를
+    고칠지, 그냥 다시 시작할지 고를 근거다."""
+    bucket = "review" if sampled else "check"
+    state[f"{bucket}_items"] = state.get(f"{bucket}_items", 0) + len(items)
+    state[f"{bucket}_wrong"] = state.get(f"{bucket}_wrong", 0) + len(wrong)
+    notes = state.get("review_notes", [])
+    for j, problem in wrong.items():
+        item = items[j].get("entity") or items[j].get("relation")
+        label = f'{item["cls"]}:{item["name"]}' if "cls" in item else f'{item["src"]} —{item["rel"]}→ {item["dst"]}'
+        notes.append({"path": path, "item": label, "evidence": item["evidence"][:160], "problem": problem,
+                      "sampled": sampled})
+    state["review_notes"] = notes[-30:]
+
+
 def _public(item: dict) -> dict:
     """저장·검토에 보내는 모양 — 기계 검사가 붙인 표시(anchored)는 뺀다."""
     return {k: v for k, v in item.items() if k != "anchored"}
@@ -715,6 +918,10 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
         root = _root(store_name)
         confirmed_forms = {name: f["confirmed"] for name, f in _get(conn, "forms", {}).items()
                            if f.get("confirmed") and f["confirmed"].get("schema_version") == schema["version"]}
+        saved_templates = _get(conn, "templates", {})
+        template_rules = {tid: t["confirmed"] for tid, t in saved_templates.items()
+                          if t.get("confirmed") and t["confirmed"].get("schema_version") == schema["version"]}
+        skeletons = {tid: saved_templates[tid]["skeleton"] for tid in template_rules}
         form_of: dict[str, list[str]] = {}
         for r in conn.execute("SELECT DISTINCT path, name FROM nodes WHERE kind = 'table'"):
             if r["name"] in confirmed_forms:
@@ -722,7 +929,7 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
         rows = list(conn.execute("SELECT path, fp, status FROM sem_docs"))
         known = {r["path"]: r["fp"] for r in rows}
         # ② 같은 본문은 한 번만 — 경로만 다르고 본문·스키마 판·대응표 판이 같으면(지문이 같으면) 앞의 결과를 옮긴다.
-        done_fp = {r["fp"]: r["path"] for r in rows if r["status"] in ("ok", "form")}
+        done_fp = {r["fp"]: r["path"] for r in rows if r["status"] in ("ok", "form", "template")}
         paths = _paths(conn)
         # 지워진 문서의 내용 그래프는 함께 지운다
         for gone in set(known) - set(paths):
@@ -730,14 +937,16 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
             conn.execute("DELETE FROM sem_docs WHERE path = ?", (gone,))
         conn.commit()
 
-        stats = {"analyzed": 0, "form_docs": 0, "failed": 0, "reviewed": 0, "dropped": 0, "copied": 0, "skipped": 0}
+        stats = {"analyzed": 0, "form_docs": 0, "template_docs": 0, "escalated": 0, "failed": 0, "reviewed": 0,
+                 "dropped": 0, "copied": 0, "skipped": 0}
         outside: dict = _get(conn, "outside", {})
         remaining = 0
         for path in paths:
             fms = sorted(form_of.get(path, []))
             body = conn.execute("SELECT body FROM docs WHERE path = ?", (path,)).fetchone()["body"] or ""
-            fp = _digest([hashlib.sha1(body.encode()).hexdigest(), schema["version"],
-                          [confirmed_forms[f]["version"] for f in fms]])
+            tid = st.member_of(st.lines_of(body), skeletons) if skeletons else None
+            parts = [hashlib.sha1(body.encode()).hexdigest(), schema["version"], [confirmed_forms[f]["version"] for f in fms]]
+            fp = _digest(parts + [template_rules[tid]["version"]] if tid else parts)   # 템플릿 밖 문서의 지문은 그대로
             if known.get(path) == fp:
                 continue
             if time.monotonic() - started > budget_seconds or should_stop():
@@ -773,7 +982,24 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                     _write(conn, path, form_nodes, form_edges, "form")
                     status, dropped, reviewed = "form", 0, 0
                     stats["form_docs"] += 1
+                elif tid and not (by_rule := st.apply_rules(template_rules[tid]["rules"], rest[:DOC_CHARS]))[2] \
+                        and (by_rule[0] or by_rule[1]):
+                    # 템플릿 문서 — 확정한 규칙으로(LLM 추출 없음). 표본이면 규칙이 뽑은 것도 LLM이 검토한다 —
+                    # 오류율(멈춤 조건)에 함께 센다. 필수 필드를 못 찾으면 이 분기로 오지 않는다(LLM으로 넘긴다).
+                    nodes, edges = by_rule[0], by_rule[1]
+                    status, dropped, reviewed = "template", 0, 0
+                    if _sampled(path):
+                        items = [{"entity": n} for n in nodes] + [{"relation": e} for e in edges]
+                        wrong = _review_items(db, provider, schema, path, items)
+                        _tally_review(state, path, items, wrong, True)
+                        nodes = [n for i, n in enumerate(nodes) if i not in wrong]
+                        edges = [e for i, e in enumerate(edges) if len(by_rule[0]) + i not in wrong]
+                        reviewed = 1
+                        stats["reviewed"] += 1
+                    _write(conn, path, form_nodes + nodes, form_edges + edges, "template")
+                    stats["template_docs"] += 1
                 else:
+                    stats["escalated"] += bool(tid)      # 템플릿인데 필수 필드가 없다 — 틀이 다르다
                     text = rest[:DOC_CHARS]
                     data = _extract_doc(db, provider, schema, path, text)
                     nodes, edges, dropped, unanchored = check_extraction(data, schema, text)
@@ -789,20 +1015,7 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                                  for k, i in targets]
                         wrong = _review_items(db, provider, schema, path, items)
                         reviewed = 1
-                        # 오류율은 **무작위 표본만**으로 잰다 — 이름이 근거에 없는 항목은 원래 틀리기 쉬워, 섞으면
-                        # 멈춤 기준을 괜히 넘는다. 그쪽은 따로 센다.
-                        bucket = "review" if sampled else "check"
-                        state[f"{bucket}_items"] = state.get(f"{bucket}_items", 0) + len(items)
-                        state[f"{bucket}_wrong"] = state.get(f"{bucket}_wrong", 0) + len(wrong)
-                        # 무엇을 왜 틀렸다고 했는지 남긴다 — 멈췄을 때 관리자가 스키마를 고칠지, 그냥 다시 시작할지 고를 근거다.
-                        notes = state.get("review_notes", [])
-                        for j, problem in wrong.items():
-                            item = items[j].get("entity") or items[j].get("relation")
-                            label = (f'{item["cls"]}:{item["name"]}' if "cls" in item
-                                     else f'{item["src"]} —{item["rel"]}→ {item["dst"]}')
-                            notes.append({"path": path, "item": label, "evidence": item["evidence"][:160],
-                                          "problem": problem, "sampled": sampled})
-                        state["review_notes"] = notes[-30:]
+                        _tally_review(state, path, items, wrong, sampled)
                         drop = {targets[j] for j in wrong}
                         nodes = [n for i, n in enumerate(nodes) if ("n", i) not in drop]
                         edges = [e for i, e in enumerate(edges) if ("e", i) not in drop]
@@ -951,13 +1164,6 @@ def submit(store_name: str, label: str, fn) -> bool:
 
 # --- ④ 묶기 ---
 
-_NORM_RE = re.compile(r"\(주\)|㈜|주식회사|\(유\)|유한회사|[\s\.\,\-_·()\[\]{}'\"]")
-
-
-def normalize(name: str) -> str:
-    return _NORM_RE.sub("", name).lower()
-
-
 def canonical_map(conn) -> dict[tuple[str, str], str]:
     """별칭 → 대표 이름, **끝까지 따라가서.** 묶기는 여러 번 돈다 — 앞에서 A-Electronics → 에이전자로 묶고, 양식
     문서가 들어온 뒤 에이전자 → 에이전자(주)로 묶이면 별칭이 사슬이 된다. 한 단계만 따르면 A-Electronics가
@@ -973,81 +1179,397 @@ def canonical_map(conn) -> dict[tuple[str, str], str]:
     return {key: value for key, value in resolved.items() if key[1] != value}
 
 
+def merge_rules(conn) -> dict:
+    """묶기 기준(JSON) — 확정한 것이 없으면 기본값. 판(version)은 내용으로 정한다."""
+    import copy  # noqa: PLC0415
+    from . import semantic_merge as sm  # noqa: PLC0415
+
+    rules = _get(conn, "merge_rules") or copy.deepcopy(sm.DEFAULT_RULES)
+    return {**rules, "version": sm.rules_version({k: v for k, v in rules.items() if k != "version"})}
+
+
+def _pair_key(a: str, b: str) -> tuple[str, str]:
+    return (a, b) if a <= b else (b, a)
+
+
+def _record_pair(conn, cls: str, a: str, b: str, decision: str, source: str, score: float = 0.0,
+                 reason: str = "") -> None:
+    a, b = _pair_key(a, b)
+    conn.execute("INSERT OR REPLACE INTO sem_pairs (cls, a, b, decision, source, score, reason, decided_at)"
+                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cls, a, b, decision, source, score, reason[:200], _now()))
+    conn.commit()   # 바로 — LLM을 기다리는 동안 쓰기 잠금을 쥐지 않는다
+
+
 def propose_merges(db: Session, store_name: str, report=_quiet) -> dict:
-    """④ 같은 개체 묶기. 정규화가 같은 이름은 바로 묶는다(기계적이라 검토하지 않는다). 그 밖의 애매한 것은 LLM이
-    묶음을 제안하고 **묶음마다** 검토한다 — 합치기는 되돌리기 어렵다(되돌리기는 별칭 삭제로 할 수 있다)."""
+    """④ 같은 개체 묶기 — 형식화한 기준(merge_rules)으로 결정론적으로 정하고, 애매한 짝(gray)만 LLM이 판정·검토한다.
+
+    LLM이 「같다」고 한 짝은 검토를 거쳐야 묶인다(합치기는 되돌리기 어렵다 — 되돌리면 사람의 「다르다」로 남는다).
+    판정한 짝에서 LLM이 새 음역·약칭 규칙을 제안하면 초안으로 남긴다(merge_rules_draft — 확정은 관리자)."""
+    from . import semantic_merge as sm  # noqa: PLC0415
+
     provider = provider_for(db, store_name)
     conn = _conn(store_name)
     try:
-        aliases = canonical_map(conn)
-        applied, rejected = [], []
+        rules = merge_rules(conn)
         names_by_cls: dict[str, dict[str, int]] = {}
-        for r in conn.execute("SELECT cls, name, COUNT(DISTINCT path) AS n FROM sem_nodes GROUP BY cls, name"):
-            names_by_cls.setdefault(r["cls"], {})[r["name"]] = r["n"]
-
-        def link(cls: str, alias: str, canonical: str, reason: str) -> None:
-            if alias != canonical and (cls, alias) not in aliases:
-                conn.execute("INSERT OR REPLACE INTO sem_aliases (cls, alias, canonical, reason) VALUES (?, ?, ?, ?)",
-                             (cls, alias, canonical, reason))
-                # 바로 커밋한다 — 끝에서 한 번 커밋하면 LLM을 기다리는 몇 분 내내 쓰기 잠금을 쥐어, 같은 색인 파일에
-                # 쓰는 것(진행 보고·주기 색인·분석)이 「database is locked」로 실패했다(실측).
-                conn.commit()
-                aliases[(cls, alias)] = canonical
-                applied.append({"cls": cls, "alias": alias, "canonical": canonical, "reason": reason})
+        evidence: dict[tuple[str, str], list[str]] = {}
+        for r in conn.execute("SELECT cls, name, path, evidence FROM sem_nodes"):
+            names_by_cls.setdefault(r["cls"], {}).setdefault(r["name"], set()).add(r["path"])
+            evidence.setdefault((r["cls"], r["name"]), []).append(r["evidence"])
+        names_by_cls = {c: {n: len(ps) for n, ps in names.items()} for c, names in names_by_cls.items()}
+        known = {(r["cls"], r["a"], r["b"]): (r["decision"], r["source"])
+                 for r in conn.execute("SELECT cls, a, b, decision, source FROM sem_pairs")}
+        stats = {"pairs": 0, "id": 0, "rule": 0, "llm": 0, "human": 0, "cached": 0, "gray": 0, "llm_calls": 0}
+        applied, rejected = [], []
+        llm_same: list[dict] = []
 
         for n, (cls, names) in enumerate(names_by_cls.items(), 1):
-            report(f"'{cls}' 이름 묶기·검토 중", n, len(names_by_cls))
-            groups: dict[str, list[str]] = {}
-            for name in names:
-                groups.setdefault(normalize(name), []).append(name)
-            for same in groups.values():
-                if len(same) > 1:
-                    head = max(same, key=lambda n: (names[n], -len(n)))
-                    for other in same:
-                        link(cls, other, head, "이름 정규화가 같다")
-            # 애매한 것 — 아직 묶이지 않은 이름들(많이 나오는 것부터)
-            rest = sorted((n for n in names if (cls, n) not in aliases), key=lambda n: -names[n])[:MERGE_NAMES]
-            if len(rest) < 2:
-                continue
-            proposal = _ask(db, provider,
-                f"'{cls}' 개념의 이름 목록에서 **같은 대상**을 가리키는 이름들을 묶는다(약칭·영문·한글 표기·오타)."
-                " 확실한 것만. 비슷하지만 다른 대상(다른 회사·다른 품목)은 묶지 않는다.\n"
-                'JSON: {"groups":[{"canonical":"대표 이름","names":["다른 이름"],"reason":""}]}\n' + _KO,
-                json.dumps(rest, ensure_ascii=False))
-            for g in proposal.get("groups") or []:
-                if not isinstance(g, dict):
+            report(f"'{cls}' 짝 고르기·판정 중(이름 {len(names)})", n, len(names_by_cls))
+            ids = {name: sm.ids_of(evidence.get((cls, name), []), rules) for name in names}
+            gray: list[tuple[str, str, float]] = []
+            for a, b in sorted(sm.candidate_pairs(list(names), rules, ids)):
+                stats["pairs"] += 1
+                cached = known.get((cls, a, b))
+                if cached and cached[1] in ("human", "llm"):
+                    stats["cached" if cached[1] == "llm" else "human"] += 1
+                    continue   # 사람·LLM이 이미 정한 짝은 다시 묻지 않는다(기준이 바뀌어도 그 판정이 이긴다)
+                decision, source, value = sm.decide(a, b, rules, ids)
+                if decision == "gray":
+                    gray.append((a, b, value))
                     continue
-                canonical = str(g.get("canonical", ""))
-                others = [str(n) for n in g.get("names") or [] if str(n) in names and str(n) != canonical]
-                if canonical not in names or not others:
-                    continue
-                verdict = _ask(db, provider,
-                    f"다른 사람이 '{cls}' 개념의 이름들을 같은 대상으로 묶자고 했다. 정말 같은 대상인지 검토한다."
-                    " 확신이 없으면 거절한다.\n"
-                    'JSON: {"same":true,"reason":""}\n' + _KO,
-                    json.dumps({"canonical": canonical, "names": others, "reason": g.get("reason", "")},
-                               ensure_ascii=False))
-                if verdict.get("same") is True:
-                    for other in others:
-                        link(cls, other, canonical, str(g.get("reason", ""))[:200])
-                else:
-                    rejected.append({"cls": cls, "canonical": canonical, "names": others,
-                                     "reason": str(verdict.get("reason", ""))[:200]})
-        conn.commit()
-        result = {"applied": applied, "rejected": rejected, "at": _now()}
+                stats[source] += 1
+                if not cached or cached[0] != decision:
+                    _record_pair(conn, cls, a, b, decision, source, value,
+                                 "같은 식별자" if source == "id" and decision == "same" else
+                                 "서로 다른 식별자" if source == "id" else f"점수 {value:.2f}")
+            stats["gray"] += len(gray)
+            for k in range(0, len(gray), sm.LLM_BATCH):
+                batch = gray[k:k + sm.LLM_BATCH]
+                report(f"'{cls}' 애매한 짝 LLM 판정 {k + 1}~{k + len(batch)}/{len(gray)}", n, len(names_by_cls))
+                judged = _judge_pairs(db, provider, cls, batch, evidence, "judge")
+                stats["llm_calls"] += 1
+                same = [i for i in range(len(batch)) if judged.get(i, (False, ""))[0]]
+                checked = _judge_pairs(db, provider, cls, [batch[i] for i in same], evidence, "review") if same else {}
+                stats["llm_calls"] += 1 if same else 0
+                for i, (a, b, value) in enumerate(batch):
+                    ok, why = judged.get(i, (False, "판정 없음"))
+                    if ok:
+                        ok, why2 = checked.get(same.index(i), (False, "검토 없음"))
+                        why = why2 or why
+                    _record_pair(conn, cls, a, b, "same" if ok else "different", "llm", value, why)
+                    stats["llm"] += 1
+                    (llm_same if ok else rejected).append({"cls": cls, "a": a, "b": b, "reason": why[:200]})
+
+            # 묶음 다시 짓기 — 「같다」 짝으로 잇되, 「다르다」(사람·식별자)인 둘이 한 묶음이 되지 않게. 믿을 만한 것부터
+            # 잇는다 — 문턱을 넘은 기준(rule)이 애매해서 LLM에 물은 것(llm)보다 앞선다
+            rows = list(conn.execute("SELECT a, b, decision, source FROM sem_pairs WHERE cls = ?", (cls,)))
+            rank = {"human": 0, "id": 1, "rule": 2, "llm": 3}
+            same_pairs = sorted(((r["a"], r["b"], r["source"]) for r in rows if r["decision"] == "same"),
+                                key=lambda x: rank.get(x[2], 9))
+            cannot = {(r["a"], r["b"]) for r in rows if r["decision"] == "different" and r["source"] in ("human", "id")}
+            mapping = _constrained_groups(names, same_pairs, cannot)
+            old = {r["alias"]: r["canonical"] for r in conn.execute(
+                "SELECT alias, canonical FROM sem_aliases WHERE cls = ?", (cls,))}
+            conn.execute("DELETE FROM sem_aliases WHERE cls = ?", (cls,))
+            for alias, canonical in mapping.items():
+                source = next((src for a, b, src in same_pairs if {a, b} & {alias}), "rule")
+                conn.execute("INSERT INTO sem_aliases (cls, alias, canonical, reason) VALUES (?, ?, ?, ?)",
+                             (cls, alias, canonical, {"id": "같은 식별자", "rule": "이름 기준", "llm": "LLM 판정·검토",
+                                                      "human": "사람이 확인"}.get(source, source)))
+                if old.get(alias) != canonical:
+                    applied.append({"cls": cls, "alias": alias, "canonical": canonical, "reason": source})
+            conn.commit()
+
+        draft = _propose_merge_rules(db, provider, rules, llm_same) if llm_same else None
+        if draft:
+            _put(conn, "merge_rules_draft", draft)
+            stats["llm_calls"] += 1
+        result = {"applied": applied, "rejected": rejected, "stats": stats, "rules_version": rules["version"],
+                  "at": _now()}
         _put(conn, "last_merge", result)
         return result
     finally:
         conn.close()
 
 
-def remove_alias(store_name: str, cls: str, alias: str) -> None:
+def _constrained_groups(names: dict[str, int], same_pairs: list[tuple[str, str, str]],
+                        cannot: set[tuple[str, str]]) -> dict[str, str]:
+    """「같다」를 믿음 순(same_pairs의 차례)으로 이어 묶음을 짓되, 「다르다」(cannot)인 둘이 같은 묶음이 되는 이음은 버린다."""
+    member = {n: {n} for n in names}
+    for a, b, _src in same_pairs:
+        if a not in member or b not in member or member[a] is member[b]:
+            continue
+        ga, gb = member[a], member[b]
+        if any(_pair_key(x, y) in cannot for x in ga for y in gb):
+            continue
+        ga |= gb
+        for n in gb:
+            member[n] = ga
+    out: dict[str, str] = {}
+    seen: set[int] = set()
+    for group in member.values():
+        if id(group) in seen or len(group) < 2:
+            continue
+        seen.add(id(group))
+        head = max(group, key=lambda n: (names[n], -len(n), n))
+        out.update({n: head for n in group if n != head})
+    return out
+
+
+def _judge_pairs(db, provider, cls: str, batch: list[tuple[str, str, float]], evidence: dict,
+                 mode: str) -> dict[int, tuple[bool, str]]:
+    """애매한 짝들을 한 번에 — 짝마다 같은 대상인지. mode=review면 다른 사람이 「같다」고 한 것을 검토한다."""
+    items = [{"i": i, "a": a, "b": b, "a_근거": (evidence.get((cls, a)) or [""])[0][:160],
+              "b_근거": (evidence.get((cls, b)) or [""])[0][:160]} for i, (a, b, _s) in enumerate(batch)]
+    task = (f"'{cls}' 개념의 이름 짝마다 **같은 대상**인지 판정한다(약칭·영문·한글 표기·오타). 비슷하지만 다른 대상"
+            "(다른 회사·다른 품목)은 다르다. 확신이 없으면 다르다." if mode == "judge" else
+            f"다른 사람이 '{cls}' 개념의 이름 짝들을 같은 대상이라고 했다. 짝마다 정말 같은지 검토한다. 확신이 없으면 다르다.")
+    out = _ask(db, provider, task + '\nJSON: {"pairs":[{"i":0,"same":true,"reason":""}]}\n' + _KO,
+               json.dumps(items, ensure_ascii=False))
+    return {int(p["i"]): (p.get("same") is True, str(p.get("reason", ""))) for p in out.get("pairs") or []
+            if isinstance(p, dict) and str(p.get("i", "")).isdigit()}
+
+
+def _propose_merge_rules(db, provider, rules: dict, same: list[dict]) -> dict | None:
+    """LLM이 같다고 판정한 짝에서 **일반 규칙**(음역·떼어 낼 꼬리)을 뽑아 초안으로 — 다음부터 결정론적으로 처리한다."""
+    try:
+        out = _ask(db, provider,
+            "같은 대상으로 판정된 이름 짝들에서, 다음부터 규칙으로 처리할 수 있는 **일반 규칙**만 뽑는다: 음역(영문 약칭 →"
+            " 한글 표기, 예: lg → 엘지)과 떼어 낼 꼬리(회사 형태 등). 한 짝에만 맞는 규칙은 내지 않는다.\n"
+            'JSON: {"translit":{"영문 소문자":"한글"},"strip":["떼어 낼 말"]}\n' + _KO,
+            json.dumps({"pairs": same[:60], "현재 음역표": rules.get("translit"), "현재 꼬리": rules.get("strip")},
+                       ensure_ascii=False))
+    except Exception:  # noqa: BLE001 — 규칙 제안은 덤이다: 실패해도 묶기는 끝났다
+        return None
+    translit = {str(k).lower(): str(v) for k, v in (out.get("translit") or {}).items()
+                if str(k).lower() not in rules.get("translit", {})}
+    strip = [str(x) for x in out.get("strip") or [] if str(x) not in rules.get("strip", [])]
+    if not translit and not strip:
+        return None
+    return {"translit": translit, "strip": strip, "from_pairs": len(same), "created_at": _now()}
+
+
+def confirm_merge_rules(store_name: str, rules: dict, actor: str) -> dict:
+    """관리자가 기준을 확정 — 다음 묶기부터 쓴다(판이 바뀐다). 초안은 비운다."""
+    from . import semantic_merge as sm  # noqa: PLC0415
+
+    clean = {k: rules[k] for k in sm.DEFAULT_RULES if k in rules}
+    for pattern in clean.get("id_patterns", []):
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            raise SemanticError(f"식별자 패턴이 정규식이 아닙니다: {pattern} ({e})") from e
+    th = clean.get("thresholds") or {}
+    if not 0 <= th.get("reject", 0) < th.get("merge", 1) <= 1:
+        raise SemanticError("문턱은 0 ≤ 거절 < 묶음 ≤ 1 이어야 합니다.")
     conn = _conn(store_name)
     try:
-        conn.execute("DELETE FROM sem_aliases WHERE cls = ? AND alias = ?", (cls, alias))
+        merged = {**merge_rules(conn), **clean}
+        merged.pop("version", None)
+        _put(conn, "merge_rules", {**merged, "confirmed_by": actor, "confirmed_at": _now()})
+        conn.execute("DELETE FROM sem_meta WHERE key = 'merge_rules_draft'")
         conn.commit()
+        return merge_rules(conn)
     finally:
         conn.close()
+
+
+def remove_alias(store_name: str, cls: str, alias: str, actor: str = "") -> None:
+    """묶음 풀기 — 사람이 「다르다」고 한 것으로 남긴다. 그래야 다음 묶기가 기준(정규화 등)으로 다시 묶지 않는다."""
+    conn = _conn(store_name)
+    try:
+        row = conn.execute("SELECT canonical FROM sem_aliases WHERE cls = ? AND alias = ?", (cls, alias)).fetchone()
+        conn.execute("DELETE FROM sem_aliases WHERE cls = ? AND alias = ?", (cls, alias))
+        conn.commit()
+        if row:
+            _record_pair(conn, cls, alias, row["canonical"], "different", "human", 0.0, f"사람이 풀었다 {actor}".strip())
+    finally:
+        conn.close()
+
+
+# --- ⑤ 사람 정답·기준 다시 배우기 ---
+# 정답의 뜻: 짝(pair)은 「같은 대상인가」, 개체(node)·관계(edge)는 「맞게 뽑았나」(1·0). 기준을 다시 배우고(semantic_tune)
+# 규칙의 정밀도를 재는 근거다 — LLM 판정은 약한 정답일 뿐이다.
+
+_TAB = "char(9)"
+_GOLD_SQL = {
+    "pair": ("SELECT cls, a, b, decision, source, score, reason FROM sem_pairs x WHERE source != 'human'",
+             f"x.cls || {_TAB} || x.a || {_TAB} || x.b"),
+    "node": ("SELECT path, cls, name, evidence, origin FROM sem_nodes x WHERE 1 = 1",
+             f"x.path || {_TAB} || x.cls || {_TAB} || x.name"),
+    "edge": ("SELECT path, src_cls, src, rel, dst_cls, dst, evidence, origin FROM sem_edges x WHERE 1 = 1",
+             f"x.path || {_TAB} || x.src_cls || {_TAB} || x.src || {_TAB} || x.rel || {_TAB} || x.dst_cls"
+             f" || {_TAB} || x.dst"),
+}
+
+
+def _gold_key(kind: str, row: dict) -> str:
+    cols = {"pair": ("cls", "a", "b"), "node": ("path", "cls", "name"),
+            "edge": ("path", "src_cls", "src", "rel", "dst_cls", "dst")}[kind]
+    return "\t".join(row[c] for c in cols)
+
+
+def gold_queue(store_name: str, kind: str, n: int = 10) -> list[dict]:
+    """사람이 확인할 것 — 아직 확인하지 않은 것에서. 짝은 반을 점수가 애매한 것(0.5 가까이)부터 — 그것을 알아야
+    문턱이 움직인다 — 나머지는 무작위(기준이 확신한 것도 맞는지 재야 한다). 개체·관계는 무작위."""
+    if kind not in GOLD_KINDS:
+        raise SemanticError(f"kind는 {', '.join(GOLD_KINDS)} 중 하나입니다.")
+    select, key = _GOLD_SQL[kind]
+    fresh = f" AND NOT EXISTS (SELECT 1 FROM sem_gold g WHERE g.kind = '{kind}' AND g.item = {key})"
+    conn = _conn(store_name)
+    try:
+        rows = []
+        if kind == "pair":
+            rows += [dict(r) for r in conn.execute(select + fresh + " ORDER BY ABS(score - 0.5) LIMIT ?", (n - n // 2,))]
+        rows += [dict(r) for r in conn.execute(select + fresh + " ORDER BY RANDOM() LIMIT ?", (n,))]
+        out, seen = [], set()
+        for r in rows:
+            item = _gold_key(kind, r)
+            if item in seen:
+                continue
+            seen.add(item)
+            if kind == "pair":       # 짝은 두 이름의 근거를 함께 — 이름만으로는 사람도 모른다
+                for side in ("a", "b"):
+                    ev = conn.execute("SELECT evidence, path FROM sem_nodes WHERE cls = ? AND name = ? LIMIT 1",
+                                      (r["cls"], r[side])).fetchone()
+                    r[f"{side}_evidence"] = dict(ev) if ev else None
+            out.append({"kind": kind, "item": item, **r})
+        return out[:n]
+    finally:
+        conn.close()
+
+
+def label_gold(store_name: str, kind: str, item: str, label: bool, actor: str) -> dict:
+    """정답 하나 — 짝이면 사람의 판정으로도 남기고(다음 묶기에 바로 쓰인다), 틀린 개체·관계는 그래프에서 뺀다."""
+    if kind not in GOLD_KINDS:
+        raise SemanticError(f"kind는 {', '.join(GOLD_KINDS)} 중 하나입니다.")
+    select, key = _GOLD_SQL[kind]
+    conn = _conn(store_name)
+    try:
+        row = conn.execute(select.replace(" WHERE source != 'human'", " WHERE 1 = 1") + f" AND {key} = ?",
+                           (item,)).fetchone()
+        if row is None:
+            raise SemanticError("그 항목이 없습니다 — 다시 분석·묶기로 바뀌었을 수 있습니다.")
+        detail = dict(row)
+        if kind != "pair" and detail.get("origin") == "template":
+            body = conn.execute("SELECT body FROM docs WHERE path = ?", (detail["path"],)).fetchone()
+            skeletons = {tid: t["skeleton"] for tid, t in _get(conn, "templates", {}).items()}
+            detail["template"] = st.member_of(st.lines_of((body and body["body"]) or ""), skeletons)
+        conn.execute("INSERT OR REPLACE INTO sem_gold (kind, item, label, detail, labeled_by, labeled_at)"
+                     " VALUES (?, ?, ?, ?, ?, ?)",
+                     (kind, item, int(label), json.dumps(detail, ensure_ascii=False), actor, _now()))
+        conn.commit()
+        if kind == "pair":
+            _record_pair(conn, row["cls"], row["a"], row["b"], "same" if label else "different", "human",
+                         row["score"], f"사람이 확인 {actor}".strip())
+        elif not label:
+            conn.execute(f"DELETE FROM {'sem_nodes' if kind == 'node' else 'sem_edges'} AS x WHERE {key} = ?", (item,))
+            conn.commit()
+        return gold_metrics(conn)
+    finally:
+        conn.close()
+
+
+def gold_metrics(conn) -> dict:
+    """정답으로 잰 정확도 — 짝은 출처(id·rule·llm)별로 그 판정이 맞았나, 개체·관계는 출처(llm·form·template)별 정밀도."""
+    out: dict = {k: {"labeled": 0, "by": {}} for k in GOLD_KINDS}
+    for r in conn.execute("SELECT kind, label, detail FROM sem_gold"):
+        d = json.loads(r["detail"])
+        m = out[r["kind"]]
+        m["labeled"] += 1
+        if r["kind"] == "pair":
+            by, ok = d.get("source", ""), (d.get("decision") == "same") == bool(r["label"])
+        else:
+            by, ok = d.get("origin", ""), bool(r["label"])
+        b = m["by"].setdefault(by, {"n": 0, "correct": 0})
+        b["n"] += 1
+        b["correct"] += ok
+    for m in out.values():
+        for b in m["by"].values():
+            b["accuracy"] = b["correct"] / b["n"]
+    return out
+
+
+def _revalidate_templates(conn, store_name: str) -> list[dict]:
+    """확정한 템플릿 규칙을 다시 잰다 — 검증 문서(지금 글)와 사람 정답. 기준 밑이면 멈춘다(그 문서들은 LLM으로)."""
+    saved = _get(conn, "templates", {})
+    golds: dict[str, list[int]] = {}
+    for r in conn.execute("SELECT label, detail FROM sem_gold WHERE kind IN ('node', 'edge')"):
+        d = json.loads(r["detail"])
+        if d.get("origin") == "template" and d.get("template"):
+            golds.setdefault(d["template"], []).append(r["label"])
+    out = []
+    for tid, t in saved.items():
+        conf = t.get("confirmed")
+        if not conf:
+            continue
+        check = []
+        for c in (t.get("draft") or {}).get("check", []):
+            try:
+                check.append({**c, "text": _markdown(store_name, c["path"])[:DOC_CHARS]})
+            except Exception:  # noqa: BLE001 — 지워진 검증 문서는 빼고 잰다
+                continue
+        by_check = st.evaluate(conf["rules"], check)["precision"] if check else None
+        labels = golds.get(tid, [])
+        by_human = sum(labels) / len(labels) if len(labels) >= TEMPLATE_GOLD_MIN else None
+        low = [f"{name} {v:.0%}" for name, v in (("검증 문서", by_check), ("사람 정답", by_human))
+               if v is not None and v < TEMPLATE_PRECISION]
+        if low:
+            t["suspended"] = {**conf, "reason": f"{' · '.join(low)} — 기준 {TEMPLATE_PRECISION:.0%} 밑", "at": _now()}
+            t["confirmed"] = None
+        out.append({"id": tid, "status": "suspended" if low else "kept", "check_precision": by_check,
+                    "human_precision": by_human, "human_labels": len(labels)})
+    if any(o["status"] == "suspended" for o in out):
+        _put(conn, "templates", saved)
+    return out
+
+
+def tune(store_name: str, actor: str = "scheduler") -> dict:
+    """기준 다시 배우기 — 묶기 가중치·문턱(나을 때만 바꾼다, 이전 기준은 기록에 남긴다)과 템플릿 규칙 재검증."""
+    from . import semantic_tune as tu  # noqa: PLC0415
+
+    conn = _conn(store_name)
+    try:
+        rules = merge_rules(conn)
+        human: dict[tuple[str, str], int] = {}
+        for r in conn.execute("SELECT item, label FROM sem_gold WHERE kind = 'pair'"):
+            _cls, a, b = r["item"].split("\t")
+            human[(a, b)] = r["label"]
+        for r in conn.execute("SELECT a, b, decision FROM sem_pairs WHERE source = 'human'"):
+            human.setdefault((r["a"], r["b"]), int(r["decision"] == "same"))
+        weak = [(r["a"], r["b"], int(r["decision"] == "same"), r["source"])
+                for r in conn.execute("SELECT a, b, decision, source FROM sem_pairs WHERE source IN ('llm', 'id')")]
+        merge = tu.tune_merge(rules, human, weak)
+        if merge["status"] == "promoted":
+            merge["previous"] = {k: v for k, v in rules.items() if k != "version"}
+            _put(conn, "merge_rules", {**{k: v for k, v in merge.pop("rules").items() if k != "version"},
+                                       "tuned_by": actor, "tuned_at": _now()})
+            merge["version"] = merge_rules(conn)["version"]
+        entry = {"at": _now(), "actor": actor, "merge": merge, "templates": _revalidate_templates(conn, store_name),
+                 "gold": gold_metrics(conn)}
+        _put(conn, "tune_history", (_get(conn, "tune_history", []) + [entry])[-30:])
+        return entry
+    finally:
+        conn.close()
+
+
+def has_schema(store_name: str) -> bool:
+    """확정한 스키마가 있나 — 스케줄러가 tick마다 묻는다. 읽기만 한다(표를 만들지 않는다). 어떤 실패든 False —
+    여기서 예외가 나면 그 tick의 다른 job이 모두 멈춘다."""
+    import sqlite3  # noqa: PLC0415
+
+    path = docsearch.index_path(store_name)
+    if not path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(path, timeout=1.0)
+        try:
+            return conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sem_meta'").fetchone() is not None and \
+                conn.execute("SELECT 1 FROM sem_meta WHERE key = 'schema'").fetchone() is not None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
 
 
 # --- 조회 ---
@@ -1076,6 +1598,10 @@ def status(store_name: str) -> dict:
             "last_run": _get(conn, "last_run"), "outside": _get(conn, "outside", {}),
             "task": {**(_get(conn, "task") or {}), "running": task_running(store_name)},
             "last_merge": _get(conn, "last_merge"),
+            "merge_rules": merge_rules(conn), "merge_rules_draft": _get(conn, "merge_rules_draft"),
+            "gold": gold_metrics(conn), "tune_history": _get(conn, "tune_history", [])[-5:],
+            "pairs": {f'{r["source"]}:{r["decision"]}': r["n"] for r in conn.execute(
+                "SELECT source, decision, COUNT(*) AS n FROM sem_pairs GROUP BY source, decision")},
             "aliases": [dict(r) for r in conn.execute("SELECT cls, alias, canonical, reason FROM sem_aliases ORDER BY cls, canonical")],
             "failed": [dict(r) for r in conn.execute(
                 "SELECT path, error FROM sem_docs WHERE status = 'failed' ORDER BY path LIMIT 20")],

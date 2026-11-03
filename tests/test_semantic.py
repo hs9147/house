@@ -2,7 +2,7 @@
 
 가짜 LLM은 역할(제안·검토·고침·추출·묶기)마다 정해 둔 답을 한다. 일부러 틀린 답을 섞어 **검토 단계가 그것을
 잡는지**를 본다: 겹친 개념(스키마), 금액 열을 협력사로 둔 대응표(양식), 원문에 없는 근거 문장(추출), 다른
-대상을 같다고 한 묶음(묶기).
+대상을 같다고 한 짝(묶기 — 기준으로 정하지 못한 짝만 LLM에 간다).
 """
 import json
 import time
@@ -33,8 +33,6 @@ class FakeLlm:
         self.calls: list[str] = []
         self.known: list[str] = []      # 관계 찾기마다 받은 「이미 정한 관계」
         self.review_wrong_all = False
-        self.merge_groups = [{"canonical": "에이전자", "names": ["A-Electronics"], "reason": "영문 표기"},
-                             {"canonical": "비상사", "names": ["에이전자"], "reason": "둘 다 견적서에 나온다"}]
 
     def __call__(self, provider, messages, db=None, *a, **kw):
         system, user = messages[0]["content"], messages[1]["content"]
@@ -50,7 +48,9 @@ class FakeLlm:
                           ("양식 표의 열을", "map"),
                           ("열 대응표를", "map_review"), ("검토 의견으로 대응표", "map_revise"),
                           ("**내용**에서 개념과 관계를 뽑는다", "extract"), ("뽑은 개념·관계를 검토", "doc_review"),
-                          ("같은 대상**을 가리키는 이름들을 묶는다", "merge"), ("같은 대상으로 묶자고", "merge_review")):
+                          ("같은 대상**인지 판정", "merge"), ("같은 대상이라고 했다", "merge_review"),
+                          ("다음부터 규칙으로 처리할 수 있는", "merge_rules"),
+                          ("검증 결과로 규칙을 고친다", "template_revise"), ("**정규식 규칙**을 짠다", "template")):
             if key in system:
                 return role
         raise AssertionError(f"모르는 역할: {system[:80]}")
@@ -81,6 +81,28 @@ class FakeLlm:
         if role == "map_revise":
             return {"columns": {"업체명": "협력사", "품목": "품목", "금액": None},
                     "relations": [{"from": "업체명", "rel": "공급한다", "to": "품목"}]}
+        if role == "extract" and "GP 협력사 등록 품의" in user:     # 템플릿 문서 — 라벨 다음 줄이 값
+            lines = [line for line in user.splitlines() if line.strip()]
+            value = {k: lines[lines.index(k) + 1] for k in ("기업명", "거래대상", "구매요청 부서") if k in lines}
+            co, item, dept = value.get("기업명"), value["거래대상"], value["구매요청 부서"]
+            return {"entities": [{"class": "협력사", "name": co, "evidence": f"기업명 {co}"},
+                                 {"class": "품목", "name": item, "evidence": f"거래대상 {item}"},
+                                 {"class": "부서", "name": dept, "evidence": f"구매요청 부서 {dept}"}] if co else [],
+                    "relations": ([{"from": {"class": "협력사", "name": co}, "rel": "공급한다",
+                                    "to": {"class": "품목", "name": item}, "evidence": f"거래대상 {item}"}] if co else [])
+                    + [{"from": {"class": "부서", "name": dept}, "rel": "담당한다",
+                        "to": {"class": "품목", "name": item}, "evidence": f"거래대상 {item}"}],
+                    "outside": []}
+        if role == "template":       # 처음 규칙은 품목을 아무 줄에서나 잡는다(일부러 틀림) — 검증이 잡아야 한다
+            return {"fields": [{"class": "협력사", "pattern": r"^기업명\n(.+)$", "required": True},
+                               {"class": "품목", "pattern": r"^(.+전지)$"}],
+                    "relations": [{"from": 0, "rel": "공급한다", "to": 1}]}
+        if role == "template_revise":
+            assert '"extra"' in user and "missing_required" in user     # 검증 결과를 받아 고친다
+            return {"fields": [{"class": "협력사", "pattern": r"^기업명\n(.+)$", "required": True},
+                               {"class": "품목", "pattern": r"^거래대상\n(.+)$"},
+                               {"class": "부서", "pattern": r"^구매요청 부서\n(.+)$"}],
+                    "relations": [{"from": 0, "rel": "공급한다", "to": 1}, {"from": 2, "rel": "담당한다", "to": 1}]}
         if role == "extract" and "A-Electronics" in user:
             sentence = "A-Electronics는 배터리를 공급한다."
             return {"entities": [{"class": "협력사", "name": "A-Electronics", "evidence": sentence}],
@@ -101,10 +123,17 @@ class FakeLlm:
         if role == "doc_review":
             items = json.loads(user[user.index("항목:") + 3:])
             return {"wrong": [{"i": it["i"], "problem": "x"} for it in items] if self.review_wrong_all else []}
-        if role == "merge":
-            return {"groups": self.merge_groups}
-        if role == "merge_review":
-            return {"same": "A-Electronics" in user, "reason": "영문 표기는 같다" if "A-Electronics" in user else "다른 회사"}
+        if role == "merge":          # 영문 표기 짝은 모두 같다고 한다 — 비상사까지(일부러 틀림)
+            pairs = json.loads(user)
+            return {"pairs": [{"i": p["i"], "same": "A-Electronics" in (p["a"], p["b"]), "reason": "영문 표기"}
+                              for p in pairs]}
+        if role == "merge_review":   # 검토가 비상사를 잡는다
+            pairs = json.loads(user)
+            return {"pairs": [{"i": p["i"], "same": "비상사" not in (p["a"], p["b"]),
+                               "reason": "다른 회사" if "비상사" in (p["a"], p["b"]) else "영문 표기는 같다"}
+                              for p in pairs]}
+        if role == "merge_rules":
+            return {"translit": {"a": "에이", "electronics": "전자", "lg": "엘지"}, "strip": ["(주)"]}
         raise AssertionError(role)
 
 
@@ -236,19 +265,243 @@ def test_a_high_sample_error_rate_pauses_the_store(store, monkeypatch):
     assert status["paused"] is None and status["review"]["items"] == 0
 
 
-def test_merging_reviews_every_group_and_can_be_undone(store):
+def test_merging_decides_by_rules_and_asks_the_llm_only_the_unclear_pairs(store):
+    """협력사 이름 넷(에이전자·에이전자(주)·A-Electronics·비상사) = 짝 여섯. 정규화가 같은 짝은 기준으로 묶고, 글자가 전혀
+    다른 한글끼리는 기준으로 거절한다. 한글·영문 짝(점수가 말해 주지 못한다)만 LLM이 한 번에 판정하고 검토한다."""
     _confirm_schema_and_form()
     with _db() as db:
         semantic.analyze(db, "docs")
+        store.calls.clear()
         result = semantic.propose_merges(db, "docs")
-    applied = {(a["alias"], a["canonical"]) for a in result["applied"]}
-    assert ("에이전자(주)", "에이전자") in applied or ("에이전자", "에이전자(주)") in applied   # 정규화 — 검토 없이
-    assert ("A-Electronics", "에이전자") in applied                                          # LLM 제안 → 검토 통과
-    assert [r["canonical"] for r in result["rejected"]] == ["비상사"]                         # 검토가 거절
+    assert store.calls == ["merge", "merge_review", "merge_rules"]           # 짝마다가 아니라 묶음 하나로
+    s = result["stats"]
+    assert (s["pairs"], s["rule"], s["gray"], s["llm"]) == (7, 4, 3, 3)       # 품목(배터리·케이블) 짝 하나 더
+    applied = {a["alias"]: a["canonical"] for a in result["applied"]}
+    head = "에이전자(주)"                                     # 더 많은 문서에 나온 이름이 대표
+    assert applied == {"에이전자": head, "A-Electronics": head}
+    assert [(r["a"], r["b"]) for r in result["rejected"]] == [("A-Electronics", "비상사")]   # 판정 → 검토가 거절
     hit = next(n for n in semantic.search("docs", "협력사", "electronics"))
-    assert "A-Electronics" in hit["aliases"] or hit["name"] == "A-Electronics"
-    semantic.remove_alias("docs", "협력사", "A-Electronics")
-    assert any(n["name"] == "A-Electronics" for n in semantic.search("docs", "협력사"))
+    assert hit["name"] == head and "A-Electronics" in hit["aliases"]
+    status = semantic.status("docs")
+    assert status["merge_rules_draft"]["translit"] == {"a": "에이", "electronics": "전자"}   # 이미 있는 lg·(주)는 뺀다
+    assert status["merge_rules_draft"]["strip"] == []
+    assert status["pairs"] == {"rule:same": 1, "rule:different": 3, "llm:same": 2, "llm:different": 1}
+
+
+def test_undoing_a_merge_is_remembered_and_nothing_is_asked_twice(store):
+    _confirm_schema_and_form()
+    with _db() as db:
+        semantic.analyze(db, "docs")
+        semantic.propose_merges(db, "docs")
+        semantic.remove_alias("docs", "협력사", "A-Electronics", "admin")
+        assert any(n["name"] == "A-Electronics" for n in semantic.search("docs", "협력사"))
+        store.calls.clear()
+        again = semantic.propose_merges(db, "docs")
+    assert store.calls == []                                   # 판정한 짝은 다시 묻지 않는다
+    assert again["stats"]["cached"] == 2 and again["stats"]["human"] == 1
+    # LLM은 A-Electronics = 에이전자라고 했지만, 사람이 A-Electronics ≠ 에이전자(주)라 했고 에이전자 = 에이전자(주)는
+    # 기준이 정했다 — 셋이 한 묶음일 수는 없으니 덜 믿을 LLM 판정을 버린다
+    aliases = {a["alias"]: a["canonical"] for a in semantic.status("docs")["aliases"]}
+    assert aliases == {"에이전자": "에이전자(주)"}
+
+
+def test_same_identifier_merges_and_different_identifiers_never_do():
+    """근거에 같은 협력사코드가 있으면 이름이 달라도 같은 대상(실측: KR029375 = (주)엘지씨엔에스 = LG CNS Co., Ltd.)."""
+    from app.services import semantic_merge as sm
+    rules = sm.DEFAULT_RULES
+    ids = {"(주)엘지씨엔에스": sm.ids_of(["| KR-CT220100008 | (주)엘지씨엔에스 | KR029375 |"], rules),
+           "엘지 정보통신": sm.ids_of(["협력사코드 KR029375"], rules),
+           "에이전자": {"KR000001"}, "에이전자(주)": {"KR000002"}}
+    assert sm.decide("(주)엘지씨엔에스", "엘지 정보통신", rules, ids)[:2] == ("same", "id")
+    assert sm.decide("에이전자", "에이전자(주)", rules, ids)[:2] == ("different", "id")   # 이름이 같아도 코드가 다르다
+    assert sm.decide("LG CNS Co., Ltd.", "(주)엘지씨엔에스", rules, {})[:2] == ("same", "rule")   # 음역 정규화
+    assert sm.decide("GS네오텍(주)", "지에스네오텍", rules, {})[0] == "same"                    # 낱말 안의 로마자도
+    assert sm.decide("삼성전자", "삼성전기", rules, {})[0] == "different"
+
+
+def test_merge_rules_are_confirmed_by_an_admin_and_checked(store):
+    with pytest.raises(semantic.SemanticError):
+        semantic.confirm_merge_rules("docs", {"id_patterns": ["[A-Z"]}, "admin")
+    with pytest.raises(semantic.SemanticError):
+        semantic.confirm_merge_rules("docs", {"thresholds": {"merge": 0.3, "reject": 0.5}}, "admin")
+    before = semantic.status("docs")["merge_rules"]
+    after = semantic.confirm_merge_rules("docs", {"translit": {**before["translit"], "electronics": "전자"}}, "admin")
+    assert after["version"] != before["version"] and after["translit"]["electronics"] == "전자"
+    assert after["weights"] == before["weights"]                 # 보낸 것만 바뀐다
+    assert semantic.status("docs")["merge_rules"]["version"] == after["version"]
+
+
+def _registration_docs(root: Path) -> None:
+    """같은 틀의 「등록 품의」 — 라벨 줄은 같고 값만 다르다(실측: 신규 협력사 등록 pptx). 마지막 것은 기업명 라벨이
+    다르다(틀이 조금 다른 문서) — 필수 필드를 못 찾아 LLM으로 넘어가야 한다."""
+    rows = [("가나전지", "리튬전지", "구매1팀"), ("다라전지", "납축전지", "구매2팀"), ("마바전지", "니켈전지", "구매1팀"),
+            ("사아전지", "건전지", "구매3팀"), ("자차전지", "태양전지", "구매2팀"), ("카타전지", "연료전지", "구매1팀"),
+            ("파하전지", "수소전지", "구매3팀")]
+    for i, (co, item, dept) in enumerate(rows):
+        label = "기업명" if i < len(rows) - 1 else "업체 이름"
+        (root / f"등록품의_{i}.md").write_text(
+            f"GP 협력사 등록 품의\n거래선 개요\n{label}\n{co}\n구매요청 부서\n{dept}\n거래대상\n{item}\n신규 등록 사유\n"
+            f"경쟁입찰을 통해 우선협상자로 선정\n평가 방식\n현장 or 서면 평가\n첨부. 사업자등록증 사본\nLGE Internal Use Only\n",
+            encoding="utf-8")
+
+
+def test_template_documents_get_rules_checked_on_other_documents(store, tmp_path, monkeypatch):
+    """③′ 같은 틀의 문서 여섯은 LLM이 짠 규칙으로 뽑는다. 규칙은 세 건(정답: LLM 추출)으로 짜고 **다른** 세 건으로
+    검증한다 — 처음 규칙이 틀려 정밀도가 모자라면 검증 결과로 한 번 고친다. 확정 뒤 분석은 그 문서들에 LLM 추출을
+    부르지 않고, 필수 필드가 없는 문서(틀이 다르다)만 LLM으로 넘긴다."""
+    monkeypatch.setattr(semantic, "REVIEW_EVERY", 10 ** 9)     # 표본 검토는 따로 본다
+    _confirm_schema_and_form()
+    _registration_docs(tmp_path / "docs")
+    docsearch.reindex("docs", tmp_path / "docs")
+    found = semantic.templates("docs")
+    assert len(found) == 1 and found[0]["documents"] == 7 and "기업명" in found[0]["skeleton"]
+    tid = found[0]["id"]
+    store.calls.clear()
+    with _db() as db:
+        draft = semantic.propose_template(db, "docs", tid)
+    assert store.calls == ["extract"] * 6 + ["template", "template_revise"]
+    assert draft["first"]["precision"] < semantic.TEMPLATE_PRECISION              # 처음 규칙 — 검증이 잡았다
+    assert draft["evaluation"]["precision"] == 1.0 and draft["evaluation"]["recall"] == 1.0
+    assert set(draft["train"]).isdisjoint(c["path"] for c in draft["check"])     # 짠 문서와 잰 문서가 다르다
+    with pytest.raises(semantic.SemanticError, match="정밀도"):
+        semantic.confirm_template("docs", tid, draft["proposal"], "admin")       # 고치기 전 규칙은 확정되지 않는다
+    confirmed = semantic.confirm_template("docs", tid, draft["revised"], "admin")
+    assert confirmed["precision"] == 1.0 and semantic.templates("docs")[0]["confirmed"]["version"]
+
+    store.calls.clear()
+    with _db() as db:
+        result = semantic.analyze(db, "docs")
+    assert result["template_docs"] == 6 and result["escalated"] == 1
+    assert store.calls.count("extract") == 3        # 공급계약·영문메모·틀이 다른 등록품의 하나
+    near = semantic.neighbors("docs", "협력사", "마바전지")
+    assert {(r["rel"], r["name"]) for r in near["relations"]} == {("공급한다", "니켈전지")}
+    assert near["relations"][0]["evidence"][0]["origin"] == "template"
+    assert semantic.status("docs")["analyzed"]["template"] == 6
+    with _db() as db:                               # 바뀐 것이 없으면 다시 돌지 않는다
+        assert semantic.analyze(db, "docs")["analyzed"] == 0
+
+
+def test_template_rules_are_sampled_for_review_like_llm_extraction(store, tmp_path, monkeypatch):
+    """규칙이 뽑은 것도 표본은 LLM이 검토하고 오류율에 센다 — 규칙이 틀리기 시작하면 멈춘다."""
+    _confirm_schema_and_form()
+    _registration_docs(tmp_path / "docs")
+    docsearch.reindex("docs", tmp_path / "docs")
+    tid = semantic.templates("docs")[0]["id"]
+    with _db() as db:
+        draft = semantic.propose_template(db, "docs", tid)
+    semantic.confirm_template("docs", tid, draft["revised"], "admin")
+    monkeypatch.setattr(semantic, "REVIEW_EVERY", 1)
+    store.review_wrong_all = True
+    with _db() as db:
+        semantic.analyze(db, "docs")
+    status = semantic.status("docs")
+    assert any(n["path"].startswith("등록품의_") for n in status["review"]["notes"])
+    assert status["paused"]
+
+
+def test_human_labels_are_queued_measured_and_used_at_once(store):
+    """⑤ 사람 정답 — 짝은 「같은 대상인가」, 개체는 「맞게 뽑았나」. 짝 판정은 바로 사람의 판정으로 남아 다음 묶기에
+    쓰이고, 틀린 개체는 그래프에서 빠진다. 확인한 것은 다시 묻지 않는다."""
+    _confirm_schema_and_form()
+    with _db() as db:
+        semantic.analyze(db, "docs")
+        semantic.propose_merges(db, "docs")
+    queue = semantic.gold_queue("docs", "pair", 50)
+    pair = next(q for q in queue if {q["a"], q["b"]} == {"A-Electronics", "에이전자"})
+    assert pair["source"] == "llm" and pair["a_evidence"]["evidence"]          # 두 이름의 근거를 함께 보인다
+    metrics = semantic.label_gold("docs", "pair", pair["item"], False, "admin")  # LLM은 같다고 했지만 다르다
+    assert metrics["pair"]["by"]["llm"] == {"n": 1, "correct": 0, "accuracy": 0.0}
+    assert pair["item"] not in {q["item"] for q in semantic.gold_queue("docs", "pair", 50)}
+    with _db() as db:
+        semantic.propose_merges(db, "docs")
+    aliases = {a["alias"]: a["canonical"] for a in semantic.status("docs")["aliases"]}
+    assert "A-Electronics" not in aliases                     # 사람의 「다르다」가 LLM의 「같다」를 이긴다
+
+    node = next(q for q in semantic.gold_queue("docs", "node", 50) if q["name"] == "케이블")
+    semantic.label_gold("docs", "node", node["item"], False, "admin")
+    assert not semantic.search("docs", "품목", "케이블") or all(
+        n["documents"] < 5 for n in semantic.search("docs", "품목", "케이블"))
+    gold = semantic.status("docs")["gold"]
+    assert gold["node"]["by"]["form"]["n"] == 1 and gold["pair"]["labeled"] == 1
+    with pytest.raises(semantic.SemanticError):
+        semantic.label_gold("docs", "node", "없는\t항목\t이름", True, "admin")
+
+
+def _pairs_for_tuning():
+    """같은 대상(한 글자 오타)과 다른 대상(전혀 다른 이름) 스무 쌍씩."""
+    import itertools
+    syll = "가나다라마바사아자차카타파하거너더러머버"
+    same, diff = {}, {}
+    for i in range(20):
+        name = syll[i] + syll[(i + 3) % 20] + syll[(i + 7) % 20] + syll[(i + 11) % 20] + "테크"
+        typo = name[:2] + "뷁" + name[3:]
+        same[(name, typo)] = 1
+    names = [k[0] for k in same]
+    for a, b in itertools.islice(itertools.combinations(names, 2), 0, 400, 9):
+        diff[(a, b)] = 0
+    return {**same, **dict(list(diff.items())[:20])}
+
+
+def test_tuning_promotes_new_weights_only_when_held_out_labels_improve():
+    """D — 사람 정답의 70%로 가중치·문턱을 배우고, 남긴 30%에서 지금 기준보다 나을 때만 바꾼다."""
+    from app.services import semantic_merge as sm
+    from app.services import semantic_tune as tu
+    human = _pairs_for_tuning()
+    assert len(human) == 40
+    blind = {**sm.DEFAULT_RULES, "weights": dict.fromkeys(sm.DEFAULT_RULES["weights"], 0.0),
+             "thresholds": {"merge": 0.99, "reject": 0.01}}       # 모든 짝이 0.5 — 전부 LLM에 넘긴다
+    first = tu.tune_merge(blind, human, [])
+    assert first["status"] == "promoted"
+    assert first["champion"]["gray"] == first["champion"]["n"] and first["challenger"]["wrong"] == 0
+    assert first["challenger"]["gray"] < first["champion"]["gray"]
+    again = tu.tune_merge(first["rules"], human, [])               # 이미 배운 기준 — 더 낫지 않으면 그대로
+    assert again["status"] == "kept"
+    few = tu.tune_merge(blind, dict(list(human.items())[:5]), [])
+    assert few["status"] == "skipped" and "20" in few["reason"]
+
+
+def test_tuning_suspends_template_rules_that_humans_find_wrong(store, tmp_path, monkeypatch):
+    """D — 템플릿 규칙이 뽑은 것을 사람이 틀렸다고 하면(정밀도가 기준 밑) 그 규칙을 멈추고, 그 문서들은 다음 분석에서
+    LLM이 읽는다. 묶기 기준은 정답이 모자라 배우지 않는다. 스케줄러가 스키마를 확정한 저장소마다 하루에 한 번 돈다."""
+    monkeypatch.setattr(semantic, "REVIEW_EVERY", 10 ** 9)
+    _confirm_schema_and_form()
+    _registration_docs(tmp_path / "docs")
+    docsearch.reindex("docs", tmp_path / "docs")
+    tid = semantic.templates("docs")[0]["id"]
+    with _db() as db:
+        semantic.confirm_template("docs", tid, semantic.propose_template(db, "docs", tid)["revised"], "admin")
+        semantic.analyze(db, "docs")
+    by_rule = [q for q in semantic.gold_queue("docs", "node", 50) if q["origin"] == "template"]
+    assert len(by_rule) >= semantic.TEMPLATE_GOLD_MIN
+    for q in by_rule[:semantic.TEMPLATE_GOLD_MIN]:
+        semantic.label_gold("docs", "node", q["item"], False, "admin")
+    out = semantic.tune("docs", "admin")
+    assert out["merge"]["status"] == "skipped"
+    assert out["templates"] == [{"id": tid, "status": "suspended", "check_precision": 1.0, "human_precision": 0.0,
+                                 "human_labels": semantic.TEMPLATE_GOLD_MIN}]
+    t = semantic.templates("docs")[0]
+    assert t["confirmed"] is None and "사람 정답 0%" in t["suspended"]["reason"]
+    assert semantic.status("docs")["tune_history"][-1]["templates"][0]["status"] == "suspended"
+    store.calls.clear()
+    with _db() as db:
+        semantic.analyze(db, "docs")
+    assert store.calls.count("extract") == 7                    # 등록품의 일곱 건 모두 LLM으로
+
+    from app.models import JobKind
+    from app.services import scheduler
+    with _db() as db:
+        assert (JobKind.semantic_tune, "docs") in scheduler._wanted(db)
+
+
+def test_the_scheduler_check_works_with_a_relative_index_dir(store, tmp_path, monkeypatch):
+    """운영 설정의 색인 폴더는 상대 경로다(data/doc-index) — 스케줄러가 tick마다 묻는 has_schema가 여기서 실패하면
+    그 tick의 다른 job이 모두 멈춘다."""
+    _confirm_schema_and_form()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PAAS_DOC_INDEX_DIR", "index")
+    get_settings.cache_clear()
+    assert semantic.has_schema("docs") is True
+    assert semantic.has_schema("없는저장소") is False
 
 
 def test_an_admin_uses_the_default_provider_of_any_organization(store):
@@ -286,6 +539,18 @@ def test_api_runs_proposals_in_the_background_and_guards_admin_actions(store):
     assert any(n["name"] == "에이전자" for n in found)
     near = c.get(f"{url}/neighbors", params={"cls": "협력사", "name": "에이전자"}, headers=ADMIN).json()
     assert near["relations"][0]["rel"] == "공급한다" and near["relations"][0]["evidence"][0]["text"]
+    rules = f"{url}/merge-rules"
+    assert c.put(rules, json={"rules": {"strip": ["상사"]}}, headers=member).status_code == 403
+    assert c.put(rules, json={"rules": {"id_patterns": ["("]}}, headers=ADMIN).status_code == 409
+    assert c.put(rules, json={"rules": {"strip": ["상사"]}}, headers=ADMIN).json()["strip"] == ["상사"]
+    assert c.get(f"{url}/templates", headers=ADMIN).json() == {"templates": []}
+    assert c.post(f"{url}/templates/propose", json={"template": "x"}, headers=member).status_code == 403
+    assert c.get(f"{url}/gold", params={"kind": "pair"}, headers=member).status_code == 403
+    assert c.get(f"{url}/gold", params={"kind": "bad"}, headers=ADMIN).status_code == 409
+    nodes = c.get(f"{url}/gold", params={"kind": "node"}, headers=ADMIN).json()["items"]
+    assert c.post(f"{url}/gold", json={"kind": "node", "item": nodes[0]["item"], "label": True},
+                  headers=ADMIN).json()["node"]["labeled"] == 1
+    assert c.post(f"{url}/tune", headers=ADMIN).json()["merge"]["status"] == "skipped"
 
 
 def test_mcp_graph_server_serves_the_content_graph(store):
@@ -435,7 +700,7 @@ def test_no_step_holds_the_index_locked_while_the_llm_thinks(store, monkeypatch)
     with _db() as db:
         semantic.analyze(db, "docs")      # 추출·표본 검토
         result = semantic.propose_merges(db, "docs")
-    assert ("A-Electronics", "에이전자") in {(a["alias"], a["canonical"]) for a in result["applied"]}
+    assert ("A-Electronics", "에이전자(주)") in {(a["alias"], a["canonical"]) for a in result["applied"]}
 
 
 # --- 비용 최적화(문서 6천 건 기준) ---

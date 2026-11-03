@@ -212,6 +212,35 @@ def semantic_confirm_mapping(store_name: str, form: str = Body(...), mapping: di
     return out
 
 
+@router.get("/ontology/stores/{store_name}/semantic/templates")
+def semantic_templates(store_name: str, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """③′ 같은 틀로 되풀이되는 문서(템플릿)와 각각의 추출 규칙(제안·검증·확정)."""
+    _indexed_store(db, key, store_name)
+    return {"templates": semantic.templates(store_name)}
+
+
+@router.post("/ontology/stores/{store_name}/semantic/templates/propose", status_code=202)
+def semantic_propose_template(store_name: str, template: str = Body(..., embed=True), db: Session = Depends(get_db),
+                              admin: ApiKey = Depends(require_admin)):
+    _store_or_404(store_name)
+    _semantic(semantic.provider_for, db, store_name)
+    _submit(store_name, "템플릿 규칙 제안·검증",
+            lambda s, report: semantic.propose_template(s, store_name, template, report))
+    audit.record(db, admin.name, "ontology.semantic.template.propose", store_name, {"template": template})
+    return {"started": True}
+
+
+@router.put("/ontology/stores/{store_name}/semantic/templates")
+def semantic_confirm_template(store_name: str, template: str = Body(...), rules: dict = Body(...),
+                              db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    """규칙 확정 — 검증 문서로 다시 재어 정밀도가 기준을 넘어야 한다."""
+    _store_or_404(store_name)
+    out = _semantic(semantic.confirm_template, store_name, template, rules, admin.name)
+    audit.record(db, admin.name, "ontology.semantic.template.confirm", store_name,
+                 {"template": template, "version": out["version"]})
+    return out
+
+
 @router.post("/ontology/stores/{store_name}/semantic/analyze")
 def semantic_analyze(store_name: str, action: str = "start", db: Session = Depends(get_db),
                      admin: ApiKey = Depends(require_admin)):
@@ -234,7 +263,7 @@ def semantic_analyze(store_name: str, action: str = "start", db: Session = Depen
 
 @router.post("/ontology/stores/{store_name}/semantic/merge", status_code=202)
 def semantic_merge(store_name: str, db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
-    """④ 같은 개체 묶기 — 정규화가 같은 것은 바로, 애매한 것은 LLM 제안 → 묶음마다 LLM 검토."""
+    """④ 같은 개체 묶기 — 기준(merge_rules)으로 결정론적으로, 애매한 짝만 LLM 판정 → 검토."""
     _store_or_404(store_name)
     _semantic(semantic.provider_for, db, store_name)
     _submit(store_name, "같은 개체 묶기", lambda s, report: semantic.propose_merges(s, store_name, report))
@@ -247,9 +276,45 @@ def semantic_unmerge(store_name: str, cls: str, alias: str, db: Session = Depend
                      admin: ApiKey = Depends(require_admin)):
     """묶음 풀기 — 별칭 하나를 지운다(그 이름은 다시 따로 보인다)."""
     _store_or_404(store_name)
-    semantic.remove_alias(store_name, cls, alias)
+    semantic.remove_alias(store_name, cls, alias, admin.name)
     audit.record(db, admin.name, "ontology.semantic.unmerge", store_name, {"cls": cls, "alias": alias})
     return None
+
+
+@router.put("/ontology/stores/{store_name}/semantic/merge-rules")
+def semantic_merge_rules(store_name: str, rules: dict = Body(..., embed=True), db: Session = Depends(get_db),
+                         admin: ApiKey = Depends(require_admin)):
+    """묶기 기준 확정 — 식별자 패턴·음역표·꼬리·가중치·문턱(JSON). 다음 묶기부터 쓴다."""
+    _store_or_404(store_name)
+    out = _semantic(semantic.confirm_merge_rules, store_name, rules, admin.name)
+    audit.record(db, admin.name, "ontology.semantic.merge_rules", store_name, {"version": out["version"]})
+    return out
+
+
+@router.get("/ontology/stores/{store_name}/semantic/gold")
+def semantic_gold_queue(store_name: str, kind: str = "pair", n: int = 10, db: Session = Depends(get_db),
+                        admin: ApiKey = Depends(require_admin)):
+    """⑤ 사람이 확인할 것 — 짝(같은 대상인가)·개체·관계(맞게 뽑았나). 정답은 기준을 다시 배우는 근거다."""
+    _store_or_404(store_name)
+    return {"items": _semantic(semantic.gold_queue, store_name, kind, max(1, min(n, 50)))}
+
+
+@router.post("/ontology/stores/{store_name}/semantic/gold")
+def semantic_gold_label(store_name: str, kind: str = Body(...), item: str = Body(...), label: bool = Body(...),
+                        db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    _store_or_404(store_name)
+    out = _semantic(semantic.label_gold, store_name, kind, item, label, admin.name)
+    audit.record(db, admin.name, "ontology.semantic.gold", store_name, {"kind": kind, "label": label})
+    return out
+
+
+@router.post("/ontology/stores/{store_name}/semantic/tune")
+def semantic_tune(store_name: str, db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    """기준 다시 배우기를 지금 — 하루에 한 번 스케줄러도 돈다. LLM을 부르지 않아 바로 끝난다."""
+    _store_or_404(store_name)
+    out = semantic.tune(store_name, admin.name)
+    audit.record(db, admin.name, "ontology.semantic.tune", store_name, {"merge": out["merge"]["status"]})
+    return out
 
 
 @router.get("/ontology/stores/{store_name}/semantic/search")

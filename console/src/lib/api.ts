@@ -88,7 +88,8 @@ import type {
   StorageListing,
   StorageStore,
   UserAccountOut,
-  UserOrgOut, OntologyCleanse, SemanticForm, SemanticHit, SemanticMapping, SemanticNeighbors, SemanticSchema, SemanticStatus,
+  UserOrgOut, OntologyCleanse, SemanticForm, SemanticHit, SemanticMapping, SemanticMergeRules, SemanticTemplate, SemanticTemplateRules, SemanticNeighbors, SemanticGoldItem,
+  SemanticGoldKind, SemanticGoldMetrics, SemanticTuneEntry, SemanticSchema, SemanticStatus,
 } from './types';
 
 // 백엔드 라우터는 모두 /paas 아래 마운트된다. /health, /status는 버전 prefix 없이
@@ -531,10 +532,24 @@ export const api = {
     request<{ started: boolean }>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/forms/propose`, { form }),
   semanticConfirmForm: (store: string, form: string, mapping: SemanticMapping) =>
     request<SemanticForm>('PUT', `/ontology/stores/${encodeURIComponent(store)}/semantic/forms`, { form, mapping }),
+  semanticTemplates: (store: string) =>
+    request<{ templates: SemanticTemplate[] }>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/templates`),
+  semanticProposeTemplate: (store: string, template: string) =>
+    request<{ started: boolean }>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/templates/propose`, { template }),
+  semanticConfirmTemplate: (store: string, template: string, rules: SemanticTemplateRules) =>
+    request<SemanticTemplate['confirmed']>('PUT', `/ontology/stores/${encodeURIComponent(store)}/semantic/templates`, { template, rules }),
+  semanticGold: (store: string, kind: SemanticGoldKind) =>
+    request<{ items: SemanticGoldItem[] }>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/gold`, undefined, { kind }),
+  semanticLabel: (store: string, kind: SemanticGoldKind, item: string, label: boolean) =>
+    request<SemanticGoldMetrics>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/gold`, { kind, item, label }),
+  semanticTune: (store: string) =>
+    request<SemanticTuneEntry>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/tune`),
   semanticAnalyze: (store: string, action: 'start' | 'stop' | 'resume') =>
     request<{ running: boolean }>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/analyze`, undefined, { action }),
   semanticMerge: (store: string) =>
     request<{ started: boolean }>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/merge`),
+  semanticMergeRules: (store: string, rules: Partial<SemanticMergeRules>) =>
+    request<SemanticMergeRules>('PUT', `/ontology/stores/${encodeURIComponent(store)}/semantic/merge-rules`, { rules }),
   semanticUnmerge: (store: string, cls: string, alias: string) =>
     request<void>('DELETE', `/ontology/stores/${encodeURIComponent(store)}/semantic/aliases`, undefined, { cls, alias }),
   semanticSearch: (store: string, cls: string, q: string) =>
