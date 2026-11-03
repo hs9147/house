@@ -42,13 +42,15 @@
   /* 사이트가 window.open을 바꿔 둔 경우가 있다 — GPS4(MSUIT4)는 빈 창을 열고 주소의 ? 뒤를 떼어 POST 폼으로
    * 보낸다. 그러면 받는 창이 해시(#/agent) 없이 POST로 열려 콘솔이 404였다(실측). 브라우저 원래의 open을 쓴다 —
    * 창의 메서드는 창 객체 자신에 있어(Window.prototype이 아니다) 사이트가 덮으면 남지 않으므로, 새 틀(iframe)의
-   * 깨끗한 open을 이 창에 대고 부른다(열린 창의 opener는 이 창이다). */
+   * 깨끗한 open을 이 창에 대고 부른다(열린 창의 opener는 이 창이다). 그것이 안 되면 사이트의 open에 넷째 인자
+   * true를 준다 — MSUIT4의 open(url, name, features, useGet)은 그때 원래 open으로 GET 연다(mwf.js, 실측). 브라우저의
+   * open은 넷째 인자를 무시한다. */
   function nativeOpen(url, name, features) {
     var frame = document.createElement('iframe');
     frame.style.display = 'none';
     document.documentElement.appendChild(frame);
     try { return frame.contentWindow.open.call(window, url, name, features); }
-    catch (e) { return window.open(url, name, features); }
+    catch (e) { return window.open(url, name, features, true); }
     finally { frame.remove(); }
   }
 
