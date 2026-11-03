@@ -674,8 +674,69 @@ def test_collection_files_and_summary_arrive_with_the_browser_scan(client, monke
     scan = client.get(f"{API}/sources/{made['id']}", headers=ADMIN).json()["scan"]
     assert len(scan["files"]) == 25 and scan["files"][0]["name"] == "붙임0.pdf"
     assert scan["collected"][1] == {"screen": "남의 것", "url": "", "rows": 0, "details": 0,
-                                    "files": 0, "notes": [], "via": ""}
+                                    "files": 0, "pages": 0, "notes": [], "via": "", "collect": "files"}
     assert any(n.startswith("수집 · 공지 조회: 결과 30행 중 상세 20건, 파일 25개") for n in scan["notes"])
+
+
+def test_page_screens_keep_the_result_pages_themselves(client, monkeypatch):
+    """크롤링 유형 둘 — 화면마다 「파일」(엑셀·첨부, 기본)이나 「페이지」(결과 목록과 행마다 상세의 본문 자체).
+    페이지는 마크다운으로 「조회결과」 폴더에, 고르면 원본 HTML도 — HTML은 스크립트를 빼고 점 폴더(.html)에 둔다
+    (색인은 HTML을 평문으로 읽어 태그가 검색에 섞인다). 「페이지」로 고르지 않은 화면의 페이지는 받지 않는다."""
+    sid = _notice_scan(client, monkeypatch)
+    url = f"{API}/sources/{sid}/queries"
+    files_only = client.put(url, headers=ADMIN, json={"screens": [
+        {"url": "https://intra.test/notice", "conditions": []}]}).json()
+    assert "collect" not in files_only["screens"][0]          # 기본(파일)은 적지 않는다 — 지금 조건의 판이 그대로다
+    version = client.get(f"{API}/sources/{sid}", headers=ADMIN).json()["queries_version"]
+    saved = client.put(url, headers=ADMIN, json={"screens": [
+        {"url": "https://intra.test/notice", "conditions": [], "collect": "page", "page_format": "md_html"}]})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["screens"][0] == {**files_only["screens"][0], "collect": "page", "page_format": "md_html"}
+    assert client.get(f"{API}/sources/{sid}", headers=ADMIN).json()["queries_version"] != version   # 옛 북마크를 알린다
+    odd = client.put(url, headers=ADMIN, json={"screens": [
+        {"url": "https://intra.test/notice", "conditions": [], "collect": "page", "page_format": "pdf"}]})
+    assert odd.json()["screens"][0]["page_format"] == "md"
+    client.put(url, headers=ADMIN, json={"screens": [
+        {"url": "https://intra.test/notice", "conditions": [], "collect": "page", "page_format": "md_html"}]})
+
+    captures = [
+        {"screen": "공지 조회", "url": "https://intra.test/notice", "kind": "list", "label": "공지 조회 목록",
+         "markdown": "| 번호 | 제목 |\n| --- | --- |\n| 1 | 휴가 규정 |", "html": "<table><tr><td>1</td></tr></table>"},
+        {"screen": "공지 조회", "url": "https://intra.test/notice", "kind": "detail", "label": "1 · 휴가 규정",
+         "markdown": "## 휴가 규정\n\n연차는 15일이다.",
+         "html": '<h2 onclick="steal()">휴가 규정</h2><script>steal()</script><a href="javascript:x()">x</a>'},
+        {"screen": "메인", "url": "https://intra.test/main", "kind": "list", "label": "메인", "markdown": "남의 화면"},
+        {"screen": "공지 조회", "url": "https://intra.test/notice", "kind": "detail", "label": "빈 것", "markdown": " "},
+    ]
+    collected = [{"screen": "공지 조회", "url": "https://intra.test/notice", "rows": 1, "details": 1,
+                  "pages": 2, "collect": "page", "notes": []}]
+    notice = [{"url": "https://intra.test/notice", "title": "공지 조회", "fields": ["등록일"], "links": []}]
+    res = client.post(f"{API}/sources/{sid}/browser-result", headers=ADMIN,
+                      files=_browser_file(sid, captures=captures, collected=collected, pages=notice))
+    assert res.status_code == 202, res.text
+    detail = client.get(f"{API}/sources/{sid}", headers=ADMIN).json()
+    caps = sorted(f["name"] for f in detail["scan"]["files"] if f["category"] == "captures")
+    assert caps == [".html/공지-조회---1-·-휴가-규정.html", ".html/공지-조회---공지-조회-목록.html",
+                    "공지-조회---1-·-휴가-규정.md", "공지-조회---공지-조회-목록.md"]
+    assert any(n.startswith("수집 · 공지 조회: 결과 1행 중 상세 1건, 페이지 2장") for n in detail["scan"]["notes"])
+    assert "페이지 · 공지 조회: 2장을 담았습니다" in detail["scan"]["notes"]
+    assert "captures" in detail["proposal"]["targets"]
+
+    out = _save(client, sid, pages={"mode": "skip"}, captures={"mode": "existing", "store": "docs"})
+    assert out.status_code == 200, out.text
+    folder = client.tmp / "docs" / "인사-포털" / "조회결과"
+    md = (folder / "공지-조회---1-·-휴가-규정.md").read_text(encoding="utf-8")
+    assert md.startswith("# 1 · 휴가 규정") and "- 종류: 상세" in md and "연차는 15일이다." in md
+    html = (folder / ".html" / "공지-조회---1-·-휴가-규정.html").read_text(encoding="utf-8")
+    assert "script-src 'none'" in html and "<script" not in html and "onclick" not in html
+    assert "javascript:" not in html and "휴가 규정" in html
+
+    # 파일로 되돌리면 페이지는 받지 않는다
+    client.put(url, headers=ADMIN, json={"screens": [{"url": "https://intra.test/notice", "conditions": []}]})
+    client.post(f"{API}/sources/{sid}/browser-result", headers=ADMIN,
+                files=_browser_file(sid, captures=captures, pages=notice))
+    files = client.get(f"{API}/sources/{sid}", headers=ADMIN).json()["scan"]["files"]
+    assert not [f for f in files if f["category"] == "captures"]
 
 
 def test_list_data_accumulates_full_then_incremental_and_marks_the_next_start(client, monkeypatch):
@@ -863,6 +924,22 @@ def test_similar_pick_goes_by_menu_text_not_by_the_shared_menu_function():
              {"tag": "a", "text": "클레임 조회", "code": "openMenu('claim');return false"}]
     assert infosource._pick_similar(target, cands) == 0
     assert infosource._pick_similar({"tag": "a", "text": "전혀 다른 것"}, cands) is None
+
+
+def test_recording_and_analysis_keep_what_the_person_chose_to_collect(client, monkeypatch):
+    """받을 것(파일·페이지)은 사람이 정한다 — 같은 화면을 다시 녹화하거나 LLM 분석을 다시 받아도 그대로 잇는다."""
+    sid = _notice_scan(client, monkeypatch)
+    client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [
+        {"screen": "공지 조회", "url": "https://intra.test/notice", "conditions": [], "collect": "page"}]})
+    res = client.post(f"{API}/sources/{sid}/queries/recording", headers=ADMIN,
+                      files=_recording(sid, url="https://intra.test/notice"))
+    assert res.status_code == 200, res.text
+    screens = client.get(f"{API}/sources/{sid}/queries", headers=ADMIN).json()["screens"]
+    assert len(screens) == 1 and screens[0]["path"]               # 녹화가 화면을 바꿨다(길이 생겼다)
+    assert (screens[0]["collect"], screens[0]["page_format"]) == ("page", "md")
+    monkeypatch.setattr(llm, "default_provider", lambda db: None)
+    suggested = client.post(f"{API}/sources/{sid}/queries/suggest", headers=ADMIN).json()["screens"]
+    assert [s.get("collect") for s in suggested if s["url"] == "https://intra.test/notice"] == ["page"]
 
 
 def test_old_bookmark_is_flagged_when_conditions_changed_since(client, monkeypatch):

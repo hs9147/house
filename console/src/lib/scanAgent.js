@@ -4,7 +4,9 @@
  *  - 스캔·수집: 화면에 그려진 메뉴 트리, 열려 있는 화면(같은 출처의 iframe 포함)의 제목·표 머리글·
  *    조회 조건, 메뉴의 GET 링크 몇 장, 같은 출처의 문서·표·발표 파일(GET)을 읽고, 스크립트로 여는 메뉴는
  *    숨긴 틀에서 눌러 조회 화면과 그리로 가는 길을 찾는다(「메뉴 탐색」). 수집 조건이 있으면 그 화면을
- *    조회해 결과 파일과 행마다 상세의 첨부를 받아(「수집」) JSON 파일로 내려받는다.
+ *    조회해 결과 파일과 행마다 상세의 첨부를 받아(「수집」) JSON 파일로 내려받는다. 화면마다 받을 것을 고른다 —
+ *    「파일」(엑셀·결과 표·상세의 첨부)이나 「페이지」(조회 결과 목록과 행마다 상세의 본문 자체를 마크다운으로,
+ *    고르면 원본 HTML도).
  *  - 녹화: 사람이 한 번 보여 주는 길(메뉴 → 조건 → 조회 → 첫 행의 상세 → 첨부)을 적어 JSON으로 내려받는다.
  *  - 스마트워크로: 지금 화면의 글자를 받는 창으로 넘겨 스마트워크 대화에 붙인다.
  * 하지 않는 일: gpax로 직접 보내기(운영 콘솔이 http라 https 페이지가 부를 수 없다 — 콘솔 창과 postMessage로만),
@@ -22,6 +24,8 @@
   /* 받는 파일 — 서버(services/infosource.FILE_TYPES)가 받는 형식과 같다. 크기는 올릴 파일이 너무
    * 커지지 않게 서버 상한보다 작게 잡는다(base64로 실려 4/3배가 된다). */
   var MAX_FILES = 60, MAX_FILE_BYTES = 10000000, MAX_TOTAL_BYTES = 50000000;
+  /* 「페이지」로 담는 것 — 장 수와 한 장의 글자 수(서버 services/infosource.MAX_CAPTURES와 같다). */
+  var MAX_PAGES = 200, MAX_PAGE_CHARS = 100000, MAX_HTML_CHARS = 500000;
   var FILE_EXT = /\.(pdf|docx?|hwpx?|txt|xlsx?|csv|pptx?)$/i;
   var FILE_TYPE = /pdf|msword|ms-excel|ms-powerpoint|officedocument|hwp|text\/csv/i;
   var DANGER = /log-?out|sign-?out|logoff|로그아웃|delete|remove|삭제/i;
@@ -1223,10 +1227,11 @@
 
   /* 한 행의 상세 — 새 창으로 열면 상세 틀에, 같은 틀이 바뀌면 그 화면에서, 같은 화면에 뜨면(팝업 레이어)
    * 누르기 전에 없던 첨부만 받는다. 같은 틀이 바뀌었으면 돌아와 다시 조회해야 한다(navigated). */
-  async function openDetail(tr, q, work, detail, files, budget) {
+  async function openDetail(tr, q, work, detail, files, budget, caps) {
     var trigger = detailOf(tr, q.detail);
     if (!trigger) return { opened: false, navigated: false };
-    var doc = tr.ownerDocument, label = rowLabel(tr), before = attachments(doc);
+    var doc = tr.ownerDocument, label = rowLabel(tr), before = attachments(doc), page = q.collect === 'page';
+    var shown = page ? layers(doc) : [];
     arm(work);
     mode = 'detail';
     caught = [];
@@ -1242,13 +1247,22 @@
       target = docOf(detail);
     } else target = docOf(work);
     if (!target || !target.body) return { opened: false, navigated: navigated };
-    var atts = attachments(target).filter(function (el) { return frame !== work || navigated || before.indexOf(el) < 0; });
-    var opened = popups.length > 0 || navigated || atts.length > 0;
-    var meta = { text: label, page: q.url.split('#')[0] };
-    for (var i = 0; i < atts.length && i < MAX_ATTACH && files.length < MAX_FILES && budget.left > 0 && !ctl.stop; i++) {
-      say(q.screen + ' — 첨부 받는 중 ' + (files.length + 1) + '…');
-      await grab(atts[i], frame, files, budget, meta);
-      if (frame === work && docOf(work) !== target) navigated = true;
+    var opened;
+    if (page) {
+      /* 상세 본문 — 새 창·바뀐 화면이면 그 화면 전체, 같은 화면에 떴으면 누른 뒤 새로 보인 상자 */
+      var root = frame !== work || navigated ? target
+        : layers(target).filter(function (el) { return shown.indexOf(el) < 0; })[0];
+      if (!root) note('상세가 어디 떴는지 찾지 못했습니다: ' + label);
+      opened = !!root && capturePage(caps, root, q, 'detail', label);
+    } else {
+      var atts = attachments(target).filter(function (el) { return frame !== work || navigated || before.indexOf(el) < 0; });
+      opened = popups.length > 0 || navigated || atts.length > 0;
+      var meta = { text: label, page: q.url.split('#')[0] };
+      for (var i = 0; i < atts.length && i < MAX_ATTACH && files.length < MAX_FILES && budget.left > 0 && !ctl.stop; i++) {
+        say(q.screen + ' — 첨부 받는 중 ' + (files.length + 1) + '…');
+        await grab(atts[i], frame, files, budget, meta);
+        if (frame === work && docOf(work) !== target) navigated = true;
+      }
     }
     if (frame === detail) detail.src = 'about:blank';
     else if (!navigated) {
@@ -1269,7 +1283,8 @@
     if (table) table.querySelectorAll('th').forEach(function (th) { head.push(textOf(th)); });
     var found = DATA.findList(t.calls || [], [].concat.apply([], grid));
     if (!found) {
-      note('조회 응답에서 결과 목록을 찾지 못했습니다(요청 ' + (t.calls || []).length + '개) — 엑셀·화면 표로 받습니다');
+      note('조회 응답에서 결과 목록을 찾지 못했습니다(요청 ' + (t.calls || []).length + '개) — ' +
+           (q.collect === 'page' ? '결과 화면을 페이지로 담습니다' : '엑셀·화면 표로 받습니다'));
       return null;
     }
     var path = new URL(found.call.url).pathname;
@@ -1299,11 +1314,93 @@
                               total: found.total, complete: complete, since: t.since || '' } };
   }
 
-  async function collectScreen(q, work, detail, files, budget, sets) {
-    var rep = { screen: q.screen, url: q.url, rows: 0, details: 0, files: 0, notes: [], via: '' };
+  /* 「페이지」 — 화면 글을 마크다운으로(제목·문단·목록·표). 스크립트·숨긴 것·입력 칸(값은 읽지 않는다)은 뺀다.
+   * 같은 출처의 안쪽 틀(본문 편집기 등)은 따라 들어간다. 다른 표를 품은 표는 배치용이라 칸마다 글로 푼다. */
+  var MD_SKIP = /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SVG|CANVAS|SELECT|OPTION|BUTTON|INPUT|TEXTAREA|OBJECT|EMBED)$/;
+  var MD_BLOCK = /^(P|DIV|SECTION|ARTICLE|MAIN|ASIDE|HEADER|FOOTER|NAV|UL|OL|DL|DT|DD|FORM|FIELDSET|PRE|BLOCKQUOTE|TR|TD|TH|CAPTION|FIGURE|FIGCAPTION|CENTER|ADDRESS)$/;
+  function hiddenEl(el) {
+    var w = el.ownerDocument.defaultView, st = w && w.getComputedStyle ? w.getComputedStyle(el) : null;
+    return el.hidden || el.getAttribute('aria-hidden') === 'true' || !!(st && (st.display === 'none' || st.visibility === 'hidden'));
+  }
+  function toMarkdown(root) {
+    var out = [], line = '', lead = '';
+    function flush(prefix) {
+      var t = line.replace(/\s+/g, ' ').trim();
+      if (t) out.push((prefix || lead) + t);
+      if (t || prefix) lead = '';
+      line = '';
+    }
+    function cell(td) { return clean(td.innerText || td.textContent, 400).replace(/\|/g, '/'); }
+    function table(t) {
+      var grid = [];
+      Array.prototype.forEach.call(t.rows, function (tr) {
+        if (hiddenEl(tr)) return;
+        var row = Array.prototype.map.call(tr.cells, cell);
+        if (row.some(function (c) { return c; })) grid.push(row);
+      });
+      if (!grid.length) return;
+      var n = Math.max.apply(null, grid.map(function (r) { return r.length; }));
+      function md(r) { while (r.length < n) r.push(''); return '| ' + r.join(' | ') + ' |'; }
+      out.push('', md(grid[0]), '|' + new Array(n + 1).join(' --- |'));
+      grid.slice(1).forEach(function (r) { out.push(md(r)); });
+      out.push('');
+    }
+    function kids(node, depth) { Array.prototype.forEach.call(node.childNodes, function (c) { walk(c, depth + 1); }); }
+    function walk(node, depth) {
+      if (node.nodeType === 3) { line += node.nodeValue; return; }
+      if (node.nodeType !== 1 || depth > 80) return;
+      var tag = node.tagName;
+      if (MD_SKIP.test(tag) || node === box || hiddenEl(node)) return;
+      if (tag === 'IFRAME' || tag === 'FRAME') {
+        var inner = null;
+        try { inner = ours(node) ? null : node.contentDocument; } catch (e) { inner = null; }
+        if (inner && inner.body) { flush(); walk(inner.body, depth + 1); flush(); }
+        return;
+      }
+      var h = /^H([1-6])$/.exec(tag);
+      /* 제목은 한 단계 내린다 — 맨 위 제목(# 행·화면 이름)은 서버가 붙인다 */
+      if (h) { flush(); line = textOf(node); flush(new Array(+h[1] + 2).join('#') + ' '); return; }
+      if (tag === 'TABLE' && !node.querySelector('table')) { flush(); table(node); return; }
+      if (tag === 'BR' || tag === 'HR') { flush(); return; }
+      if (tag === 'LI') { flush(); lead = '- '; kids(node, depth); flush(); return; }
+      var block = MD_BLOCK.test(tag);
+      if (block) flush();
+      kids(node, depth);
+      if (block) flush();
+    }
+    walk(root.body || root, 0);
+    flush();
+    return out.join('\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, MAX_PAGE_CHARS);
+  }
+  /* 같은 화면에 뜬 상세(팝업 레이어) 후보 — 보이는 상자, 글이 많은 것부터. 누르기 전 것과 견줘 새로 뜬 것을 고른다. */
+  var LAYER = '[role=dialog],[role=alertdialog],dialog,[class*="layer"],[class*="popup"],[class*="modal"],[class*="dialog"]';
+  function layers(doc) {
+    var found = [];
+    doc.querySelectorAll(LAYER).forEach(function (el) {
+      if (el !== box && visible(el) && clean(el.innerText, 20)) found.push(el);
+    });
+    return found.sort(function (a, b) { return (b.innerText || '').length - (a.innerText || '').length; });
+  }
+  /* 「페이지」 한 장을 담는다 — 마크다운, 고른 화면이면 원본 HTML도(스크립트는 서버가 뺀다). */
+  function capturePage(caps, root, q, kind, label) {
+    if (caps.length >= MAX_PAGES) { note('담는 페이지 상한(' + MAX_PAGES + '장)에 닿았습니다'); return false; }
+    var doc = root.ownerDocument || root, md = toMarkdown(root);
+    if (!md) { note('글이 없는 페이지라 담지 않았습니다: ' + clean(label, 60)); return false; }
+    var page = { screen: q.screen, url: q.url, kind: kind, label: clean(label, 200), title: clean(doc.title, 200),
+                 markdown: md };
+    if (q.page_format === 'md_html') page.html = ((root.documentElement || root).outerHTML || '').slice(0, MAX_HTML_CHARS);
+    caps.push(page);
+    log('담음 ' + page.label + ' (' + md.length.toLocaleString() + '자)');
+    return true;
+  }
+
+  async function collectScreen(q, work, detail, files, budget, sets, caps) {
+    var page = q.collect === 'page';
+    var rep = { screen: q.screen, url: q.url, rows: 0, details: 0, files: 0, pages: 0, notes: [], via: '',
+                collect: page ? 'page' : 'files' };
     notes = rep.notes;
     repair = null;
-    var live = ctl.fresh ? null : liveFrame(q), start = files.length;
+    var live = ctl.fresh ? null : liveFrame(q), start = files.length, startPages = caps.length;
     /* 맨 위 창에 그 화면이 떠 있으면(틀 없는 사이트) 그 주소를 숨긴 틀에 연다. */
     var t = { root: work, live: !!live, frame: live,
               url: !live && hasFieldsTop(q) ? location.href.split('#')[0] : q.url.split('#')[0] };
@@ -1318,12 +1415,15 @@
     log(q.screen + ' — 결과 ' + rows.length + '행');
     var list = await listData(q, t, rows);
     if (list) { rep.data = list.rep; sets.push(list.set); }
-    /* 목록을 빠짐없이 받았으면 엑셀은 받지 않는다 — 서버가 누적한 목록으로 전체 표를 만든다. */
-    if (!list || !list.rep.complete) await exportResult(q, t.frame, files, budget);
+    /* 페이지면 결과 목록 화면 자체를 담는다(엑셀·첨부는 받지 않는다). 파일이면 — 목록을 빠짐없이 받았으면 엑셀은
+     * 받지 않는다(서버가 누적한 목록으로 전체 표를 만든다). */
+    if (page) capturePage(caps, docOf(t.frame), q, 'list', q.screen + ' 목록');
+    else if (!list || !list.rep.complete) await exportResult(q, t.frame, files, budget);
     /* 한도(ctl.rows)는 도는 동안 바뀔 수 있다 — 행마다 다시 본다. */
     var i = 0;
     for (; i < Math.min(rep.rows, ctl.rows) && !ctl.stop; i++) {
-      if (files.length >= MAX_FILES || budget.left <= 0) { note('파일 상한에 닿아 멈췄습니다'); break; }
+      if (!page && (files.length >= MAX_FILES || budget.left <= 0)) { note('파일 상한에 닿아 멈췄습니다'); break; }
+      if (page && caps.length >= MAX_PAGES) { note('담는 페이지 상한에 닿아 멈췄습니다'); break; }
       rows = docOf(t.frame) && matches(t.frame, q) ? resultRows(docOf(t.frame)) : [];
       if (rows.length <= i) {
         why = await search(q, t);
@@ -1332,7 +1432,7 @@
       }
       if (rows.length <= i) { note((i + 1) + '번째 행을 다시 찾지 못해 멈췄습니다'); break; }
       say(q.screen + ' — 상세 ' + (i + 1) + '/' + Math.min(rep.rows, ctl.rows) + ' · ' + rowLabel(rows[i]));
-      var got = await openDetail(rows[i], q, t.frame, detail, files, budget);
+      var got = await openDetail(rows[i], q, t.frame, detail, files, budget, caps);
       if (got.opened) rep.details++;
     }
     if (ctl.stop) note('사람이 멈췄습니다 — 결과 ' + rep.rows + '행 중 ' + i + '행까지 봤습니다');
@@ -1342,18 +1442,19 @@
       try { winOf(t.frame).history.back(); } catch (e) { /* 뒤로 갈 곳이 없다 */ }
     }
     rep.files = files.length - start;
+    rep.pages = caps.length - startPages;
     notes = null;
     return rep;
   }
   function hasFieldsTop(q) { return q.conditions.length > 0 && hasFields(document, q); }
 
-  async function collect(files, budget, sets) {
+  async function collect(files, budget, sets, caps) {
     var queries = SOURCE.queries || [], out = [];
     if (!queries.length) return out;
     var work = makeFrame('gpax-work'), detail = makeFrame('gpax-detail');
     try {
       for (var i = 0; i < queries.length && !ctl.stop; i++) {
-        out.push(await collectScreen(queries[i], work, detail, files, budget, sets));
+        out.push(await collectScreen(queries[i], work, detail, files, budget, sets, caps));
       }
     } finally {
       disarmAll();
@@ -1565,14 +1666,16 @@
     controls();
     say('봇 실행 — 수집 조건 ' + (SOURCE.queries || []).length + '개를 녹화한 길대로 처음부터 다시 합니다');
     try {
-      var files = [], sets = [], collected = await collect(files, { left: MAX_TOTAL_BYTES }, sets);
+      var files = [], sets = [], caps = [], collected = await collect(files, { left: MAX_TOTAL_BYTES }, sets, caps);
       var out = { agent: AGENT, replay: true, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
                   url: location.href.split('#')[0], at: new Date().toISOString(), menu: [], pages: [],
-                  files: files, collected: collected, datasets: sets, queries_version: SOURCE.version || '' };
+                  files: files, collected: collected, datasets: sets, captures: caps,
+                  queries_version: SOURCE.version || '' };
       var sent = deliver('scan', out, 'gpax-scan');
       say('봇 끝 — ' + collected.map(function (c) {
         return c.screen + (c.data ? ' 목록 ' + c.data.got + '건' + (c.data.complete ? '(빠짐없음)' : '(덜 받음)')
-          : ' 결과 ' + c.rows + '행') + ' · 상세 ' + c.details + ' · 파일 ' + c.files;
+          : ' 결과 ' + c.rows + '행') + ' · 상세 ' + c.details +
+          (c.collect === 'page' ? ' · 페이지 ' + c.pages : ' · 파일 ' + c.files);
       }).join(' / ') + (sent ? '. 콘솔로 보냈습니다.' : '. 내려받은 파일을 콘솔에 올리세요.'));
     } catch (err) {
       say('봇 실패 — ' + (err && err.message));
@@ -1646,13 +1749,15 @@
       var explored = await explore(pages, seen);
       log('메뉴 탐색 — 조회 화면 ' + explored + '개를 찾았습니다');
     }
-    var sets = [], collected = await collect(files, budget, sets);
+    var sets = [], caps = [], collected = await collect(files, budget, sets, caps);
     var out = { agent: AGENT, source: { id: SOURCE.id, name: SOURCE.name }, origin: origin,
                 url: location.href.split('#')[0], at: new Date().toISOString(), menu: menu, pages: pages,
-                files: files, collected: collected, datasets: sets, queries_version: SOURCE.version || '' };
+                files: files, collected: collected, datasets: sets, captures: caps,
+                queries_version: SOURCE.version || '' };
     var sent = deliver('scan', out, 'gpax-scan');
     running = false;
-    say('끝 — 메뉴 ' + menuN + '개 · 화면 ' + pages.length + '장 · 파일 ' + files.length + '개. ' +
+    say('끝 — 메뉴 ' + menuN + '개 · 화면 ' + pages.length + '장 · 파일 ' + files.length + '개' +
+        (caps.length ? ' · 담은 페이지 ' + caps.length + '장' : '') + '. ' +
         (sent ? '콘솔로 보냈습니다 — 콘솔이 결과를 올립니다.'
           : '내려받은 파일을 GPAX 콘솔 데이터 수집 → ' + SOURCE.name + ' → ① 북마크 추가 → 「콘솔 없이 쓸 때」에 올리세요.'));
     finish();

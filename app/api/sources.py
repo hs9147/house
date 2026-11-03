@@ -72,6 +72,9 @@ class QueryScreen(BaseModel):
     # LLM 분석이 남긴 것 — 버튼 글자(search·export)와 수집 방법(plan: method·reason·risks)
     hints: dict | None = None
     plan: dict | None = None
+    # 받을 것 — files(엑셀·결과 표·상세의 첨부, 기본) | page(결과 목록과 상세의 본문 자체), page면 저장 형태 md | md_html
+    collect: str = "files"
+    page_format: str = "md"
 
 
 class SourceQueries(BaseModel):

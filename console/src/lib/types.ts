@@ -1075,7 +1075,7 @@ export interface SourcePage {
 export type SourceChange = 'new' | 'changed' | 'same';
 
 // 저장 유형 — services/infosource.CATEGORIES
-export type SourceCategory = 'pages' | 'documents' | 'sheets' | 'slides';
+export type SourceCategory = 'pages' | 'documents' | 'sheets' | 'slides' | 'captures';
 
 export interface SourceFile {
   url: string;
@@ -1124,6 +1124,7 @@ export interface SourceScan {
   collected?: {
     screen: string; url: string; rows: number; details: number; files: number; notes: string[];
     via: 'open' | 'path' | 'url' | ''; repair?: { kind: 'step' | 'fields' };
+    collect?: SourceCollect; pages?: number;   // 「페이지」로 받은 화면이면 담은 페이지 수
     data?: { via: 'api'; got: number; total: number | null; complete: boolean; end: string; key: string; since: string };
   }[];
   // 화면마다 누적한 목록(services/infosource.merge_dataset) — 이번에 받은 건수와 누적, 다음 증분의 시작일(last)
@@ -1215,7 +1216,12 @@ export interface SourceQueryScreen {
   // LLM 분석 — 본문에서 읽은 버튼 글자(녹화가 남긴 위치가 없을 때 북마크가 쓴다)와 수집 방법
   hints?: { search?: string; export?: string };
   plan?: { method: SourceQueryMethod; reason: string; risks: string[] };
+  // 받을 것 — 파일(엑셀·결과 표·상세의 첨부, 기본)·페이지(결과 목록과 상세의 본문 자체), 페이지의 저장 형태
+  collect?: SourceCollect;
+  page_format?: 'md' | 'md_html';
 }
+
+export type SourceCollect = 'files' | 'page';
 
 // 화면을 여는 길 — 열어 둔 화면 · 메뉴 길(탐색·녹화가 찾은) · 주소 · 녹화 필요
 export type SourceQueryMethod = 'open' | 'path' | 'url' | 'record';

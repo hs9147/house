@@ -89,7 +89,8 @@ _FILE_CTYPES = {
 }
 # 저장 유형 — 유형마다 저장 위치를 따로 정한다. 값은 (화면 이름, 저장소 안 폴더).
 CATEGORIES = {"pages": ("조회 정보 정리", ""), "documents": ("문서 파일", "문서"),
-              "sheets": ("표 파일", "표"), "slides": ("발표 파일", "발표")}
+              "sheets": ("표 파일", "표"), "slides": ("발표 파일", "발표"),
+              "captures": ("조회 결과 페이지", "조회결과")}
 
 # 따라가면 세션이 끊기거나 무언가를 바꾸는 링크 — 쿠키를 들고 도는 크롤러가 밟으면 안 된다.
 _DANGEROUS_LINK = re.compile(r"log-?out|sign-?out|logoff|로그아웃|delete|remove|삭제", re.I)
@@ -528,7 +529,7 @@ def _stage(source_id: int, items: list[dict]) -> tuple[list[dict], list[str]]:
         by_sha[sha] = item["url"]
         (out_dir / f"{sha}{item['ext']}").write_bytes(data)
         files.append({**item, "sha": sha, "size": len(data),
-                      "category": FILE_TYPES.get(item["ext"], "documents")})
+                      "category": item.get("category") or FILE_TYPES.get(item["ext"], "documents")})
     keep = {f"{f['sha']}{f['ext']}" for f in files}
     for old in out_dir.iterdir():
         if old.name not in keep:
@@ -1358,6 +1359,7 @@ def from_browser(row: InfoSource, payload) -> dict:
                 "via": "browser", "menu_dom": (row.scan or {}).get("menu") or [], "replay": True,
                 "downloads": downloads, "collected": _collected_in(payload.get("collected"), origin),
                 "datasets": _datasets_in(payload.get("datasets"), origin),
+                "captures": _captures_in(payload.get("captures"), origin, query_screens(row)),
                 "queries_version": _s(payload.get("queries_version"), 32)}
     pages, seen = [], set()
     for p in (payload.get("pages") if isinstance(payload.get("pages"), list) else [])[:MAX_PAGES * 2]:
@@ -1384,6 +1386,7 @@ def from_browser(row: InfoSource, payload) -> dict:
             "via": "browser", "menu_dom": _menu_in(payload.get("menu"), origin, [400]),
             "downloads": downloads, "collected": _collected_in(payload.get("collected"), origin),
             "datasets": _datasets_in(payload.get("datasets"), origin),
+            "captures": _captures_in(payload.get("captures"), origin, query_screens(row)),
             "queries_version": _s(payload.get("queries_version"), 32)}
 
 
@@ -1394,11 +1397,12 @@ def _collected_in(items, origin: str) -> list[dict]:
         if not isinstance(c, dict):
             continue
         counts = {k: c[k] if isinstance(c.get(k), int) and c[k] >= 0 else 0
-                  for k in ("rows", "details", "files")}
+                  for k in ("rows", "details", "files", "pages")}
         via = c.get("via") if c.get("via") in ("open", "path", "url") else ""
         repair, data = _repair_in(c.get("repair")), _data_in(c.get("data"))
         out.append({"screen": _s(c.get("screen"), 200), "url": _same(c.get("url"), origin),
                     **counts, "notes": _strs(c.get("notes"), 10, 200), "via": via,
+                    "collect": "page" if c.get("collect") == "page" else "files",
                     **({"repair": repair} if repair else {}), **({"data": data} if data else {})})
     return out
 
@@ -1451,9 +1455,65 @@ def _collected_notes(collected: list[dict]) -> list[str]:
         rows = (f"목록 {d['got']}건" + (f"/전체 {d['total']}건" if d["total"] is not None else "") +
                 (" 빠짐없음" if d["complete"] else f" 덜 받음({d['end']})") + f", 첫 쪽 {c['rows']}행"
                 if d else f"결과 {c['rows']}행")
-        line = f"수집 · {c['screen'] or c['url']}: {rows} 중 상세 {c['details']}건, 파일 {c['files']}개"
+        got = f"페이지 {c.get('pages', 0)}장" if c.get("collect") == "page" else f"파일 {c['files']}개"
+        line = f"수집 · {c['screen'] or c['url']}: {rows} 중 상세 {c['details']}건, {got}"
         notes.append(line + (f" — {' / '.join(c['notes'][:3])}" if c["notes"] else ""))
     return notes
+
+
+MAX_CAPTURES = 200            # 한 번에 담는 조회 결과 페이지(scanAgent.js MAX_PAGES와 같다)
+MAX_CAPTURE_CHARS = 100_000
+MAX_CAPTURE_HTML = 500_000
+_HTML_DROP = re.compile(r"<(script|iframe|frame|object|embed|noscript)\b.*?(</\1\s*>|$)", re.I | re.S)
+_HTML_ON = re.compile(r"""\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.I)
+_HTML_JS = re.compile(r"""(href|src|action)\s*=\s*(["']?)\s*javascript:""", re.I)
+_NO_SCRIPT = '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'; object-src \'none\'">'
+
+
+def _captures_in(items, origin: str, screens: list[dict]) -> list[dict]:
+    """북마크가 담은 조회 결과 페이지 — 「페이지」로 받기로 한 화면의 것만. 원본 HTML은 그 화면이 HTML도 받기로
+    했을 때만 싣는다. 길이를 자른다."""
+    kinds = {s["url"]: s.get("page_format") or "md" for s in screens if s.get("collect") == "page"}
+    out = []
+    for c in (items if isinstance(items, list) else [])[:MAX_CAPTURES]:
+        url = _same(c.get("url"), origin) if isinstance(c, dict) else ""
+        if url not in kinds:
+            continue
+        markdown = c.get("markdown") if isinstance(c.get("markdown"), str) else ""
+        if not markdown.strip():
+            continue
+        html = c.get("html") if kinds[url] == "md_html" and isinstance(c.get("html"), str) else ""
+        out.append({"screen": _s(c.get("screen"), 200) or url, "url": url,
+                    "kind": "detail" if c.get("kind") == "detail" else "list",
+                    "label": _s(c.get("label"), 200), "title": _s(c.get("title"), 200),
+                    "markdown": markdown[:MAX_CAPTURE_CHARS], "html": html[:MAX_CAPTURE_HTML]})
+    return out
+
+
+def _safe_html(html: str) -> str:
+    """원본 HTML을 저장해도 열었을 때 스크립트가 돌지 않게 — 스크립트·틀을 빼고, 맨 앞에 스크립트 금지 정책."""
+    html = _HTML_JS.sub(r"\1=\2#", _HTML_ON.sub("", _HTML_DROP.sub("", html)))
+    return _NO_SCRIPT + "\n" + html
+
+
+def _capture_files(captures: list[dict]) -> tuple[list[dict], list[str]]:
+    """조회 결과 페이지 → 저장할 파일(_stage가 받는 모양). 마크다운은 색인·온톨로지가 읽고, 원본 HTML은 점 폴더
+    (.html)에 둔다 — 색인은 HTML을 평문으로 읽어 태그가 검색에 섞이므로 점 폴더(색인 제외)로 뺀다."""
+    out, count = [], {}
+    for c in captures:
+        page = c["url"].split("#")[0]
+        name = _folder_name(f"{_folder_name(c['screen'])[:50]} - {c['label'] or c['kind']}")[:100]
+        head = [f"# {c['label'] or c['title'] or c['screen']}", "",
+                f"- 조회 화면: {c['screen']}", f"- 주소: {page}",
+                f"- 종류: {'상세' if c['kind'] == 'detail' else '결과 목록'}", ""]
+        url = f"{page}#{quote(c['screen'] + ' / ' + (c['label'] or c['kind']))}"
+        out.append({"url": url, "name": f"{name}.md", "text": c["label"], "page": page, "ext": ".md",
+                    "category": "captures", "data": ("\n".join(head) + "\n" + c["markdown"] + "\n").encode("utf-8")})
+        if c["html"]:
+            out.append({"url": url + "#html", "name": f".html/{name}.html", "text": c["label"], "page": page,
+                        "ext": ".html", "category": "captures", "data": _safe_html(c["html"]).encode("utf-8")})
+        count[c["screen"]] = count.get(c["screen"], 0) + 1
+    return out, [f"페이지 · {screen}: {n}장을 담았습니다" for screen, n in count.items()]
 
 
 def _browser_files(items, origin: str) -> tuple[list[dict], list[dict]]:
@@ -1659,8 +1719,10 @@ def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
     sheets, result["datasets"], data_notes = _merge_datasets(row, result.pop("datasets"))
     # 받은 파일은 지금 둔다 — 큐로 넘길 결과에 수십 MB의 본문을 싣지 않는다.
     got, missed = _download(result.pop("downloads"), {}, result["origin"], limit=MAX_BROWSER_FILES)
-    result["files"], result["stage_notes"] = _stage(row.id, sheets + got)
-    result["stage_notes"] = _collected_notes(result["collected"]) + data_notes + result["stage_notes"]
+    captured, capture_notes = _capture_files(result.pop("captures"))
+    result["files"], result["stage_notes"] = _stage(row.id, sheets + captured + got)
+    result["stage_notes"] = (_collected_notes(result["collected"]) + data_notes + capture_notes
+                             + result["stage_notes"])
     if result.pop("replay", False):
         result["stage_notes"].insert(0, "봇 실행 — 화면은 지난 스캔 그대로이고, 수집 조건(녹화한 길)대로 다시 받은 "
                                         "결과입니다.")
@@ -1682,7 +1744,9 @@ def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
 
 # ---------------------------------------------------------------- 수집 조건(사람이 확정)
 #
-# 사이트에서 모으는 것은 **조회 결과 목록 전체와 첨부파일**이다. 화면마다 조회 조건을 정해 두면
+# 사이트에서 모으는 것은 **조회 결과 목록 전체와, 화면마다 고른 것** — 「파일」(엑셀·결과 표·행마다 상세의
+# 첨부)이나 「페이지」(결과 목록 화면과 행마다 상세의 본문 자체 — 마크다운, 고르면 원본 HTML도)다(collect).
+# 화면마다 조회 조건을 정해 두면
 # 북마크릿이 그 화면에 채우고 조회한 뒤, 조회 응답에서 결과 목록을 찾아 쪽을 넘기며 전체를 받고(못 찾으면
 # 엑셀 버튼·결과 표로 첫 쪽), 행마다 상세를 열어 첨부를 받는다(scanAgent.js). 목록은 화면마다 누적한다 —
 # 날짜 칸을 @last로 두면 지난번에 빠짐없이 받은 날부터 받는다(증분). 조건은 LLM이 스캔한 조회 항목과 지난
@@ -1690,6 +1754,7 @@ def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
 
 MAX_QUERY_SCREENS = 10
 MAX_CONDITIONS = 15
+PAGE_FORMATS = ("md", "md_html")   # 「페이지」로 받을 때 — 마크다운만, 마크다운 + 원본 HTML
 _DATE_FIELD = re.compile(r"일자|날짜|일시|기간|등록일|작성일|date|day", re.I)
 _FROM_FIELD = re.compile(r"시작|부터|from|start|begin|~$", re.I)
 _TO_FIELD = re.compile(r"종료|까지|to$|end", re.I)
@@ -1795,6 +1860,9 @@ def clean_screens(row: InfoSource, screens) -> list[dict]:
             extra["hints"] = hints
         if _s(s.get("key"), 80):   # 레코드를 가르는 열(표 머리글) — 목록을 누적할 때 같은 건을 알아본다
             extra["key"] = _s(s.get("key"), 80)
+        if s.get("collect") == "page":   # 받을 것 — 「파일」이 기본이라 적지 않는다(지금 조건의 판이 그대로다)
+            extra["collect"] = "page"
+            extra["page_format"] = s.get("page_format") if s.get("page_format") in PAGE_FORMATS else "md"
         plan = s.get("plan") if isinstance(s.get("plan"), dict) else {}
         if plan.get("method") in METHODS:
             extra["plan"] = {"method": plan["method"], "reason": _s(plan.get("reason"), 300),
@@ -1918,12 +1986,14 @@ def accept_recording(db: Session, row: InfoSource, payload, actor: str) -> dict:
         raise SourceError("녹화에 이 출처의 화면 주소가 없습니다.")
     name = _s(recipe.get("screen"), 200) or url
     screens = query_screens(row)
-    kept = [s for s in screens if not (s["url"].split("#")[0] == url and s["screen"] == name)]
+    replaced = next((s for s in screens if s["url"].split("#")[0] == url and s["screen"] == name), {})
+    kept = [s for s in screens if s is not replaced]
     # 메뉴를 POST로 여는 사이트는 화면마다 주소가 같다 — 이름을 붙여 가른다(북마크는 # 앞만 연다).
     if any(s["url"] == url for s in kept):
         url = f"{url}#{quote(name)}"
     cleaned = clean_screens(row, [{**recipe, "screen": name, "url": url,
-                                   "conditions": recipe.get("conditions") or []}])[0]
+                                   "conditions": recipe.get("conditions") or [],
+                                   **{k: replaced[k] for k in ("collect", "page_format") if k in replaced}}])[0]
     screens = [s for s in kept if s["url"] != cleaned["url"]] + [cleaned]
     if len(screens) > MAX_QUERY_SCREENS:
         raise SourceError(f"수집할 화면은 {MAX_QUERY_SCREENS}개까지입니다 — 쓰지 않는 화면을 빼고 다시 올리세요.")
@@ -2054,6 +2124,10 @@ def suggest_queries(db: Session, row: InfoSource) -> dict:
                    for p in pages if _date_guess(p["fields"]) or p.get("kind") == "list"]
     if dropped:
         notes.append(f"화면에 없는 칸을 버렸습니다: {', '.join(sorted(set(f for f in dropped if f))[:5])}")
+    # 받을 것(파일·페이지)은 사람이 정한다 — 분석이 다시 제안해도 지금 조건의 것을 그대로 잇는다
+    current = {s["url"]: s for s in query_screens(row)}
+    for s in screens:
+        s.update({k: current[s["url"]][k] for k in ("collect", "page_format") if k in current.get(s["url"], {})})
     return {"screens": screens[:MAX_QUERY_SCREENS], "notes": notes}
 
 

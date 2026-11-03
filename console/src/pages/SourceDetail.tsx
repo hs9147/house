@@ -20,9 +20,9 @@ const PAGE_KIND: Record<string, string> = {
 
 // services/infosource.CATEGORIES
 const CATEGORY: Record<SourceCategory, string> = {
-  pages: '조회 정보 정리', documents: '문서 파일', sheets: '표 파일', slides: '발표 파일',
+  pages: '조회 정보 정리', documents: '문서 파일', sheets: '표 파일', slides: '발표 파일', captures: '조회 결과 페이지',
 };
-const CATEGORY_ORDER: SourceCategory[] = ['pages', 'documents', 'sheets', 'slides'];
+const CATEGORY_ORDER: SourceCategory[] = ['pages', 'documents', 'sheets', 'slides', 'captures'];
 
 const CHANGE: Record<SourceChange, { label: string; cls: string }> = {
   new: { label: '새로', cls: 'info' }, changed: { label: '바뀜', cls: 'warn' }, same: { label: '그대로', cls: 'dim' },
@@ -252,8 +252,9 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         화면마다 — 여는 길, 조회 조건, 조회·엑셀 버튼, 상세를 여는 열. 북마크가 그 화면을 조회하고, 화면이 받은 조회
         응답에서 <b>결과 목록 전체</b>를 쪽을 넘기며 받습니다(전체 건수로 빠짐없는지 셉니다 — 응답에서 목록을 찾지 못하면
-        엑셀 버튼이나 결과 표로 첫 쪽). 목록은 화면마다 쌓여 저장할 때 CSV 한 장(「… 목록.csv」)이 되고, <b>행마다 상세의
-        첨부파일</b>도 받습니다. 날짜는 <span className="mono">@today</span>·<span className="mono">@today-7d</span>처럼
+        엑셀 버튼이나 결과 표로 첫 쪽). 목록은 화면마다 쌓여 저장할 때 CSV 한 장(「… 목록.csv」)이 됩니다. 그 밖에
+        받을 것은 화면마다 고릅니다 — <b>파일</b>은 엑셀·결과 표와 <b>행마다 상세의 첨부파일</b>을, <b>페이지</b>는 조회 결과
+        목록 화면과 <b>행마다 상세의 본문 자체</b>를 마크다운으로(고르면 원본 HTML도) 담아 「조회결과」 폴더에 둡니다. 날짜는 <span className="mono">@today</span>·<span className="mono">@today-7d</span>처럼
         쓰면 북마크를 누른 날로 바뀝니다. 시작 날짜를 <span className="mono">@last|@today-3y</span>로 두면 처음에는 3년
         전부터 전체를, 다음부터는 지난번에 빠짐없이 받은 날부터 받습니다(증분). 기간처럼 칸이 둘이면 같은 칸 이름을
         두 번(시작, 끝 순서) 넣습니다.
@@ -292,6 +293,24 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
                     {s.detail && ` · 상세는 ${s.detail.col + 1}번째 칸`}
                     {s.hints?.search && ` · 조회 버튼 「${s.hints.search}」`}
                     {s.hints?.export && ` · 엑셀 「${s.hints.export}」`}
+                  </div>
+                  <div className="row" style={{ gap: 6, alignItems: 'center', fontSize: 11, marginTop: 4 }}>
+                    받을 것
+                    <select value={s.collect ?? 'files'} aria-label="받을 것"
+                      onChange={(e) => {
+                        const { collect: _c, page_format: _f, ...rest } = s;
+                        setScreen(i, e.target.value === 'page' ? { ...rest, collect: 'page', page_format: s.page_format ?? 'md' } : rest);
+                      }}>
+                      <option value="files">파일 — 엑셀·결과 표·상세의 첨부</option>
+                      <option value="page">페이지 — 결과 목록과 상세의 본문 자체</option>
+                    </select>
+                    {s.collect === 'page' && (
+                      <select value={s.page_format ?? 'md'} aria-label="페이지 저장 형태"
+                        onChange={(e) => setScreen(i, { ...s, page_format: e.target.value as 'md' | 'md_html' })}>
+                        <option value="md">마크다운</option>
+                        <option value="md_html">마크다운 + 원본 HTML</option>
+                      </select>
+                    )}
                   </div>
                   {s.plan && (
                     <div style={{ fontSize: 11 }}>
