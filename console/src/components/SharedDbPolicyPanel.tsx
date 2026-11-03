@@ -48,7 +48,10 @@ export default function SharedDbPolicyPanel() {
               <tr><th>부서</th><th>함께 쓰는 부서</th><th>분리</th><th>DB</th><th>스키마</th></tr>
             </thead>
             <tbody>
-              {s.policies.map((row) => (
+              {s.policies.map((row) => {
+                // 같은 공유 단위의 다른 부서 — 여럿일 수 있다(여러 부서가 한 부서를 지정하면 모두 한 단위)
+                const members = s.policies.filter((o) => o.unit_id === row.unit_id && o.organization_id !== row.organization_id);
+                return (
                 <tr key={row.organization_id}>
                   <td>{row.name}</td>
                   <td>
@@ -63,6 +66,16 @@ export default function SharedDbPolicyPanel() {
                     </select>
                     {row.share_with_org_id !== null && row.unit_id !== row.share_with_org_id && (
                       <span className="mutedtext" style={{ fontSize: 11 }}> → {row.unit_name}</span>
+                    )}
+                    {members.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                        {members.map((o) => (
+                          <span key={o.organization_id} className="status info"
+                            title={o.organization_id === row.unit_id ? '공유 단위의 기준 부서' : undefined}>
+                            {o.name}{o.organization_id === row.unit_id ? ' (기준)' : ''}
+                          </span>
+                        ))}
+                      </div>
                     )}
                   </td>
                   <td>
@@ -80,7 +93,8 @@ export default function SharedDbPolicyPanel() {
                   <td className="mono" style={{ fontSize: 12 }}>{row.db_name}</td>
                   <td className="mono">{row.schemas}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}
