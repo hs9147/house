@@ -148,7 +148,7 @@ export default function WorkflowDetail() {
               <div className="panel" style={{ borderColor: VIZ.status.critical }}>
                 <b>저장된 스펙에 문제가 있습니다</b>
                 <p className="mutedtext" style={{ fontSize: 12, margin: '4px 0' }}>
-                  저장할 때는 통과했지만 지금은 아닙니다 — 저장소·모듈·프로바이더가 사라졌거나
+                  저장할 때는 통과했지만 지금은 아닙니다 — 저장소·도구·프로바이더가 사라졌거나
                   이름이 바뀌었습니다. 사용 가능한 흐름이 되도록 구성을 다시 확인하세요.
                 </p>
                 <ul style={{ fontSize: 12, margin: 0 }}>

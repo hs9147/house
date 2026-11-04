@@ -61,7 +61,7 @@ def _ensure_shared_db_module() -> None:
         with SessionLocal() as db:
             shareddb.ensure_module(db)
     except Exception as e:  # noqa: BLE001
-        print(f"[paas] 공용 DB 모듈을 만들지 못했습니다(무시): {e}")
+        print(f"[paas] 공용 DB 도구를 만들지 못했습니다(무시): {e}")
 
 
 def _warn_if_schema_is_behind() -> None:

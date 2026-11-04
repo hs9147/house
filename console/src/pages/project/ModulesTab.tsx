@@ -37,19 +37,19 @@ export default function ModulesTab() {
 
   return (
     <div className="panel">
-      <h2>바인딩된 모듈</h2>
+      <h2>바인딩된 도구</h2>
       <p className="mutedtext" style={{ fontSize: 12 }}>
         바인딩은 에이전트 기획의 <b>솔루션 구성</b> 단계에서 문서와 함께 결정됩니다 — 여기서는
-        무엇이 붙어 있는지 확인하고, 잘못된 것을 해제합니다. 바인딩된 모듈은 다음 배포부터
-        규약된 환경변수로 주입되고, 이 목록은 가용 모듈 제약(외부 빌드 guardrail)에도 그대로
+        무엇이 붙어 있는지 확인하고, 잘못된 것을 해제합니다. 바인딩된 도구는 다음 배포부터
+        규약된 환경변수로 주입되고, 이 목록은 가용 도구 제약(외부 빌드 guardrail)에도 그대로
         쓰입니다.
       </p>
-      <Async state={bound} empty="바인딩된 모듈이 없습니다 — 기획의 '솔루션 구성' 단계에서 붙습니다.">
+      <Async state={bound} empty="바인딩된 도구가 없습니다 — 기획의 '솔루션 구성' 단계에서 붙습니다.">
         {(rows) => (
           <table>
             <thead>
               <tr>
-                <th>모듈</th>
+                <th>도구</th>
                 <th>타입</th>
                 <th>env 접두사</th>
                 <th>능력</th>

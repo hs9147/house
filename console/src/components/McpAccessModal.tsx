@@ -107,7 +107,7 @@ export default function McpAccessModal({ onClose }: { onClose: () => void }) {
                 {bundle ? (
                   <p className="mutedtext" style={{ fontSize: 12 }}>
                     <span className="mono">paas</span> 서버 하나에 문서·온톨로지·저장소 목록·API 카탈로그·코드·기획
-                    (과제 이름을 인자로)·업무 앱 찾기·MCP 모듈·운영(관리자)이 모두 들어 있습니다. 데스크톱 도구는 서버마다 중계 프로세스가
+                    (과제 이름을 인자로)·업무 앱 찾기·MCP 도구·운영(관리자)이 모두 들어 있습니다. 데스크톱 앱은 서버마다 중계 프로세스가
                     하나라, 따로 등록하면 시작할 때 일부가 실패할 수 있습니다.
                   </p>
                 ) : (
@@ -250,7 +250,7 @@ function Guide({ target, os }: { target: Target; os: DesktopOs }) {
   }
   return (
     <p style={{ fontSize: 12 }}>
-      게이트웨이(/proxy·/a2a — LLM·모듈·A2A)를 부르는 스크립트·외주 빌더가 쓰는 환경변수입니다. 같은 토큰입니다.
+      게이트웨이(/proxy·/a2a — LLM·도구·A2A)를 부르는 스크립트·외주 빌더가 쓰는 환경변수입니다. 같은 토큰입니다.
     </p>
   );
 }

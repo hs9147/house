@@ -26,10 +26,10 @@ export default function Modules() {
   return (
     <div className="panel">
       <div className="row" style={{ marginBottom: 12 }}>
-        <h2 style={{ margin: 0 }}>모듈 레지스트리</h2>
+        <h2 style={{ margin: 0 }}>도구 레지스트리</h2>
         <div className="spacer" />
         <button className="secondary" onClick={() => setShowReport(true)}>
-          📊 모듈 사용이력 리포트
+          📊 도구 사용이력 리포트
         </button>
         {isAdmin() && (
           <>
@@ -41,12 +41,12 @@ export default function Modules() {
             </button>
           </>
         )}
-        <button onClick={() => setShowCreate(true)}>+ 새 모듈</button>
+        <button onClick={() => setShowCreate(true)}>+ 새 도구</button>
       </div>
       <p className="mutedtext" style={{ fontSize: 12 }}>
         api_key·dsn·secret 등 민감 필드는 암호화 저장되며 이후 마스킹(•••)으로만 표시됩니다.
       </p>
-      <Async state={state} empty="등록된 모듈이 없습니다.">
+      <Async state={state} empty="등록된 도구가 없습니다.">
         {(rows) => (
           <table>
             <thead>
@@ -100,7 +100,7 @@ export default function Modules() {
                       <button
                         className="small danger"
                         onClick={async () => {
-                          if (confirm(`정말로 모듈 '${m.name}'을(를) 삭제하시겠습니까?`)) {
+                          if (confirm(`정말로 도구 '${m.name}'을(를) 삭제하시겠습니까?`)) {
                             try {
                               await api.deleteModule(m.id);
                               state.reload();
@@ -282,7 +282,7 @@ function SearchMcpModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
                     </span>
                   ) : r.url ? (
                     <button className="small" onClick={() => importMcp(r)}>
-                      + 모듈로 등록
+                      + 도구로 등록
                     </button>
                   ) : (
                     <span
@@ -399,15 +399,15 @@ function SearchApiModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   };
 
   return (
-    <Modal title="외부 API 검색 → 모듈 추가" onClose={onClose}>
+    <Modal title="외부 API 검색 → 도구 추가" onClose={onClose}>
       <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
-        수집해 둔 공개 API 카탈로그를 키워드·카테고리로 검색해 external_api 모듈로
+        수집해 둔 공개 API 카탈로그를 키워드·카테고리로 검색해 external_api 도구로
         추가합니다(검색은 밖으로 나가지 않습니다 — 수집은 하루 한 번, <b>수집</b> 버튼으로
         당겨 쓸 수 있습니다).
         카테고리 기본값은 전체이고, 카테고리가 없는 API는 <span className="mono">기타</span>로
         고릅니다. 키워드는 이름·설명뿐 아니라 <b>주소</b>에도 걸립니다 — 받아 둔 URL을
         그대로 붙여 넣어 그게 무슨 API였는지 되짚을 수 있습니다. 추가 후
-        설정의 <span className="mono">url</span>·<span className="mono">api_key</span>는 새 모듈
+        설정의 <span className="mono">url</span>·<span className="mono">api_key</span>는 새 도구
         수정에서 채웁니다.
       </p>
       <form onSubmit={search} className="row" style={{ marginBottom: 12 }}>
@@ -768,10 +768,10 @@ function CreateModuleModal({
   };
 
   return (
-    <Modal title="새 모듈 등록" onClose={onClose}>
+    <Modal title="새 도구 등록" onClose={onClose}>
       <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <label className="field">
-          모듈 이름 — 빈칸 없이 소문자·숫자·하이픈만 사용 (예: user-storage)
+          도구 이름 — 빈칸 없이 소문자·숫자·하이픈만 사용 (예: user-storage)
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -852,10 +852,10 @@ function PlatformReportModal({ onClose }: { onClose: () => void }) {
   const reportState = useApi(() => api.getPlatformModuleReport());
 
   return (
-    <Modal title="모듈 사용이력 리포트" onClose={onClose} wide>
+    <Modal title="도구 사용이력 리포트" onClose={onClose} wide>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
-          house 플랫폼에 등록된 모든 모듈과 이를 바인딩하여 사용 중인 프로젝트 목록, 그리고 최근 모듈 관련 변경 이력을 종합 리포팅합니다.
+          house 플랫폼에 등록된 모든 도구와 이를 바인딩하여 사용 중인 프로젝트 목록, 그리고 최근 도구 관련 변경 이력을 종합 리포팅합니다.
         </p>
 
         <Async state={reportState}>
@@ -864,7 +864,7 @@ function PlatformReportModal({ onClose }: { onClose: () => void }) {
               {/* 요약 카드 */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
                 <div style={{ padding: 14, borderRadius: 8, background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)' }}>
-                  <div style={{ fontSize: 12, color: '#888' }}>총 등록 모듈</div>
+                  <div style={{ fontSize: 12, color: '#888' }}>총 등록 도구</div>
                   <div style={{ fontSize: 22, fontWeight: 700, color: '#38bdf8', marginTop: 4 }}>
                     {report.total_modules}개
                   </div>
@@ -879,12 +879,12 @@ function PlatformReportModal({ onClose }: { onClose: () => void }) {
 
               {/* 전역 모듈 현황 테이블 */}
               <div style={{ marginTop: 8 }}>
-                <h4 style={{ margin: '0 0 8px 0', fontSize: 14 }}>🧩 등록 모듈 및 프로젝트 바인딩 현황</h4>
+                <h4 style={{ margin: '0 0 8px 0', fontSize: 14 }}>🧩 등록 도구 및 프로젝트 바인딩 현황</h4>
                 <div style={{ maxHeight: 260, overflowY: 'auto' }}>
                   <table>
                     <thead>
                       <tr>
-                        <th>모듈명</th>
+                        <th>도구명</th>
                         <th>타입</th>
                         <th>소속 조직</th>
                         <th>바인딩 프로젝트 ({report.total_bindings})</th>
@@ -928,7 +928,7 @@ function PlatformReportModal({ onClose }: { onClose: () => void }) {
 
               {/* 최근 모듈 감사 로그 */}
               <div style={{ marginTop: 8 }}>
-                <h4 style={{ margin: '0 0 8px 0', fontSize: 14 }}>📜 최근 모듈 변경 이력 ({report.recent_history.length})</h4>
+                <h4 style={{ margin: '0 0 8px 0', fontSize: 14 }}>📜 최근 도구 변경 이력 ({report.recent_history.length})</h4>
                 <div style={{ maxHeight: 200, overflowY: 'auto' }}>
                   <table>
                     <thead>
@@ -1014,7 +1014,7 @@ function McpCheckButton({ moduleId }: { moduleId: number }) {
           className="small"
           disabled={busy}
           onClick={issueKey}
-          title="이 모듈에 전용 키를 발급해 넣습니다 (모듈을 지울 필요 없음)"
+          title="이 도구에 전용 키를 발급해 넣습니다 (도구를 지울 필요 없음)"
         >
           키 발급
         </button>

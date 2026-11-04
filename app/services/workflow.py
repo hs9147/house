@@ -75,10 +75,10 @@ NODE_TYPES: dict[str, dict] = {
         "help": "입력을 컨텍스트로 프롬프트를 실행한다. provider를 비우면 기본 프로바이더.",
     },
     "mcp.tool": {
-        "label": "모듈 도구",
+        "label": "MCP 도구",
         "required": ("module", "tool"),
         "optional": ("args",),
-        "help": "조직에 보이는 MCP 모듈의 도구를 호출한다.",
+        "help": "조직에 보이는 MCP 도구의 기능을 호출한다.",
     },
     "branch": {
         "label": "분기",
@@ -253,7 +253,7 @@ def validate(db: Session, organization_id: int, spec: dict) -> list[str]:
         if kind == "mcp.tool":
             if node.get("module") and str(node["module"]) not in module_names:
                 problems.append(
-                    f"{node_id}: 모듈 '{node['module']}'를 이 조직에서 쓸 수 없습니다.")
+                    f"{node_id}: 도구 '{node['module']}'를 이 조직에서 쓸 수 없습니다.")
             if node.get("args") is not None and not isinstance(node["args"], dict):
                 problems.append(f"{node_id}: args는 객체여야 합니다.")
         if kind == "llm" and node.get("provider"):
@@ -690,13 +690,13 @@ def _node_mcp(db: Session, workflow: Workflow, node: dict, data: dict) -> dict:
         select(Module).where(Module.name == str(node["module"]))
     ).scalar_one_or_none()
     if module is None:
-        raise WorkflowError(f"모듈 '{node['module']}'가 없습니다.")
+        raise WorkflowError(f"도구 '{node['module']}'가 없습니다.")
     if module.organization_id not in (None, workflow.organization_id):
-        raise WorkflowError(f"모듈 '{module.name}'를 이 조직에서 쓸 수 없습니다.")
+        raise WorkflowError(f"도구 '{module.name}'를 이 조직에서 쓸 수 없습니다.")
     config = modules_service.decrypt_config(module.config or {})
     url = str(config.get("url") or "")
     if not url:
-        raise WorkflowError(f"모듈 '{module.name}'에 url이 없습니다.")
+        raise WorkflowError(f"도구 '{module.name}'에 url이 없습니다.")
     args = dict(node.get("args") or {})
     # 앞 단계 텍스트를 쓰고 싶다는 표시 — 인자에 "$입력"이라고 적는다.
     for key, value in args.items():

@@ -371,14 +371,14 @@ def issue_mcp_module_key(
     if row is None:
         raise HTTPException(status_code=404, detail="module not found")
     if row.type != ModuleType.mcp:
-        raise HTTPException(status_code=400, detail=f"mcp 타입 모듈이 아닙니다: {row.type.value}")
+        raise HTTPException(status_code=400, detail=f"mcp 타입 도구가 아닙니다: {row.type.value}")
     config = svc.decrypt_config(row.config)
     url = config.get("url", "")
     if not mcp_search.is_internal_server_url(url):
         accepted = mcp_search.accepted_bases() or "(비어 있음 — 공개 주소·PAAS_MCP_INTERNAL_BASE_URL 미설정)"
         raise HTTPException(status_code=400, detail=(
             f"사내 MCP 주소가 아니라 키를 발급하지 않습니다: {url} — 발급한 키는 이 주소로"
-            " 전송되므로 사외 서버에는 붙일 수 없습니다. 사외 서버라면 모듈 수정에서"
+            " 전송되므로 사외 서버에는 붙일 수 없습니다. 사외 서버라면 도구 수정에서"
             " config.api_key에 그 서버가 준 키를 넣으세요. 사내 서버인데 여기서 걸린다면"
             f" 기준 주소 설정을 보세요(인정하는 기준: {accepted})."))
 
@@ -407,7 +407,7 @@ def check_mcp_module(
     if row is None:
         raise HTTPException(status_code=404, detail="module not found")
     if row.type != ModuleType.mcp:
-        raise HTTPException(status_code=400, detail=f"mcp 타입 모듈이 아닙니다: {row.type.value}")
+        raise HTTPException(status_code=400, detail=f"mcp 타입 도구가 아닙니다: {row.type.value}")
     config = svc.decrypt_config(row.config)
     url, api_key = config.get("url", ""), config.get("api_key") or None
     result = mcp_client.check_server(url, api_key)
@@ -418,11 +418,11 @@ def check_mcp_module(
         # 401을 그대로 내주면 "주소가 틀렸나"를 먼저 의심하게 된다 — 원인은 키가 없는
         # 것이고, 사내 서버는 다시 가져오기만 하면 전용 키가 발급된다.
         result["error"] += (
-            " — 이 모듈에 API 키가 없습니다."
-            + (" 사내 MCP 서버는 인증이 필요합니다. '키 발급'으로 이 모듈에 전용 키를"
-               " 넣으세요(모듈을 지울 필요 없습니다 — 바인딩도 그대로 유지됩니다)."
+            " — 이 도구에 API 키가 없습니다."
+            + (" 사내 MCP 서버는 인증이 필요합니다. '키 발급'으로 이 도구에 전용 키를"
+               " 넣으세요(도구를 지울 필요 없습니다 — 바인딩도 그대로 유지됩니다)."
                if mcp_search.is_internal_server_url(url)
-               else " 모듈 수정에서 config.api_key에 키를 넣으세요.")
+               else " 도구 수정에서 config.api_key에 키를 넣으세요.")
         )
     return {"module_id": row.id, "name": row.name, "url": url, **result}
 

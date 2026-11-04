@@ -52,7 +52,7 @@ const TASK_STATUS: { key: BuildTaskOut['status']; label: string; color: string }
 const COMPLIANCE_RULE_LABEL: Record<string, string> = {
   llm_direct: '외부 LLM 직접 호출',
   hardcoded_secret: '코드에 박힌 자격증명',
-  unknown_module: '가용 목록 밖 모듈 호출',
+  unknown_module: '가용 목록 밖 도구 호출',
 };
 
 // 에이전트 기획 5단계(진행단계 표시) — 순차 진행, 앞 단계 확정을 전제로 한다.
@@ -340,7 +340,7 @@ export default function AgentPlanning() {
     const stageLabel = STAGES.find((s) => s.key === activeStage)?.label ?? activeStage;
     const signal = begin(
       `${stageLabel} 생성 중`,
-      'LLM이 앞 단계 확정 문서와 가용 모듈 제약을 읽고 산출물을 작성하고 있습니다. '
+      'LLM이 앞 단계 확정 문서와 가용 도구 제약을 읽고 산출물을 작성하고 있습니다. '
       + '문서 길이에 따라 수십 초가 걸릴 수 있습니다.',
     );
     try {
@@ -490,8 +490,8 @@ export default function AgentPlanning() {
   const runCompliance = async () => {
     if (!session) return;
     const signal = begin(
-      'LLM·모듈 사용 검증 중',
-      '커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 모듈을 쓰는지 훑습니다.',
+      'LLM·도구 사용 검증 중',
+      '커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 도구를 쓰는지 훑습니다.',
     );
     try {
       setCompliance(await api.planCompliance(session.project_id, signal));
@@ -825,7 +825,7 @@ export default function AgentPlanning() {
                       )}
                       {m.usedModules && m.usedModules.length > 0 && (
                         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                          <span className="mutedtext" style={{ fontSize: 11 }}>참조된 모듈:</span>
+                          <span className="mutedtext" style={{ fontSize: 11 }}>참조된 도구:</span>
                           {m.usedModules.map((mod) => (
                             <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8' }}>{mod}</span>
                           ))}
@@ -833,7 +833,7 @@ export default function AgentPlanning() {
                       )}
                       {m.boundModules && m.boundModules.length > 0 && (
                         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                          <span className="mutedtext" style={{ fontSize: 11 }}>이번에 바인딩된 모듈:</span>
+                          <span className="mutedtext" style={{ fontSize: 11 }}>이번에 바인딩된 도구:</span>
                           {m.boundModules.map((mod) => (
                             <span key={mod} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(16, 185, 129, 0.2)', color: '#10b981' }}>🔗 {mod}</span>
                           ))}
@@ -1061,25 +1061,25 @@ export default function AgentPlanning() {
 
           {/* 외부 빌드 모니터링 — 진행 현황과 결과 검증을 한 화면에 둔다.
               둘은 같은 질문의 두 면이다: 외주 빌더가 무엇을 했고(이벤트·커밋), 그것이
-              제약을 지켰는지(LLM·모듈 사용). 패널을 갈라 두면 커밋이 올라온 것을 보고도
+              제약을 지켰는지(LLM·도구 사용). 패널을 갈라 두면 커밋이 올라온 것을 보고도
               검증은 다른 자리에서 따로 눌러야 해서 그냥 넘어가기 쉽다. */}
           <div className="panel plan-aside">
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <h3 style={{ margin: 0 }}>🛠️ 외부 빌드 모니터링</h3>
               <div className="row" style={{ gap: 6 }}>
                 <button className="secondary small" onClick={runCompliance} disabled={busy}>
-                  🔍 LLM·모듈 사용 검증
+                  🔍 LLM·도구 사용 검증
                 </button>
               </div>
             </div>
             <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
-              빌드는 외부 개발도구에서 수행됩니다. 커밋(Gitea 웹훅)과 모듈 사용·진행 보고(MCP)가
-              아래에 집계되고, 커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 모듈을 쓰는지도
+              빌드는 외부 개발도구에서 수행됩니다. 커밋(Gitea 웹훅)과 도구 사용·진행 보고(MCP)가
+              아래에 집계되고, 커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 도구를 쓰는지도
               여기서 검증합니다.
             </p>
 
             <div style={{ fontSize: 12, fontWeight: 600, margin: '16px 0 4px' }}>
-              LLM·모듈 사용 검증
+              LLM·도구 사용 검증
               {!compliance && (
                 <span className="mutedtext" style={{ fontWeight: 400 }}>
                   {' '}— 아직 검사하지 않았습니다 (위 버튼으로 실행)

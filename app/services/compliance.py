@@ -32,7 +32,7 @@ _GATEWAY_TARGET_RE = re.compile(r"/proxy/modules/([A-Za-z0-9_-]+)|/a2a/agents/([
 _RULE_TITLES = {
     "llm_direct": "외부 LLM 직접 호출 — 중앙 게이트웨이(/paas/api/v1/proxy/llm) 경유로 바꿔야 한다",
     "hardcoded_secret": "코드에 박힌 자격증명 — 플랫폼이 주입하는 환경변수로 바꿔야 한다",
-    "unknown_module": "가용 모듈 제약 목록에 없는 모듈/에이전트 호출",
+    "unknown_module": "가용 도구 제약 목록에 없는 도구/에이전트 호출",
 }
 
 
@@ -130,12 +130,12 @@ def builder_prompt(findings: list[dict], constraints_doc: str) -> str:
         "## 수정 규칙",
         "- LLM 호출은 반드시 중앙 게이트웨이 `/paas/api/v1/proxy/llm`(또는 주입된 "
         "`PAAS_LLM_PROXY_URL`)를 경유한다. 외부 LLM SDK·엔드포인트를 직접 쓰지 않는다.",
-        "- 모듈 호출은 `/paas/api/v1/proxy/modules/{module_name}` 또는 "
+        "- 도구 호출은 `/paas/api/v1/proxy/modules/{module_name}` 또는 "
         "`/paas/api/v1/a2a/agents/{agent_name}/task`를 경유하고, 아래 가용 목록에 있는 이름만 쓴다.",
         "- 자격증명·엔드포인트는 코드에 쓰지 말고 플랫폼이 주입하는 환경변수를 읽는다.",
         "- 수정 후 같은 검사를 다시 통과시켜라(MCP `check_compliance`).",
         "",
-        "## 가용 모듈 제약 (원문)",
+        "## 가용 도구 제약 (원문)",
         "",
         constraints_doc,
     ]

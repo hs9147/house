@@ -194,8 +194,8 @@ _OPS_TOOLS = [
         "name": "list_scheduled_jobs",
         "description": (
             "주기 갱신 현황 — 무엇이 언제 돌았고, 밀렸는지(overdue), 연속 실패 중인지."
-            " 대상은 외부 API 카탈로그 수집·문서 색인·모듈 응답 확인이다."
-            " 목록은 저장소·모듈 등록 현황에서 만들어지므로 없는 대상은 올라오지 않는다."
+            " 대상은 외부 API 카탈로그 수집·문서 색인·도구 응답 확인이다."
+            " 목록은 저장소·도구 등록 현황에서 만들어지므로 없는 대상은 올라오지 않는다."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -1118,7 +1118,7 @@ def _db_engine(db: Session, module: Module):
             "「공용 DB」는 DB 조회 MCP로 열지 않습니다 — 표 권한은 과제마다 다릅니다.")
     dsn = modules_service.decrypt_config(module.config or {}).get("dsn", "")
     if not dsn:
-        raise mcp_server.McpToolError(f"모듈 '{module.name}'에 dsn이 없습니다.")
+        raise mcp_server.McpToolError(f"도구 '{module.name}'에 dsn이 없습니다.")
     try:
         return create_engine(dsn, poolclass=NullPool)
     except ModuleNotFoundError as e:
@@ -1724,18 +1724,18 @@ _AGENT_TOOLS = [{
 _MODULE_TOOLS = [
     {
         "name": "list",
-        "description": "내가 쓸 수 있는 MCP 모듈(외부·사내 MCP 서버) 목록 — 이름·분류. 도구는 modules__tools로 본다.",
+        "description": "내가 쓸 수 있는 MCP 도구(외부·사내 MCP 서버) 목록 — 이름·분류. 기능은 modules__tools로 본다.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "tools",
-        "description": "모듈 하나의 도구 목록(이름·설명·인자 형식). modules__call로 부르기 전에 형식을 본다.",
+        "description": "도구(MCP 서버) 하나의 기능 목록(이름·설명·인자 형식). modules__call로 부르기 전에 형식을 본다.",
         "inputSchema": {"type": "object", "properties": {"module": {"type": "string"}},
                         "required": ["module"]},
     },
     {
         "name": "call",
-        "description": "모듈의 도구 하나를 실행한다. 인자는 modules__tools가 보여 준 형식대로.",
+        "description": "도구(MCP 서버)의 기능 하나를 실행한다. 인자는 modules__tools가 보여 준 형식대로.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1793,7 +1793,7 @@ def _modules_call(db: Session, key: ApiKey, name: str, args: dict) -> str:
         return _dump([{"module": m.name, "category": m.category or "기타"} for m in found.values()])
     module = found.get(_str_arg(args, "module"))
     if module is None:
-        raise mcp_server.McpToolError("쓸 수 있는 모듈이 아닙니다 — modules__list의 이름을 쓰세요.")
+        raise mcp_server.McpToolError("쓸 수 있는 도구가 아닙니다 — modules__list의 이름을 쓰세요.")
     cfg = modules_service.decrypt_config(module.config or {})
     if name == "tools":
         tools = mcp_client.cached_list_tools(cfg.get("url", ""), cfg.get("api_key"))

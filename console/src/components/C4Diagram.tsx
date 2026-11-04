@@ -36,13 +36,13 @@ const LEVELS: { key: Level; label: string; origin: string }[] = [
     key: 'container',
     label: 'Container',
     origin: '② 아키텍처 설계 단계 문서에 C4Container 블록을 실으면 그려집니다 '
-      + '(③ 솔루션 구성에서 실제 모듈·기술로 구체화).',
+      + '(③ 솔루션 구성에서 실제 도구·기술로 구체화).',
   },
   {
     key: 'component',
     label: 'Component',
     origin: '② 아키텍처 설계 단계 문서에 C4Component 블록을 실으면 그려집니다 '
-      + '(③ 솔루션 구성에서 실제 모듈·기술로 구체화).',
+      + '(③ 솔루션 구성에서 실제 도구·기술로 구체화).',
   },
   { key: 'code', label: 'Code', origin: '' },
 ];

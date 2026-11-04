@@ -36,7 +36,7 @@ const LABEL: Record<string, string> = {
   'doc.read': '문서 읽기',
   'storage.write': '파일 저장',
   llm: 'LLM',
-  'mcp.tool': '모듈 도구',
+  'mcp.tool': 'MCP 도구',
   branch: '분기',
   human: '사람 작업',
 };

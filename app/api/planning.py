@@ -286,7 +286,7 @@ async def post_plan_message(
 
     # 가용 모듈 제약(guardrail) — 모든 단계에 주입, 솔루션 구성 단계의 핵심 제약
     constraints = planning_service.build_constraints(db, project)
-    context_parts.append("=== 가용 모듈 제약 (공통 제약사항·사용 가능 자원·게이트웨이 규칙) ===\n"
+    context_parts.append("=== 가용 도구 제약 (공통 제약사항·사용 가능 자원·게이트웨이 규칙) ===\n"
                          + planning_service.render_constraints_doc(constraints))
 
     # 앞 단계에서 확정된 산출물 본문을 순서대로 주입 — 각 단계는 이전 단계 문서를 근거로 쓴다.
@@ -1133,12 +1133,12 @@ def get_plan_build_status(
 _MCP_TOOLS = [
     {
         "name": "get_constraints",
-        "description": "이 프로젝트의 가용 모듈 제약(외부 빌드 guardrail) 문서를 반환한다.",
+        "description": "이 프로젝트의 가용 도구 제약(외부 빌드 guardrail) 문서를 반환한다.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "list_available_modules",
-        "description": "이 프로젝트에서 사용 가능한 내부 모듈/A2A 능력 목록을 반환한다.",
+        "description": "이 프로젝트에서 사용 가능한 내부 도구/A2A 능력 목록을 반환한다.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -1214,7 +1214,7 @@ _MCP_TOOLS = [
     {
         "name": "check_compliance",
         "description": (
-            "커밋된 코드의 LLM·모듈 사용이 제약을 지켰는지 검사한다. "
+            "커밋된 코드의 LLM·도구 사용이 제약을 지켰는지 검사한다. "
             "위반이 있으면 그대로 따를 수정 지시가 함께 온다."
         ),
         "inputSchema": {"type": "object", "properties": {}},

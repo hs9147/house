@@ -51,7 +51,7 @@ export default function Workflows() {
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>워크플로 관리</h2>
         <p className="mutedtext" style={{ fontSize: 12 }}>
-          조직마다 여러 개를 둡니다. 단계는 플랫폼이 가진 자원(파일 저장소·문서 검색·모듈
+          조직마다 여러 개를 둡니다. 단계는 플랫폼이 가진 자원(파일 저장소·문서 검색·도구
           도구·LLM)과 <b>사람의 작업</b>을 엮은 것이고, 구성은 대화로 합니다 — 적은 것은
           검증을 통과해야 저장되고, 저장된 것만 실행됩니다.
         </p>

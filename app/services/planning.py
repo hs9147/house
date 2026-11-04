@@ -59,7 +59,7 @@ STAGES: dict[PlanStage, dict[str, str]] = {
             "사용자(Person·Person_Ext), 맞닿은 외부 환경(System_Ext), 그리고 그 사이의 Rel."
         ),
         "request": (
-            "이 프로젝트의 리포 구성과 가용 모듈 제약을 참고해 기획서 초안을 작성해줘. "
+            "이 프로젝트의 리포 구성과 가용 도구 제약을 참고해 기획서 초안을 작성해줘. "
             "목적·범위·주요 사용자 시나리오·기능 요구사항·비기능 요구사항·성공 기준을 포함해줘."
         ),
     },
@@ -83,22 +83,22 @@ STAGES: dict[PlanStage, dict[str, str]] = {
         "title": "솔루션 구성",
         "filename": "03-솔루션구성.md",
         "prompt": (
-            "이번 단계는 '솔루션 구성'이다. 아래 '가용 모듈 제약'에 명시된 내부 모듈/자원만 "
+            "이번 단계는 '솔루션 구성'이다. 아래 '가용 도구 제약'에 명시된 내부 도구/자원만 "
             "사용하고, 외부 직접 호출 대신 중앙 게이트웨이(A2A/프록시) 경유를 전제로 솔루션 구성 "
             "문서를 작성하라. 제약에 없는 자원은 사용하지 말라.\n"
-            "- **주소는 전체 URL로 적어라.** MCP 서버·게이트웨이 주소는 '가용 모듈 제약'의 "
+            "- **주소는 전체 URL로 적어라.** MCP 서버·게이트웨이 주소는 '가용 도구 제약'의 "
             "'MCP 접속 주소'와 '규칙'에 있는 값을 **그대로** 옮긴다. 상대 경로(`/paas/...`)로 "
             "적으면 이 문서를 받는 쪽(외주 빌더의 기계)에서 기준 호스트를 알 수 없다. "
             "주소를 추측해 만들지 말고, 제약에 없으면 적지 말라.\n\n"
             + C4_BLOCK_GUIDE
             + "\n- 이 단계에서는 앞 단계의 C4Context·C4Container·C4Component를 이 문서에 다시 "
-            "싣되, 쓰기로 결정한 실제 내부 모듈·솔루션·기술 이름으로 고쳐 구체화하라 "
+            "싣되, 쓰기로 결정한 실제 내부 도구·솔루션·기술 이름으로 고쳐 구체화하라 "
             "(내부 솔루션은 System·Container, 게이트웨이 경유로 닿는 외부는 System_Ext). "
             "여기 다시 실은 블록이 그 레벨의 최신 그림이 된다."
         ),
         "request": (
-            "확정된 기획서·아키텍처 설계와 가용 모듈 제약을 근거로 솔루션 구성 초안을 작성해줘. "
-            "사용할 내부 모듈과 게이트웨이 경유 방식, 배포 형상, 외부 연동 대체 방안을 포함해줘."
+            "확정된 기획서·아키텍처 설계와 가용 도구 제약을 근거로 솔루션 구성 초안을 작성해줘. "
+            "사용할 내부 도구와 게이트웨이 경유 방식, 배포 형상, 외부 연동 대체 방안을 포함해줘."
         ),
     },
     PlanStage.principles: {
@@ -113,7 +113,7 @@ STAGES: dict[PlanStage, dict[str, str]] = {
             "반영되면 해당 작업을 완료로 바꾼다(app/services/taskmatch.py). 참조가 없으면 어느 "
             "작업의 커밋인지 알 수 없어 진행 현황이 갱신되지 않는다 — 플랫폼은 짐작하지 않는다. "
             "작업 번호는 콘솔의 작업 지시 표와 MCP `list_tasks`의 `number`다(프로젝트별로 1부터 — 전역 `id`가 아니다).\n"
-            "- '구현계획 및 현황관리'에 **MCP 접속 주소를 전체 URL로** 남겨라: '가용 모듈 제약'의 "
+            "- '구현계획 및 현황관리'에 **MCP 접속 주소를 전체 URL로** 남겨라: '가용 도구 제약'의 "
             "'MCP 접속 주소'에 있는 값을 그대로 옮긴다(작업 지시 조회·진행 보고용 주소와 "
             "바인딩된 MCP 서버). 상대 경로로 적으면 이 문서를 읽고 구현하는 사람이 어디로 "
             "붙어야 하는지 알 수 없다. API 키는 적지 말라 — 배포 시 환경변수로 주입된다.\n"
@@ -170,7 +170,7 @@ PLANNING_SYSTEM_PROMPT = (
     "Rules:\n"
     "1. Output the document body in Korean Markdown. No code diffs, no ``` diff fences.\n"
     "2. Ground every claim in the injected project context (stack, modules, resources).\n"
-    "3. Respect the injected '가용 모듈 제약' — never propose resources outside it, and always "
+    "3. Respect the injected '가용 도구 제약' — never propose resources outside it, and always "
     "route resource access through the central PaaS gateway (A2A/proxy), never external direct calls.\n"
     "4. Build on the confirmed artifacts of previous stages when provided; do not contradict them.\n"
     "5. When a '현재 산출물' is given, revise THAT document instead of starting over — keep the "
@@ -243,7 +243,7 @@ SHARED_DB_PRINCIPLES_GUIDE = (
     "  - **같은 조직의 다른 과제는 이 과제의 운영 표를 기본으로 읽는다.** 개인정보·민감 정보는 따로 "
     "표로 떼어 두고, 어느 표가 그런지 문서에 표시한다.\n"
     "  - 다른 과제의 표는 `스키마.표`로 읽는다. 쓰기는 권한을 받은 표만 할 수 있다. 다른 조직의 표가 "
-    "필요하면 '가용 모듈 제약'의 '신청하면 쓸 수 있는 표'에서 골라, 표·읽기/쓰기·사유를 문서에 적어 "
+    "필요하면 '가용 도구 제약'의 '신청하면 쓸 수 있는 표'에서 골라, 표·읽기/쓰기·사유를 문서에 적어 "
     "관리자에게 신청한다(권한은 관리자가 표 단위로 준다).\n"
     "  - 슈퍼유저 작업·확장 설치·다른 스키마의 구조 변경은 할 수 없다. 백업은 플랫폼이 매일 한다 — "
     "앱이 따로 덤프를 만들지 않는다. 대량 삭제·변경은 되돌릴 수 없으니 기능으로 만들 때 확인 절차를 둔다."
@@ -365,7 +365,7 @@ def decompose_tasks(
     """확정 산출물 + 제약에서 작업 지시 목록을 만든다. 형식이 깨지면 빈 목록."""
     messages = [
         {"role": "system", "content": _TASK_DECOMPOSE_PROMPT.format(limit=limit)},
-        {"role": "user", "content": f"{documents}\n\n=== 가용 모듈 제약 ===\n{constraints_doc}"},
+        {"role": "user", "content": f"{documents}\n\n=== 가용 도구 제약 ===\n{constraints_doc}"},
     ]
     try:
         reply = llm_service.chat_completion(provider, messages, db)
@@ -404,9 +404,9 @@ def module_bind_tools(resources: list[dict]) -> list[dict]:
         "function": {
             "name": BIND_TOOL,
             "description": (
-                "솔루션에 사용하기로 결정한 내부 모듈을 이 프로젝트에 바인딩한다. "
+                "솔루션에 사용하기로 결정한 내부 도구를 이 프로젝트에 바인딩한다. "
                 "바인딩하면 배포 시 규약된 환경변수가 자동 주입된다. "
-                "문서에 사용한다고 적은 모듈은 반드시 이 도구로 바인딩하라."
+                "문서에 사용한다고 적은 도구는 반드시 이 기능으로 바인딩하라."
             ),
             "parameters": {
                 "type": "object",
@@ -467,17 +467,17 @@ def make_bind_executor(db: Session, project: Project, actor: str, bound: list[st
             return "module_name과 env_prefix가 모두 필요합니다."
         module = db.execute(select(Module).where(Module.name == name)).scalar_one_or_none()
         if module is None:
-            return f"모듈을 찾을 수 없습니다: {name}"
+            return f"도구를 찾을 수 없습니다: {name}"
         allowed = {r["name"] for r in modules_service.available_resources(db, project)}
         if name not in allowed:
-            return f"이 프로젝트에서 사용할 수 없는 모듈입니다: {name}"
+            return f"이 프로젝트에서 사용할 수 없는 도구입니다: {name}"
 
         existing = db.execute(
             select(ModuleBinding).where(ModuleBinding.project_id == project.id)
         ).scalars().all()
         for b in existing:
             if b.module_id == module.id:
-                return f"이미 바인딩된 모듈입니다: {name} (prefix={b.env_prefix})"
+                return f"이미 바인딩된 도구입니다: {name} (prefix={b.env_prefix})"
             if b.env_prefix == prefix:
                 return f"이 프로젝트에서 이미 쓰는 접두사입니다: {prefix}"
 
@@ -625,10 +625,10 @@ def build_constraints(db: Session, project: Project) -> dict:
             for svr in modules_service.mcp_servers_for_project(db, project) if svr.get("url")
         ],
         "rules": [
-            "허용된 내부 모듈/자원만 사용한다 — 아래 목록 밖의 자원은 사용 금지.",
-            "외부 LLM API·외부 모듈/DB URL을 직접 호출하지 않는다.",
+            "허용된 내부 도구/자원만 사용한다 — 아래 목록 밖의 자원은 사용 금지.",
+            "외부 LLM API·외부 도구/DB URL을 직접 호출하지 않는다.",
             "모든 자원 접근은 중앙 PaaS 게이트웨이를 경유한다 "
-            f"(LLM: {api}/proxy/llm, 모듈: {api}/proxy/modules/{{module_name}}, "
+            f"(LLM: {api}/proxy/llm, 도구: {api}/proxy/modules/{{module_name}}, "
             f"A2A: {api}/a2a/agents/{{agent_name}}/task).",
             "문서에 주소를 적을 때는 위와 같이 **전체 URL**로 적는다 — 상대 경로(`/paas/...`)는 "
             "받는 쪽에서 기준을 알 수 없다.",
@@ -655,7 +655,7 @@ def _shared_db_schema(db: Session, project: Project) -> str:
 def render_constraints_doc(constraints: dict) -> str:
     """가용 모듈 제약을 마크다운 문서로 정형화(솔루션 구성 단계 컨텍스트·외부 빌드 guardrail용)."""
     lines = [
-        f"# 가용 모듈 제약 (프로젝트: {constraints['project']})",
+        f"# 가용 도구 제약 (프로젝트: {constraints['project']})",
         "",
         "## 규칙 (외부 빌드 제약)",
     ]
@@ -664,12 +664,12 @@ def render_constraints_doc(constraints: dict) -> str:
     if common:
         lines += ["", "## 공통 제약사항 (모든 프로젝트 적용 — 각 단계에서 반드시 고려)"]
         lines += [f"- {c}" for c in common]
-    lines += ["", "## 바인딩된 내부 모듈(A2A 능력)"]
+    lines += ["", "## 바인딩된 내부 도구(A2A 능력)"]
     agents = constraints.get("bound_agents") or []
     if agents:
         lines += ["", "```json", json.dumps(agents, indent=2, ensure_ascii=False), "```"]
     else:
-        lines.append("- (바인딩된 모듈 없음)")
+        lines.append("- (바인딩된 도구 없음)")
     lines += ["", "## MCP 접속 주소 (전체 URL — 문서에도 이 형태로 적는다)"]
     lines.append(f"- 작업 지시·진행 보고(플랫폼): `{constraints.get('plan_mcp_url', '')}`")
     for svr in constraints.get("mcp_servers") or []:

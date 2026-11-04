@@ -15,8 +15,8 @@ const TABS = [
   ['deployments', '배포 이력'],
   ['logs', '로그'],
   ['env', '환경변수'],
-  ['modules', '모듈'],
-  ['module-report', '📦 모듈 사용이력 리포트'],
+  ['modules', '도구'],
+  ['module-report', '📦 도구 사용이력 리포트'],
 ] as const;
 
 export default function ProjectDetail() {

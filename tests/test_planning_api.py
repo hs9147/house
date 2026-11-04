@@ -1151,7 +1151,7 @@ def test_compliance_detects_llm_and_module_violations(monkeypatch, fresh_setting
     prompt = body["builder_prompt"]
     assert "agent.py:3" in prompt  # 파일·줄이 근거로 남는다
     assert "/paas/api/v1/proxy/llm" in prompt  # 어떻게 고칠지
-    assert "가용 모듈 제약" in prompt  # 제약 원문 동봉
+    assert "가용 도구 제약" in prompt  # 제약 원문 동봉
 
     # 외부 빌더는 같은 검사를 MCP로 직접 돌려 제출 전에 자기 점검한다
     text = _mcp(c, pid, "check_compliance")["result"]["content"][0]["text"]
@@ -1319,7 +1319,7 @@ def test_constraints_document_lists_rules():
     body = r.json()
     assert body["project"] == "plan-app"
     assert any("게이트웨이" in rule for rule in body["rules"])
-    assert "가용 모듈 제약" in body["document"]
+    assert "가용 도구 제약" in body["document"]
 
 
 def test_common_constraints_are_admin_only_to_edit():

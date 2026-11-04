@@ -213,7 +213,7 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
         select(Module).where(Module.name == job.target)
     ).scalar_one_or_none()
     if module is None:
-        return JobStatus.failed, {"error": f"모듈이 없습니다: {job.target}"}
+        return JobStatus.failed, {"error": f"도구가 없습니다: {job.target}"}
     config = modules_service.decrypt_config(module.config or {})
 
     if job.kind == JobKind.mcp_probe:

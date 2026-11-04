@@ -26,7 +26,7 @@ export default function Projects() {
   const remove = async (p: ProjectOut) => {
     const ok = confirm(
       `정말로 프로젝트 '${p.name}'을(를) 삭제하시겠습니까?\n` +
-      '배포본이 정지되고 배포 이력·환경변수·모듈 바인딩·기획 세션이 함께 삭제됩니다.\n' +
+      '배포본이 정지되고 배포 이력·환경변수·도구 바인딩·기획 세션이 함께 삭제됩니다.\n' +
       'Git 리포지토리와 소스는 삭제되지 않습니다.',
     );
     if (!ok) return;
