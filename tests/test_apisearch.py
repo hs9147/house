@@ -706,3 +706,43 @@ def test_refresh_endpoint_takes_a_source(monkeypatch, db):
                  params={"source": apisearch.SOURCE_PUBLIC_DATA}, headers=ADMIN)
     assert off.status_code == 502
     assert "켜져 있지 않은" in off.json()["detail"]
+
+
+def test_odcloud_catalog_is_read_page_by_page_to_the_total(monkeypatch, db):
+    """목록조회서비스(odcloud)는 한 번에 너무 많이 달라고 하면 목록 없이 「정상」만 준다(실측: perPage=20000 →
+    {"code":0,"msg":"정상"}). 한 쪽 1,000건씩 전체 건수(totalCount)까지 받는다. 지운 것은 싣지 않고, 분류·안내 주소·
+    제공기관은 그 서비스의 이름으로 읽는다."""
+    httpx_retry.reset_breakers()
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_URL",
+                       "https://api.odcloud.kr/api/15077093/v1/open-data-list?page=1&perPage=20000&returnType=JSON")
+    monkeypatch.setenv("PAAS_PUBLIC_DATA_KEY", "k")
+    get_settings.cache_clear()
+    total, asked = 2500, []
+
+    def fake_get(url, params=None, **kw):
+        if "odcloud" not in url:
+            return _R(200, FAKE_DIRECTORY)
+        page, size = int(params["page"]), int(params["perPage"])
+        asked.append((page, size))
+        if size > 1000:
+            return _R(200, {"code": 0, "msg": "정상"})
+        rows = [{"id": f"api{i}", "title": f"서비스 {i}", "desc": "설명", "org_nm": "기상청", "new_category_nm": "환경기상",
+                 "guide_url": f"https://www.data.go.kr/data/{i}/openapi.do", "is_deleted": "Y" if i == 7 else "N"}
+                for i in range((page - 1) * size, min(page * size, total))]
+        return _R(200, {"page": page, "perPage": size, "totalCount": total, "currentCount": len(rows), "data": rows})
+
+    monkeypatch.setattr(httpx_retry.httpx, "get", fake_get)
+    stats = apisearch.sync_catalog(db, source=apisearch.SOURCE_PUBLIC_DATA)
+    assert stats["warnings"] == [] and asked == [(1, 1000), (2, 1000), (3, 1000)]
+    assert apisearch.catalog_status(db)["sources"]["publicdata"]["total"] == total - 1   # 지운 것 하나
+    hit = apisearch.search_apis(db, "서비스 12", source=apisearch.SOURCE_PUBLIC_DATA)["results"][0]
+    assert (hit["provider"], hit["categories"], hit["homepage"]) == (
+        "기상청", ["환경기상"], "https://www.data.go.kr/data/12/openapi.do")
+
+
+def test_ok_reply_without_a_list_is_not_called_an_error(monkeypatch, db):
+    """「code=0 · 정상」인데 목록이 없으면 오류라 하지 않는다 — 받은 모양과 건수로, 쪽 크기를 줄이라고 한다."""
+    _stub_public(monkeypatch, {"code": 0, "msg": "정상", "totalCount": 12000})
+    stats = apisearch.sync_catalog(db)
+    assert "오류를 답했습니다" not in stats["warnings"][0]
+    assert "정상이라 답했지만 목록이 없습니다" in stats["warnings"][0] and "totalCount=12000" in stats["warnings"][0]

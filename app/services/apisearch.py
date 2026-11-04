@@ -126,9 +126,17 @@ def _entry_to_result(api_id: str, entry: dict) -> dict | None:
 _LIST_KEYS = ("data", "items", "results", "list", "records")
 _TITLE_KEYS = ("title", "name", "apiNm", "listTitle", "서비스명", "api_nm")
 _DESC_KEYS = ("description", "desc", "apiDesc", "listDesc", "설명", "api_desc")
-_URL_KEYS = ("url", "link", "endpoint", "apiUrl", "linkUrl", "detailUrl")
+_URL_KEYS = ("url", "link", "endpoint", "apiUrl", "linkUrl", "detailUrl", "guide_url", "link_url", "end_point_url")
 _ID_KEYS = ("id", "apiId", "listId", "publicDataPk", "serviceId")
-_CATEGORY_KEYS = ("category", "categoryNm", "classification", "분류")
+_CATEGORY_KEYS = ("category", "categoryNm", "classification", "분류", "new_category_nm", "category_nm")
+_PROVIDER_KEYS = ("org_nm", "orgNm", "제공기관")
+# 목록조회서비스(odcloud 15077093)는 지운 것도 표시만 해서 준다
+_DELETED_KEYS = ("is_deleted", "is_list_deleted")
+# odcloud 계열(page·perPage)은 쪽으로 나눠 받는다 — 한 번에 너무 많이 달라고 하면 목록 없이 「정상」만 온다
+# (실측: perPage=20000 → {"code":0,"msg":"정상"}). 1만 2천 건이면 열세 번이다(개발계정 하루 10,000번).
+ODCLOUD_PAGE = 1000
+MAX_PAGES = 100
+_OK_CODES = {"0", "00", "000"}
 
 # 공공데이터포털(data.go.kr) 계열이 요구하는 것. **주소에 이미 있으면 건드리지 않는다.**
 #   _type=json   이 계열은 지정하지 않으면 XML을 준다 — 그러면 "JSON이 아닙니다"로 끝난다.
@@ -183,22 +191,22 @@ def _rows_of(payload) -> list[dict]:
     return []
 
 
-def _public_data_items() -> list[dict]:
-    """공공데이터 카탈로그 → 공통 항목 모양. 주소가 없으면 빈 목록(소스를 끈 것)."""
-    settings = get_settings()
-    url = settings.public_data_url.strip()
-    if not url:
-        return []
-
-    params = _public_data_params(url, settings.public_data_key)
+def _public_data_page(url: str, params: dict):
+    """한 번 불러 JSON으로. 실패는 도메인 오류로 — 무엇을 받았는지 함께."""
     try:
-        res = get_with_retry(url, timeout=15, params=params)
+        res = get_with_retry(url, timeout=30, params=params)
     except Exception as e:  # noqa: BLE001 — 네트워크/서킷 오류를 도메인 오류로 변환
         raise ApiSearchError(f"공공데이터 카탈로그 조회 실패: {e}") from e
     if res.status_code >= 400:
-        raise ApiSearchError(f"공공데이터 카탈로그 조회 실패 (HTTP {res.status_code})")
+        said = ""
+        try:
+            body = res.json()
+            said = f" — {body.get('msg') or body.get('resultMsg') or ''}".rstrip(" —") if isinstance(body, dict) else ""
+        except Exception:  # noqa: BLE001 — 오류 본문이 JSON이 아니면 상태 코드만
+            pass
+        raise ApiSearchError(f"공공데이터 카탈로그 조회 실패 (HTTP {res.status_code}){said}")
     try:
-        payload = res.json()
+        return res.json()
     except Exception as e:  # noqa: BLE001 — JSON이 아닌 응답(XML·HTML 오류 페이지 등)
         head = (res.text or "")[:200].strip().replace("\n", " ")
         raise ApiSearchError(
@@ -206,31 +214,75 @@ def _public_data_items() -> list[dict]:
             f" — 받은 앞부분: {head!r}"
             " (XML이면 주소에 _type=json을 넣으세요)") from e
 
-    rows = _rows_of(payload)
-    if not rows:
-        # 포털이 목록 대신 오류를 답한 것 — 그 말을 그대로 싣는다(odcloud: code·msg, data.go.kr: resultCode·resultMsg).
-        # 최상위 이름만 보여서는 인증키 문제인지 주소·인자 문제인지 알 수 없었다(실측: 「받은 최상위: code, msg」).
+
+def _no_list(payload) -> ApiSearchError:
+    """목록이 없을 때의 사유 — 포털이 오류를 답했으면 그 말을, 정상이라는데 비었으면 받은 모양·건수를."""
+    if isinstance(payload, dict):
         said = {k: payload[k] for k in ("code", "msg", "resultCode", "resultMsg", "returnAuthMsg", "returnReasonCode")
-                if isinstance(payload, dict) and isinstance(payload.get(k), (str, int)) and str(payload[k]).strip()}
-        if said:
+                if isinstance(payload.get(k), (str, int)) and str(payload[k]).strip()}
+        code = str(payload.get("code", payload.get("resultCode", ""))).strip()
+        if said and code not in _OK_CODES:
             detail = " · ".join(f"{k}={v}" for k, v in said.items())
-            raise ApiSearchError(f"공공데이터 카탈로그가 목록 대신 오류를 답했습니다: {detail}"[:400])
-        shape = ", ".join(sorted(payload)[:8]) if isinstance(payload, dict) else type(payload).__name__
-        raise ApiSearchError(
-            f"공공데이터 카탈로그에서 목록을 찾지 못했습니다(받은 최상위: {shape})"
-            " — PAAS_PUBLIC_DATA_URL이 카탈로그 목록을 주는 주소인지 확인하세요.")
+            return ApiSearchError(f"공공데이터 카탈로그가 목록 대신 오류를 답했습니다: {detail}"[:400])
+        counts = {k: payload[k] for k in ("totalCount", "matchCount", "currentCount", "page", "perPage")
+                  if isinstance(payload.get(k), int)}
+        shape = ", ".join(sorted(payload)[:8])
+        if said:
+            return ApiSearchError(
+                f"공공데이터 카탈로그가 정상이라 답했지만 목록이 없습니다(받은 최상위: {shape}"
+                f"{', ' + ', '.join(f'{k}={v}' for k, v in counts.items()) if counts else ''})"
+                " — 주소의 쪽 크기(perPage 등)를 줄여 보세요.")
+    else:
+        shape = type(payload).__name__
+    return ApiSearchError(
+        f"공공데이터 카탈로그에서 목록을 찾지 못했습니다(받은 최상위: {shape})"
+        " — PAAS_PUBLIC_DATA_URL이 카탈로그 목록을 주는 주소인지 확인하세요.")
+
+
+def _public_data_items() -> list[dict]:
+    """공공데이터 카탈로그 → 공통 항목 모양. 주소가 없으면 빈 목록(소스를 끈 것).
+
+    주소에 perPage가 있으면(odcloud) 한 쪽 ODCLOUD_PAGE건으로 전체 건수(totalCount)까지 차례로 받는다."""
+    settings = get_settings()
+    url = settings.public_data_url.strip()
+    if not url:
+        return []
+
+    params = _public_data_params(url, settings.public_data_key)
+    rows: list[dict] = []
+    if "perPage" in params:
+        params["perPage"] = str(min(ODCLOUD_PAGE, max(1, int(params["perPage"])))
+                                if str(params["perPage"]).isdigit() else ODCLOUD_PAGE)
+        page = int(params["page"]) if str(params.get("page", "")).isdigit() else 1
+        for _ in range(MAX_PAGES):
+            payload = _public_data_page(url, {**params, "page": str(page)})
+            got = _rows_of(payload)
+            if not got:
+                if rows:
+                    break   # 끝 쪽을 지났다
+                raise _no_list(payload)
+            rows += got
+            total = payload.get("totalCount") if isinstance(payload, dict) else None
+            if (isinstance(total, int) and len(rows) >= total) or len(got) < int(params["perPage"]):
+                break
+            page += 1
+    else:
+        payload = _public_data_page(url, params)
+        rows = _rows_of(payload)
+        if not rows:
+            raise _no_list(payload)
 
     items = []
     for row in rows:
         title = _pick(row, _TITLE_KEYS)
-        if not title:
-            continue  # 이름조차 없으면 고를 수도, 등록할 수도 없다
+        if not title or any(str(row.get(k, "")).upper() in ("Y", "TRUE", "1") for k in _DELETED_KEYS):
+            continue  # 이름조차 없으면 고를 수도, 등록할 수도 없다 · 지운 것은 싣지 않는다
         category = _pick(row, _CATEGORY_KEYS)
         items.append({
             "id": _pick(row, _ID_KEYS) or normalize_module_name(title),
             "title": title,
             "description": _pick(row, _DESC_KEYS)[:300],
-            "provider": "공공데이터",
+            "provider": _pick(row, _PROVIDER_KEYS) or "공공데이터",
             "categories": _as_categories(category),
             "homepage": _pick(row, _URL_KEYS),
             "spec_url": "",
