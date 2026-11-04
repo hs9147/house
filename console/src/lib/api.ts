@@ -890,6 +890,9 @@ export const api = {
         reason?: string | null; error?: string | null; login_at?: string | null; ended_at?: string | null;
         session_seconds?: [number, number] | null;   // 배운 세션 시간(하한·상한, 초)
         session_ends?: [string, string] | null;      // 그로 본 이번 세션의 끝(이르면·늦으면)
+        // 세션이 끝나 서버가 시작한 다시 로그인 — 승인 주소(약 10분 살아 있다)와 몇 번째인지, 누구에게 알렸는지
+        login?: { url: string; user_code?: string; code_autofilled?: boolean; started_at: string; attempt: number;
+                  notified?: string; error?: string } | null;
       } | null;
     }[];
   }>('GET', '/llm/aws/profiles'),

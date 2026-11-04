@@ -14,6 +14,12 @@ botocore는 조용히 넘어가므로, 갱신 여부는 캐시의 expires_at이 
 좁혀지지 않는다 — 그래서 창 안의 어느 때에 갱신할지를 고른다(간격을 늘이고 줄인다). 다음 시도가 지금
 추정 구간의 가운데에 떨어지게 몰아 가면, 세션마다 구간이 절반씩 줄어든다.
 
+**세션이 끝나면 다시 로그인한다.** 이 job이 있는 까닭이다 — 끝났다고 적고 기다리기만 하면(실측: 22시간 동안
+실패 270번) 누군가 콘솔에서 로그인 버튼을 누를 때까지 Bedrock이 멈춘다. 끝난 것을 보면 서버에서 로그인(device
+code)을 시작하고 승인 주소를 사람에게 알린다(scheduler가 관리자 메일로, 콘솔 프로바이더 화면에도). 브라우저의
+「허용」 한 번은 SSO의 보안 경계라 사람이 한다. 주소는 10분쯤 살아 있어, 그 안에 승인이 없으면 간격을 늘려 가며
+(RELOGIN_BACKOFF) 새 주소를 받는다 — 메일이 쏟아지지 않게.
+
 상태는 스케줄러 표의 그 job 행(last_detail)에 남는다 — 재시작해도 배운 것을 잃지 않는다.
 """
 from datetime import datetime, timedelta, timezone
@@ -34,6 +40,10 @@ TOKEN_LIFETIME = timedelta(hours=1)
 # 추정 구간이 이보다 좁으면 더 몰아 가지 않는다(창 안에서 맞출 수 있는 정밀도).
 GOOD_ENOUGH = timedelta(minutes=5)
 KEEP_SESSIONS = 10
+# 다시 로그인 — 승인 주소가 살아 있는 동안(device code 약 10분)은 새로 받지 않고, 승인이 없으면 이 간격 뒤에 다시
+# (마지막 값으로 계속). 간격은 로그인을 시작한 때부터 잰다.
+LOGIN_ALIVE = timedelta(minutes=9)
+RELOGIN_BACKOFF = (timedelta(minutes=30), timedelta(hours=1), timedelta(hours=2), timedelta(hours=4))
 
 
 def _ts(value: str | None) -> datetime | None:
@@ -98,11 +108,36 @@ def next_check(now: datetime, expires: datetime, login_at: datetime | None,
     return max(r_lo + (r_hi - r_lo) / 2, now), "steer"
 
 
-def keep_alive(profile: str, prev: dict | None, now: datetime | None = None) -> tuple[str, dict, int]:
-    """한 번 돌기 — (상태, 남길 detail, 다음까지 초). 상태는 scheduler의 JobStatus 값(ok·failed·skipped)."""
+def _relogin(profile: str, state: dict, now: datetime, login) -> dict:
+    """끝난 세션 — 서버에서 로그인을 시작한다(살아 있는 주소가 없고 다시 받을 때가 됐으면). 새 주소를 받았으면
+    login_new를 단다(scheduler가 알리고 떼어 낸다). 시작하지 못했으면 그 까닭을 남긴다."""
+    if login is None:
+        return {}
+    current = state.get("login") or {}
+    started = _ts(current.get("started_at"))
+    attempt = int(current.get("attempt") or 0)
+    if started is not None:
+        wait = RELOGIN_BACKOFF[min(attempt, len(RELOGIN_BACKOFF)) - 1] if attempt else timedelta(0)
+        if now - started < max(LOGIN_ALIVE, wait):
+            return {}
+    try:
+        result = login(profile)
+    except bedrock.BedrockError as e:
+        state["login"] = {**current, "started_at": _iso(now), "attempt": attempt + 1, "url": "",
+                          "error": str(e)[:300]}
+        return {}
+    state["login"] = {"started_at": _iso(now), "attempt": attempt + 1, "url": result.get("verification_url") or "",
+                      "user_code": result.get("user_code") or "", "code_autofilled": bool(result.get("code_autofilled")),
+                      **({} if result.get("verification_url") else {"error": "승인 주소를 읽지 못했습니다(서버 로그를 보세요)"})}
+    return {"login_new": bool(state["login"]["url"])}
+
+
+def keep_alive(profile: str, prev: dict | None, now: datetime | None = None, login=None) -> tuple[str, dict, int]:
+    """한 번 돌기 — (상태, 남길 detail, 다음까지 초). 상태는 scheduler의 JobStatus 값(ok·failed·skipped).
+    login(profile)을 주면 세션이 끝났을 때 서버에서 다시 로그인을 시작한다(bedrock.start_sso_login)."""
     now = now or datetime.now(timezone.utc)
     state = dict(prev or {})
-    for key in ("error", "reason", "plan"):   # 지난 실행의 설명은 이번 것이 아니다
+    for key in ("error", "reason", "plan", "login_new"):   # 지난 실행의 설명은 이번 것이 아니다
         state.pop(key, None)
     sessions = list(state.get("sessions") or [])
 
@@ -163,13 +198,23 @@ def keep_alive(profile: str, prev: dict | None, now: datetime | None = None) -> 
                                  "lower": max(0.0, (last_ok - login_at).total_seconds()),
                                  "upper": max(0.0, (ended - login_at).total_seconds())})
             state.update(ended_at=_iso(now), first_fail_at=None)
-        return done("failed", ENDED_POLL, reason="SSO 세션이 끝났습니다 — 서버에서 다시 로그인해야 합니다")
+        extra = _relogin(profile, state, now, login)
+        pending = state.get("login") or {}
+        if pending.get("url"):
+            reason = ("SSO 세션이 끝나 서버에서 다시 로그인을 시작했습니다 — 승인 주소를 관리자에게 알렸습니다"
+                      f"({pending.get('attempt')}번째, 승인하면 다음 확인에 이어집니다)")
+        elif pending.get("error"):
+            reason = f"SSO 세션이 끝났는데 서버에서 로그인을 시작하지 못했습니다: {pending['error']}"
+        else:
+            reason = "SSO 세션이 끝났습니다 — 서버에서 다시 로그인해야 합니다"
+        return done("failed", ENDED_POLL, reason=reason, **extra)
 
     if state.get("ended_at") or "login_at" not in state:
         # 끝난 뒤 다시 살아났다 = 누군가 로그인했다. 그때 캐시가 쓰였다. 처음 보는 프로필은 언제 로그인했는지
         # 모른다(이번 세션은 배우지 않는다 — 틀린 출발점으로 배우면 구간이 엉뚱하게 좁아진다).
         state["login_at"] = after.get("written_at") if state.get("ended_at") else None
         state.update(ended_at=None, first_fail_at=None, last_ok_at=state.get("login_at"))
+        state.pop("login", None)   # 다시 로그인한 것을 마쳤다
 
     if not refreshable or expires is None:
         # 구형 프로필 — 갱신이 없다. 만료가 곧 끝이니 그 직후에 본다.

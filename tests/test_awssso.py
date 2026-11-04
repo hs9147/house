@@ -179,3 +179,86 @@ def test_scheduler_makes_one_job_per_bedrock_profile(fresh_settings):
         assert jobs == ["aws_sso:dev"]
     finally:
         db.close()
+
+
+def test_ended_session_starts_a_login_on_the_server_and_retries_with_backoff(aws):
+    """이 job이 있는 까닭 — 세션이 끝나면 서버에서 다시 로그인을 시작한다(승인 주소는 사람에게). 주소가 살아 있는
+    동안은 새로 받지 않고, 승인이 없으면 30분·1시간·2시간·4시간 간격으로 새 주소를 받는다. 승인되면 지운다."""
+    started = []
+
+    def login(profile):
+        started.append(aws.now)
+        return {"verification_url": f"https://device.sso/?code={len(started)}", "user_code": "ABCD-EFGH",
+                "code_autofilled": True}
+
+    aws.now = T0 + timedelta(hours=9)
+    status, detail, _ = awssso.keep_alive("p", None, now=aws.now, login=login)
+    assert status == "failed" and detail.pop("login_new") is True
+    assert detail["login"]["url"].endswith("code=1") and detail["login"]["attempt"] == 1
+    assert "다시 로그인을 시작했습니다" in detail["reason"]
+    for minutes in (5, 10, 25):                       # 30분 전에는 새로 받지 않는다(메일이 쏟아지지 않게)
+        aws.now = T0 + timedelta(hours=9, minutes=minutes)
+        status, detail, _ = awssso.keep_alive("p", detail, now=aws.now, login=login)
+        assert "login_new" not in detail
+    assert len(started) == 1
+    for at, attempt in ((timedelta(hours=9, minutes=31), 2), (timedelta(hours=10, minutes=32), 3),
+                        (timedelta(hours=12, minutes=33), 4), (timedelta(hours=16, minutes=34), 5)):
+        aws.now = T0 + at - timedelta(minutes=2)       # 아직 간격 전
+        _s, detail, _ = awssso.keep_alive("p", detail, now=aws.now, login=login)
+        assert detail["login"]["attempt"] == attempt - 1
+        aws.now = T0 + at
+        _s, detail, _ = awssso.keep_alive("p", detail, now=aws.now, login=login)
+        assert detail.pop("login_new") is True and detail["login"]["attempt"] == attempt
+    aws.login(aws.now + timedelta(minutes=2))          # 누군가 승인했다
+    aws.now += timedelta(minutes=5)
+    status, detail, _ = awssso.keep_alive("p", detail, now=aws.now, login=login)
+    assert status == "ok" and "login" not in detail and detail["login_at"] == aws.login_at.isoformat()
+
+
+def test_a_login_that_cannot_start_says_why(aws):
+    def login(_profile):
+        raise bedrock.BedrockError("서버에 aws CLI가 없어 SSO 로그인을 시작할 수 없습니다")
+
+    aws.now = T0 + timedelta(hours=9)
+    status, detail, _ = awssso.keep_alive("p", None, now=aws.now, login=login)
+    assert status == "failed" and "login_new" not in detail
+    assert "로그인을 시작하지 못했습니다" in detail["reason"] and "aws CLI" in detail["reason"]
+
+
+def test_scheduler_mails_the_approval_link_to_admins(fresh_settings, monkeypatch):
+    """서버가 다시 로그인을 시작하면 승인 주소를 관리자 메일로(noreply) — 콘솔을 열지 않아도 안다."""
+    from app.db import SessionLocal
+    from app.main import create_app
+    from app.models import JobKind, ScheduledJob, UserAccount
+    from app.services import mailer, scheduler
+
+    monkeypatch.setenv("PAAS_SMTP_HOST", "lgesmtp.lge.com")
+    monkeypatch.setenv("PAAS_MAIL_FROM", "GPAX <gpax-noreply@lge.com>")
+    monkeypatch.setenv("PAAS_MAIL_ALLOWED_DOMAINS", "lge.com")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    create_app()
+    sent = []
+    monkeypatch.setattr(mailer, "send", lambda actor, to, subject, body, **kw: sent.append((actor, to, subject, body)))
+    monkeypatch.setattr(awssso, "keep_alive", lambda profile, prev, login=None: (
+        "failed", {"reason": "x", "login": {"url": "https://device.sso/?code=9", "attempt": 1, "started_at": "t"},
+                   "login_new": True}, 300))
+    db = SessionLocal()
+    try:
+        db.query(UserAccount).delete()
+        db.add_all([UserAccount(email="admin@lge.com", password_hash="x", is_admin=True),
+                    UserAccount(email="user@lge.com", password_hash="x", is_admin=False),
+                    UserAccount(email="admin@gmail.com", password_hash="x", is_admin=True)])
+        job = ScheduledJob(name="aws_sso:p", kind=JobKind.aws_sso, target="p", interval_seconds=300)
+        db.add(job)
+        db.commit()
+        scheduler.run(db, job)
+        assert [s[1] for s in sent] == [["admin@lge.com"]]          # 사내 주소인 관리자만
+        assert "https://device.sso/?code=9" in sent[0][3] and "AWS SSO" in sent[0][2]
+        assert "login_new" not in job.last_detail and "1명" in job.last_detail["login"]["notified"]
+    finally:
+        db.rollback()
+        db.query(ScheduledJob).delete()
+        db.query(UserAccount).delete()
+        db.commit()
+        db.close()

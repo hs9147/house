@@ -190,7 +190,8 @@ def _keepalive(db: Session, profile: str) -> dict | None:
         "status": job.last_status.value if job.last_status else None,
         "checked_at": job.last_run_at.isoformat() if job.last_run_at else None,
         "next_in_seconds": job.interval_seconds,
-        **{k: detail.get(k) for k in ("reason", "error", "login_at", "session_seconds", "session_ends", "ended_at")},
+        **{k: detail.get(k) for k in ("reason", "error", "login_at", "session_seconds", "session_ends", "ended_at",
+                                      "login")},
     }
 
 

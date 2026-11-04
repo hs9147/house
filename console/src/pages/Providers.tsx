@@ -526,7 +526,17 @@ function KeepAlive({ k }: { k: KeepAliveState | null }) {
   const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const hours = (s: number) => `${(s / 3600).toFixed(1)}시간`;
   if (!k) return <>이 프로필을 쓰는 Bedrock 프로바이더를 등록하면 서버가 토큰을 갱신해 둡니다</>;
-  if (k.status === 'failed') return <>⚠️ 서버 토큰 유지: {k.reason || k.error}</>;
+  if (k.status === 'failed') {
+    // 세션이 끝나 서버가 다시 로그인을 시작했다 — 주소가 살아 있는 동안(약 10분)은 여기서 바로 승인한다
+    const live = k.login?.url && Date.now() - new Date(k.login.started_at).getTime() < 9 * 60 * 1000;
+    return (
+      <>⚠️ 서버 토큰 유지: {k.reason || k.error}
+        {live && <> · <a href={k.login!.url} target="_blank" rel="noreferrer">승인하기</a>
+          {k.login!.user_code && !k.login!.code_autofilled && <> (코드 <span className="mono">{k.login!.user_code}</span>)</>}</>}
+        {k.login?.notified && <> · {k.login.notified}</>}
+      </>
+    );
+  }
   if (k.status === 'skipped') return <>서버 토큰 유지 안 함: {k.reason}</>;
   const ends = k.session_ends;
   return (
