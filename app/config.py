@@ -339,6 +339,21 @@ class Settings(BaseSettings):
     public_data_url: str = ""
     public_data_key: str = ""
 
+    # --- 메일 발송(선택, services/mailer.py · MCP /mcp/mail) ---
+    # 사내 SMTP 중계로 보낸다(인증 없이 사내 수신자만 받는 중계 — 예: lgesmtp.lge.com:25, STARTTLS).
+    # 보내는 사람은 **이 시스템 주소로 고정**이다 — 중계는 아무 발신 주소나 받으므로, 요청한 사람의
+    # 주소로 보내게 두면 사칭이 된다. 요청한 사람은 회신 주소(Reply-To)와 본문 끝 표기로 남는다.
+    # smtp_host·mail_from 둘 다 있어야 켜진다.
+    smtp_host: str = ""
+    smtp_port: int = 25
+    smtp_starttls: bool = True
+    mail_from: str = ""                 # 예: GPAX <gpax-noreply@lge.com>
+    # 받을 수 있는 도메인(쉼표) — 비우면 계정 도메인(allowed_email_domain)만
+    mail_allowed_domains: str = ""
+    mail_max_per_hour: int = 30         # 보내는 사람(키·토큰)마다 한 시간에
+    mail_max_recipients: int = 20       # 받는 사람 + 참조
+    mail_max_bytes: int = 20_000_000    # 본문 + 첨부(중계 상한은 약 42MB)
+
     # --- 콘솔 자기 배포 (옵트인, services/self_deploy.py) ---
     # true면 백엔드 기동 시 platform/console/을 일반 react Project(source_subdir 사용)로
     # 등록하고 기존 배포 파이프라인(build_image → DockerRuntime → 리버스프록시)으로 최초

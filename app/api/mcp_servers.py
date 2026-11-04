@@ -5,7 +5,7 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
 충돌), 뒤는 이 플랫폼 클라이언트(services/mcp_client.py — streamable-http 단일 JSON
 응답)로는 통신 자체가 안 된다. 그래서 필요한 것만 사내에서 만든다.
 
-서버 7개:
+서버 8개:
   POST /mcp/ops                  운영 — 배포 상태·로그·라우팅·호스트·감사·주기 갱신 현황
   POST /mcp/code                 프로젝트 코드 조회 — project 인자로 고른다(읽기 전용)
   POST /mcp/docs                 사내 문서 본문 검색 — 저장소를 가로질러 한 번에(읽기 전용)
@@ -13,6 +13,7 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
   POST /mcp/db/{module}          database 모듈 조회 — SELECT 전용, 허용 목록에 있는 모듈만
   POST /mcp/apis                 외부 API 카탈로그 — 검색은 표만 읽고, 수집만 밖으로 나간다
   POST /mcp/graph                사내 문서 온톨로지 — 그래프와 스키마(읽기 전용)
+  POST /mcp/mail                 메일 발송 — 사내 SMTP 중계로, 시스템 주소(noreply)에서 사내 수신자에게만
 
 저장소 목록은 모듈 레지스트리가 아니라 환경변수가 정한다(PAAS_STORAGE_ROOT ·
 PAAS_DOC_ROOTS, services/storage.py) — 디스크 경로는 서버를 설치한 사람이 아는
@@ -62,7 +63,7 @@ from ..models import (
 )
 from ..security import (accessible_document_stores, require_agent_key,
                         require_document_store, require_project_mcp_access, viewer_org_ids)
-from ..services import apisearch
+from ..services import apisearch, mailer
 from ..services import codemap as codemap_service
 from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, shareddb, workspace
 from ..services import modules as modules_service
@@ -1315,6 +1316,81 @@ def _apis_call(db: Session, actor: str, name: str, args: dict) -> str:
         # 돌려주면 모델은 질의를 바꿔 가며 헛돌게 된다.
         raise mcp_server.McpToolError(" / ".join(result["warnings"]))
     return _dump(result["results"])
+
+
+# --- 메일 발송 서버 (/mcp/mail) ---
+#
+# 플랫폼 MCP 중 **밖으로 무언가를 보내는** 서버다. 그래서 묶음(통합 서버·스마트워크 대화, agent_toolsets)에는
+# 넣지 않는다 — 대화 한 줄로 메일이 나가면 안 된다. 쓰려면 이 주소를 mcp 모듈로 등록해 바인딩한다.
+# 막는 것은 services/mailer가 한다: 보내는 사람은 시스템 주소로 고정(사칭 방지 — 요청한 사람은 회신 주소로),
+# 받는 사람은 허용 도메인만·인원 상한, 보내는 사람(키·토큰)마다 한 시간 발송 수, 크기 상한.
+# 감사에는 받는 사람 수·제목만 남긴다(본문·주소는 남기지 않는다).
+
+_MAIL_TOOLS = [
+    {
+        "name": "send_mail",
+        "description": (
+            "사내 주소로 메일을 보낸다. 보내는 사람은 플랫폼의 시스템 주소(noreply)로 고정이고, 회신은 요청한"
+            " 사람에게 가며 본문 끝에 요청한 사람이 표시된다. 받는 사람은 허용한 사내 도메인만(mail_status로"
+            " 확인), 보내기 전에 받는 사람·제목·본문을 사람에게 확인받고 부른다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "array", "items": {"type": "string"}, "description": "받는 사람 주소들"},
+                "cc": {"type": "array", "items": {"type": "string"}, "description": "참조(선택)"},
+                "subject": {"type": "string"},
+                "body": {"type": "string", "description": "본문 — format이 html이면 HTML"},
+                "format": {"type": "string", "description": "text(기본) | html"},
+                "attachments": {
+                    "type": "array",
+                    "description": f"첨부(선택, {mailer.MAX_ATTACHMENTS}개까지) — name·type(MIME)·data(base64)",
+                    "items": {"type": "object", "properties": {
+                        "name": {"type": "string"}, "type": {"type": "string"}, "data": {"type": "string"}},
+                        "required": ["name", "data"]},
+                },
+            },
+            "required": ["to", "subject", "body"],
+        },
+    },
+    {
+        "name": "mail_status",
+        "description": "발송 설정 — 켜져 있는지, 보내는 주소, 받을 수 있는 도메인, 인원·크기 상한, 이번 한 시간에 남은 발송 수.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
+
+
+@router.post("/mcp/mail")
+async def mail_mcp_server(
+    request: Request,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_agent_key),
+):
+    """메일 발송 MCP 서버(JSON-RPC 2.0) — 사내 SMTP 중계, 시스템 주소에서 사내 수신자에게만."""
+    return mcp_server.dispatch(
+        await mcp_server.read_payload(request),
+        server_name="paas-mail",
+        tools=_MAIL_TOOLS,
+        call=lambda name, args: _mail_call(db, key.name, name, args),
+    )
+
+
+def _mail_call(db: Session, actor: str, name: str, args: dict) -> str:
+    if name == "mail_status":
+        return _dump(mailer.status(actor))
+    fmt = _str_arg(args, "format", required=False) or "text"
+    if fmt not in ("text", "html"):
+        raise mcp_server.McpToolError("format은 text 또는 html입니다.")
+    try:
+        result = mailer.send(actor, args.get("to"), _str_arg(args, "subject"), _str_arg(args, "body"),
+                             cc=args.get("cc"), html=fmt == "html", attachments=args.get("attachments"))
+    except mailer.MailError as e:
+        raise mcp_server.McpToolError(str(e))
+    audit.record(db, actor, "mcp.mail.send", f"{result['recipients']}명",
+                 {"subject": _str_arg(args, "subject")[:200], "recipients": result["recipients"],
+                  "attachments": len(args.get("attachments") or []), "message_id": result["message_id"]})
+    return _dump(result)
 
 
 # --- 문서 온톨로지 서버 (/mcp/graph) ---

@@ -147,6 +147,15 @@ def list_internal_servers(db: Session, key: ApiKey | None = None) -> list[dict]:
         "외부 API 카탈로그 검색 — 키워드·카테고리로 공개 API를 찾는다(읽기 전용)",
         "api", "/mcp/apis",
     ))
+    # 메일 발송 — 설정한 설치본에서만(PAAS_SMTP_HOST·PAAS_MAIL_FROM). 밖으로 보내는 서버라 묶음에는 없다.
+    from . import mailer  # noqa: PLC0415
+
+    if mailer.configured():
+        entries.append(_entry(
+            "paas-mail", "paas-mail",
+            f"메일 발송 — 사내 주소로, 시스템 주소({settings.mail_from})에서 보낸다(회신은 요청한 사람에게)",
+            "mail", "/mcp/mail",
+        ))
     return entries
 
 
