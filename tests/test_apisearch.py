@@ -390,12 +390,23 @@ def test_public_data_list_can_be_nested_or_bare(monkeypatch, db):
 
 def test_unrecognised_shape_fails_loudly(monkeypatch, db):
     """형식이 어긋난 것과 '그런 데이터가 없다'가 구분되지 않으면 설정을 고칠 수 없다."""
-    _stub_public(monkeypatch, {"resultCode": "99", "resultMsg": "SERVICE KEY IS NOT REGISTERED"})
+    _stub_public(monkeypatch, {"header": {"status": "x"}, "count": 3})
     stats = apisearch.sync_catalog(db)
     # apis.guru는 살아 있으므로 수집은 되고, 죽은 소스는 사유로 말한다
     assert stats["sources"] == [apisearch.SOURCE_APISGURU]
     assert stats["warnings"] and "목록을 찾지 못했습니다" in stats["warnings"][0]
-    assert "resultCode" in stats["warnings"][0]  # 무엇을 받았는지 그대로 보여 준다
+    assert "header" in stats["warnings"][0]  # 무엇을 받았는지 그대로 보여 준다
+
+
+def test_catalog_error_reply_is_shown_as_is(monkeypatch, db):
+    """포털이 목록 대신 오류를 답하면 그 말을 그대로 — 최상위 이름(code, msg)만으로는 원인을 알 수 없었다(실측)."""
+    for payload, said in (({"code": -4, "msg": "등록되지 않은 인증키 입니다."}, "code=-4 · msg=등록되지 않은 인증키 입니다."),
+                          ({"resultCode": "99", "resultMsg": "SERVICE KEY IS NOT REGISTERED"},
+                           "resultCode=99 · resultMsg=SERVICE KEY IS NOT REGISTERED")):
+        _stub_public(monkeypatch, payload)
+        stats = apisearch.sync_catalog(db)
+        assert stats["sources"] == [apisearch.SOURCE_APISGURU]
+        assert stats["warnings"] == [f"공공데이터 카탈로그가 목록 대신 오류를 답했습니다: {said}"]
 
 
 def test_one_dead_source_does_not_kill_the_other(monkeypatch, db):

@@ -208,6 +208,13 @@ def _public_data_items() -> list[dict]:
 
     rows = _rows_of(payload)
     if not rows:
+        # 포털이 목록 대신 오류를 답한 것 — 그 말을 그대로 싣는다(odcloud: code·msg, data.go.kr: resultCode·resultMsg).
+        # 최상위 이름만 보여서는 인증키 문제인지 주소·인자 문제인지 알 수 없었다(실측: 「받은 최상위: code, msg」).
+        said = {k: payload[k] for k in ("code", "msg", "resultCode", "resultMsg", "returnAuthMsg", "returnReasonCode")
+                if isinstance(payload, dict) and isinstance(payload.get(k), (str, int)) and str(payload[k]).strip()}
+        if said:
+            detail = " · ".join(f"{k}={v}" for k, v in said.items())
+            raise ApiSearchError(f"공공데이터 카탈로그가 목록 대신 오류를 답했습니다: {detail}"[:400])
         shape = ", ".join(sorted(payload)[:8]) if isinstance(payload, dict) else type(payload).__name__
         raise ApiSearchError(
             f"공공데이터 카탈로그에서 목록을 찾지 못했습니다(받은 최상위: {shape})"
