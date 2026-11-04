@@ -5,7 +5,7 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
 충돌), 뒤는 이 플랫폼 클라이언트(services/mcp_client.py — streamable-http 단일 JSON
 응답)로는 통신 자체가 안 된다. 그래서 필요한 것만 사내에서 만든다.
 
-서버 8개:
+서버 9개:
   POST /mcp/ops                  운영 — 배포 상태·로그·라우팅·호스트·감사·주기 갱신 현황
   POST /mcp/code                 프로젝트 코드 조회 — project 인자로 고른다(읽기 전용)
   POST /mcp/docs                 사내 문서 본문 검색 — 저장소를 가로질러 한 번에(읽기 전용)
@@ -14,6 +14,7 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
   POST /mcp/apis                 외부 API 카탈로그 — 검색은 표만 읽고, 수집만 밖으로 나간다
   POST /mcp/graph                사내 문서 온톨로지 — 그래프와 스키마(읽기 전용)
   POST /mcp/mail                 메일 발송 — 사내 SMTP 중계로, 시스템 주소(noreply)에서 사내 수신자에게만
+  POST /mcp/web                  웹 검색 — 지역마다 강한 출처(전 세계·한국·일본·중국) 중 LLM이 고른다
 
 저장소 목록은 모듈 레지스트리가 아니라 환경변수가 정한다(PAAS_STORAGE_ROOT ·
 PAAS_DOC_ROOTS, services/storage.py) — 디스크 경로는 서버를 설치한 사람이 아는
@@ -63,7 +64,7 @@ from ..models import (
 )
 from ..security import (accessible_document_stores, require_agent_key,
                         require_document_store, require_project_mcp_access, viewer_org_ids)
-from ..services import apisearch, mailer
+from ..services import apisearch, mailer, websearch
 from ..services import codemap as codemap_service
 from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, shareddb, workspace
 from ..services import modules as modules_service
@@ -1390,6 +1391,70 @@ def _mail_call(db: Session, actor: str, name: str, args: dict) -> str:
     audit.record(db, actor, "mcp.mail.send", f"{result['recipients']}명",
                  {"subject": _str_arg(args, "subject")[:200], "recipients": result["recipients"],
                   "attachments": len(args.get("attachments") or []), "message_id": result["message_id"]})
+    return _dump(result)
+
+
+# --- 웹 검색 서버 (/mcp/web) ---
+#
+# 검색어가 회사 밖(Brave·Naver·Baidu)으로 나간다 — 그래서 묶음(통합 서버·스마트워크 대화)에는 넣지 않는다.
+# 쓰려면 이 주소를 mcp 도구로 등록해 바인딩한다. 출처 고르기는 LLM의 몫이다: list_search_sources가 출처마다
+# 강점(지역·범위·분야)을 글로 준다. 감사에는 출처와 검색어 길이만 남긴다.
+
+_WEB_TOOLS = [
+    {
+        "name": "list_search_sources",
+        "description": (
+            "검색 출처 목록 — 출처마다 어느 지역·범위·분야에서 강한지(strengths)와 켜져 있는지(enabled)."
+            " 검색 전에 읽고, 질문의 지역·언어·분야에 맞는 출처를 고른다(여럿이면 차례로 부른다)."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "web_search",
+        "description": (
+            "웹을 검색한다 — source는 list_search_sources의 id(켜진 것만). 결과는 제목·주소·요약."
+            " 검색어는 회사 밖으로 나가므로 사내 비밀(고객 정보·미공개 계획 등)을 넣지 않는다."
+            " 그 출처가 강한 언어로 묻는다(naver는 한국어, japan은 일본어, baidu는 중국어)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "source": {"type": "string", "description": "출처 id — list_search_sources로 확인"},
+                "count": {"type": "integer", "description": f"결과 수(기본·최대 {websearch.MAX_RESULTS})"},
+            },
+            "required": ["query", "source"],
+        },
+    },
+]
+
+
+@router.post("/mcp/web")
+async def web_mcp_server(
+    request: Request,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_agent_key),
+):
+    """웹 검색 MCP 서버(JSON-RPC 2.0) — 지역마다 강한 출처 중 LLM이 고른다."""
+    return mcp_server.dispatch(
+        await mcp_server.read_payload(request),
+        server_name="paas-web",
+        tools=_WEB_TOOLS,
+        call=lambda name, args: _web_call(db, key.name, name, args),
+    )
+
+
+def _web_call(db: Session, actor: str, name: str, args: dict) -> str:
+    if name == "list_search_sources":
+        return _dump(websearch.sources())
+    source = _str_arg(args, "source")
+    try:
+        result = websearch.search(actor, _str_arg(args, "query"), source,
+                                  _int_arg(args, "count", websearch.MAX_RESULTS, websearch.MAX_RESULTS))
+    except websearch.SearchError as e:
+        raise mcp_server.McpToolError(str(e))
+    audit.record(db, actor, "mcp.web.search", source,
+                 {"query_chars": len(result["query"]), "results": len(result["results"])})
     return _dump(result)
 
 

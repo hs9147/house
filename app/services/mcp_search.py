@@ -150,6 +150,16 @@ def list_internal_servers(db: Session, key: ApiKey | None = None) -> list[dict]:
     # 메일 발송 — 설정한 설치본에서만(PAAS_SMTP_HOST·PAAS_MAIL_FROM). 밖으로 보내는 서버라 묶음에는 없다.
     from . import mailer  # noqa: PLC0415
 
+    from . import websearch  # noqa: PLC0415
+
+    # 웹 검색 — 출처 하나라도 키를 넣은 설치본에서만. 검색어가 밖으로 나가는 서버라 묶음에는 없다.
+    if websearch.configured():
+        on = ", ".join(s["name"] for s in websearch.sources() if s["enabled"])
+        entries.append(_entry(
+            "paas-web", "paas-web",
+            f"웹 검색 — 지역마다 강한 출처 중 LLM이 고른다(켜진 출처: {on})",
+            "search", "/mcp/web",
+        ))
     if mailer.configured():
         entries.append(_entry(
             "paas-mail", "paas-mail",

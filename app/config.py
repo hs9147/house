@@ -354,6 +354,14 @@ class Settings(BaseSettings):
     mail_max_recipients: int = 20       # 받는 사람 + 참조
     mail_max_bytes: int = 20_000_000    # 본문 + 첨부(중계 상한은 약 42MB)
 
+    # --- 웹 검색(선택, services/websearch.py · MCP /mcp/web) ---
+    # 출처는 키를 넣은 것만 켜진다. Brave 키 하나로 전 세계·일본이 함께 켜진다(야후 재팬은 공식 API가 없다).
+    search_brave_key: str = ""          # Brave Search API 구독 토큰(매달 무료 크레딧)
+    search_naver_id: str = ""           # 네이버 개발자센터 검색 API Client ID
+    search_naver_secret: str = ""
+    search_baidu_key: str = ""          # 百度千帆 AI 검색(AppBuilder) API 키
+    search_max_per_hour: int = 60       # 부르는 사람(키·토큰)마다
+
     # --- 콘솔 자기 배포 (옵트인, services/self_deploy.py) ---
     # true면 백엔드 기동 시 platform/console/을 일반 react Project(source_subdir 사용)로
     # 등록하고 기존 배포 파이프라인(build_image → DockerRuntime → 리버스프록시)으로 최초
