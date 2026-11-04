@@ -92,6 +92,18 @@ def test_reconcile_removes_orphans_but_keeps_settings(db, fresh_settings):
     assert "api_probe:news-api" not in _names(db)
 
 
+def test_aws_sso_is_not_refreshed_on_a_schedule(db, fresh_settings):
+    """SSO 세션은 주기로 갱신하지 않는다 — 만료를 처음 만난 사용자의 브라우저에서 승인받는다(api/llm.provider_error).
+    Bedrock 프로바이더가 있어도 job을 만들지 않고, 예전 job 행은 지운다."""
+    from app.models import LlmProvider, LlmProviderKind
+
+    db.add(LlmProvider(name="bedrock", kind=LlmProviderKind.aws, base_url="x", model="m", aws_profile="dev"))
+    db.add(ScheduledJob(name="aws_sso:dev", kind=JobKind.aws_sso, target="dev", interval_seconds=300))
+    db.commit()
+    scheduler.reconcile(db)
+    assert not [n for n in _names(db) if n.startswith("aws_sso")]
+
+
 def test_doc_index_job_per_store(db, monkeypatch, tmp_path, fresh_settings):
     (tmp_path / "rules").mkdir()
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"rules={tmp_path / 'rules'}")

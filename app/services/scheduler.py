@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..models import (
-    JobKind, JobStatus, LlmProvider, LlmProviderKind, Module, ModuleType, ScheduledJob, utcnow,
+    JobKind, JobStatus, Module, ModuleType, ScheduledJob, utcnow,
 )
 
 # tick 간격. job의 주기와 다르다 — tick마다 "지금 돌 때가 된 job"만 고른다.
@@ -44,8 +44,6 @@ DEFAULT_INTERVALS = {
     JobKind.db_backup: 86_400,
     # 만료된 권한을 거두는 주기이기도 하다 — 만료일이 지나고 최대 한 시간 안에 거둔다.
     JobKind.db_grants: 3_600,
-    # 처음 한 번의 값일 뿐이다 — 돌 때마다 토큰 만료와 배운 세션 시간으로 다음 간격을 다시 정한다(services/awssso).
-    JobKind.aws_sso: 600,
     # 사람 정답은 하루에 몇 십 개 쌓인다 — 하루에 한 번 배우면 된다(LLM을 부르지 않는다).
     JobKind.semantic_tune: 86_400,
 }
@@ -78,12 +76,9 @@ def _wanted(db: Session) -> list[tuple[JobKind, str]]:
             wanted.append((JobKind.mcp_probe, module.name))
         elif module.type == ModuleType.external_api:
             wanted.append((JobKind.api_probe, module.name))
-    # Bedrock 프로바이더가 쓰는 AWS 프로필마다 하나 — 여러 사람이 같은 토큰을 쓰므로 서버가 살려 둔다.
-    profiles = db.execute(
-        select(LlmProvider.aws_profile).where(
-            LlmProvider.kind == LlmProviderKind.aws, LlmProvider.aws_profile.is_not(None))
-    ).scalars()
-    wanted += [(JobKind.aws_sso, p) for p in sorted({p for p in profiles if p})]
+    # AWS SSO 세션은 주기로 갱신하지 않는다 — 만료를 처음 만난 사용자의 요청에서 서버가 로그인을 시작하고 그
+    # 사람의 브라우저에서 승인받는다(api/llm.provider_error · 콘솔 SsoLoginNotice). 예전 aws_sso job 행은 여기
+    # 목록에 없으므로 reconcile이 지운다.
     from . import shareddb  # noqa: PLC0415
 
     if shareddb.configured():
@@ -187,23 +182,6 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
         except shareddb.SharedDbError as e:
             return JobStatus.failed, {"error": str(e)}
 
-    if job.kind == JobKind.aws_sso:
-        from . import awssso  # noqa: PLC0415
-
-        from . import bedrock  # noqa: PLC0415
-
-        log_dir = get_settings().resolved_repo_root / "logs"
-        try:
-            status, detail, seconds = awssso.keep_alive(
-                job.target, job.last_detail, login=lambda p: bedrock.start_sso_login(p, log_dir))
-        except Exception as e:  # noqa: BLE001 — run()에 맡기면 detail이 오류 한 줄로 바뀌어 배운 세션 시간을 잃는다
-            return JobStatus.failed, {**(job.last_detail or {}), "error": f"{type(e).__name__}: {e}"[:300]}
-        job.interval_seconds = seconds   # 간격은 매번 다시 정한다 — 토큰 만료·배운 세션 시간에 맞춰
-        if detail.pop("login_new", False):
-            # 세션이 끝나 서버가 로그인을 시작했다 — 승인할 사람에게 주소를 알린다(관리자 메일)
-            detail["login"]["notified"] = _notify_sso_login(db, job.target, detail["login"])
-        return JobStatus(status), detail
-
     if job.kind == JobKind.semantic_tune:
         from . import semantic  # noqa: PLC0415
 
@@ -256,31 +234,6 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
         JobStatus.ok if res.status_code < 400 else JobStatus.failed,
         {"status_code": res.status_code, "url": url},
     )
-
-
-def _notify_sso_login(db: Session, profile: str, login: dict) -> str:
-    """승인 주소를 관리자에게 메일로(services/mailer — 설정한 설치본에서만). 무엇을 했는지 한 줄로 돌려준다."""
-    from ..models import UserAccount  # noqa: PLC0415
-    from . import mailer  # noqa: PLC0415
-
-    if not mailer.configured():
-        return "메일 발송이 꺼져 있어 콘솔(LLM 프로바이더)에만 띄웠습니다"
-    domains = mailer.allowed_domains()
-    to = [a.email for a in db.execute(select(UserAccount).where(UserAccount.is_admin.is_(True))).scalars()
-          if a.email and a.email.split("@")[-1].lower() in domains]
-    if not to:
-        return "알릴 관리자 메일 주소가 없습니다"
-    code = "" if login.get("code_autofilled") or not login.get("user_code") else f"\n코드: {login['user_code']}"
-    body = (f"Bedrock이 쓰는 AWS SSO 프로필 {profile}의 세션이 끝나, 서버에서 다시 로그인을 시작했습니다.\n\n"
-            f"아래 주소를 열어 「허용」을 누르면 끝납니다(약 10분 안에).\n{login['url']}{code}\n\n"
-            "승인하는 사람의 SSO 계정에 이 프로필(역할)의 권한이 있어야 합니다. 10분 안에 승인하지 못하면 잠시 뒤 새 주소를"
-            f" 다시 보냅니다({login.get('attempt')}번째 안내). 콘솔 → LLM 프로바이더 화면에서도 승인할 수 있습니다.")
-    try:
-        mailer.send(f"aws_sso:{profile}", to[:get_settings().mail_max_recipients],
-                    f"[GPAX] AWS SSO 다시 로그인 승인 필요 — {profile}", body)
-    except mailer.MailError as e:
-        return f"메일을 보내지 못했습니다: {e}"[:200]
-    return f"관리자 {len(to)}명에게 메일로 알렸습니다"
 
 
 def tick(db: Session) -> dict:

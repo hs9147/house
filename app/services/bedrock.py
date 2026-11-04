@@ -160,8 +160,9 @@ def sso_token_expiry(profile: str) -> str:
 
     **자격증명 만료와 다른 값이다.** 실측에서 토큰은 08:15Z에, 그 토큰으로 받은 STS
     자격증명은 19:25Z에 만료였다. 갱신 토큰이 없는 구형 프로필은 앞쪽이 곧 재로그인 시각이다.
-    sso_session 프로필은 1시간짜리라 곧 지나지만 서버가 갱신한다 — 끊기는 때는 Identity Center의
-    세션 시간이 끝날 때이고 그것은 services/awssso가 배운다(sso_token_state의 refreshable).
+    sso_session 프로필은 1시간짜리라 곧 지나지만 botocore가 갱신 토큰으로 다시 받는다 — 끊기는 때는
+    Identity Center의 세션 시간이 끝날 때다(sso_token_state의 refreshable). 끊기면 처음 만난 사용자의
+    요청에서 로그인을 시작한다(api/llm.provider_error).
 
     캐시 파일 이름은 sso_session 이름(구형은 start_url)의 sha1이다. botocore의
     SSOTokenLoader를 쓰려면 파일 캐시를 직접 주입해야 하는데(기본값이 빈 dict라
@@ -176,7 +177,7 @@ def sso_token_state(profile: str) -> dict:
 
     expires_at        액세스 토큰 만료. sso_session 프로필은 1시간짜리라 곧 지나지만 그때 끊기는 것이 아니다
     refreshable       갱신 토큰이 있는가 — 있으면 만료 15분 전부터 다시 받는다(botocore SSOTokenProvider).
-                      그때 끊기는 시각은 Identity Center의 세션 시간이고, 그 값은 캐시에 없다(services/awssso).
+                      그때 끊기는 시각은 Identity Center의 세션 시간이고, 그 값은 캐시에 없다.
                       없으면(구형 sso_start_url 프로필) expires_at이 곧 재로그인 시각이다
     registration_expires_at  클라이언트 등록 만료(약 90일) — 지나면 갱신할 수 없다
     written_at        캐시가 마지막으로 쓰인 시각 — 로그인이나 갱신이 일어난 때
@@ -203,31 +204,6 @@ def sso_token_state(profile: str) -> dict:
         "registration_expires_at": str(token.get("registrationExpiresAt") or ""),
         "written_at": datetime.fromtimestamp(written, timezone.utc).isoformat(),
     }
-
-
-def refresh_sso_token(profile: str) -> None:
-    """SSO 액세스 토큰을 지금 받아 본다 — 만료 15분 안이면 botocore가 갱신해 캐시에 다시 쓴다.
-
-    갱신 실패는 **토큰이 아직 살아 있으면 조용히 넘어간다**(botocore가 경고만 남긴다) — 그래서 호출부는
-    캐시의 expires_at이 앞으로 갔는지로 갱신 여부를 판정한다(services/awssso). 토큰이 이미 만료됐고 갱신도
-    안 되면 SsoExpired다.
-    """
-    import botocore.exceptions as exc  # noqa: PLC0415
-    import botocore.session  # noqa: PLC0415
-    from botocore.tokens import SSOTokenProvider  # noqa: PLC0415
-
-    try:
-        session = botocore.session.Session(profile=profile or None)
-        token = SSOTokenProvider(session).load_token()
-        if token is None:
-            raise BedrockError(f"AWS 프로필 '{profile}'은 SSO 세션(sso_session) 프로필이 아닙니다")
-        token.get_frozen_token()
-    except exc.ProfileNotFound:
-        raise BedrockError(f"AWS 프로필 '{profile}'을 찾을 수 없습니다 (~/.aws/config 확인)")
-    except (exc.UnauthorizedSSOTokenError, exc.TokenRetrievalError, exc.SSOTokenLoadError):
-        raise SsoExpired(profile)
-    except exc.BotoCoreError as e:
-        raise BedrockError(f"AWS SSO 토큰을 갱신하지 못했습니다 (프로필 '{profile}'): {e}")
 
 
 def _credentials(profile: str):

@@ -551,7 +551,9 @@ class JobKind(str, enum.Enum):
     api_probe = "api_probe"      # external_api 모듈 주소가 살아 있는지
     db_backup = "db_backup"      # 공용 DB를 pg_dump로 백업(services/shareddb.backup)
     db_grants = "db_grants"      # 공용 DB의 표 권한을 권한 표에 맞춤(services/shareddb.reconcile)
-    aws_sso = "aws_sso"          # Bedrock 프로바이더의 AWS SSO 토큰을 서버가 갱신해 둠(services/awssso)
+    # 더 이상 만들지 않는다(SSO 만료는 처음 만난 사용자가 브라우저로 승인한다) — 남은 행을 읽어 reconcile이 지우도록
+    # 값만 둔다. 값을 빼면 그 행을 읽지 못해 스케줄러 tick이 통째로 실패한다.
+    aws_sso = "aws_sso"
     semantic_tune = "semantic_tune"  # 내용 분석의 기준 다시 배우기 — 사람 정답으로(services/semantic.tune)
 
 
