@@ -1404,7 +1404,8 @@ _WEB_TOOLS = [
     {
         "name": "list_search_sources",
         "description": (
-            "검색 출처 목록 — 출처마다 어느 지역·범위·분야에서 강한지(strengths)와 켜져 있는지(enabled)."
+            "검색 출처 목록 — 출처마다 어느 지역·범위·분야에서 강한지(strengths)와 켜져 있는지(enabled —"
+            " 보안·비용 검증을 마친 출처만 켜진다)."
             " 검색 전에 읽고, 질문의 지역·언어·분야에 맞는 출처를 고른다(여럿이면 차례로 부른다)."
         ),
         "inputSchema": {"type": "object", "properties": {}},

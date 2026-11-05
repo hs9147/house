@@ -11,6 +11,9 @@
 고르게 하는 것이라 문장이 낫다. 출처는 키를 넣은 것만 켜지고(enabled), 새 출처는 SOURCES에 한 줄과 어댑터로
 더한다(검색 네트워크를 넓혀 가며 운영한다).
 
+**운영은 검증을 마친 출처만.** 키를 넣었다고 켜지지 않는다 — 보안(검색어가 밖으로 나간다)·비용(무료 한도를 넘으면
+과금되는 출처가 있다) 검증을 마치고 PAAS_SEARCH_APPROVED에 그 출처 id를 적어야 켜진다(docs/web-search-review.md).
+
 검색어는 회사 밖으로 나간다 — 그래서 스마트워크 대화·통합 서버 묶음에는 넣지 않고 별도 MCP 서버로만 둔다.
 감사에는 출처와 검색어 길이만 남긴다(검색어 자체는 남기지 않는다 — 호출하는 쪽이 남긴다).
 """
@@ -126,14 +129,27 @@ SOURCES = [
 _BY_ID = {s["id"]: s for s in SOURCES}
 
 
+def approved() -> set[str]:
+    """보안·비용 검증을 마친 출처(PAAS_SEARCH_APPROVED)."""
+    return {x.strip() for x in get_settings().search_approved.split(",") if x.strip()}
+
+
+def state(src: dict) -> str:
+    """on(쓸 수 있다) · pending(키는 있는데 검증 전) · no_key(키 없음)."""
+    if not src["enabled"]():
+        return "no_key"
+    return "on" if src["id"] in approved() else "pending"
+
+
 def sources() -> list[dict]:
-    """LLM이 고를 수 있게 — id·이름·강점·켜짐 여부."""
-    return [{"id": s["id"], "name": s["name"], "strengths": s["strengths"], "enabled": s["enabled"]()}
-            for s in SOURCES]
+    """LLM이 고를 수 있게 — id·이름·강점·켜짐 여부(검증을 마친 출처만 켜진다)."""
+    return [{"id": s["id"], "name": s["name"], "strengths": s["strengths"], "enabled": state(s) == "on",
+             "state": state(s)} for s in SOURCES]
 
 
 def configured() -> bool:
-    return any(s["enabled"]() for s in SOURCES)
+    """하나라도 운영에 들어간 출처가 있는가 — 서버 목록에 올릴지."""
+    return any(state(s) == "on" for s in SOURCES)
 
 
 def search(actor: str, query: str, source: str, count: int = MAX_RESULTS) -> dict:
@@ -143,8 +159,10 @@ def search(actor: str, query: str, source: str, count: int = MAX_RESULTS) -> dic
     src = _BY_ID.get(source)
     if src is None:
         raise SearchError(f"모르는 출처입니다: {source} — list_search_sources의 id를 쓰세요.")
-    if not src["enabled"]():
+    if state(src) == "no_key":
         raise SearchError(f"출처 {source}는 꺼져 있습니다(인증키가 없습니다) — 켜진 출처를 고르세요.")
+    if state(src) == "pending":
+        raise SearchError(f"출처 {source}는 보안·비용 검증 전이라 아직 쓸 수 없습니다 — 켜진 출처를 고르세요.")
     limit = get_settings().search_max_per_hour
     with _lock:
         now = time.time()

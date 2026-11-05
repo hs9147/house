@@ -25,7 +25,8 @@ class _R:
 @pytest.fixture
 def web(monkeypatch, fresh_settings):
     for k, v in {"PAAS_SEARCH_BRAVE_KEY": "bt", "PAAS_SEARCH_NAVER_ID": "nid",
-                 "PAAS_SEARCH_NAVER_SECRET": "nsec", "PAAS_SEARCH_BAIDU_KEY": ""}.items():
+                 "PAAS_SEARCH_NAVER_SECRET": "nsec", "PAAS_SEARCH_BAIDU_KEY": "",
+                 "PAAS_SEARCH_APPROVED": "global,naver,naver_news,japan,baidu"}.items():
         monkeypatch.setenv(k, v)
     get_settings.cache_clear()
     websearch._used.clear()
@@ -132,5 +133,24 @@ def test_web_server_is_listed_only_when_a_source_is_keyed(monkeypatch, fresh_set
     assert "paas-web" not in ids()
     monkeypatch.setenv("PAAS_SEARCH_NAVER_ID", "nid")
     monkeypatch.setenv("PAAS_SEARCH_NAVER_SECRET", "nsec")
+    monkeypatch.setenv("PAAS_SEARCH_APPROVED", "")
+    get_settings.cache_clear()
+    assert "paas-web" not in ids()                      # 키가 있어도 검증 전이면 올리지 않는다
+    monkeypatch.setenv("PAAS_SEARCH_APPROVED", "naver")
     get_settings.cache_clear()
     assert "paas-web" in ids()
+
+
+def test_keyed_sources_stay_off_until_security_and_cost_are_verified(web, monkeypatch):
+    """보안·비용 검증을 마친 출처(PAAS_SEARCH_APPROVED)만 운영에 들어간다 — 키가 있어도 그 전에는 쓰지 않는다."""
+    monkeypatch.setenv("PAAS_SEARCH_APPROVED", "naver")
+    get_settings.cache_clear()
+    by = {s["id"]: s for s in websearch.sources()}
+    assert {k: s["state"] for k, s in by.items()} == {
+        "global": "pending", "naver": "on", "naver_news": "pending", "japan": "pending", "baidu": "no_key"}
+    assert [k for k, s in by.items() if s["enabled"]] == ["naver"]
+    before = len(web)
+    with pytest.raises(websearch.SearchError, match="보안·비용 검증 전"):
+        websearch.search("a@lge.com", "x", "global")
+    assert len(web) == before                                  # 밖으로 나가지도 않는다
+    websearch.search("a@lge.com", "배터리", "naver")

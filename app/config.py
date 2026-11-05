@@ -361,6 +361,8 @@ class Settings(BaseSettings):
     search_naver_secret: str = ""
     search_baidu_key: str = ""          # 百度千帆 AI 검색(AppBuilder) API 키
     search_max_per_hour: int = 60       # 부르는 사람(키·토큰)마다
+    # 보안·비용 검증을 마친 출처 id(쉼표) — 여기 없는 출처는 키가 있어도 쓰지 않는다(docs/web-search-review.md)
+    search_approved: str = ""
 
     # --- 콘솔 자기 배포 (옵트인, services/self_deploy.py) ---
     # true면 백엔드 기동 시 platform/console/을 일반 react Project(source_subdir 사용)로
