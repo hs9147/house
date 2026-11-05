@@ -168,7 +168,7 @@ def test_run_records_failure_without_raising(db, fresh_settings):
 
     result = scheduler.run(db, job)
     assert result["status"] == "failed"
-    assert "모듈이 없습니다" in result["detail"]["error"]
+    assert "도구가 없습니다" in result["detail"]["error"]
     assert job.consecutive_failures == 1
     assert job.last_run_at is not None
     assert job.last_ms is not None

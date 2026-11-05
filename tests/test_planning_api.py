@@ -311,7 +311,7 @@ def test_duplicate_bind_is_reported_not_raised(monkeypatch, fresh_settings, tmp_
         bound: list[str] = []
         execute = planning_service.make_bind_executor(db, project, "tester", bound)
         assert "바인딩 완료" in execute("bind_module", {"module_name": "orders-db", "env_prefix": "ORD"})
-        assert "이미 바인딩된 모듈" in execute("bind_module", {"module_name": "orders-db", "env_prefix": "X"})
+        assert "이미 바인딩된 도구" in execute("bind_module", {"module_name": "orders-db", "env_prefix": "X"})
         assert "찾을 수 없습니다" in execute("bind_module", {"module_name": "ghost", "env_prefix": "G"})
         assert bound == ["orders-db"]
 
