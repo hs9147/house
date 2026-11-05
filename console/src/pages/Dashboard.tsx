@@ -121,6 +121,7 @@ export default function Dashboard() {
                   {s.docker_hint && <> · {s.docker_hint}</>}
                 </p>
               )}
+              {s.backend && <BackendInstance b={s.backend} />}
               {s.system && <p className="mutedtext">{s.system}</p>}
               {s.cpu_percent !== undefined && <Gauge label="CPU" percent={s.cpu_percent} />}
               <CpuTop s={s} />
@@ -140,7 +141,6 @@ export default function Dashboard() {
                 />
               )}
               <DiskTop s={s} />
-              {s.backend && <BackendInstance b={s.backend} />}
               {s.gpus.length > 0 ? (
                 <table style={{ marginTop: 8 }}>
                   <thead>
@@ -189,7 +189,7 @@ function fmtUptime(sec: number): string {
 function BackendInstance({ b }: { b: NonNullable<StatusSnapshot['backend']> }) {
   const t = b.request_threads;
   return (
-    <div style={{ marginTop: 12 }}>
+    <div style={{ marginBottom: 12 }}>
       <div style={{ fontSize: 13, marginBottom: 4 }}>
         <b>백엔드 인스턴스</b> {b.instances}개
         <span className="mutedtext" style={{ fontSize: 12 }}>
