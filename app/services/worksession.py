@@ -236,6 +236,12 @@ def _progress_step(session_id: int, label: str) -> None:
             state["steps"].append({"label": label, "at": utcnow().isoformat()})
 
 
+def running_turns() -> int:
+    """지금 답을 만들고 있는 턴 수(이 프로세스) — 대시보드가 백엔드의 여유를 볼 때."""
+    with _PROGRESS_LOCK:
+        return sum(1 for state in _PROGRESS.values() if state.get("running"))
+
+
 def _progress_end(session_id: int) -> list[dict]:
     with _PROGRESS_LOCK:
         state = _PROGRESS.get(session_id) or {"steps": []}

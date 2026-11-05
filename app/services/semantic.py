@@ -1114,6 +1114,13 @@ def stop(store_name: str) -> None:
 _tasks: dict[str, threading.Thread] = {}
 
 
+def busy() -> dict:
+    """뒤에서 도는 내용 분석·제안 작업 수(이 프로세스) — 대시보드가 백엔드의 여유를 볼 때."""
+    with _lock:
+        return {"analysis": sum(1 for t in _workers.values() if t.is_alive()),
+                "tasks": sum(1 for t in _tasks.values() if t.is_alive())}
+
+
 def task_running(store_name: str) -> bool:
     task = _tasks.get(store_name)
     return task is not None and task.is_alive()

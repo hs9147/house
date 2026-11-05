@@ -268,6 +268,10 @@ def start() -> None:
         _thread.start()
 
 
+def alive() -> bool:
+    return _thread is not None and _thread.is_alive()
+
+
 def snapshot(db: Session) -> dict:
     """대시보드 모니터가 묻는 것 — 지금 무엇이 밀려 있고 무엇이 죽어 있나."""
     jobs = list(db.execute(select(ScheduledJob).order_by(ScheduledJob.name)).scalars())

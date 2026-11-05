@@ -84,6 +84,31 @@ def _owner(p, work_dir: Path, repo: Path) -> tuple[str, str]:
     return "process", info.get("name") or f"pid {p.pid}"
 
 
+def backend_instance(request_threads: tuple[int, int] | None = None) -> dict[str, Any]:
+    """백엔드 인스턴스(이 프로세스)의 상태 — 인스턴스 하나로 버티는지 지켜보는 숫자.
+
+    **인스턴스는 하나다.** 스케줄러·작업 큐·진행 상태·발송 상한이 프로세스 안에 있어 둘 이상 띄우면 정기 작업이
+    중복으로 돌고 진행 화면이 엇갈린다 — 늘리려면 그것들을 DB로 옮기는 공사가 먼저다. 그래서 개수는 설정이 아니라
+    사실로 보인다. request_threads는 (쓰는 중, 상한) — 동기 요청을 처리하는 스레드 풀(긴 LLM 대화가 하나씩 잡는다)."""
+    from . import scheduler, semantic, worksession  # noqa: PLC0415
+
+    out: dict[str, Any] = {"instances": 1, "pid": os.getpid(), "llm_turns": worksession.running_turns(),
+                           "background": semantic.busy(), "scheduler": scheduler.alive()}
+    if request_threads is not None:
+        out["request_threads"] = {"busy": request_threads[0], "limit": request_threads[1]}
+    try:
+        import psutil  # noqa: PLC0415
+
+        proc = psutil.Process()
+        started = proc.create_time()
+        out.update(started_at=datetime.fromtimestamp(started, timezone.utc).isoformat(),
+                   uptime_seconds=int(time.time() - started), memory=proc.memory_info().rss,
+                   threads=proc.num_threads())
+    except Exception:  # noqa: BLE001 — psutil이 없으면 숫자 몇 개만 빠진다
+        pass
+    return out
+
+
 def _processes(psutil) -> tuple[float, list[dict], list[dict]]:
     """(전체 CPU %, CPU 상위, 메모리 상위). CPU는 두 번 읽은 차이라 SAMPLE_SECONDS 동안 잰다 — 프로세스의
     값은 코어 하나 기준이라 코어 수로 나눠 전체 대비로 맞춘다."""

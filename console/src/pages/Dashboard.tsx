@@ -140,6 +140,7 @@ export default function Dashboard() {
                 />
               )}
               <DiskTop s={s} />
+              {s.backend && <BackendInstance b={s.backend} />}
               {s.gpus.length > 0 ? (
                 <table style={{ marginTop: 8 }}>
                   <thead>
@@ -176,6 +177,35 @@ export default function Dashboard() {
       </div>
       <SchedulerPanel />
     </>
+  );
+}
+
+function fmtUptime(sec: number): string {
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  return d ? `${d}일 ${h}시간` : h ? `${h}시간 ${m}분` : `${m}분`;
+}
+
+/** 백엔드 인스턴스 — 하나로 버티는지 보는 숫자. 요청 스레드가 상한에 가까우면 긴 LLM 대화가 다른 요청을 밀어낸다. */
+function BackendInstance({ b }: { b: NonNullable<StatusSnapshot['backend']> }) {
+  const t = b.request_threads;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ fontSize: 13, marginBottom: 4 }}>
+        <b>백엔드 인스턴스</b> {b.instances}개
+        <span className="mutedtext" style={{ fontSize: 12 }}>
+          {' '}— 정기 작업·진행 상태가 프로세스 안에 있어 하나로 운영합니다(늘리려면 그것들을 DB로 옮기는 작업이 먼저)
+        </span>
+      </div>
+      {t && <Gauge label="요청 스레드" percent={(t.busy / t.limit) * 100} detail={`${t.busy} / ${t.limit}`} />}
+      <p className="mutedtext" style={{ fontSize: 12, margin: '4px 0' }}>
+        답을 만드는 LLM 대화 {b.llm_turns}개 · 뒤에서 도는 내용 분석 {b.background.analysis}개·제안 작업 {b.background.tasks}개
+        {' '}· 스케줄러 {b.scheduler ? '동작 중' : '멈춤'}
+        {b.memory !== undefined && <> · 메모리 {fmtBytes(b.memory)}</>}
+        {b.threads !== undefined && <> · 스레드 {b.threads}개</>}
+        {b.uptime_seconds !== undefined && <> · 가동 {fmtUptime(b.uptime_seconds)}</>}
+        {' '}· PID <span className="mono">{b.pid}</span>
+      </p>
+    </div>
   );
 }
 

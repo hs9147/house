@@ -98,8 +98,16 @@ def health():
 
 
 @health_router.get("/status")
-def system_status(_: ApiKey = Depends(require_admin)):
-    return monitor.snapshot()
+async def system_status(_: ApiKey = Depends(require_admin)):
+    """시스템 상태와 백엔드 인스턴스 상태. 요청 스레드 풀은 이벤트 루프에서만 읽힌다 — 그래서 async로 받고,
+    무거운 스냅샷(psutil)은 스레드로 돌린다(읽은 뒤에 — 자기 자신이 쓰는 스레드를 세지 않게)."""
+    import anyio.to_thread  # noqa: PLC0415
+
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    threads = (int(limiter.borrowed_tokens), int(limiter.total_tokens))
+    snap = await anyio.to_thread.run_sync(monitor.snapshot)
+    backend = await anyio.to_thread.run_sync(monitor.backend_instance, threads)
+    return {**snap, "backend": backend}
 
 
 @router.get("/scheduler")

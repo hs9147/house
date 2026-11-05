@@ -760,6 +760,13 @@ export interface StatusSnapshot {
   };
   gpus: GpuInfo[];
   system?: string;
+  // 백엔드 인스턴스(services/monitor.backend_instance) — 하나다(스케줄러·작업 상태가 프로세스 안에 있다).
+  backend?: {
+    instances: number; pid: number; llm_turns: number; scheduler: boolean;
+    background: { analysis: number; tasks: number };
+    request_threads?: { busy: number; limit: number };
+    started_at?: string; uptime_seconds?: number; memory?: number; threads?: number;
+  };
 }
 
 export interface TopConsumer {
