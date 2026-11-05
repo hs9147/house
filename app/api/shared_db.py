@@ -84,6 +84,19 @@ def list_databases(db: Session = Depends(get_db), _: ApiKey = Depends(require_ad
             "databases": shareddb.database_rows(db)}
 
 
+@router.delete("/shared-db/databases/{name}")
+def delete_database(name: str, force: bool = False, db: Session = Depends(get_db),
+                    admin: ApiKey = Depends(require_admin)):
+    """DB를 지운다(관리자). 기본 DB는 409. 과제 스키마나 표가 있는 DB는 force=true일 때만(스키마까지 지운다 —
+    되돌릴 수 없다), 아니면 409. 남은 DB 목록을 돌려준다."""
+    try:
+        rows = shareddb.delete_database(db, name, force)
+    except shareddb.SharedDbError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    audit.record(db, admin.name, "shared_db.database.delete", name, {"force": force})
+    return rows
+
+
 class OrgDatabasesIn(BaseModel):
     databases: list[str]   # 앞의 것이 부서의 기본 — 새 이름이면 서버에 만든다
 

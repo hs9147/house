@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../lib/api';
 import { useApi } from '../lib/hooks';
-import type { OrgDatabasesRow } from '../lib/types';
+import type { DataDatabaseRow, OrgDatabasesRow } from '../lib/types';
 import Async from './Async';
 
 /**
@@ -18,6 +18,36 @@ export default function SharedDbPolicyPanel() {
   const [error, setError] = useState('');
   const [adding, setAdding] = useState<Record<number, string>>({});
   if (state.data && !state.data.configured) return null;  // 공용 DB를 쓰지 않는 설치본
+
+  // 자료(과제 스키마·표)가 있는 DB는 강제 삭제다 — 되돌릴 수 없어 DB 이름을 직접 입력받는다
+  const forceOk = (d: DataDatabaseRow, why: string) => window.prompt(
+    `DB '${d.name}'을(를) 스키마·표까지 모두 지웁니다(강제 삭제).\n${why}\n\n붙어 있는 앱의 접속을 끊고 지우며 되돌릴 수`
+    + ' 없습니다. 그 과제는 다시 배포하면 부서의 기본 DB에 빈 스키마를 받습니다.\n\n지우려면 DB 이름을 입력하세요.') === d.name;
+  const remove = async (d: DataDatabaseRow) => {
+    const users = d.organizations.length ? `쓰는 부서: ${d.organizations.join(', ')}` : '쓰는 부서 없음';
+    let force = d.schemas > 0;
+    if (force ? !forceOk(d, `과제 스키마 ${d.schemas}개 · ${users}`)
+      : !window.confirm(`DB '${d.name}'을(를) 지웁니다.\n${users}\n\n서버에서 DB를 삭제하고 쓰던 부서에서도 뺍니다.`
+        + ' 되돌릴 수 없습니다.')) return;
+    setBusy(true);
+    setError('');
+    try {
+      try {
+        await api.deleteDatabase(d.name, force);
+      } catch (e) {
+        // 플랫폼 밖에서 만든 표가 있었다 — 강제로 지울지 다시 묻는다
+        const msg = (e as Error).message;
+        if (force || !msg.includes('강제 삭제') || !forceOk(d, msg)) throw e;
+        force = true;
+        await api.deleteDatabase(d.name, true);
+      }
+      state.reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const save = async (row: OrgDatabasesRow, databases: string[]) => {
     setBusy(true);
@@ -86,7 +116,7 @@ export default function SharedDbPolicyPanel() {
 
               <h3 style={{ fontSize: 14, marginTop: 16 }}>DB 목록</h3>
               <table>
-                <thead><tr><th>DB</th><th>용도 (LLM이 쓰임을 보고 적음)</th><th>쓰는 부서</th><th>스키마</th></tr></thead>
+                <thead><tr><th>DB</th><th>용도 (LLM이 쓰임을 보고 적음)</th><th>쓰는 부서</th><th>스키마</th><th /></tr></thead>
                 <tbody>
                   {s.databases.map((d) => (
                     <tr key={d.name}>
@@ -102,6 +132,14 @@ export default function SharedDbPolicyPanel() {
                       </td>
                       <td style={{ fontSize: 12 }}>{d.organizations.join(', ') || '—'}</td>
                       <td className="mono">{d.schemas}</td>
+                      <td>
+                        {/* 기본 DB는 지울 수 없다 — 버튼을 두지 않는다 */}
+                        {d.name !== 'paas_data' && (
+                          <button className="small secondary" disabled={busy}
+                            title={d.schemas > 0 ? '스키마까지 지웁니다(강제 삭제 — DB 이름을 입력해 확인)' : 'DB를 지웁니다(확인 후)'}
+                            onClick={() => void remove(d)}>{d.schemas > 0 ? '강제 삭제' : '삭제'}</button>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

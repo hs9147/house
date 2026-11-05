@@ -248,6 +248,48 @@ def set_databases(db: Session, org_id: int, names: list[str]) -> list[dict]:
     return org_rows(db)
 
 
+def delete_database(db: Session, name: str, force: bool = False) -> list[dict]:
+    """DB를 지운다(관리자). 기본 DB는 지울 수 없다(DB를 고르지 않은 부서가 쓰는 자리). 과제 스키마가 있거나(지운
+    과제의 것도) 서버에 표가 있는 DB(플랫폼 밖에서 만든 것도)는 **강제(force)로만** 지운다 — 접속을 끊고 DB를 통째로
+    지우며, 그 DB의 과제 스키마 기록과 그 스키마의 표 권한도 지운다(그 과제는 다시 배포하면 부서의 기본 DB에 빈
+    스키마를 받는다). 되돌릴 수 없다. 지우면 서버의 읽기 역할도 없애고, 그 DB를 쓰던 부서와 그 DB를 골라 둔
+    과제에서 뺀다."""
+    name = _check_name(name)
+    if name == DATA_DB:
+        raise SharedDbError(f"기본 DB({DATA_DB})는 지울 수 없습니다 — DB를 고르지 않은 부서가 쓰는 자리입니다.")
+    schemas = [r for r in db.execute(select(DataSchema).where(DataSchema.db_name == name)).scalars()]
+    if schemas and not force:
+        owners = ", ".join(sorted({r.project_name or r.schema_name for r in schemas}))
+        raise SharedDbError(f"{name}에 과제 스키마가 {len(schemas)}개 있습니다({owners}) — 스키마까지 지우려면 강제 삭제로.")
+    if configured() and _exists("db", name):
+        if not force:
+            (count,), = _execute(name, (
+                "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                " WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema')"
+                " AND n.nspname NOT LIKE 'pg\\_toast%'"))
+            if int(count):
+                raise SharedDbError(f"{name}에 표가 {int(count)}개 있습니다(플랫폼 밖에서 만든 것일 수 있습니다) — 표까지"
+                                    " 지우려면 강제 삭제로.")
+        # 붙어 있는 앱의 접속을 끊고 지운다(PostgreSQL 13 이상)
+        _execute(None, f"DROP DATABASE {_ident(name)}" + (" WITH (FORCE)" if force else ""))
+    gone = {r.schema_name for r in schemas}
+    for g in db.execute(select(DataGrant)).scalars():
+        if g.schema_name in gone:
+            db.delete(g)
+    for r in schemas:
+        db.delete(r)
+    if configured() and _exists("role", db_reader(name)):
+        _execute(None, f"DROP ROLE {_ident(db_reader(name))}")
+    for model in (OrgDatabase, ProjectDatabase):
+        for row in db.execute(select(model).where(model.db_name == name)).scalars():
+            db.delete(row)
+    row = db.get(DataDatabase, name)
+    if row is not None:
+        db.delete(row)
+    db.commit()
+    return database_rows(db)
+
+
 def org_rows(db: Session) -> list[dict]:
     """관리 화면용 — 부서마다 쓰는 DB와 스키마 수."""
     counts: dict[int, int] = {}

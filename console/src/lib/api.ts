@@ -740,6 +740,9 @@ export const api = {
   // 부서가 쓰는 자료 DB(관리자) — 여럿, 앞의 것이 기본. 새 이름이면 서버에 만든다.
   sharedDbDatabases: () =>
     request<{ configured: boolean; organizations: OrgDatabasesRow[]; databases: DataDatabaseRow[] }>('GET', '/shared-db/databases'),
+  deleteDatabase: (name: string, force = false) =>
+    request<DataDatabaseRow[]>('DELETE', `/shared-db/databases/${encodeURIComponent(name)}`, undefined,
+      force ? { force: 'true' } : undefined),
   setOrgDatabases: (orgId: number, databases: string[]) =>
     request<OrgDatabasesRow[]>('PUT', `/shared-db/organizations/${orgId}/databases`, { databases }),
   smartworkAgents: () => request<SmartworkAgent[]>('GET', '/smartwork/agents'),

@@ -16,7 +16,8 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.main import create_app
 from app.models import (
-    BuildProfile, DataDatabase, DataGrant, DataSchema, Module, ModuleBinding, Organization, Project, ScheduledJob,
+    BuildProfile, DataDatabase, DataGrant, DataSchema, Module, ModuleBinding, Organization, Project, ProjectDatabase,
+    ScheduledJob,
 )
 from app.services import deployer, modules, planning, scheduler, shareddb
 
@@ -59,6 +60,12 @@ class FakeServer:
             return [(r, s, t, p) for d, r, s, t, p in self.privs if d == dbname]
         if sql.startswith("SELECT n.nspname, r.rolname"):
             return [(s, r) for d, r, s in self.usage if d == dbname]
+        if sql.startswith("SELECT count(*) FROM pg_class"):
+            return [(len(self.tables.get(dbname, [])),)]
+        if m := re.match(r'DROP DATABASE "(\w+)"', sql):
+            self.dbs.discard(m.group(1))
+        if m := re.match(r'DROP ROLE "(\w+)"', sql):
+            self.roles.discard(m.group(1))
         if sql.startswith("SELECT r.rolname, m.rolname FROM pg_auth_members"):
             return list(self.members)
         if m := _MEMBER_RE.match(sql):
@@ -227,6 +234,65 @@ def test_a_db_holding_the_departments_data_cannot_be_removed(server):
         _dbs(hr)
     with SessionLocal() as db:
         assert db.query(DataSchema).filter(DataSchema.db_name != shareddb.DATA_DB).count() == 0
+
+
+def test_only_a_db_without_data_can_be_deleted(server):
+    """DB 삭제는 자료가 없는 DB만 — 기본 DB, 과제 스키마가 있는 DB, 서버에 표가 있는 DB는 거부한다. 지우면 서버의 DB와
+    읽기 역할을 없애고, 쓰던 부서와 골라 둔 과제(스키마 없음)에서 뺀다."""
+    hr, cost = _org("인사팀"), _org("원가팀")
+    _dbs(hr, "paas_hr", "paas_data")
+    _dbs(cost, "paas_data", "paas_spare", "paas_outside")
+    _provision(_project("payroll", hr))
+    waiting = _project("cost-plan", cost)
+    with SessionLocal() as db:
+        shareddb.choose_db(db, db.get(Project, waiting), "paas_spare")
+        db.query(DataSchema).filter(DataSchema.db_name == "paas_data").update({"db_name": "paas_hr"})
+        db.commit()
+        with pytest.raises(shareddb.SharedDbError, match="기본 DB"):
+            shareddb.delete_database(db, "paas_data")
+        with pytest.raises(shareddb.SharedDbError, match="과제 스키마가 1개 있습니다.*강제 삭제로"):
+            shareddb.delete_database(db, "paas_hr")
+        server.tables["paas_outside"] = [("public", "legacy", "")]
+        with pytest.raises(shareddb.SharedDbError, match="표가 1개 있습니다.*강제 삭제로"):
+            shareddb.delete_database(db, "paas_outside")
+        rows = shareddb.delete_database(db, "paas_spare")
+        assert "paas_spare" not in {r["name"] for r in rows}
+        assert shareddb.databases_of(db, cost) == ["paas_data", "paas_outside"]
+        assert db.get(ProjectDatabase, waiting) is None                    # 골라 둔 과제는 부서의 기본으로
+        assert db.get(DataDatabase, "paas_spare") is None
+    assert 'DROP DATABASE "paas_spare"' in server.sql() and 'DROP ROLE "reader_paas_spare"' in server.sql()
+    assert "paas_spare" not in server.dbs
+    c = TestClient(create_app())
+    assert c.delete(f"{API}/shared-db/databases/paas_outside").status_code == 401
+    refused = c.delete(f"{API}/shared-db/databases/paas_hr", headers=ADMIN)
+    assert refused.status_code == 409 and "강제 삭제로" in refused.json()["detail"]
+    assert c.delete(f"{API}/shared-db/databases/paas_data", params={"force": "true"}, headers=ADMIN).status_code == 409
+
+
+def test_force_delete_drops_the_db_with_its_schemas(server):
+    """강제 삭제 — 스키마가 있어도 접속을 끊고 DB를 통째로 지운다. 그 DB의 스키마 기록과 표 권한도 지우고, 그 과제를
+    다시 배포하면 부서의 기본 DB에 빈 스키마를 받는다."""
+    hr, cost = _org("인사팀"), _org("원가팀")
+    _dbs(hr, "paas_hr", "paas_data")
+    _dbs(cost, "paas_hr", "paas_data")
+    payroll, reader = _project("payroll", hr), _project("cost-db", cost)
+    with SessionLocal() as db:
+        shareddb.choose_db(db, db.get(Project, payroll), "paas_hr")
+    _provision(payroll, BuildProfile.release, BuildProfile.development)
+    _provision(reader)
+    server.tables["paas_hr"] = [("payroll", "salaries", "급여")]
+    with SessionLocal() as db:
+        shareddb.grant(db, "payroll", "salaries", db.get(Project, reader), "write", "admin")
+    c = TestClient(create_app())
+    out = c.delete(f"{API}/shared-db/databases/paas_hr", params={"force": "true"}, headers=ADMIN)
+    assert out.status_code == 200, out.text
+    assert 'DROP DATABASE "paas_hr" WITH (FORCE)' in server.sql()
+    with SessionLocal() as db:
+        assert db.query(DataSchema).filter(DataSchema.db_name == "paas_hr").count() == 0
+        assert db.query(DataGrant).count() == 0
+        assert shareddb.databases_of(db, hr) == ["paas_data"]
+        row = shareddb.provision(db, db.get(Project, payroll), BuildProfile.release)   # 다시 배포하면
+        assert row.db_name == "paas_data" and row.schema_name == "payroll"
 
 
 def test_old_sharing_unit_grants_are_withdrawn(server):
