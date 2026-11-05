@@ -2,7 +2,7 @@ import { getKey, logout } from './auth';
 import type {
   AgentProfileState,
   DataGrantOut,
-  OrgDataPolicyRow,
+  OrgDatabasesRow, DataDatabaseRow,
   ProjectSharedDb,
   ApiKeyIssued,
   ApiCatalogStatus,
@@ -737,11 +737,11 @@ export const api = {
   createDataGrant: (body: { schema_name: string; table: string; project_id: number; privilege: string;
     expires_at: string | null }) => request<DataGrantOut>('POST', '/shared-db/grants', body),
   deleteDataGrant: (id: number) => request<void>('DELETE', `/shared-db/grants/${id}`),
-  // 부서의 공유 단위(관리자) — 비우면 자기 부서, 분리는 공유 단위에만.
-  sharedDbPolicies: () =>
-    request<{ configured: boolean; policies: OrgDataPolicyRow[] }>('GET', '/shared-db/policies'),
-  setSharedDbPolicy: (orgId: number, body: { share_with_org_id: number | null; isolated: boolean }) =>
-    request<OrgDataPolicyRow[]>('PUT', `/shared-db/policies/${orgId}`, body),
+  // 부서가 쓰는 자료 DB(관리자) — 여럿, 앞의 것이 기본. 새 이름이면 서버에 만든다.
+  sharedDbDatabases: () =>
+    request<{ configured: boolean; organizations: OrgDatabasesRow[]; databases: DataDatabaseRow[] }>('GET', '/shared-db/databases'),
+  setOrgDatabases: (orgId: number, databases: string[]) =>
+    request<OrgDatabasesRow[]>('PUT', `/shared-db/organizations/${orgId}/databases`, { databases }),
   smartworkAgents: () => request<SmartworkAgent[]>('GET', '/smartwork/agents'),
   // 업무 제안의 근거 — 소속 조직(부서)의 워크플로
   smartworkWorkflows: () => request<DepartmentWorkflow[]>('GET', '/smartwork/workflows'),

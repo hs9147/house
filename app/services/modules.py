@@ -131,8 +131,13 @@ def env_for_project(db: Session, project: Project,
     env: dict[str, str] = {}
     for binding, module in rows:
         if shareddb.is_shared(module):
-            key = f"{binding.env_prefix.upper()}_DSN"
-            env[key] = shareddb.dsn(shareddb.provision(db, project, profile)) if profile else ""
+            # 자기 DB는 {PREFIX}_DSN, 부서가 쓰는 다른 DB는 {PREFIX}_DSN_{DB} — 같은 계정이다
+            prefix = binding.env_prefix.upper()
+            row = shareddb.provision(db, project, profile) if profile else None
+            env[f"{prefix}_DSN"] = shareddb.dsn(row) if row else ""
+            for name in shareddb.databases_of(db, project.organization_id):
+                if row is None or name != row.db_name:
+                    env[f"{prefix}_DSN_{name.upper()}"] = shareddb.dsn(row, name) if row else ""
             continue
         env.update(binding_env(module, binding.env_prefix, db=db))
     return env
@@ -160,8 +165,11 @@ def available_resources(db: Session, project: Project) -> list[dict]:
             "scope": "org" if m.organization_id is not None else "global",
         }
         if shareddb.is_shared(m):
-            # 이름·종류만으로는 어떻게 쓰는지 모른다 — 앱을 짓는 쪽이 알아야 하는 사실을 싣는다.
+            # 이름·종류만으로는 어떻게 쓰는지 모른다 — 앱을 짓는 쪽이 알아야 하는 사실을 싣는다. 고를 수 있는 DB와
+            # 그 용도 설명(LLM이 실제 쓰임으로 적은 것)도 — 기획 LLM이 바인딩할 때 database로 고른다.
             item["usage"] = shareddb.USAGE
+            if shareddb.configured():
+                item["databases"] = shareddb.database_choices(db, project)
         result.append(item)
     return result
 

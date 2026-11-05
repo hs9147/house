@@ -1944,7 +1944,7 @@ def test_dev_principles_add_db_rules_only_for_projects_that_bind_a_database():
     assert "DB 사용 원칙" in general and "{PREFIX}_DSN" in general and "마이그레이션으로만" in general
     assert "공용 DB" not in general
     shared = planning_service.stage_prompt(PlanStage.principles, uses_db=True, shared_db=True)
-    assert "COMMENT ON TABLE" in shared and "같은 조직의 다른 과제는" in shared
+    assert "COMMENT ON TABLE" in shared and "같은 DB를 쓰는 부서의 과제는" in shared
     # 다른 단계에는 붙지 않는다
     assert "DB 사용 원칙" not in planning_service.stage_prompt(PlanStage.spec, uses_db=True, shared_db=True)
 

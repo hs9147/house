@@ -240,10 +240,10 @@ SHARED_DB_PRINCIPLES_GUIDE = (
     "자료는 읽기만 한다.\n"
     "  - 표마다 `COMMENT ON TABLE`로 무엇을 담는지 적는다. 다른 과제와 기획 에이전트가 그 설명으로 "
     "표를 찾는다.\n"
-    "  - **같은 조직의 다른 과제는 이 과제의 운영 표를 기본으로 읽는다.** 개인정보·민감 정보는 따로 "
+    "  - **같은 DB를 쓰는 부서의 과제는 이 과제의 운영 표를 기본으로 읽는다.** 개인정보·민감 정보는 따로 "
     "표로 떼어 두고, 어느 표가 그런지 문서에 표시한다.\n"
-    "  - 다른 과제의 표는 `스키마.표`로 읽는다. 쓰기는 권한을 받은 표만 할 수 있다. 다른 조직의 표가 "
-    "필요하면 '가용 도구 제약'의 '신청하면 쓸 수 있는 표'에서 골라, 표·읽기/쓰기·사유를 문서에 적어 "
+    "  - 다른 과제의 표는 `스키마.표`로 읽는다(부서가 쓰는 다른 DB의 표는 `{PREFIX}_DSN_{DB}`로 접속해 읽는다). "
+    "쓰기는 자기 표와 권한을 받은 표만 할 수 있다. 다른 과제의 표에 써야 하면 표·사유를 문서에 적어 "
     "관리자에게 신청한다(권한은 관리자가 표 단위로 준다).\n"
     "  - 슈퍼유저 작업·확장 설치·다른 스키마의 구조 변경은 할 수 없다. 백업은 플랫폼이 매일 한다 — "
     "앱이 따로 덤프를 만들지 않는다. 대량 삭제·변경은 되돌릴 수 없으니 기능으로 만들 때 확인 절차를 둔다."
@@ -399,6 +399,15 @@ def module_bind_tools(resources: list[dict]) -> list[dict]:
     names = [str(r.get("name", "")) for r in resources if r.get("name")]
     if not names:
         return []
+    # 공용 DB는 부서의 DB 중 하나를 고른다 — 고를 것이 있을 때만 인자를 보인다
+    databases = [d["name"] for r in resources for d in r.get("databases") or []]
+    db_args = {
+        "database": {"type": "string", "enum": databases,
+                     "description": "공용 DB(shared-db)를 바인딩할 때 이 과제의 스키마를 둘 DB — '가용 자원 목록'의"
+                                    " databases의 용도 설명을 보고 고른다(생략하면 부서의 기본)."},
+        "database_purpose": {"type": "string",
+                             "description": "고른 DB의 용도 설명이 비어 있을 때만 — 이 DB를 무엇에 쓰는지 한 문장"},
+    } if databases else {}
     return [{
         "type": "function",
         "function": {
@@ -416,6 +425,7 @@ def module_bind_tools(resources: list[dict]) -> list[dict]:
                         "type": "string",
                         "description": "주입 환경변수 접두사(대문자·숫자·밑줄, 예: PAY → PAY_URL)",
                     },
+                    **db_args,
                 },
                 "required": ["module_name", "env_prefix"],
             },
@@ -481,13 +491,23 @@ def make_bind_executor(db: Session, project: Project, actor: str, bound: list[st
             if b.env_prefix == prefix:
                 return f"이 프로젝트에서 이미 쓰는 접두사입니다: {prefix}"
 
+        chosen = ""
+        from . import shareddb  # noqa: PLC0415 — 순환 import 회피
+
+        if shareddb.is_shared(module) and str(arguments.get("database", "")).strip():
+            try:
+                chosen = shareddb.choose_db(db, project, str(arguments["database"]),
+                                            str(arguments.get("database_purpose", "")))
+            except shareddb.SharedDbError as e:
+                return f"DB를 고르지 못했습니다: {e}"
         db.add(ModuleBinding(project_id=project.id, module_id=module.id, env_prefix=prefix))
         db.commit()
         audit.record(db, actor, "module.bind", project.name,
                      {"module": name, "prefix": prefix, "via": "plan.solution"})
         bound.append(name)
         keys = sorted(modules_service.binding_env(module, prefix, db=db).keys())
-        return f"바인딩 완료: {name} (prefix={prefix}) — 주입될 환경변수: {', '.join(keys)}"
+        where = f" — 스키마는 DB {chosen}에 둔다" if chosen else ""
+        return f"바인딩 완료: {name} (prefix={prefix}){where} — 주입될 환경변수: {', '.join(keys)}"
 
     return execute
 

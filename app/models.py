@@ -747,33 +747,54 @@ class LlmCallLog(Base):
     trace_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
-class OrgDataPolicy(Base):
-    """부서의 공용 DB 공유 단위 — 관리자가 정한다(services/shareddb).
+class DataDatabase(Base):
+    """공용 PostgreSQL 서버의 자료 DB 하나와 그 **용도 설명**(services/shareddb).
 
-    기본(행이 없거나 share_with_org_id가 비면)은 **자기 부서가 공유 단위**다. 다른 부서(상위 부서)를
-    지정하면 그 부서와 같은 단위가 되어, 그 단위의 과제끼리 서로의 운영 표를 읽는다. 상하 관계를
-    조직 구조에 들이지 않고 "이 부서는 어느 부서와 함께 쓰나" 하나만 둔다.
-
-    isolated는 공유 단위(다른 부서를 지정하지 않은 부서)에만 의미가 있다 — 켜면 그 단위만 자기 DB를
-    쓴다(표 이름도 다른 부서에 보이지 않게). 자료가 생긴 뒤에는 DB가 바뀌는 설정을 받지 않는다.
+    설명은 사람이 적지 않는다 — LLM이 실제 쓰임을 보고 적고 고친다: 기획 단계에서 과제에 이 DB를 고를 때(비어
+    있으면) 용도를 적고, 권한 대조(db_grants)가 DB 안의 표·표 설명·쓰는 과제가 바뀐 것을 보면(signature) 다시
+    쓴다. 기획 LLM은 이 설명으로 과제가 쓸 DB를 고른다.
     """
 
-    __tablename__ = "org_data_policies"
+    __tablename__ = "data_databases"
+
+    name: Mapped[str] = mapped_column(String(63), primary_key=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    described_by: Mapped[str] = mapped_column(String(32), default="")   # planning | llm
+    described_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    signature: Mapped[str] = mapped_column(String(64), default="")      # 설명을 쓸 때 본 내용의 지문
+
+
+class OrgDatabase(Base):
+    """부서가 쓰는 자료 DB — 여럿일 수 있다. 행이 없으면 기본 DB(paas_data) 하나다.
+
+    **같은 DB를 고른 부서의 과제끼리는 서로의 운영 표를 읽는다**(DB마다 읽기 역할). 한 부서만 고른 DB에는 그
+    부서만 접속한다. 과제는 부서의 DB 중 하나에 자기 스키마를 둔다(ProjectDatabase).
+    """
+
+    __tablename__ = "org_databases"
+    __table_args__ = (UniqueConstraint("organization_id", "db_name", name="uq_org_database"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    organization_id: Mapped[int] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE"), unique=True, index=True)
-    share_with_org_id: Mapped[int | None] = mapped_column(
-        ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True)
-    isolated: Mapped[bool] = mapped_column(Boolean, default=False)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    db_name: Mapped[str] = mapped_column(String(63))
+
+
+class ProjectDatabase(Base):
+    """과제가 자기 스키마를 둘 DB — 기획 LLM이 부서의 DB 중에서 고른다(없으면 부서의 기본). 스키마가 생긴 뒤에는
+    옮기지 않는다."""
+
+    __tablename__ = "project_databases"
+
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    db_name: Mapped[str] = mapped_column(String(63))
 
 
 class DataSchema(Base):
     """공용 DB에 플랫폼이 만든 스키마 하나와 그 계정(services/shareddb).
 
-    과제마다·프로필(운영·개발)마다 하나다. db_name은 그 스키마가 있는 DB(기본 paas_data, 분리된 공유
-    단위면 그 단위의 DB)다. unit_id는 마지막으로 반영한 공유 단위 — 단위가 바뀌면 이전 단위의 읽기를
-    거두려고 적어 둔다. 비밀번호는 플랫폼이 만들어 암호화해 둔다.
+    과제마다·프로필(운영·개발)마다 하나다. db_name은 그 스키마가 있는 DB(과제가 고른 부서의 DB)다. unit_id는
+    예전 「공유 단위」 읽기를 반영해 둔 것 — 남아 있으면 권한 대조가 거두고 비운다. 비밀번호는 플랫폼이 만들어
+    암호화해 둔다.
 
     **지우지 않는다.** 과제를 지우면 project_id만 비우고 행과 스키마는 남긴다(데이터는 되돌릴 수
     없다) — project_name이 무엇의 스키마였는지 남긴다.
@@ -797,8 +818,8 @@ class DataSchema(Base):
 class DataGrant(Base):
     """다른 과제의 표 하나에 대한 권한 — **권한의 원천**이다(PostgreSQL 권한은 그 반영).
 
-    같은 공유 단위 과제끼리는 이것 없이 서로의 운영 표를 읽는다. 단위 밖의 표는 관리자가 여기에 적어
-    준다(읽기/쓰기, 만료일) — 같은 DB 안에서만(분리된 단위의 표는 밖으로 나가지 않는다). services/shareddb.reconcile이 주기적으로 DB를 이 표에 맞춘다 — 손으로 준
+    같은 DB를 쓰는 부서의 과제끼리는 이것 없이 서로의 운영 표를 읽는다. 쓰기(와 표 단위 읽기)는 관리자가 여기에 적어
+    준다(읽기/쓰기, 만료일) — 받는 과제의 부서가 그 DB를 쓸 때만(쓰지 않는 DB의 표는 이름도 보이지 않는다). services/shareddb.reconcile이 주기적으로 DB를 이 표에 맞춘다 — 손으로 준
     권한과 만료된 권한은 거둔다. 개발 계정은 쓰기를 받아도 읽기만 한다.
     """
 

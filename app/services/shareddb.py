@@ -1,31 +1,31 @@
-"""공용 DB — 같은 서버의 PostgreSQL에 과제마다 스키마를 주고, 부서 간 경계를 권한으로 막는다.
+"""공용 DB — 같은 서버의 PostgreSQL에 자료 DB를 여럿 두고, 과제마다 스키마를 주며, 부서 간 경계를 권한으로 막는다.
 
-**구조.** 기본은 자료 DB 하나(paas_data)다 — 함께 쓰기로 한 부서끼리는 한 질의로 서로의 표를 묶어
-쓸 수 있어야 하고, 공유 범위를 바꿀 때 데이터를 옮기지 않아도 돼야 한다. 과제마다 스키마를 따로
-두는 것은 표 이름과 마이그레이션 관리 표(alembic_version 등)가 과제끼리 부딪히지 않게 하려는 것이다.
-스키마 이름은 과제 이름이다(플랫폼에서 유일하고, 조직 이름은 SQL에 쓰기 불편한 글자가 많다).
+**구조.** 서버에는 자료 DB가 여럿이다(기본 paas_data). **부서는 쓰는 DB를 여럿 고른다**(OrgDatabase — 고르지
+않으면 기본 DB 하나). 과제는 부서의 DB 중 하나에 자기 스키마를 둔다(ProjectDatabase — 기획 LLM이 DB의 용도
+설명을 보고 고른다). 과제마다 스키마를 따로 두는 것은 표 이름과 마이그레이션 관리 표(alembic_version 등)가
+과제끼리 부딪히지 않게 하려는 것이다. 스키마 이름은 과제 이름이다.
 
-**공유 단위.** 기본은 자기 부서다. 관리자가 부서의 공유 단위를 다른 부서(상위 부서)로 지정하면 그
-부서와 같은 단위가 된다(OrgDataPolicy). **같은 공유 단위의 과제는 서로의 운영 표를 읽는다**(단위
-읽기 역할 unit_{id}_reader). 단위 밖의 과제는 그 스키마에 **들어가지도 못한다**(USAGE가 없다) —
-관리자가 표 단위로 준 경우(DataGrant)만 예외다. 표 권한이 실수로 새어도 스키마에서 한 번 더 막힌다.
+**읽는 범위 = 같은 DB를 고른 부서.** DB마다 읽기 역할(reader_{DB})이 있고, 그 DB를 고른 부서의 과제 계정이 그
+역할에 든다 — 그 DB의 운영 스키마를 모두 읽는다. 그 DB를 고르지 않은 부서는 **접속하지도 못한다**(CONNECT는
+읽기 역할에만). 한 부서만 고른 DB는 그 부서 전용이다(예전 「분리」). 쓰기는 자기 스키마와 관리자가 표 단위로
+준 것(DataGrant)만. 과제는 자기 DB 밖의 DB(부서가 고른 다른 DB)에도 같은 계정으로 접속한다.
 
-**분리.** 하나의 DB에서는 표 이름·열 이름이 카탈로그로 보인다(데이터는 막혀도). 그것도 보이면 안
-되는 공유 단위는 관리자가 「분리」로 지정한다 — 그 단위만 자기 DB(paas_org_{id})를 쓰고, 그 DB에는
-그 단위의 계정만 접속한다. 대가로 다른 단위의 표와 묶어 쓸 수 없다.
+**DB의 용도 설명은 LLM이 적는다**(DataDatabase.description) — 기획에서 DB를 고를 때(비어 있으면), 그리고 권한
+대조 때 DB 안의 표·표 설명·쓰는 과제가 바뀌었으면 다시. 사람이 입력하지 않는다.
 
-**자료가 생긴 뒤에는 DB를 옮기지 않는다.** 분리를 켜고 끄거나 분리된 단위로 옮기면 스키마가 다른
-DB로 가야 하는데(백업→복원), 되돌리기 어렵다. 그런 설정은 거부하고 안내서의 수동 절차로 둔다.
-같은 DB 안의 공유 단위 변경은 권한만 바꾸므로 바로 적용된다.
+**자료가 생긴 뒤에는 DB를 옮기지 않는다.** 부서가 자기 과제의 스키마가 있는 DB를 빼는 설정은 거부한다
+(백업→복원은 안내서의 수동 절차로 둔다).
 
-**권한의 원천은 플랫폼의 표다**(OrgDataPolicy·DataGrant). PostgreSQL 권한은 그 반영이고 reconcile이
-주기적으로 맞춘다 — 손으로 준 권한과 만료된 권한은 거둔다. 막는 것은 DB 자체라 앱이 우회할 수 없다.
+**권한의 원천은 플랫폼의 표다**(OrgDatabase·DataGrant). PostgreSQL 권한은 그 반영이고 reconcile이 주기적으로
+맞춘다 — 손으로 준 권한과 만료된 권한은 거둔다. 막는 것은 DB 자체라 앱이 우회할 수 없다.
 
 **관리 계정은 슈퍼유저가 아니다**(CREATEDB·CREATEROLE). 만든 앱 계정은 관리 계정에 GRANT한다 —
 그래야 그 계정 소유의 스키마를 만들고, 백업·대조·스키마 요약 때 읽는다.
 
 **지우지 않는다.** 바인딩을 풀어도, 과제를 지워도 스키마는 남는다 — 데이터는 되돌릴 수 없다.
 """
+import hashlib
+import json
 import os
 import re
 import secrets
@@ -40,13 +40,15 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..models import (
-    BuildProfile, DataGrant, DataSchema, Module, ModuleType, Organization, OrgDataPolicy, Project,
+    BuildProfile, DataDatabase, DataGrant, DataSchema, Module, ModuleType, Organization, OrgDatabase, Project,
+    ProjectDatabase,
 )
 from ..security import decrypt_value, encrypt_value
 
 MODULE_NAME = "shared-db"
 DATA_DB = "paas_data"
-APP_GROUP = "paas_app"   # 모든 앱 계정이 속한다 — 기본 자료 DB에 접속하는 권한만 준다
+APP_GROUP = "paas_app"   # 예전에 모든 앱 계정에 기본 DB 접속을 주던 역할 — 지금은 거둔다(읽기 역할만 접속)
+_DB_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,40}$")
 PRIVILEGES = {"read": ("SELECT",), "write": ("SELECT", "INSERT", "UPDATE", "DELETE")}
 _TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 _NAME_RE = re.compile(r"[^a-z0-9]+")
@@ -59,8 +61,9 @@ USAGE = (
     "공용 PostgreSQL DB의 이 앱 전용 스키마. 접속 정보는 환경변수 {PREFIX}_DSN(postgresql://…)으로"
     " 주입되고, 검색 경로가 자기 스키마로 잡혀 있어 표 이름만 쓰면 거기 만들어진다. 표는 앱이 기동할 때"
     " 마이그레이션(Alembic·Prisma·Flyway 등)으로 만들고, 표마다 COMMENT ON TABLE로 무엇을 담는지 적는다"
-    "(다른 과제가 그 설명을 보고 쓴다). 개발 배포는 개발 스키마에 쓴다. 같은 공유 단위(부서) 과제의 표와"
-    " 권한을 받은 표는 '스키마.표'로 읽는다(쓰기는 권한을 받은 표만). 계정마다 연결 수와 질의 시간에"
+    "(다른 과제가 그 설명을 보고 쓴다). 개발 배포는 개발 스키마에 쓴다. 같은 DB를 쓰는 부서 과제의 표와"
+    " 권한을 받은 표는 '스키마.표'로 읽는다(쓰기는 권한을 받은 표만). 부서가 다른 DB도 쓰면 그 DB는"
+    " {PREFIX}_DSN_{DB이름(대문자)}으로 접속한다(같은 계정). 계정마다 연결 수와 질의 시간에"
     " 상한이 있다. 슈퍼유저 작업·확장 설치는 할 수 없다."
 )
 
@@ -136,98 +139,143 @@ def _exists(kind: str, name: str) -> bool:
 # --- 공유 단위 ---
 
 def unit_reader(unit_id: int) -> str:
+    """예전 「공유 단위」 읽기 역할 — 남은 것을 거둘 때만 쓴다(_drop_unit)."""
     return f"unit_{unit_id}_reader"
 
 
-def _policies(db: Session) -> dict[int, OrgDataPolicy]:
-    return {p.organization_id: p for p in db.execute(select(OrgDataPolicy)).scalars()}
+def db_reader(db_name: str) -> str:
+    """그 DB를 고른 부서의 과제 계정이 드는 읽기 역할 — 그 DB에 접속하고 운영 스키마를 읽는다."""
+    return f"reader_{db_name}"
 
 
-def unit_of(db: Session, org_id: int | None, policies: dict[int, OrgDataPolicy] | None = None) -> int | None:
-    """이 부서의 공유 단위 — 지정한 부서를 따라간다(그 부서가 또 다른 부서를 지정했으면 거기까지).
-    조직이 없는 과제는 단위가 없다(같은 단위 공유 없이, 권한을 받은 표만 읽는다)."""
+def _check_name(name: str) -> str:
+    name = str(name or "").strip().lower()
+    if not _DB_NAME_RE.match(name):
+        raise SharedDbError(f"DB 이름은 영소문자로 시작하는 영소문자·숫자·밑줄 2~41자입니다: {name or '(비어 있음)'}")
+    return name
+
+
+def databases_of(db: Session, org_id: int | None) -> list[str]:
+    """부서가 쓰는 DB — 고른 차례대로. 고르지 않았거나 부서가 없는 과제는 기본 DB 하나."""
     if org_id is None:
-        return None
-    policies = _policies(db) if policies is None else policies
-    seen: set[int] = set()
-    current = org_id
-    while current not in seen:
-        seen.add(current)
-        policy = policies.get(current)
-        if policy is None or policy.share_with_org_id is None:
-            return current
-        current = policy.share_with_org_id
-    raise SharedDbError("공유 단위 설정이 돌고 있습니다(서로를 지정했습니다).")
+        return [DATA_DB]
+    names = [r.db_name for r in db.execute(select(OrgDatabase).where(
+        OrgDatabase.organization_id == org_id).order_by(OrgDatabase.id)).scalars()]
+    return names or [DATA_DB]
 
 
-def db_for_unit(db: Session, unit_id: int | None, policies: dict[int, OrgDataPolicy] | None = None) -> str:
-    """공유 단위의 DB — 「분리」로 지정한 단위만 자기 DB를 쓴다."""
-    policies = _policies(db) if policies is None else policies
-    if unit_id is not None and policies.get(unit_id) is not None and policies[unit_id].isolated:
-        return f"paas_org_{unit_id}"
-    return DATA_DB
+def _readers_by_project(db: Session) -> dict[int, list[str]]:
+    orgs = {p.id: p.organization_id for p in db.execute(select(Project)).scalars()}
+    cache: dict[int | None, list[str]] = {}
+    out = {}
+    for pid, org in orgs.items():
+        if org not in cache:
+            cache[org] = databases_of(db, org)
+        out[pid] = cache[org]
+    return out
 
 
-def policy_rows(db: Session) -> list[dict]:
-    """관리 화면용 — 부서마다 공유 단위·분리·DB·스키마 수."""
-    policies = _policies(db)
-    names = {o.id: o.name for o in db.execute(select(Organization)).scalars()}
+def project_db(db: Session, project: Project) -> str:
+    """과제의 스키마를 둘 DB — 이미 있으면 그곳, 아니면 과제가 고른 것(부서의 DB일 때), 아니면 부서의 기본."""
+    names = databases_of(db, project.organization_id)
+    have = db.execute(select(DataSchema).where(DataSchema.project_id == project.id)).scalars().first()
+    if have is not None:
+        return have.db_name
+    chosen = db.get(ProjectDatabase, project.id)
+    if chosen is not None and chosen.db_name in names:
+        return chosen.db_name
+    return DATA_DB if DATA_DB in names else names[0]
+
+
+def choose_db(db: Session, project: Project, name: str, purpose: str = "", by: str = "planning") -> str:
+    """과제가 쓸 DB를 고른다(기획 LLM) — 부서의 DB 중에서만, 스키마가 생긴 뒤에는 바꾸지 않는다. 그 DB에 용도
+    설명이 아직 없으면 purpose로 적는다(LLM이 부여 — 뒤에 실제 쓰임으로 다시 쓴다)."""
+    name = _check_name(name)
+    names = databases_of(db, project.organization_id)
+    if name not in names:
+        raise SharedDbError(f"{name}은 이 과제의 부서가 쓰는 DB가 아닙니다 — 쓸 수 있는 DB: {', '.join(names)}")
+    have = db.execute(select(DataSchema).where(DataSchema.project_id == project.id)).scalars().first()
+    if have is not None and have.db_name != name:
+        raise SharedDbError(f"이 과제의 자료는 이미 {have.db_name}에 있습니다 — DB를 옮기지 않습니다.")
+    row = db.get(ProjectDatabase, project.id) or ProjectDatabase(project_id=project.id, db_name=name)
+    row.db_name = name
+    db.add(row)
+    entry = _database_row(db, name)
+    if purpose.strip() and not entry.description.strip():
+        entry.description, entry.described_by = purpose.strip()[:500], by
+        entry.described_at = datetime.now(timezone.utc)
+    db.commit()
+    return name
+
+
+def _database_row(db: Session, name: str) -> DataDatabase:
+    row = db.get(DataDatabase, name)
+    if row is None:
+        row = DataDatabase(name=name, description="")
+        db.add(row)
+        db.flush()
+    return row
+
+
+def set_databases(db: Session, org_id: int, names: list[str]) -> list[dict]:
+    """부서가 쓰는 DB(관리자) — 여럿, 차례가 곧 기본(앞의 것). 자기 과제의 스키마가 있는 DB는 뺄 수 없다."""
+    if db.get(Organization, org_id) is None:
+        raise SharedDbError("그런 부서가 없습니다.")
+    clean: list[str] = []
+    for n in names:
+        n = _check_name(n)
+        if n not in clean:
+            clean.append(n)
+    if not clean:
+        raise SharedDbError("DB를 하나 이상 고르세요.")
+    used = {r.db_name for r in db.execute(select(DataSchema).join(Project, Project.id == DataSchema.project_id)
+                                          .where(Project.organization_id == org_id)).scalars()}
+    kept = used - set(clean)
+    if kept:
+        raise SharedDbError(f"이 부서 과제의 자료가 있는 DB는 뺄 수 없습니다: {', '.join(sorted(kept))}"
+                            " — 옮기려면 안내서의 수동 절차(백업→복원)로.")
+    for row in db.execute(select(OrgDatabase).where(OrgDatabase.organization_id == org_id)).scalars():
+        db.delete(row)
+    db.flush()
+    for n in clean:
+        db.add(OrgDatabase(organization_id=org_id, db_name=n))
+        _database_row(db, n)
+    db.commit()
+    if configured():
+        for n in clean:
+            ensure_base(n)
+        apply_access(db)
+    return org_rows(db)
+
+
+def org_rows(db: Session) -> list[dict]:
+    """관리 화면용 — 부서마다 쓰는 DB와 스키마 수."""
     counts: dict[int, int] = {}
     for project in db.execute(select(Project).where(Project.organization_id.is_not(None))).scalars():
         n = db.execute(select(DataSchema.id).where(DataSchema.project_id == project.id)).all()
         counts[project.organization_id] = counts.get(project.organization_id, 0) + len(n)
+    return [{"organization_id": o.id, "name": o.name, "databases": databases_of(db, o.id),
+             "schemas": counts.get(o.id, 0)}
+            for o in sorted(db.execute(select(Organization)).scalars(), key=lambda o: o.name)]
+
+
+def database_rows(db: Session) -> list[dict]:
+    """DB 목록 — 용도 설명(LLM이 적은 것), 쓰는 부서, 스키마 수. 고른 부서가 없고 자료도 없는 DB도 보인다."""
+    names = {DATA_DB} | {r.name for r in db.execute(select(DataDatabase)).scalars()} | \
+        {r.db_name for r in db.execute(select(OrgDatabase)).scalars()} | set(_db_names(db))
+    orgs = org_rows(db)
+    schemas: dict[str, int] = {}
+    for r in db.execute(select(DataSchema)).scalars():
+        schemas[r.db_name] = schemas.get(r.db_name, 0) + 1
     out = []
-    for org_id, name in sorted(names.items(), key=lambda kv: kv[1]):
-        policy = policies.get(org_id)
-        unit = unit_of(db, org_id, policies)
-        out.append({"organization_id": org_id, "name": name,
-                    "share_with_org_id": policy.share_with_org_id if policy else None,
-                    "isolated": bool(policy and policy.isolated),
-                    "unit_id": unit, "unit_name": names.get(unit, ""),
-                    "db_name": db_for_unit(db, unit, policies), "schemas": counts.get(org_id, 0)})
+    for name in sorted(names):
+        row = db.get(DataDatabase, name)
+        out.append({"name": name, "description": row.description if row else "",
+                    "described_by": row.described_by if row else "",
+                    "described_at": row.described_at.isoformat() if row and row.described_at else None,
+                    "organizations": [o["name"] for o in orgs if name in o["databases"]],
+                    "schemas": schemas.get(name, 0)})
     return out
-
-
-def set_policy(db: Session, org_id: int, share_with_org_id: int | None, isolated: bool) -> list[dict]:
-    """부서의 공유 단위·분리 설정(관리자). DB가 바뀌는 부서에 이미 자료가 있으면 거부한다."""
-    if db.get(Organization, org_id) is None:
-        raise SharedDbError("그런 부서가 없습니다.")
-    if share_with_org_id is not None:
-        if share_with_org_id == org_id:
-            raise SharedDbError("자기 자신을 공유 단위로 지정할 수 없습니다 — 비워 두면 자기 자신입니다.")
-        if db.get(Organization, share_with_org_id) is None:
-            raise SharedDbError("공유 단위로 지정한 부서가 없습니다.")
-        if isolated:
-            raise SharedDbError("분리는 공유 단위(다른 부서를 지정하지 않은 부서)에만 켤 수 있습니다.")
-    before = _policies(db)
-    after = {k: OrgDataPolicy(organization_id=v.organization_id, share_with_org_id=v.share_with_org_id,
-                              isolated=v.isolated) for k, v in before.items()}
-    after[org_id] = OrgDataPolicy(organization_id=org_id, share_with_org_id=share_with_org_id,
-                                  isolated=isolated)
-    orgs = [o.id for o in db.execute(select(Organization)).scalars()]
-    moved = []
-    for oid in orgs:
-        old_db = db_for_unit(db, unit_of(db, oid, before), before)
-        new_db = db_for_unit(db, unit_of(db, oid, after), after)  # 도는 설정이면 여기서 거부된다
-        if old_db != new_db and _org_has_schemas(db, oid):
-            moved.append(db.get(Organization, oid).name)
-    if moved:
-        raise SharedDbError(
-            f"자료가 있는 부서의 DB가 바뀌는 설정입니다({', '.join(moved)}) — 스키마를 다른 DB로 옮겨야 해서"
-            " 플랫폼이 하지 않습니다. 안내서(infra/postgres/README.md)의 수동 절차를 보세요.")
-    row = before.get(org_id)
-    if row is None:
-        row = OrgDataPolicy(organization_id=org_id)
-        db.add(row)
-    row.share_with_org_id, row.isolated = share_with_org_id, isolated
-    db.commit()
-    apply_units(db)
-    return policy_rows(db)
-
-
-def _org_has_schemas(db: Session, org_id: int) -> bool:
-    return db.execute(select(DataSchema.id).join(Project, Project.id == DataSchema.project_id)
-                      .where(Project.organization_id == org_id).limit(1)).first() is not None
 
 
 # --- 스키마·계정 ---
@@ -242,30 +290,26 @@ def _new_password() -> str:
     return secrets.token_urlsafe(24)
 
 
-def dsn(row: DataSchema) -> str:
-    """앱에 줄 접속 주소(libpq 형식) — 앱의 언어가 무엇이든 받는 모양이다. 스키마는 검색 경로로 잡힌다."""
+def dsn(row: DataSchema, db_name: str | None = None) -> str:
+    """앱에 줄 접속 주소(libpq 형식) — 앱의 언어가 무엇이든 받는 모양이다. 스키마는 검색 경로로 잡힌다.
+    db_name을 주면 같은 계정으로 부서의 다른 DB에 접속하는 주소(그 DB의 표를 읽는다)."""
     admin = _admin_url()
     host = get_settings().shared_db_app_host.strip() or admin.host or "127.0.0.1"
     port = admin.port or 5432
     return (f"postgresql://{row.role_name}:{decrypt_value(row.password_encrypted)}"
-            f"@{host}:{port}/{row.db_name}")
+            f"@{host}:{port}/{db_name or row.db_name}")
 
 
-def ensure_base(db_name: str, unit_id: int | None) -> None:
-    """자료 DB와 그 접속 권한 — 몇 번을 불러도 같다.
-
-    기본 DB에는 모든 앱 계정(paas_app)이 접속한다(스키마에 들어가는 것은 따로 막는다). 분리된 DB에는
-    그 공유 단위의 계정만 접속한다 — 그래야 다른 부서에 표 이름도 보이지 않는다.
-    """
-    if not _exists("role", APP_GROUP):
-        _execute(None, f"CREATE ROLE {_ident(APP_GROUP)} NOLOGIN")
+def ensure_base(db_name: str) -> None:
+    """자료 DB와 그 접속 권한 — 몇 번을 불러도 같다. 접속은 그 DB의 읽기 역할(그 DB를 고른 부서의 과제)만."""
     if not _exists("db", db_name):
         _execute(None, f"CREATE DATABASE {_ident(db_name)}")
     _execute(None, f"REVOKE CONNECT ON DATABASE {_ident(db_name)} FROM PUBLIC")
-    who = APP_GROUP if db_name == DATA_DB else unit_reader(unit_id) if unit_id is not None else APP_GROUP
-    if who != APP_GROUP:
-        _ensure_role(who)
-    _execute(None, f"GRANT CONNECT ON DATABASE {_ident(db_name)} TO {_ident(who)}")
+    if _exists("role", APP_GROUP):   # 예전 구성 — 모든 앱 계정이 기본 DB에 접속했다
+        _execute(None, f"REVOKE CONNECT ON DATABASE {_ident(db_name)} FROM {_ident(APP_GROUP)}")
+    reader = db_reader(db_name)
+    _ensure_role(reader)
+    _execute(None, f"GRANT CONNECT ON DATABASE {_ident(db_name)} TO {_ident(reader)}")
     # public 스키마는 쓰지 않는다 — 모든 표는 과제의 스키마에 있다.
     _execute(db_name, "REVOKE ALL ON SCHEMA public FROM PUBLIC")
 
@@ -285,8 +329,8 @@ def provision(db: Session, project: Project, profile: BuildProfile) -> DataSchem
     배포가 환경변수를 만들 때 부른다(deployer.resolve_env). 비밀번호는 DB에 만들기 **전에**
     저장한다 — 만든 뒤에 저장이 실패하면 아무도 모르는 비밀번호의 계정이 남는다.
     """
-    unit = unit_of(db, project.organization_id)
-    target_db = db_for_unit(db, unit)
+    names = databases_of(db, project.organization_id)
+    target_db = project_db(db, project)
     row = db.execute(select(DataSchema).where(
         DataSchema.project_id == project.id, DataSchema.profile == profile.value,
     )).scalar_one_or_none()
@@ -300,78 +344,152 @@ def provision(db: Session, project: Project, profile: BuildProfile) -> DataSchem
                          password_encrypted=encrypt_value(_new_password()))
         db.add(row)
         db.commit()
-    elif row.db_name != target_db:
+    elif row.db_name not in names:
         raise SharedDbError(
-            f"이 과제의 자료는 {row.db_name}에 있는데 지금 공유 단위의 DB는 {target_db}입니다 — 과제의 부서나"
-            " 공유 단위 설정이 바뀌었습니다. 되돌리거나 안내서의 수동 절차로 옮기세요.")
-    ensure_base(row.db_name, unit)
+            f"이 과제의 자료는 {row.db_name}에 있는데 과제의 부서가 그 DB를 쓰지 않습니다 — 부서의 DB에 다시 더하거나"
+            " 안내서의 수동 절차로 옮기세요.")
+    _database_row(db, row.db_name)
+    for name in names:
+        ensure_base(name)
     settings = get_settings()
     role = _ident(row.role_name)
     schema = _ident(row.schema_name)
     _ensure_role(row.role_name, decrypt_value(row.password_encrypted))
     # 관리 계정이 이 계정이 될 수 있어야 그 소유의 스키마를 만들고, 백업·대조 때 읽는다.
     _execute(None, f"GRANT {role} TO CURRENT_USER")
-    _execute(None, f"GRANT {_ident(APP_GROUP)} TO {role}")
     # 한 과제가 서버를 붙잡지 않게 — 여러 부서가 같은 서버를 쓴다.
     _execute(None, f"ALTER ROLE {role} CONNECTION LIMIT {int(settings.shared_db_connection_limit)}")
     _execute(None, f"ALTER ROLE {role} SET statement_timeout = '{int(settings.shared_db_statement_timeout)}s'")
     _execute(row.db_name, f"CREATE SCHEMA IF NOT EXISTS {schema} AUTHORIZATION {role}")
     # 표 이름만 쓰면 자기 스키마에 만들어진다 — 앱 코드에 스키마를 박지 않아도 된다.
     _execute(None, f"ALTER ROLE {role} IN DATABASE {_ident(row.db_name)} SET search_path TO {schema}")
-    _apply_unit(row, unit)
+    _share(row)
+    _apply_readers(row, names, _memberships())
     db.commit()
     return row
 
 
-def _apply_unit(row: DataSchema, unit: int | None) -> None:
-    """같은 공유 단위 읽기 — 이 계정을 단위 읽기 역할에 넣고, 운영 스키마를 그 역할이 들어가 읽게 한다.
-
-    공유 단위가 바뀌었으면 이전 단위의 읽기를 거둔다(이전 단위 과제가 계속 읽으면 안 된다). 개발
-    스키마는 공유하지 않는다 — 시험 중인 자료다.
-    """
-    role = _ident(row.role_name)
-    schema = _ident(row.schema_name)
-    release = row.profile == BuildProfile.release.value
-    old = row.unit_id
-    if old is not None and old != unit:
-        reader = _ident(unit_reader(old))
-        _execute(None, f"REVOKE {reader} FROM {role}")
-        if release:
-            _execute(row.db_name, f"ALTER DEFAULT PRIVILEGES FOR ROLE {role} IN SCHEMA {schema}"
-                                  f" REVOKE SELECT ON TABLES FROM {reader}")
-            _execute(row.db_name, f"REVOKE SELECT ON ALL TABLES IN SCHEMA {schema} FROM {reader}")
-            _execute(row.db_name, f"REVOKE USAGE ON SCHEMA {schema} FROM {reader}")
-    row.unit_id = unit
-    if unit is None:
+def _drop_unit(row: DataSchema) -> None:
+    """예전 「공유 단위」 읽기를 거둔다 — 남아 있으면 단위 밖으로 바뀐 부서가 계속 읽는다."""
+    if row.unit_id is None:
         return
-    reader = _ident(unit_reader(unit))
-    _ensure_role(unit_reader(unit))
-    _execute(None, f"GRANT {reader} TO {role}")
-    if release:
-        _execute(row.db_name, f"GRANT USAGE ON SCHEMA {schema} TO {reader}")
+    role, schema, reader = _ident(row.role_name), _ident(row.schema_name), _ident(unit_reader(row.unit_id))
+    _execute(None, f"REVOKE {reader} FROM {role}")
+    if row.profile == BuildProfile.release.value:
         _execute(row.db_name, f"ALTER DEFAULT PRIVILEGES FOR ROLE {role} IN SCHEMA {schema}"
-                              f" GRANT SELECT ON TABLES TO {reader}")
-        _execute(row.db_name, f"GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {reader}")
+                              f" REVOKE SELECT ON TABLES FROM {reader}")
+        _execute(row.db_name, f"REVOKE SELECT ON ALL TABLES IN SCHEMA {schema} FROM {reader}")
+        _execute(row.db_name, f"REVOKE USAGE ON SCHEMA {schema} FROM {reader}")
+    row.unit_id = None
 
 
-def apply_units(db: Session) -> dict:
-    """과제의 부서나 공유 단위 설정이 바뀌었으면 읽기 권한을 따라 바꾼다(같은 DB 안에서만).
+def _share(row: DataSchema) -> None:
+    """운영 스키마를 그 DB의 읽기 역할이 들어가 읽게 한다(앞으로 만들 표까지). 개발 스키마는 공유하지 않는다."""
+    if row.profile != BuildProfile.release.value:
+        return
+    role, schema, reader = _ident(row.role_name), _ident(row.schema_name), _ident(db_reader(row.db_name))
+    _execute(row.db_name, f"GRANT USAGE ON SCHEMA {schema} TO {reader}")
+    _execute(row.db_name, f"ALTER DEFAULT PRIVILEGES FOR ROLE {role} IN SCHEMA {schema}"
+                          f" GRANT SELECT ON TABLES TO {reader}")
+    _execute(row.db_name, f"GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {reader}")
 
-    DB가 바뀌어야 하는 과제는 건드리지 않고 남긴다(blocked) — 다음 배포가 사유와 함께 멈춘다.
-    """
-    policies = _policies(db)
+
+def _memberships() -> set[tuple[str, str]]:
+    """(읽기 역할, 계정) — 지금 서버에 있는 DB 읽기 역할 소속."""
+    return {(r, m) for r, m in _execute(None, (
+        "SELECT r.rolname, m.rolname FROM pg_auth_members a JOIN pg_roles r ON r.oid = a.roleid"
+        " JOIN pg_roles m ON m.oid = a.member WHERE r.rolname LIKE 'reader\\_%'"))}
+
+
+def _apply_readers(row: DataSchema, names: list[str], have: set[tuple[str, str]]) -> int:
+    """이 계정을 부서가 쓰는 DB들의 읽기 역할에 넣고, 쓰지 않게 된 DB의 읽기 역할에서는 뺀다. 바꾼 수."""
+    _drop_unit(row)
+    want = {db_reader(n) for n in names}
+    mine = {r for r, m in have if m == row.role_name}
+    for reader in sorted(want - mine):
+        _ensure_role(reader)
+        _execute(None, f"GRANT {_ident(reader)} TO {_ident(row.role_name)}")
+    for reader in sorted(mine - want):
+        _execute(None, f"REVOKE {_ident(reader)} FROM {_ident(row.role_name)}")
+    return len(want - mine) + len(mine - want)
+
+
+def apply_access(db: Session) -> dict:
+    """부서가 쓰는 DB가 바뀌었으면 읽기 역할 소속을 따라 바꾼다. 자기 스키마의 DB를 부서가 쓰지 않게 된 과제는
+    건드리지 않고 남긴다(blocked) — 다음 배포가 사유와 함께 멈춘다."""
+    readers = _readers_by_project(db)
+    have = _memberships()
     changed, blocked = 0, []
     for row in db.execute(select(DataSchema).where(DataSchema.project_id.is_not(None))).scalars():
-        project = db.get(Project, row.project_id)
-        unit = unit_of(db, project.organization_id, policies)
-        if db_for_unit(db, unit, policies) != row.db_name:
+        names = readers.get(row.project_id, [DATA_DB])
+        if row.db_name not in names:
             blocked.append(row.schema_name)
             continue
-        if row.unit_id != unit:
-            _apply_unit(row, unit)
-            changed += 1
+        changed += _apply_readers(row, names, have)
     db.commit()
     return {"changed": changed, "blocked": blocked}
+
+
+# --- DB 용도 설명(LLM) ---
+
+DESCRIBE_PROMPT = """사내 공용 PostgreSQL 서버의 자료 DB 하나가 **무엇에 쓰이는지** 한두 문장(한국어, 200자 안)으로 적는다.
+아래는 그 DB를 쓰는 부서·과제와 들어 있는 표(표 설명 포함)다. 어떤 업무의 어떤 자료가 모이는 DB인지, 새 과제가
+이 DB를 골라야 할 때가 언제인지 알 수 있게 쓴다. 지금 설명이 있으면 실제 내용에 맞게 고친다(맞으면 그대로).
+설명 문장만 낸다(따옴표·머리말 없이).
+
+DB: {name}
+지금 설명: {current}
+쓰는 부서: {orgs}
+과제: {projects}
+표(스키마.표 — 설명):
+{tables}"""
+
+
+def _db_facts(db: Session, name: str) -> dict:
+    owners = [r for r in db.execute(select(DataSchema).where(DataSchema.db_name == name)).scalars()
+              if r.profile == BuildProfile.release.value]
+    tables_here = [(t["schema"], t["table"], t["comment"]) for t in tables(db, name)]
+    return {"orgs": sorted(o["name"] for o in org_rows(db) if name in o["databases"]),
+            "projects": sorted({r.project_name for r in owners if r.project_name}),
+            "tables": tables_here[:200]}
+
+
+def describe_databases(db: Session) -> list[str]:
+    """DB 안의 표·표 설명·쓰는 과제가 지난번 설명 이후 바뀐 DB만 LLM이 용도 설명을 다시 쓴다(기본 프로바이더).
+    바뀐 것이 없으면 부르지 않는다. 실패해도 권한 대조는 계속된다 — 다시 쓴 DB 이름을 돌려준다."""
+    from . import llm  # noqa: PLC0415 — 순환 import 회피
+
+    provider = llm.default_provider(db)
+    if provider is None:
+        return []
+    done = []
+    for name in sorted({r["name"] for r in database_rows(db)}):
+        try:
+            facts = _db_facts(db, name)
+        except SharedDbError:
+            continue
+        if not facts["tables"] and not facts["projects"]:
+            continue   # 아직 쓰임이 없다 — 기획이 고를 때 적은 설명(있으면)을 둔다
+        signature = hashlib.sha1(json.dumps(facts, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        row = _database_row(db, name)
+        if row.signature == signature:
+            continue
+        prompt = DESCRIBE_PROMPT.format(
+            name=name, current=row.description or "(없음)", orgs=", ".join(facts["orgs"]) or "(없음)",
+            projects=", ".join(facts["projects"]) or "(없음)",
+            tables="\n".join(f"- {s}.{t}" + (f" — {c}" if c else "") for s, t, c in facts["tables"]) or "- (없음)")
+        try:
+            text = llm.chat_completion(provider, [{"role": "user", "content": prompt}], db)
+        except Exception:  # noqa: BLE001 — 설명은 덤이다: 다음 대조에 다시 해 본다
+            continue
+        text = re.sub(r"\s+", " ", str(text or "")).strip().strip('"\'「」').strip()
+        if text:
+            row.description, row.described_by = text[:500], "llm"
+            row.described_at = datetime.now(timezone.utc)
+        row.signature = signature
+        db.commit()
+        done.append(name)
+    return done
 
 
 # --- 표·권한 ---
@@ -381,7 +499,7 @@ def _db_names(db: Session) -> list[str]:
 
 
 def tables(db: Session, db_name: str | None = None) -> list[dict]:
-    """플랫폼이 만든 운영 스키마의 표 — 이름·설명·주인 과제·공유 단위·DB. 행은 읽지 않는다."""
+    """플랫폼이 만든 운영 스키마의 표 — 이름·설명·주인 과제·DB. 행은 읽지 않는다."""
     owners = {r.schema_name: r for r in db.execute(select(DataSchema).where(
         DataSchema.profile == BuildProfile.release.value)).scalars()
         if db_name is None or r.db_name == db_name}
@@ -395,8 +513,7 @@ def tables(db: Session, db_name: str | None = None) -> list[dict]:
             owner = owners.get(schema)
             out.append({"schema": schema, "table": table, "comment": comment or "", "db_name": name,
                         "project_id": owner.project_id if owner else None,
-                        "project_name": owner.project_name if owner else "",
-                        "unit_id": owner.unit_id if owner else None})
+                        "project_name": owner.project_name if owner else ""})
     return out
 
 
@@ -410,7 +527,8 @@ def grant(db: Session, schema: str, table: str, project: Project, privilege: str
           granted_by: str, expires_at: datetime | None = None) -> DataGrant:
     """다른 과제에 표 하나를 읽기/쓰기로 준다(관리자) — 권한 표에 적고 바로 반영한다.
 
-    같은 DB 안에서만 줄 수 있다 — 분리된 공유 단위의 표는 그 단위 밖으로 나가지 않는다.
+    받는 과제의 부서가 그 DB를 쓸 때만 줄 수 있다 — 쓰지 않는 DB에는 접속도 못 한다(그 DB를 부서에 더하는 것은
+    부서의 DB 설정이다). 같은 DB를 쓰면 읽기는 이미 되므로, 표 단위로 주는 것은 대개 쓰기다.
     """
     if privilege not in PRIVILEGES:
         raise SharedDbError("권한은 read 또는 write입니다.")
@@ -423,8 +541,9 @@ def grant(db: Session, schema: str, table: str, project: Project, privilege: str
     mine = _release_row(db, project.id)
     if mine is None:
         raise SharedDbError("받을 과제가 아직 공용 DB를 쓰지 않습니다 — 「공용 DB」를 바인딩해 배포한 뒤에 주세요.")
-    if mine.db_name != owner.db_name:
-        raise SharedDbError(f"{owner.db_name}의 표는 그 공유 단위 밖으로 줄 수 없습니다(분리된 DB).")
+    if owner.db_name not in databases_of(db, project.organization_id):
+        raise SharedDbError(f"받을 과제의 부서가 {owner.db_name}을 쓰지 않습니다 — 그 DB의 표는 줄 수 없습니다"
+                            "(부서의 DB에 더한 뒤에 주세요).")
     row = db.execute(select(DataGrant).where(
         DataGrant.schema_name == schema, DataGrant.table_name == table,
         DataGrant.project_id == project.id)).scalar_one_or_none()
@@ -451,10 +570,11 @@ def _aware(at: datetime) -> datetime:
 
 
 def reconcile(db: Session, now: datetime | None = None) -> dict:
-    """PostgreSQL 권한을 플랫폼의 표에 맞춘다 — 공유 단위, 표 권한, 스키마 출입(USAGE).
+    """PostgreSQL 권한을 플랫폼의 표에 맞춘다 — DB 읽기 역할 소속, 표 권한, 스키마 출입(USAGE). 바뀐 DB는 용도
+    설명을 LLM이 다시 쓴다.
 
     없는 것은 주고, 권한 표에 없는 것·만료된 것은 거둔다. 대상은 플랫폼이 만든 계정이 **남의
-    스키마에** 가진 권한이다(자기 스키마의 주인 권한과 단위 읽기 역할은 _apply_unit이 맡는다).
+    스키마에** 가진 권한이다(자기 스키마의 주인 권한과 DB 읽기 역할은 _share·_apply_readers가 맡는다).
     """
     now = now or datetime.now(timezone.utc)
     expired = [g for g in db.execute(select(DataGrant)).scalars()
@@ -462,9 +582,13 @@ def reconcile(db: Session, now: datetime | None = None) -> dict:
     for g in expired:
         db.delete(g)
     db.commit()
-    units = apply_units(db)
+    access = apply_access(db)
 
     rows = list(db.execute(select(DataSchema)).scalars())
+    readers = _readers_by_project(db)
+    for r in rows:
+        if r.db_name in readers.get(r.project_id, ()) or r.project_id is None:
+            _share(r)
     roles_of: dict[int, dict[str, DataSchema]] = {}
     for r in rows:
         if r.project_id is not None:
@@ -473,16 +597,16 @@ def reconcile(db: Session, now: datetime | None = None) -> dict:
     granted = revoked = 0
     for name in _db_names(db):
         schemas = {r.schema_name: r for r in rows if r.db_name == name}
-        app_roles = {r.role_name for r in rows if r.db_name == name}
+        app_roles = {r.role_name for r in rows}
         existing = {(t["schema"], t["table"]) for t in tables(db, name)}
         want_table: dict[tuple[str, str, str], set[str]] = {}
         want_usage: set[tuple[str, str]] = set()
         for g in grants:
             if g.schema_name not in schemas or (g.schema_name, g.table_name) not in existing:
                 continue  # 다른 DB의 표이거나, 아직 없거나 지워졌다 — 생기면 다음 대조에서 준다
+            if name not in readers.get(g.project_id, ()):
+                continue   # 받는 과제의 부서가 이 DB를 쓰지 않는다(뒤에 뺐다) — 주지 않는다
             for profile, r in roles_of.get(g.project_id, {}).items():
-                if r.db_name != name:
-                    continue
                 # 개발 계정은 남의 표를 읽기만 한다 — 쓰기 권한을 받았어도.
                 privs = PRIVILEGES["read" if profile != BuildProfile.release.value else g.privilege]
                 want_table.setdefault((r.role_name, g.schema_name, g.table_name), set()).update(privs)
@@ -518,8 +642,12 @@ def reconcile(db: Session, now: datetime | None = None) -> dict:
         for role, schema in have_usage - want_usage:
             _execute(name, f"REVOKE USAGE ON SCHEMA {_ident(schema)} FROM {_ident(role)}")
             revoked += 1
+    try:
+        described = describe_databases(db)
+    except Exception:  # noqa: BLE001 — 설명은 덤이다
+        described = []
     return {"granted": granted, "revoked": revoked, "expired": len(expired),
-            "units_changed": units["changed"], "blocked": units["blocked"]}
+            "access_changed": access["changed"], "blocked": access["blocked"], "described": described}
 
 
 def detach_project(db: Session, project_id: int) -> None:
@@ -548,29 +676,33 @@ def is_shared(module: Module) -> bool:
 
 
 def readable(db: Session, project: Project) -> dict[str, list[dict]]:
-    """이 과제가 읽을 수 있는 표(자기 것·같은 공유 단위·받은 것)와, 신청하면 쓸 수 있는 표.
+    """이 과제가 읽을 수 있는 표 — 자기 것(own), 같은 DB를 쓰는 다른 과제의 것(shared), 표 단위로 받은 것(granted).
 
-    같은 DB의 표만 본다 — 분리된 DB의 표는 이름도 내보내지 않는다.
+    부서가 쓰는 DB의 표만 본다 — 쓰지 않는 DB의 표는 이름도 내보내지 않는다.
     """
-    out: dict[str, list[dict]] = {"own": [], "unit": [], "granted": [], "requestable": []}
-    mine = _release_row(db, project.id) or db.execute(select(DataSchema).where(
-        DataSchema.project_id == project.id)).scalars().first()
-    if mine is None:
+    out: dict[str, list[dict]] = {"own": [], "shared": [], "granted": []}
+    if db.execute(select(DataSchema).where(DataSchema.project_id == project.id)).scalars().first() is None:
         return out
-    unit = unit_of(db, project.organization_id)
     received = {(g.schema_name, g.table_name): g.privilege for g in db.execute(
         select(DataGrant).where(DataGrant.project_id == project.id)).scalars()}
-    for t in tables(db, mine.db_name):
-        key = (t["schema"], t["table"])
-        if t["project_id"] == project.id:
-            out["own"].append(t)
-        elif unit is not None and t["unit_id"] == unit:
-            out["unit"].append(t)
-        elif key in received:
-            out["granted"].append({**t, "privilege": received[key]})
-        else:
-            out["requestable"].append(t)
+    for name in databases_of(db, project.organization_id):
+        for t in tables(db, name):
+            key = (t["schema"], t["table"])
+            if t["project_id"] == project.id:
+                out["own"].append(t)
+            elif key in received:
+                out["granted"].append({**t, "privilege": received[key]})
+            else:
+                out["shared"].append(t)
     return out
+
+
+def database_choices(db: Session, project: Project) -> list[dict]:
+    """기획 LLM이 고를 DB — 부서가 쓰는 DB와 그 용도 설명, 지금 이 과제의 DB인지."""
+    current = project_db(db, project)
+    descriptions = {r.name: r.description for r in db.execute(select(DataDatabase)).scalars()}
+    return [{"name": n, "description": descriptions.get(n, ""), "current": n == current}
+            for n in databases_of(db, project.organization_id)]
 
 
 def schema_summary(db: Session, project: Project) -> str:
@@ -581,7 +713,7 @@ def schema_summary(db: Session, project: Project) -> str:
     """
     try:
         groups = readable(db, project)
-        visible = groups["own"] + groups["unit"] + groups["granted"]
+        visible = groups["own"] + groups["shared"] + groups["granted"]
         columns: dict[tuple[str, str], list[str]] = {}
         for name in sorted({t["db_name"] for t in visible}):
             schemas = ", ".join(_literal(s) for s in sorted({t["schema"] for t in visible if t["db_name"] == name}))
@@ -593,18 +725,18 @@ def schema_summary(db: Session, project: Project) -> str:
         return f"- 공용 DB를 읽지 못했습니다({e})"
 
     def line(t: dict, with_columns: bool) -> str:
-        head = f"  - {t['schema']}.{t['table']}"
+        head = f"  - [{t['db_name']}] {t['schema']}.{t['table']}"
         if with_columns:
             head += f"({', '.join(columns.get((t['schema'], t['table']), []))})"
         if t.get("privilege") == "write":
             head += " [쓰기 가능]"
         return head + (f" — {t['comment']}" if t["comment"] else "")
 
-    lines: list[str] = []
+    lines: list[str] = [f"- DB {d['name']}{' (이 과제의 DB)' if d['current'] else ''}: {d['description'] or '(용도 설명 없음)'}"
+                        for d in database_choices(db, project)]
     for key, label, with_columns in (("own", "이 앱의 표", True),
-                                     ("unit", "같은 공유 단위(부서) 과제의 표(읽기)", True),
-                                     ("granted", "권한을 받은 표", True),
-                                     ("requestable", "다른 공유 단위의 표(관리자에게 신청하면 쓸 수 있다)", False)):
+                                     ("shared", "같은 DB를 쓰는 과제의 표(읽기)", True),
+                                     ("granted", "권한을 받은 표", True)):
         if groups[key]:
             lines.append(f"- {label}:")
             lines += [line(t, with_columns) for t in groups[key]]
@@ -639,7 +771,7 @@ def backup(db: Session, db_name: str = DATA_DB) -> dict:
 
 
 def backup_targets(db: Session) -> list[str]:
-    """백업할 DB — 스키마가 있는 자료 DB마다 하나(기본 DB와 분리된 DB들)."""
+    """백업할 DB — 스키마가 있는 자료 DB마다 하나."""
     return _db_names(db)
 
 
@@ -647,5 +779,5 @@ def listing(db: Session) -> list[dict]:
     """플랫폼이 만든 스키마 목록 — 주인 없는 것(지운 과제의 스키마)도 보인다."""
     rows = db.execute(select(DataSchema).order_by(DataSchema.db_name, DataSchema.schema_name)).scalars()
     return [{"db_name": r.db_name, "schema": r.schema_name, "role": r.role_name, "profile": r.profile,
-             "project_id": r.project_id, "project_name": r.project_name, "unit_id": r.unit_id,
+             "project_id": r.project_id, "project_name": r.project_name,
              "orphan": r.project_id is None, "created_at": r.created_at.isoformat()} for r in rows]

@@ -9,12 +9,11 @@ const PROFILE: Record<string, string> = { release: '운영', development: '개�
 const PRIVILEGE: Record<string, string> = { read: '읽기', write: '읽기·쓰기' };
 
 /**
- * 공용 DB — 자료 DB(paas_data)에서 이 과제의 스키마와, 읽을 수 있는 표·준 권한(services/shareddb).
+ * 공용 DB — 부서가 쓰는 자료 DB 중 이 과제의 DB에 있는 스키마와, 읽을 수 있는 표·준 권한(services/shareddb).
  *
- * 같은 공유 단위(기본은 자기 부서 — 조직 관리에서 관리자가 넓힌다)의 과제는 서로의 운영 표를 기본으로
- * 읽는다. 단위 밖의 과제는 그 스키마에 들어가지도 못하고, **관리자가 표 단위로**
- * 준다(읽기/쓰기, 만료일) — 플랫폼이 그 기록대로 DB 권한을 맞추고, 만료되면 거둔다. 비밀번호는
- * 보이지 않는다(앱은 배포 때 환경변수로 받는다).
+ * 같은 DB를 쓰는 부서의 과제는 서로의 운영 표를 기본으로 읽는다(부서가 쓰는 DB는 조직 관리에서 관리자가 고른다).
+ * 쓰기는 자기 표와 **관리자가 표 단위로** 준 것만(읽기/쓰기, 만료일) — 플랫폼이 그 기록대로 DB 권한을 맞추고,
+ * 만료되면 거둔다. DB를 고르는 것과 DB의 용도 설명은 LLM이 한다(기획의 솔루션 구성). 비밀번호는 보이지 않는다.
  */
 export default function SharedDbPanel({ projectId }: { projectId: number }) {
   const state = useApi(() => api.projectSharedDb(projectId), [projectId]);
@@ -54,9 +53,21 @@ export default function SharedDbPanel({ projectId }: { projectId: number }) {
               앱은 <span className="mono">{s.env_key}</span>로 접속 정보를 받고, 표 이름만 쓰면 자기 스키마에
               만들어집니다.{' '}
               {s.schemas.length > 0
-                ? s.schemas.map((x) => `${PROFILE[x.profile] ?? x.profile} ${x.schema}`).join(' · ')
+                ? s.schemas.map((x) => `${PROFILE[x.profile] ?? x.profile} ${x.db_name}.${x.schema}`).join(' · ')
                 : '아직 만들어진 스키마가 없습니다 — 배포하면 만들어집니다.'}
             </p>
+            {s.databases.length > 0 && (
+              <ul className="mutedtext" style={{ fontSize: 12, margin: '0 0 8px', paddingLeft: 18 }}>
+                {s.databases.map((d) => (
+                  <li key={d.name}>
+                    <span className="mono">{d.name}</span>
+                    {d.current ? <span className="status info" style={{ marginLeft: 4 }}>이 과제의 DB</span>
+                      : <> — <span className="mono">{s.env_key}_{d.name.toUpperCase()}</span>로 접속</>}
+                    {' '}· {d.description || '(용도 설명 없음 — 쓰이기 시작하면 LLM이 적습니다)'}
+                  </li>
+                ))}
+              </ul>
+            )}
             {s.error && <p className="error">표를 읽지 못했습니다: {s.error}</p>}
 
             <h3 style={{ fontSize: 14 }}>이 과제의 표</h3>
@@ -115,16 +126,16 @@ export default function SharedDbPanel({ projectId }: { projectId: number }) {
               </>
             )}
 
-            {(s.tables.unit.length > 0 || s.tables.granted.length > 0) && (
+            {(s.tables.shared.length > 0 || s.tables.granted.length > 0) && (
               <>
                 <h3 style={{ fontSize: 14 }}>읽을 수 있는 다른 표</h3>
                 <table>
                   <tbody>
-                    {[...s.tables.unit.map((t) => ({ ...t, how: '같은 공유 단위(읽기)' })),
+                    {[...s.tables.shared.map((t) => ({ ...t, how: '같은 DB(읽기)' })),
                       ...s.tables.granted.map((t) => ({ ...t, how: `권한 받음(${PRIVILEGE[t.privilege ?? 'read']})` }))]
                       .map((t) => (
                         <tr key={`${t.schema}.${t.table}`}>
-                          <td className="mono">{t.schema}.{t.table}</td>
+                          <td className="mono">{t.db_name}.{t.schema}.{t.table}</td>
                           <td>{t.project_name}</td>
                           <td>{t.how}</td>
                           <td className="mutedtext" style={{ fontSize: 12 }}>{t.comment}</td>
@@ -172,7 +183,8 @@ function GrantForm({ table, projects, busy, onCancel, onSubmit }: {
       })}>주기</button>
       <button className="small secondary" onClick={onCancel}>취소</button>
       <span className="mutedtext" style={{ fontSize: 11 }}>
-        같은 공유 단위 과제는 이미 읽습니다. 쓰기는 운영 배포에만 적용되고, 개발 배포는 읽기만 합니다.
+        같은 DB를 쓰는 부서의 과제는 이미 읽습니다(받는 과제의 부서가 이 DB를 써야 줄 수 있습니다). 쓰기는 운영
+        배포에만 적용되고, 개발 배포는 읽기만 합니다.
       </span>
     </div>
   );

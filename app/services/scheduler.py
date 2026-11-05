@@ -84,7 +84,7 @@ def _wanted(db: Session) -> list[tuple[JobKind, str]]:
     if shareddb.configured():
         from ..models import DataSchema  # noqa: PLC0415
 
-        # 자료 DB마다 야간 백업(기본 DB와 분리된 DB들), 권한 대조는 하나. 스키마가 하나라도 생긴 뒤에만
+        # 자료 DB마다 야간 백업(스키마가 있는 DB마다), 권한 대조는 하나. 스키마가 하나라도 생긴 뒤에만
         # 돈다(설정만 해 두고 아무도 쓰지 않는 동안 빈 DB를 백업하고 대조할 이유가 없다).
         if db.execute(select(DataSchema.id).limit(1)).first() is not None:
             wanted += [(JobKind.db_backup, name) for name in shareddb.backup_targets(db)]
@@ -174,7 +174,8 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
             if job.kind == JobKind.db_backup:
                 return JobStatus.ok, shareddb.backup(db, job.target)
             result = shareddb.reconcile(db)
-            changed = result["granted"] + result["revoked"] + result["expired"] + result["units_changed"]
+            changed = (result["granted"] + result["revoked"] + result["expired"] + result["access_changed"]
+                       + len(result["described"]))
             if result["blocked"]:
                 # DB가 바뀌어야 하는 과제 — 플랫폼이 옮기지 않는다. 실패로 띄워 사람이 보게 한다.
                 return JobStatus.failed, {**result, "error": "공유 단위의 DB가 바뀐 과제가 있습니다(수동 이전 필요)"}

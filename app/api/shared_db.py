@@ -62,7 +62,9 @@ def project_shared_db(project_id: int, db: Session = Depends(get_db),
         "env_key": f"{binding.env_prefix.upper()}_DSN" if binding else "",
         "schemas": [{"profile": s.profile, "schema": s.schema_name, "db_name": s.db_name}
                     for s in schemas],
-        "tables": {"own": [], "unit": [], "granted": [], "requestable": []},
+        # 부서가 쓰는 DB와 용도 설명(LLM이 적은 것), 이 과제의 DB — 다른 DB는 {PREFIX}_DSN_{DB}로 접속한다
+        "databases": shareddb.database_choices(db, project) if shareddb.configured() else [],
+        "tables": {"own": [], "shared": [], "granted": []},
         "given": [_grant_out(g, names) for g in db.execute(
             select(DataGrant).where(DataGrant.schema_name.in_(own))).scalars()] if own else [],
         "error": "",
@@ -75,27 +77,26 @@ def project_shared_db(project_id: int, db: Session = Depends(get_db),
     return out
 
 
-@router.get("/shared-db/policies")
-def list_policies(db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
-    """부서마다 공유 단위·분리·DB·스키마 수(관리자). 공용 DB를 쓰지 않는 설치본이면 화면이 숨는다."""
-    return {"configured": shareddb.configured(), "policies": shareddb.policy_rows(db)}
+@router.get("/shared-db/databases")
+def list_databases(db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """부서마다 쓰는 DB와 DB 목록(용도 설명·쓰는 부서·스키마 수)(관리자). 공용 DB를 쓰지 않는 설치본이면 화면이 숨는다."""
+    return {"configured": shareddb.configured(), "organizations": shareddb.org_rows(db),
+            "databases": shareddb.database_rows(db)}
 
 
-class PolicyIn(BaseModel):
-    share_with_org_id: int | None = None  # 비우면 자기 부서가 공유 단위
-    isolated: bool = False                # 공유 단위만 — 켜면 그 단위만 자기 DB를 쓴다
+class OrgDatabasesIn(BaseModel):
+    databases: list[str]   # 앞의 것이 부서의 기본 — 새 이름이면 서버에 만든다
 
 
-@router.put("/shared-db/policies/{org_id}")
-def put_policy(org_id: int, body: PolicyIn, db: Session = Depends(get_db),
-               admin: ApiKey = Depends(require_admin)):
-    """부서의 공유 단위를 정한다(관리자). 자료가 있는 부서의 DB가 바뀌는 설정은 409로 거부한다."""
+@router.put("/shared-db/organizations/{org_id}/databases")
+def put_org_databases(org_id: int, body: OrgDatabasesIn, db: Session = Depends(get_db),
+                      admin: ApiKey = Depends(require_admin)):
+    """부서가 쓰는 DB를 정한다(관리자). 자기 과제의 자료가 있는 DB를 빼는 설정은 409로 거부한다."""
     try:
-        rows = shareddb.set_policy(db, org_id, body.share_with_org_id, body.isolated)
+        rows = shareddb.set_databases(db, org_id, body.databases)
     except shareddb.SharedDbError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    audit.record(db, admin.name, "shared_db.policy", str(org_id),
-                 {"share_with_org_id": body.share_with_org_id, "isolated": body.isolated})
+    audit.record(db, admin.name, "shared_db.databases", str(org_id), {"databases": body.databases})
     return rows
 
 

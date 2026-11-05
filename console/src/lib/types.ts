@@ -1311,20 +1311,25 @@ export interface SharedDbTable {
   comment: string;
   project_id: number | null;
   project_name: string;
-  unit_id: number | null;
   db_name: string;
   privilege?: string;
 }
 
-/** 부서의 공용 DB 공유 단위(관리자 설정) — 기본은 자기 부서, 다른 부서를 지정하면 그 부서와 함께 쓴다. */
-export interface OrgDataPolicyRow {
+/** 부서가 쓰는 자료 DB(관리자 설정) — 여럿, 앞의 것이 기본. 고르지 않으면 기본 DB 하나. */
+export interface OrgDatabasesRow {
   organization_id: number;
   name: string;
-  share_with_org_id: number | null;
-  isolated: boolean;
-  unit_id: number | null;
-  unit_name: string;
-  db_name: string;
+  databases: string[];
+  schemas: number;
+}
+
+/** 자료 DB 하나 — 용도 설명은 LLM이 실제 쓰임을 보고 적고 고친다(사람이 입력하지 않는다). */
+export interface DataDatabaseRow {
+  name: string;
+  description: string;
+  described_by: string;   // planning(기획에서 고를 때) | llm(쓰임을 보고 다시 씀)
+  described_at: string | null;
+  organizations: string[];
   schemas: number;
 }
 
@@ -1346,7 +1351,9 @@ export interface ProjectSharedDb {
   bound: boolean;
   env_key: string;
   schemas: { profile: string; schema: string; db_name: string }[];
-  tables: { own: SharedDbTable[]; unit: SharedDbTable[]; granted: SharedDbTable[]; requestable: SharedDbTable[] };
+  // 부서가 쓰는 DB와 용도 설명(LLM이 적은 것) — current가 이 과제의 스키마가 있는(둘) DB
+  databases: { name: string; description: string; current: boolean }[];
+  tables: { own: SharedDbTable[]; shared: SharedDbTable[]; granted: SharedDbTable[] };
   given: DataGrantOut[];
   error: string;
 }
