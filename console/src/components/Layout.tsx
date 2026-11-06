@@ -105,6 +105,18 @@ export default function Layout() {
             같은 일을 세 번 겪었으니(projects.structure · chat_sessions.merged_at ·
             build_tasks.number) 어느 화면에 있든 보이게 띄운다. 막지는 않는다:
             나머지 화면은 동작하고, 복구도 이 콘솔(터미널)로 해야 한다. */}
+        {health.data?.schema_revision?.behind && (health.data?.schema_missing?.length ?? 0) === 0 && (
+          <div className="panel" style={{ borderColor: '#f59e0b', marginBottom: 12 }}>
+            <strong style={{ color: '#f59e0b' }}>
+              ⚠️ DB 마이그레이션이 덜 돌았습니다 — DB는 <span className="mono">{health.data.schema_revision.db.join(', ') || '(없음)'}</span>,
+              코드는 <span className="mono">{health.data.schema_revision.code.join(', ')}</span>
+            </strong>
+            <div className="mutedtext" style={{ fontSize: 12, marginTop: 4 }}>
+              화면은 동작하지만 자료를 옮기는 단계가 건너뛰어졌을 수 있습니다. 복구:{' '}
+              <span className="mono">{health.data.schema_recovery}</span>
+            </div>
+          </div>
+        )}
         {(health.data?.schema_missing?.length ?? 0) > 0 && (
           <div className="panel" style={{ borderColor: '#f59e0b', marginBottom: 12 }}>
             <strong style={{ color: '#f59e0b' }}>

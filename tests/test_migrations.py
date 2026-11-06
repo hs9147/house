@@ -100,3 +100,45 @@ def test_startup_is_quiet_when_the_schema_matches(monkeypatch, fresh_settings, t
     monkeypatch.setattr(main, "engine", engine)
     main._warn_if_schema_is_behind()
     assert "뒤처졌습니다" not in capsys.readouterr().out
+
+
+def test_upgrade_reaches_head_even_after_the_app_made_the_tables(alembic_cfg):
+    """앱은 기동할 때 표를 직접 만든다(create_all) — 그 뒤에 upgrade head를 돌려도 「already exists」로 멈추지 않고
+    끝까지 간다(migrations/env.py가 이미 된 것을 건너뛴다). 실측: 개발 DB가 mcp_tokens에서 멈춰 있었다."""
+    cfg, url = alembic_cfg
+    from app.db import Base
+    from app.services.schemacheck import code_heads, missing_columns, revision_state
+
+    engine = create_engine(url)
+    Base.metadata.create_all(engine)
+    command.upgrade(cfg, "head")
+    state = revision_state(engine)
+    assert state["db"] == code_heads() and state["behind"] is False
+    assert missing_columns(engine, Base.metadata) == []
+    command.upgrade(cfg, "head")                       # 다시 돌려도 그대로
+
+
+def test_columns_without_a_revision_are_added_on_upgrade(alembic_cfg):
+    """모델에 열을 더하고 리비전을 빠뜨린 경우 — upgrade head가 끝에 그 열을 더한다(더하기만)."""
+    cfg, url = alembic_cfg
+    from sqlalchemy import text
+
+    from app.db import Base
+    from app.services.schemacheck import missing_columns
+
+    command.upgrade(cfg, "head")
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE data_schemas DROP COLUMN unit_id"))
+    assert missing_columns(engine, Base.metadata) == ["data_schemas.unit_id"]
+    command.upgrade(cfg, "head")
+    assert missing_columns(engine, Base.metadata) == []
+
+
+def test_health_reports_a_revision_behind(alembic_cfg):
+    cfg, url = alembic_cfg
+    from app.services.schemacheck import revision_state
+
+    command.upgrade(cfg, "fc3d4e5f6a7b")
+    state = revision_state(create_engine(url))
+    assert state["db"] == ["fc3d4e5f6a7b"] and state["behind"] is True

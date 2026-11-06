@@ -9,8 +9,44 @@ health에도 실어 콘솔이 띄울 수 있게 한다.
 """
 import sqlalchemy as sa
 
-RECOVERY = ("alembic upgrade head "
-            "(테이블이 이미 있어 실패하면 빠진 컬럼을 ALTER TABLE로 추가하고 alembic stamp head)")
+RECOVERY = ("python -m alembic upgrade head — 이미 있는 표·열은 건너뛰고, 리비전에 없던 표·열도 만든다"
+            "(migrations/env.py). 「SW 업데이트」가 이것을 돌린다")
+
+
+_CODE_HEADS: list[str] | None = None
+
+
+def code_heads() -> list[str]:
+    """코드의 마지막 리비전 — 기동할 때 한 번 읽는다(코드는 재시작해야 바뀐다)."""
+    global _CODE_HEADS
+    if _CODE_HEADS is None:
+        try:
+            from pathlib import Path  # noqa: PLC0415
+
+            from alembic.config import Config  # noqa: PLC0415
+            from alembic.script import ScriptDirectory  # noqa: PLC0415
+
+            root = Path(__file__).resolve().parents[2]
+            cfg = Config(str(root / "alembic.ini"))
+            cfg.set_main_option("script_location", str(root / "migrations"))
+            _CODE_HEADS = sorted(ScriptDirectory.from_config(cfg).get_heads())
+        except Exception:  # noqa: BLE001 — 진단이다
+            _CODE_HEADS = []
+    return _CODE_HEADS
+
+
+def revision_state(engine) -> dict:
+    """DB의 리비전과 코드의 리비전 — 다르면(behind) 마이그레이션이 덜 돌았다. 빠진 열만 보면 막혀 있어도 모른다:
+    앱이 표를 만들어 주니 화면은 멀쩡한데, 자료를 옮기는 리비전은 조용히 건너뛰어진 채다(실측)."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(sa.text("SELECT version_num FROM alembic_version")).fetchall() \
+                if sa.inspect(conn).has_table("alembic_version") else []
+        db = sorted(r[0] for r in rows)
+    except Exception:  # noqa: BLE001
+        return {"db": [], "code": code_heads(), "behind": False}
+    code = code_heads()
+    return {"db": db, "code": code, "behind": bool(code) and db != code}
 
 
 def missing_columns(engine, metadata) -> list[str]:

@@ -66,7 +66,7 @@ def health():
     from ..services.host import get_host_caps  # noqa: PLC0415
 
     from ..db import Base, engine  # noqa: PLC0415
-    from ..services.schemacheck import RECOVERY, missing_columns  # noqa: PLC0415
+    from ..services.schemacheck import RECOVERY, missing_columns, revision_state  # noqa: PLC0415
     from .. import models  # noqa: F401, PLC0415 — 모델을 메타데이터에 등록해 둔다
 
     settings = get_settings()
@@ -79,6 +79,8 @@ def health():
         # 빠진 컬럼이 있으면 그 테이블을 읽는 화면이 전부 500이 된다. 기동 로그에만 적었더니
         # 로그를 보지 않는 사람은 "Internal Server Error"만 봤다 — 콘솔이 배너로 띄우게 싣는다.
         "schema_missing": missing_columns(engine, Base.metadata),
+        # DB 리비전 ≠ 코드 리비전 — 마이그레이션이 덜 돌았다(빠진 열이 없어도 자료 옮기기가 건너뛰어졌을 수 있다)
+        "schema_revision": revision_state(engine),
         "schema_recovery": RECOVERY,
         "revision": revision,
         "branch": branch,
@@ -958,8 +960,13 @@ def sw_update(
         "Write-Host '[SW Update] alembic upgrade head...'; "
         f"& '{escaped_python}' -m alembic upgrade head; "
         "if ($LASTEXITCODE -ne 0) { "
-        "  Write-Host '[SW Update] !! alembic 실패 — DB 스키마가 코드보다 뒤처집니다"
-        "(해당 화면이 500으로 실패할 수 있습니다). /paas/health의 schema_missing을 보세요.'; } "
+        "  Write-Host ''; "
+        "  Write-Host '[SW Update] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'; "
+        "  Write-Host '[SW Update] !! alembic 실패 — DB 스키마가 코드보다 뒤처집니다. 위 오류를 보세요.'; "
+        "  Write-Host '[SW Update] !! 재시작 뒤 콘솔 맨 위에 경고가 뜹니다(/paas/health의 schema_revision).'; "
+        "  Write-Host '[SW Update] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'; "
+        "  Write-Host ''; } "
+        f"& '{escaped_python}' -m alembic current; "
         # 콘솔은 플랫폼 자신이라 배포 파이프라인이 없다 — 여기서 빌드하지 않으면
         # 의존성이 늘었을 때 예전 dist가 조용히 계속 서빙된다.
         f"if (Test-Path '{escaped_console}\package.json') {{ "

@@ -73,6 +73,12 @@ def _warn_if_schema_is_behind() -> None:
     """
     from .services.schemacheck import RECOVERY, missing_columns  # noqa: PLC0415
 
+    from .services.schemacheck import revision_state  # noqa: PLC0415
+
+    state = revision_state(engine)
+    if state["behind"]:
+        print(f"[paas] !! DB 리비전({', '.join(state['db']) or '없음'})이 코드({', '.join(state['code'])})와 다릅니다 — "
+              f"마이그레이션이 덜 돌았습니다. 복구: {RECOVERY}")
     missing = missing_columns(engine, Base.metadata)
     if missing:
         print("[paas] !! DB 스키마가 코드보다 뒤처졌습니다 — 아래 컬럼이 없어 해당 화면이 "
