@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import Async from '../components/Async';
+import Modal from '../components/Modal';
 import { api } from '../lib/api';
 import { fmtBytes, fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
@@ -95,6 +96,7 @@ function DiskTop({ s }: { s: StatusSnapshot }) {
 
 export default function Dashboard() {
   const state = useApi(() => api.status());
+  const [tempOpen, setTempOpen] = useState(false);
 
   return (
     <>
@@ -102,6 +104,7 @@ export default function Dashboard() {
         <div className="row" style={{ marginBottom: 12 }}>
           <h2 style={{ margin: 0 }}>시스템 상태</h2>
           <div className="spacer" />
+          <button className="secondary small" onClick={() => setTempOpen(true)}>임시 작업</button>{' '}
           <button className="secondary small" onClick={state.reload}>
             새로고침
           </button>
@@ -176,7 +179,87 @@ export default function Dashboard() {
         </Async>
       </div>
       <SchedulerPanel />
+      {tempOpen && <TempJobsModal onClose={() => setTempOpen(false)} />}
     </>
+  );
+}
+
+/** 임시 작업 — 코드에 둔 운영 스크립트의 현황(마지막 실행·결과·활성)과 이력(한 일이 있을 때만). 활성/비활성·지금 실행. */
+function TempJobsModal({ onClose }: { onClose: () => void }) {
+  const state = useApi(() => api.tempJobs());
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const act = async (id: string, fn: () => Promise<unknown>) => {
+    setBusy(id);
+    setError('');
+    try {
+      await fn();
+      state.reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+  return (
+    <Modal title="임시 작업" onClose={onClose} wide>
+      <p className="mutedtext" style={{ fontSize: 12, marginTop: 0 }}>
+        한동안만 돌리는 운영 스크립트입니다(코드에 있습니다 — 다 쓰면 코드에서 지웁니다). 활성이면 일이 생길 때 바로
+        돌고 스케줄러가 주기마다 놓친 것을 줍습니다 — 비활성이면 둘 다 멈춥니다(「지금 실행」은 그래도 됩니다).
+        이력은 실제로 무언가를 처리했을 때만 남습니다.
+      </p>
+      {error && <p className="error">{error}</p>}
+      <Async state={state}>
+        {(s) => (s.tasks.length === 0 ? <p className="mutedtext">임시 작업이 없습니다.</p> : (
+          <>
+            {s.tasks.map((t) => (
+              <div key={t.id} style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 10, marginBottom: 10 }}>
+                <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                  <b>{t.title}</b>
+                  {t.job && (t.job.enabled ? <span className="status ok">활성</span> : <span className="status dim">비활성</span>)}
+                  {t.job?.last_status === 'failed' && <span className="status bad">실패 {t.job.consecutive_failures}회</span>}
+                  <div className="spacer" />
+                  {t.job && (
+                    <button className="small secondary" disabled={!!busy}
+                      title={t.job.enabled ? '바로 실행·주기 실행을 모두 멈춥니다' : '바로 실행·주기 실행을 다시 켭니다'}
+                      onClick={() => void act(t.id, () => api.toggleScheduledJob(t.job!.id))}>
+                      {t.job.enabled ? '비활성으로' : '활성으로'}
+                    </button>
+                  )}
+                  <button className="small" disabled={!!busy} onClick={() => void act(t.id, () => api.runTempJob(t.id))}>
+                    {busy === t.id ? '실행 중…' : '지금 실행'}
+                  </button>
+                </div>
+                <div className="mutedtext" style={{ fontSize: 12, margin: '4px 0' }}>{t.description}</div>
+                <div className="mutedtext" style={{ fontSize: 12 }}>
+                  {t.events.length > 0 && <>바로 도는 때: <span className="mono">{t.events.join(', ')}</span> · </>}
+                  주기 {t.job ? fmtInterval(t.job.interval_seconds) : '—'}
+                  {' '}· 마지막 실행 {t.job?.last_run_at ? fmtDate(t.job.last_run_at) : '아직 없음'}
+                  {t.job?.last_detail && <> — <span className="mono">{fmtDetail(t.job.last_detail)}</span></>}
+                </div>
+                <h4 style={{ fontSize: 13, margin: '8px 0 4px' }}>이력 ({t.history.length})</h4>
+                {t.history.length === 0 ? (
+                  <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>아직 처리한 것이 없습니다.</p>
+                ) : (
+                  <table style={{ fontSize: 12 }}>
+                    <thead><tr><th>시각</th><th>계기</th><th>결과</th></tr></thead>
+                    <tbody>
+                      {t.history.map((h, i) => (
+                        <tr key={i}>
+                          <td style={{ whiteSpace: 'nowrap' }}>{fmtDate(h.at)}</td>
+                          <td className="mono">{h.actor}</td>
+                          <td className="mono" style={{ wordBreak: 'break-all' }}>{fmtDetail(h.detail)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            ))}
+          </>
+        ))}
+      </Async>
+    </Modal>
   );
 }
 

@@ -555,6 +555,7 @@ class JobKind(str, enum.Enum):
     # 값만 둔다. 값을 빼면 그 행을 읽지 못해 스케줄러 tick이 통째로 실패한다.
     aws_sso = "aws_sso"
     semantic_tune = "semantic_tune"  # 내용 분석의 기준 다시 배우기 — 사람 정답으로(services/semantic.tune)
+    temp_job = "temp_job"            # 임시 작업 — 한동안만 돌리는 운영 스크립트(services/tempjobs)
 
 
 class JobStatus(str, enum.Enum):

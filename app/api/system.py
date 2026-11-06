@@ -35,7 +35,7 @@ from ..security import (
     validate_email_domain,
     verify_password,
 )
-from ..services import gitea, monitor, scheduler
+from ..services import gitea, monitor, scheduler, tempjobs
 
 # 헬스체크·상태 프로브는 버전 prefix 밖에 둔다(로드밸런서/k8s liveness probe, 콘솔 로그인
 # 프로브가 API 버전과 무관하게 고정된 경로를 기대함) — router.py 참고.
@@ -124,6 +124,23 @@ def scheduler_snapshot(
     """
     scheduler.reconcile(db)
     return scheduler.snapshot(db)
+
+
+@router.get("/temp-jobs")
+def list_temp_jobs(db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """임시 작업 — 작업마다 설명·현황·최근 이력(관리자). 스케줄러 job이 아직 없으면 만든다."""
+    scheduler.reconcile(db)
+    return {"tasks": tempjobs.listing(db)}
+
+
+@router.post("/temp-jobs/{task_id}/run")
+def run_temp_job(task_id: str, db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    """임시 작업을 지금 돌린다(관리자) — 결과를 스케줄러 job 행에도 남긴다(현황). 실패해도 200, 결과가 답이다."""
+    if task_id not in tempjobs.TASKS:
+        raise HTTPException(status_code=404, detail="그런 임시 작업이 없습니다")
+    scheduler.reconcile(db)
+    job = tempjobs.job_of(db, task_id)
+    return scheduler.run(db, job)
 
 
 @router.post("/scheduler/jobs/{job_id}/run")
@@ -220,6 +237,11 @@ def register_user_account(
     db.commit()
 
     audit.record(db, email, "user.register", email, {"name": body.name})
+    # 임시 작업(사용자 등록 즉시 승인 등) — 켜져 있으면 바로 돈다(services/tempjobs)
+    tempjobs.on_event(db, "user.register")
+    user = db.execute(select(UserAccount).where(UserAccount.email == email)).scalar_one()
+    if user.is_approved:
+        return UserRegisterOut(name=body.name, email=email, is_approved=True, is_admin=False)
 
     # 세션을 발급하지 않는다 — 관리자가 승인해야 로그인할 수 있다.
     return UserRegisterOut(name=body.name, email=email, is_approved=False, is_admin=False)

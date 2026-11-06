@@ -769,6 +769,20 @@ export interface StatusSnapshot {
   };
 }
 
+/** 임시 작업 — 코드에 둔 운영 스크립트(services/tempjobs). 현황은 스케줄러 job, 이력은 한 일이 있을 때만. */
+export interface TempJob {
+  id: string;
+  title: string;
+  description: string;
+  events: string[];
+  job: {
+    id: number; enabled: boolean; interval_seconds: number; last_run_at: string | null;
+    last_status: 'ok' | 'failed' | 'skipped' | null; last_detail: Record<string, unknown> | null;
+    consecutive_failures: number;
+  } | null;
+  history: { at: string; actor: string; detail: Record<string, unknown> | null }[];
+}
+
 export interface TopConsumer {
   kind: 'app' | 'platform' | 'process';
   label: string;

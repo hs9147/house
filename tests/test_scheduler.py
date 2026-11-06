@@ -26,6 +26,9 @@ def db(monkeypatch, tmp_path):
     from app.db import Base, engine
     from app.models import DocumentStore, DocumentStoreRegistry
 
+    # 임시 작업(services/tempjobs)은 그때그때 바뀌는 스크립트다 — job 개수가 흔들리지 않게 비운다(tests/test_tempjobs.py)
+    from app.services import tempjobs
+    monkeypatch.setattr(tempjobs, "TASKS", {})
     (tmp_path / "docs").mkdir()
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"docs={tmp_path / 'docs'}")

@@ -46,6 +46,8 @@ DEFAULT_INTERVALS = {
     JobKind.db_grants: 3_600,
     # 사람 정답은 하루에 몇 십 개 쌓인다 — 하루에 한 번 배우면 된다(LLM을 부르지 않는다).
     JobKind.semantic_tune: 86_400,
+    # 임시 작업은 일이 생길 때 바로 돌고(이벤트), 주기는 놓친 것을 줍는다.
+    JobKind.temp_job: 60,
 }
 
 _lock = threading.Lock()
@@ -60,7 +62,10 @@ def _wanted(db: Session) -> list[tuple[JobKind, str]]:
     """지금 돌아야 하는 일의 목록 — 설정과 등록 현황에서 만든다."""
     from . import storage  # noqa: PLC0415 — 순환 import 회피
 
+    from . import tempjobs  # noqa: PLC0415
+
     wanted: list[tuple[JobKind, str]] = [(JobKind.api_catalog, "")]
+    wanted += [(JobKind.temp_job, task_id) for task_id in tempjobs.TASKS]
     try:
         # 문서 색인은 PAAS_DOC_ROOTS의 문서 저장소만 — 내부 저장소(internal)는 색인 대상이 아니다(storage.indexed).
         stores = storage.indexed_stores()
@@ -182,6 +187,14 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
             return (JobStatus.ok if changed else JobStatus.skipped), result
         except shareddb.SharedDbError as e:
             return JobStatus.failed, {"error": str(e)}
+
+    if job.kind == JobKind.temp_job:
+        from . import tempjobs  # noqa: PLC0415
+
+        if job.target not in tempjobs.TASKS:
+            return JobStatus.skipped, {"reason": "코드에서 지운 임시 작업입니다"}
+        result = tempjobs.run(db, job.target)
+        return (JobStatus.ok if result.get("done") else JobStatus.skipped), result
 
     if job.kind == JobKind.semantic_tune:
         from . import semantic  # noqa: PLC0415

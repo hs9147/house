@@ -62,7 +62,7 @@ import type {
   ServerConfigOut,
   StartScriptOut,
   StartScriptUnitsOut,
-  StatusSnapshot,
+  StatusSnapshot, TempJob,
   SourceCapabilities,
   SourceCategory,
   SourceKind,
@@ -340,6 +340,9 @@ export const api = {
   // 시스템
   health: () => request<HealthInfo>('GET', '/health'),
   status: () => request<StatusSnapshot>('GET', '/status'),
+  tempJobs: () => request<{ tasks: TempJob[] }>('GET', '/temp-jobs'),
+  runTempJob: (id: string) =>
+    request<{ job: string; status: string; ms: number; detail: Record<string, unknown> }>('POST', `/temp-jobs/${id}/run`),
   audit: (limit = 100) => request<AuditRow[]>('GET', '/audit', undefined, { limit }),
   // 대시보드가 읽는 LLM 호출 집계 — 화면이 행을 더하지 않는다(서버가 센다).
   llmTelemetry: (days = 7) =>
