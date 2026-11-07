@@ -6,7 +6,10 @@
     구조가 기본이고(WebArena 2023, Playwright MCP의 aria snapshot), 화면 캡처를 비전 모델에
     함께 주면 메뉴·표의 배치처럼 구조에 안 드러나는 것이 보완된다(SeeAct ICML 2024,
     WebVoyager 2024, Set-of-Mark 2023). 그래서 HTTP로 받은 HTML의 구조가 기본이고,
-    Playwright가 설치돼 있으면 렌더링한 DOM·aria snapshot·캡처를 **더한다**(없어도 돈다).
+    Playwright(기본 의존성)로 렌더링한 DOM·aria snapshot·캡처를 **더한다**(브라우저를 못 띄워도 돈다).
+  - **조건 채우기는 LLM이 한 번 찾고, 찾은 것을 다시 쓴다**(Stagehand의 act + 캐시). 칸·버튼을 역할과
+    접근성 이름(Playwright getByRole)으로 저장해 다음부터 LLM 없이 밟고, 화면이 바뀌어 맞지 않을 때만 다시
+    묻는다(_Actor). 못 연 화면이 있으면 실패 기록(Playwright trace)을 남긴다.
   - **같은 출처 안에서, 깊이와 쪽수에 상한을 두고 돈다.** Crawl4AI·Firecrawl의 크롤 방식이다
     — sitemap.xml을 먼저 보고, robots.txt를 지키고, 결과를 마크다운으로 남긴다.
   - **API는 OpenAPI 문서를 찾아 읽는다**(잘 알려진 자리 몇 곳). 조회 가능한 정보 = GET 경로다.
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import calendar
 import copy
 import csv
 import difflib
@@ -43,7 +47,7 @@ import re
 import shutil
 import ssl
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
@@ -146,10 +150,13 @@ def parse_headers(text: str) -> dict[str, str]:
             raise SourceError(f"헤더는 `이름: 값` 형식이어야 합니다: {name[:40]!r}")
         if name.lower() in _FORBIDDEN_HEADERS:
             raise SourceError(f"이 헤더는 지정할 수 없습니다: {name}")
-        if name.lower() == "cookie" and (sso := _SSO_COOKIE.search(value)):
+        if name.lower() == "cookie" and (sso := _SSO_COOKIE.search(value)) and not get_settings().source_unattended:
+            # 무인 수집을 켠 설치본만 받는다(PAAS_SOURCE_UNATTENDED). 받아도 값은 암호화해 두고, 이 출처의 주소로
+            # 가는 요청에만 붙는다(_http_get·_browse) — 상위 도메인 쿠키지만 다른 사내 시스템으로는 가지 않는다.
             raise SourceError(
                 f"SSO 쿠키({sso.group(2)})는 넣을 수 없습니다 — 그 사용자로 사내 시스템 전부에 "
-                "들어갈 수 있는 값입니다. 이 사이트의 세션 쿠키만 넣거나 브라우저 스캔을 쓰세요.")
+                "들어갈 수 있는 값입니다. 이 사이트의 세션 쿠키만 넣거나 브라우저 스캔을 쓰세요"
+                "(무인 수집을 켠 설치본만 받습니다 — PAAS_SOURCE_UNATTENDED).")
         found[name] = value.strip()
     return found
 
@@ -541,11 +548,36 @@ def staged_file(row: InfoSource, f: dict) -> Path:
     return _file_dir(row.id) / f"{f['sha']}{f['ext']}"
 
 
-# ---------------------------------------------------------------- 브라우저(선택)
+# ---------------------------------------------------------------- 브라우저
+
+TRACE_NAME = "trace.zip"
+
 
 def browser_available() -> bool:
-    """Playwright가 설치돼 있는가. 브라우저 바이너리까지는 실제로 띄울 때 안다."""
+    """Playwright가 설치돼 있는가(requirements의 기본 의존성). 브라우저 바이너리까지는 실제로 띄울 때 안다."""
     return importlib.util.find_spec("playwright") is not None
+
+
+def _launch(pw):
+    """내장 Chromium → 서버에 설치된 Edge → Chrome. 사내망에서 내장 브라우저를 내려받지 못해도 깔린 Edge로
+    돈다(실측: 내장이 없는 PC에서 msedge·chrome 채널은 바로 떴다). → (브라우저, 무엇으로 띄웠나)."""
+    errors = []
+    for channel in ("", "msedge", "chrome"):
+        try:
+            return pw.chromium.launch(**({"channel": channel} if channel else {})), channel or "chromium"
+        except Exception as e:  # noqa: BLE001 — 다음 것으로
+            errors.append(f"{channel or 'chromium'}: {str(e).splitlines()[0][:120] if str(e) else type(e).__name__}")
+    raise SourceError("브라우저를 띄우지 못했습니다 — " + "; ".join(errors)
+                      + " (서버에서 python -m playwright install --only-shell chromium)")
+
+
+def _markdown(html: str) -> str:
+    """렌더링한 화면 → 마크다운. 스크립트·스타일·틀·머리(head)는 버리고 표·제목·링크는 둔다(그림은 뺀다)."""
+    from markdownify import markdownify  # noqa: PLC0415
+
+    html = re.sub(r"<(head|style)\b.*?</\1\s*>", "", _HTML_DROP.sub("", html), flags=re.I | re.S)
+    md = markdownify(html, heading_style="ATX", strip=["img"])
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(line.rstrip() for line in md.splitlines())).strip()
 
 
 def _shot_dir(source_id: int) -> Path:
@@ -554,16 +586,24 @@ def _shot_dir(source_id: int) -> Path:
     return root / ".infosource" / str(source_id)
 
 
-def _browse(source_id: int, urls: list[str], headers: dict, origin: str) -> dict:
-    """렌더링한 DOM·aria snapshot·캡처. 실패하면 이유만 남기고 HTTP 결과로 간다."""
-    from playwright.sync_api import sync_playwright  # noqa: PLC0415 — 선택 의존성
+def _browse(source_id: int, urls: list[str], headers: dict, origin: str, extra: list[str] = (),
+            prepare=None) -> dict:
+    """렌더링한 DOM·aria snapshot·캡처. 실패하면 이유만 남기고 HTTP 결과로 간다. extra는 캡처 없이 그리기만 할
+    화면(「페이지」로 받는 화면 — HTML만 쓴다). prepare(url, page)는 extra 화면을 연 뒤 읽기 전에 부른다(조건 채우기,
+    _Actor).
+
+    열지 못한 화면이 있으면 **실패 기록(trace)** 을 남긴다 — 단계마다의 화면·DOM·요청이 담겨, 왜 못 열었는지
+    다시 돌려 보지 않고 본다. 요청 헤더(세션 쿠키)를 단 출처는 남기지 않는다: trace에는 요청 헤더가 그대로
+    실리는데, 헤더 값은 등록한 뒤로 어디에도 내보내지 않는다."""
+    from playwright.sync_api import sync_playwright  # noqa: PLC0415
 
     out_dir = _shot_dir(source_id)
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     rendered: list[dict] = []
+    failed = False
     with sync_playwright() as pw:
-        browser = pw.chromium.launch()
+        browser, name = _launch(pw)
         try:
             context = browser.new_context(viewport={"width": 1280, "height": 900},
                                           user_agent=USER_AGENT)
@@ -576,10 +616,20 @@ def _browse(source_id: int, urls: list[str], headers: dict, origin: str) -> dict
                     route.continue_()
 
             context.route("**/*", attach)
+            if not headers:
+                context.tracing.start(screenshots=True, snapshots=True)
             page = context.new_page()
-            for i, url in enumerate(urls[:MAX_SHOTS]):
+            plan = [(u, True) for u in urls[:MAX_SHOTS]]
+            # 캡처한 화면이어도 다시 연다 — 조건을 채운 뒤의 화면을 읽는다
+            plan += [(u, False) for u in dict.fromkeys(extra)]
+            for i, (url, shoot) in enumerate(plan):
                 try:
                     page.goto(url, wait_until="networkidle", timeout=int(TIMEOUT * 1000))
+                    if not shoot:
+                        if prepare is not None:
+                            prepare(url, page)
+                        rendered.append({"url": url, "html": page.content()})
+                        continue
                     shot = out_dir / f"{i}.jpg"
                     page.screenshot(path=str(shot), type="jpeg", quality=60)
                     try:
@@ -590,9 +640,219 @@ def _browse(source_id: int, urls: list[str], headers: dict, origin: str) -> dict
                                      "html": page.content()})
                 except Exception as e:  # noqa: BLE001
                     rendered.append({"url": url, "error": str(e)[:200]})
+            failed = not headers and any(r.get("error") for r in rendered)
+            if not headers:
+                context.tracing.stop(path=str(out_dir / TRACE_NAME) if failed else None)
         finally:
             browser.close()
-    return {"pages": rendered}
+    return {"pages": rendered, "browser": name, "trace": failed}
+
+
+def _server_pages(row: InfoSource) -> tuple[dict[str, dict], list[str]]:
+    """「페이지」로 받기로 한 화면 중 서버가 주소로 여는 것 — 조건은 서버가 채운다(_Actor). 메뉴를 눌러야 뜨는
+    화면(길이 있는 화면)은 북마크(브라우저 스캔)가 받는다. 화면에는 지난 수집일(last)이 붙어 온다(@last)."""
+    out, notes = {}, []
+    for s in served_screens(row):
+        if s.get("collect") != "page":
+            continue
+        if s.get("path"):
+            notes.append(f"페이지 · {s['screen']}: 메뉴를 눌러야 열리는 화면이라 서버는 받지 않았습니다"
+                         " — 북마크(브라우저 스캔)로 받으세요")
+        else:
+            out[s["url"]] = s
+    return out, notes
+
+
+def _server_capture(screen: dict, url: str, html: str) -> dict | None:
+    """서버가 그린 화면 → 북마크가 담은 조회 결과 페이지와 같은 모양(_capture_files가 받는다)."""
+    markdown = _markdown(html)
+    if not markdown:
+        return None
+    title = re.search(r"<title[^>]*>(.*?)</title\s*>", html, re.I | re.S)
+    return {"screen": screen["screen"], "url": url, "kind": "list", "label": "",
+            "title": " ".join(title.group(1).split())[:200] if title else "",
+            "markdown": markdown[:MAX_CAPTURE_CHARS],
+            "html": html[:MAX_CAPTURE_HTML] if screen.get("page_format") == "md_html" else ""}
+
+
+# ---------------------------------------------------------------- 서버가 조건을 채운다
+
+ACT_PROMPT = """사내 업무 사이트의 조회 화면이다. 조회 조건 칸을 채우고 조회 버튼을 눌러 결과를 보려 한다. 아래 '화면의
+접근성 트리'에서 조건마다 채울 칸과 누를 조회 버튼을 고른다. 역할(role)과 이름(name)은 트리에 적힌 그대로 쓴다 —
+트리에 없는 것을 지어내지 마라. 같은 조건이 두 번이면(기간의 시작·끝) 서로 다른 칸을 시작, 끝 순서로 고른다.
+조회 버튼은 결과를 보여 주기만 하는 버튼이다(저장·삭제·등록·승인처럼 무언가를 바꾸는 버튼은 고르지 않는다).
+출력은 JSON 객체 하나다(설명·코드펜스 없이).
+{{"fill": [{{"i": 조건 번호, "role": "textbox|searchbox|combobox|spinbutton|listbox", "name": "칸 이름"}}],
+ "submit": {{"role": "button|link", "name": "버튼 이름"}}}}
+
+조건:
+{fields}
+{hint}
+화면의 접근성 트리:
+{aria}
+"""
+ACT_ROLES = {"textbox", "searchbox", "combobox", "spinbutton", "listbox"}
+SUBMIT_ROLES = {"button", "link"}
+# 무언가를 바꾸는 버튼 — 조회 버튼으로 받지 않는다(북마크의 MUTATE_TEXT와 같은 낱말)
+_MUTATE = re.compile(r"저장|삭제|등록|수정|승인|반려|결재|상신|전송|제출|발송|취소|확정|신청|반영|초기화|로그아웃|save|"
+                     r"delete|remove|insert|update|modify|edit|approve|reject|submit|send|cancel|reset|logout|sign ?out",
+                     re.I)
+
+
+class _Stale(Exception):
+    """저장한 동작이 지금 화면과 맞지 않는다(칸·버튼이 없거나 여럿) — LLM에 다시 묻는다."""
+
+
+def _actions_file(source_id: int) -> Path:
+    # 캡처 폴더(_shot_dir) 옆 — 그 폴더는 스캔마다 비운다
+    return _shot_dir(source_id).parent / f"{source_id}.actions.json"
+
+
+def _date_value(value: str, current: str, kind: str) -> str:
+    """상대 날짜(@today-1m)·지난 수집일(2026-10-01)을 그 칸의 모양으로 — 북마크의 dateValue와 같다."""
+    m = re.fullmatch(r"@today(?:([+-]\d+)([dmy]))?", value, re.I)
+    iso = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", value)
+    if iso:
+        d = date(int(iso[1]), int(iso[2]), int(iso[3]))
+    elif not m:
+        return value
+    else:
+        n, unit, d = int(m[1] or 0), (m[2] or "").lower(), date.today()
+        if unit == "d":
+            d = d + timedelta(days=n)
+        elif unit in ("m", "y"):
+            months = d.year * 12 + d.month - 1 + (n if unit == "m" else n * 12)
+            y, mo = divmod(months, 12)
+            d = date(y, mo + 1, min(d.day, calendar.monthrange(y, mo + 1)[1]))
+    y, mo, da = f"{d.year:04d}", f"{d.month:02d}", f"{d.day:02d}"
+    if kind == "date":
+        return f"{y}-{mo}-{da}"
+    sep = re.search(r"\d{4}([./-])\d{1,2}", current) or re.search(r"[yY]{4}([./-])[mM]{2}", current)
+    if sep:
+        return sep[1].join((y, mo, da))
+    if re.fullmatch(r"\d{8}|[yY]{4}[mM]{2}[dD]{2}", current):
+        return y + mo + da
+    return f"{y}-{mo}-{da}"
+
+
+def _condition_value(raw: str, screen: dict) -> str:
+    """@last|대신 — 이 화면을 지난번에 빠짐없이 받은 날, 처음이면 | 뒤의 값(북마크의 since와 같다)."""
+    m = re.fullmatch(r"@last(?:\|(.*))?", (raw or "").strip(), re.I)
+    if not m:
+        return raw or ""
+    return screen.get("last") or (m[1] or "").strip()
+
+
+def _plan_in(data: dict, need: set[int]) -> dict | None:
+    """LLM이 고른 동작 — 역할·이름의 모양만 보고, 값이 있는 조건이 다 칸을 얻었는지, 버튼이 바꾸는 버튼이 아닌지."""
+    fill = []
+    for f in data.get("fill") if isinstance(data.get("fill"), list) else []:
+        if not isinstance(f, dict):
+            continue
+        i, role, name = f.get("i"), _s(f.get("role"), 40), _s(f.get("name"), 120)
+        if isinstance(i, int) and i in need and role in ACT_ROLES and name:
+            fill.append({"i": i, "role": role, "name": name})
+    sub = data.get("submit") if isinstance(data.get("submit"), dict) else {}
+    role, name = _s(sub.get("role"), 40), _s(sub.get("name"), 120)
+    if role not in SUBMIT_ROLES or not name or _MUTATE.search(name) or _DANGEROUS_LINK.search(name):
+        return None
+    if {f["i"] for f in fill} != need:
+        return None
+    return {"fill": fill, "submit": {"role": role, "name": name}}
+
+
+def _act(page, plan: dict, screen: dict) -> None:
+    """저장한 동작을 밟는다 — 칸마다 그 역할·이름의 요소가 꼭 하나여야 한다(아니면 _Stale)."""
+    from playwright.sync_api import Error as PlaywrightError  # noqa: PLC0415
+
+    conditions = screen["conditions"]
+    for f in plan["fill"]:
+        loc = page.get_by_role(f["role"], name=f["name"], exact=True)
+        if loc.count() != 1:
+            raise _Stale(f"{conditions[f['i']]['field']} 칸({f['role']} \"{f['name']}\")이 {loc.count()}개")
+        tag, kind, current = loc.evaluate(
+            "el => [el.tagName, (el.type || '').toLowerCase(), el.value || el.getAttribute('placeholder') || '']")
+        value = _date_value(_condition_value(conditions[f["i"]].get("value"), screen), current, kind)
+        if tag == "SELECT":
+            loc.select_option(label=value)
+        else:
+            loc.fill(value)
+    sub = plan["submit"]
+    button = page.get_by_role(sub["role"], name=sub["name"], exact=True)
+    if button.count() != 1:
+        raise _Stale(f"조회 버튼({sub['role']} \"{sub['name']}\")이 {button.count()}개")
+    button.click()
+    try:
+        page.wait_for_load_state("networkidle", timeout=int(TIMEOUT * 1000))
+    except PlaywrightError:
+        pass   # 계속 요청하는 화면 — 그려진 데까지 읽는다
+
+
+class _Actor:
+    """조건이 있는 「페이지」 화면 — 저장한 동작대로 칸을 채우고 조회를 누른다. 저장한 것이 없거나 지금 화면과
+    맞지 않을 때만 LLM이 접근성 트리를 보고 칸·버튼을 찾고, 찾은 것은 저장해 다음부터 LLM 없이 쓴다(Stagehand의
+    act + 캐시). LLM에는 조건의 칸 이름만 간다 — 값은 보내지 않는다(조회어에 무엇이 들어 있을지 모른다).
+    저장하는 것은 역할·이름뿐이다(값은 매번 조건에서 — 상대 날짜는 그날 기준으로 풀린다)."""
+
+    def __init__(self, db: Session, source_id: int, screens: dict[str, dict], notes: list[str]):
+        self.db, self.source_id, self.screens, self.notes = db, source_id, screens, notes
+        try:
+            self.saved = json.loads(_actions_file(source_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self.saved = {}
+        self.changed = False
+
+    @staticmethod
+    def signature(screen: dict) -> str:
+        """조건 칸이나 버튼 힌트가 바뀌면 저장한 동작은 버린다."""
+        key = [[c["field"] for c in screen["conditions"] if c.get("value")], (screen.get("hints") or {}).get("search")]
+        return hashlib.sha1(json.dumps(key, ensure_ascii=False).encode()).hexdigest()[:12]
+
+    def _ask(self, page, screen: dict, need: set[int]) -> dict:
+        provider = llm.default_provider(self.db)
+        if provider is None:
+            raise SourceError("기본 LLM 프로바이더가 없어 조건 칸을 찾지 못했습니다")
+        try:
+            aria = page.locator("body").aria_snapshot()
+        except Exception:  # noqa: BLE001 — 옛 Playwright에는 없다
+            aria = ""
+        hint = (screen.get("hints") or {}).get("search")
+        text = ACT_PROMPT.format(
+            fields="\n".join(f"{i}. {c['field']}" for i, c in enumerate(screen["conditions"]) if i in need),
+            hint=f"조회 버튼 힌트: {hint}\n" if hint else "", aria=aria[:12000])
+        plan = _plan_in(_parse(llm.chat_completion(provider, [{"role": "user", "content": text}], self.db)), need)
+        if plan is None:
+            raise SourceError("LLM이 조건 칸·조회 버튼을 찾지 못했습니다(고른 것이 화면에 맞지 않거나 바꾸는 버튼이었습니다)")
+        return plan
+
+    def __call__(self, url: str, page) -> None:
+        screen = self.screens.get(url)
+        need = {i for i, c in enumerate((screen or {}).get("conditions") or []) if c.get("value")}
+        if not need:
+            return
+        sig, saved = self.signature(screen), self.saved.get(url)
+        if saved and saved.get("sig") == sig:
+            try:
+                _act(page, saved, screen)
+                return
+            except _Stale as e:
+                self.notes.append(f"페이지 · {screen['screen']}: 저장한 동작이 화면과 맞지 않아({e}) LLM이 다시 찾았습니다")
+                page.goto(url, wait_until="networkidle", timeout=int(TIMEOUT * 1000))
+        plan = self._ask(page, screen, need)
+        try:
+            _act(page, plan, screen)
+        except _Stale as e:
+            raise SourceError(f"LLM이 고른 칸·버튼이 화면에 맞지 않습니다: {e}")
+        self.saved[url] = {"sig": sig, **plan, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        self.changed = True
+        self.notes.append(f"페이지 · {screen['screen']}: LLM이 조건 칸·조회 버튼을 찾아 저장했습니다 — 다음부터는 LLM 없이 "
+                          "채웁니다")
+
+    def save(self) -> None:
+        if self.changed:
+            path = _actions_file(self.source_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self.saved, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 # ---------------------------------------------------------------- API·MCP
@@ -996,12 +1256,13 @@ def scan(db: Session, row: InfoSource) -> None:
     if row.kind == "web":
         result = _crawl(row.url, headers, known_urls(db, row, "server"), step)
         got, missed = _download(result.pop("downloads"), headers, result["origin"], step=step)
-        result["files"], stage_notes = _stage(row.id, got)
         result["skipped"] = (result["skipped"] + missed)[:80]
-        notes += stage_notes
         if not result["pages"]:
             raise SourceError("받은 페이지가 없습니다: "
                               + "; ".join(f"{s['url']} — {s['reason']}" for s in result["skipped"][:3]))
+        captures = []
+        pages_md, md_notes = _server_pages(row)
+        notes += md_notes
         if browser_available():
             try:
                 targets = [result["pages"][0]["url"]] + [
@@ -1009,13 +1270,28 @@ def scan(db: Session, row: InfoSource) -> None:
                     and _origin(link["url"]) == result["origin"]
                     and not _DANGEROUS_LINK.search(f"{link['url']} {link['text']}")]
                 step("브라우저로 화면을 그려 캡처하는 중")
-                rendered = _browse(row.id, list(dict.fromkeys(targets)), headers, result["origin"])
+                actor = _Actor(db, row.id, pages_md, notes)
+                rendered = _browse(row.id, list(dict.fromkeys(targets)), headers, result["origin"], list(pages_md),
+                                   prepare=actor)
+                actor.save()
+                if rendered["browser"] != "chromium":
+                    notes.append(f"내장 브라우저가 없어 서버에 설치된 {rendered['browser']}로 그렸습니다"
+                                 "(python -m playwright install --only-shell chromium으로 받을 수 있습니다).")
+                if rendered["trace"]:
+                    notes.append("열지 못한 화면이 있어 실패 기록(trace)을 남겼습니다 — 스캔 결과에서 받아 "
+                                 "python -m playwright show-trace로 열면 단계마다 화면·요청이 보입니다.")
+                result["trace"] = rendered["trace"]
                 by_url = {p["url"]: p for p in result["pages"]}
                 for r in rendered["pages"]:
                     if r.get("error"):
                         notes.append(f"브라우저로 열지 못함: {r['url']} — {r['error']}")
                         continue
-                    seen_page = _read_page(r["url"], r.pop("html"))
+                    html = r.pop("html")
+                    if "shot" not in r:   # 「페이지」로 받으려고 (조건을 채워) 그린 화면
+                        if r["url"] in pages_md and (cap := _server_capture(pages_md[r["url"]], r["url"], html)):
+                            captures.append(cap)
+                        continue
+                    seen_page = _read_page(r["url"], html)
                     page = by_url.get(r["url"])
                     if page is None:
                         seen_page["depth"] = 1
@@ -1031,6 +1307,11 @@ def scan(db: Session, row: InfoSource) -> None:
                 result["browser"] = False
         else:
             result["browser"] = False
+        if pages_md and not result["browser"]:
+            notes.append("브라우저를 쓰지 못해 「페이지」로 받는 화면을 받지 못했습니다.")
+        captured, capture_notes = _capture_files(captures)
+        result["files"], stage_notes = _stage(row.id, captured + got)
+        notes += capture_notes + stage_notes
     elif row.kind == "api":
         step("OpenAPI 문서를 찾는 중")
         result = _scan_api(row.url, headers)
@@ -1285,7 +1566,7 @@ def _check_payload(row: InfoSource, payload, agent: str, what: str) -> str:
 # 북마크가 다시 밟는 것이라 모양·길이만 자르고, 주소는 같은 출처의 경로만 둔다.
 MAX_PATH_STEPS = 20
 _LOC_KEYS = {"tag": 16, "text": 120, "id": 120, "name": 120, "title": 120, "code": 200, "href": 300,
-             "cls": 120, "xpath": 300}
+             "cls": 120, "xpath": 300, "role": 40, "aria": 120}
 
 
 def _loc_in(d) -> dict | None:
@@ -2392,12 +2673,68 @@ def save(db: Session, row: InfoSource, targets: dict) -> dict:
             "created": bool(created), "files": written, "same": same, "removed": removed}
 
 
+# ---------------------------------------------------------------- 무인 수집(PAAS_SOURCE_UNATTENDED)
+
+def collectable(db: Session) -> list[InfoSource]:
+    """스케줄러가 도는 출처 — 웹사이트이고, 한 번 저장했고, 마지막 스캔이 서버 스캔인 것. 브라우저(북마크)로 읽은
+    출처는 넣지 않는다: 서버 스캔이 그 결과(메뉴 탐색이 찾은 길·조건을 고를 화면)를 덮는다. 세션을 맡긴 뒤 서버로
+    한 번 스캔·저장하면 들어온다."""
+    if not get_settings().source_unattended:
+        return []
+    rows = db.execute(select(InfoSource).where(InfoSource.kind == "web").order_by(InfoSource.id)).scalars()
+    return [r for r in rows if r.saved_files and (r.scan or {}).get("via", "server") == "server"]
+
+
+def collect(db: Session, row: InfoSource, actor: str = "scheduler") -> dict:
+    """무인 수집 한 번 — 서버 스캔 뒤 지난번 저장한 자리에 그대로 저장한다(사람이 고르던 저장 위치를 다시 묻지 않는다).
+
+    받은 화면이 모두 로그인 화면이면 저장하지 않는다 — 맡긴 세션이 만료된 것이고, 저장하면 로그인 화면이 저장해 둔
+    정리를 덮고 지난번 파일은 「이번에 없는 것」으로 휴지통에 간다. 실패로 남겨 대시보드에 보이게 한다.
+    이번에 새로 생긴 유형(지난번에 저장하지 않은 것)은 저장하지 않고 알린다 — 위치는 사람이 정한다."""
+    from .. import audit  # noqa: PLC0415
+
+    previous = {f["category"]: f["store"] for f in row.saved_files or []}
+    if not previous:
+        raise SourceError("저장한 적이 없는 출처입니다 — 한 번 스캔·저장한 뒤에 무인 수집이 돕니다.")
+    _refuse_if_running(row)
+    row.status, row.error = "scanning", None
+    row.scanned_at = datetime.now(timezone.utc)
+    db.commit()
+    progress_start(row.id, "무인 수집 — 서버 스캔을 시작합니다")
+    try:
+        scan(db, row)
+    except Exception as e:  # noqa: BLE001
+        _fail(db, row.id, e, "server")
+        raise SourceError(f"스캔하지 못했습니다: {str(e)[:300]}")
+    finally:
+        progress_end(row.id)
+    pages = (row.scan or {}).get("pages") or []
+    if not pages or all(p.get("requires_login") for p in pages):
+        row.status = "failed"
+        row.error = ("로그인 화면만 받았습니다 — 맡긴 세션(쿠키)이 만료됐습니다. 사이트에 다시 로그인해 쿠키를 새로 "
+                     "맡기세요. 저장해 둔 것은 그대로입니다.")
+        db.commit()
+        raise SourceError(row.error)
+    categories = categories_of(row.scan)
+    result = save(db, row, {c: {"mode": "existing", "store": previous[c]} for c in categories if c in previous})
+    out = {"written": len(result["files"]), "same": len(result["same"]), "removed": len(result["removed"]),
+           "pages": len(pages), "unsaved": [c for c in categories if c not in previous]}
+    audit.record(db, actor, "source.collect", row.name, out)
+    return out
+
+
 def shot_path(row: InfoSource, n: int) -> Path | None:
     path = _shot_dir(row.id) / f"{n}.jpg"
     return path if path.is_file() else None
 
 
+def trace_path(row: InfoSource) -> Path | None:
+    path = _shot_dir(row.id) / TRACE_NAME
+    return path if path.is_file() else None
+
+
 def forget(row: InfoSource) -> None:
     shutil.rmtree(_shot_dir(row.id), ignore_errors=True)
+    _actions_file(row.id).unlink(missing_ok=True)
     shutil.rmtree(_file_dir(row.id), ignore_errors=True)
     shutil.rmtree(_dataset_dir(row.id), ignore_errors=True)

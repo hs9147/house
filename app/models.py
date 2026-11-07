@@ -556,6 +556,7 @@ class JobKind(str, enum.Enum):
     aws_sso = "aws_sso"
     semantic_tune = "semantic_tune"  # 내용 분석의 기준 다시 배우기 — 사람 정답으로(services/semantic.tune)
     temp_job = "temp_job"            # 임시 작업 — 한동안만 돌리는 운영 스크립트(services/tempjobs)
+    source_collect = "source_collect"  # 정보 업데이트 무인 수집 — 서버 스캔 뒤 지난 자리에 저장(infosource.collect)
 
 
 class JobStatus(str, enum.Enum):

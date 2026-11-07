@@ -48,6 +48,8 @@ DEFAULT_INTERVALS = {
     JobKind.semantic_tune: 86_400,
     # 임시 작업은 일이 생길 때 바로 돌고(이벤트), 주기는 놓친 것을 줍는다.
     JobKind.temp_job: 60,
+    # 무인 수집은 사이트 하나를 통째로 스캔하고 LLM 정리를 한 번 부른다 — 하루에 한 번이면 된다.
+    JobKind.source_collect: 86_400,
 }
 
 _lock = threading.Lock()
@@ -84,6 +86,11 @@ def _wanted(db: Session) -> list[tuple[JobKind, str]]:
     # AWS SSO 세션은 주기로 갱신하지 않는다 — 만료를 처음 만난 사용자의 요청에서 서버가 로그인을 시작하고 그
     # 사람의 브라우저에서 승인받는다(api/llm.provider_error · 콘솔 SsoLoginNotice). 예전 aws_sso job 행은 여기
     # 목록에 없으므로 reconcile이 지운다.
+    from . import infosource  # noqa: PLC0415
+
+    # 무인 수집 — 켠 설치본(PAAS_SOURCE_UNATTENDED)에서, 한 번 서버로 스캔·저장한 웹 출처마다. 대상은 출처 id다
+    # (이름은 바뀐다 — 이름을 쓰면 바꿀 때마다 job이 새로 생겨 끄기·주기가 풀린다).
+    wanted += [(JobKind.source_collect, str(r.id)) for r in infosource.collectable(db)]
     from . import shareddb  # noqa: PLC0415
 
     if shareddb.configured():
@@ -195,6 +202,20 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
             return JobStatus.skipped, {"reason": "코드에서 지운 임시 작업입니다"}
         result = tempjobs.run(db, job.target)
         return (JobStatus.ok if result.get("done") else JobStatus.skipped), result
+
+    if job.kind == JobKind.source_collect:
+        from ..models import InfoSource  # noqa: PLC0415
+        from . import infosource  # noqa: PLC0415
+
+        row = db.get(InfoSource, int(job.target))
+        if row is None:
+            return JobStatus.skipped, {"reason": "지운 출처입니다"}
+        try:
+            result = infosource.collect(db, row)
+        except infosource.SourceError as e:
+            return JobStatus.failed, {"source": row.name, "error": str(e)}
+        changed = result["written"] + result["removed"]
+        return (JobStatus.ok if changed else JobStatus.skipped), {"source": row.name, **result}
 
     if job.kind == JobKind.semantic_tune:
         from . import semantic  # noqa: PLC0415

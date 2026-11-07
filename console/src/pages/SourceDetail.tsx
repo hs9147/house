@@ -123,7 +123,7 @@ function Means({ caps, kind }: { caps: SourceCapabilities | null; kind: SourceOu
       ? [
           `HTTP로 같은 출처 안을 최대 ${caps.limits.pages}쪽·깊이 ${caps.limits.depth}까지(메뉴 먼저, robots.txt 준수)`,
           caps.browser
-            ? `브라우저로 첫 화면과 메뉴 ${caps.limits.shots}곳을 렌더링·캡처(접근성 트리 포함)`
+            ? `브라우저로 첫 화면과 메뉴 ${caps.limits.shots}곳을 렌더링·캡처(접근성 트리 포함). 「페이지」로 받는 화면은 조건을 채워(칸·버튼은 LLM이 한 번 찾아 저장) 마크다운으로`
             : '브라우저(Playwright)가 없어 렌더링·캡처는 건너뜁니다',
         ]
       : kind === 'api'
@@ -1155,6 +1155,14 @@ function Notes({ row }: { row: SourceOut }) {
           {scan.via === 'browser'
             ? '사용자 브라우저에서 읽음(북마크릿)'
             : `사이트맵 ${scan.sitemap ?? 0}건 · 브라우저 ${scan.browser ? '사용' : '미사용'}`}
+          {scan.trace && (
+            <>
+              {' · '}
+              <button className="small secondary" onClick={() => void api.downloadSourceTrace(row.id).catch((e) => alert((e as Error).message))}>
+                실패 기록(trace) 받기
+              </button>
+            </>
+          )}
         </p>
       )}
       {(scan.skipped ?? []).length > 0 && (

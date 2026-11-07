@@ -160,6 +160,16 @@ def list_internal_servers(db: Session, key: ApiKey | None = None) -> list[dict]:
             f"웹 검색 — 지역마다 강한 출처 중 LLM이 고른다(켜진 출처: {on})",
             "search", "/mcp/web",
         ))
+    from . import webbrowse  # noqa: PLC0415
+
+    # 웹 페이지 읽기 — 열 호스트를 정하고 검증을 마친 설치본에서만. 밖의 화면을 여는 서버라 묶음에는 없다.
+    if webbrowse.configured():
+        entries.append(_entry(
+            "paas-browser", "paas-browser",
+            f"웹 페이지 읽기 — 서버 브라우저로 그린 화면을 마크다운으로(읽기만, 열 수 있는 곳: "
+            f"{', '.join(webbrowse.allowed_hosts())})",
+            "browser", "/mcp/browser",
+        ))
     if mailer.configured():
         entries.append(_entry(
             "paas-mail", "paas-mail",

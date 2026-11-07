@@ -133,6 +133,8 @@ def capabilities(db: Session = Depends(get_db), _: ApiKey = Depends(require_admi
     """스캔에 쓸 수 있는 수단 — 화면이 "무엇으로 읽는지"를 미리 말한다."""
     return {"browser": infosource.browser_available(),
             "llm": llm.default_provider(db) is not None,
+            # 무인 수집을 켠 설치본 — SSO 세션을 맡길 수 있고, 저장한 출처를 스케줄러가 하루마다 다시 받는다
+            "unattended": get_settings().source_unattended,
             "limits": {"pages": infosource.MAX_PAGES, "depth": infosource.MAX_DEPTH,
                        "shots": infosource.MAX_SHOTS}}
 
@@ -357,3 +359,12 @@ def get_shot(source_id: int, n: int, db: Session = Depends(get_db),
     if path is None:
         raise HTTPException(status_code=404, detail="캡처가 없습니다.")
     return FileResponse(path, media_type="image/jpeg")
+
+
+@router.get("/sources/{source_id}/trace")
+def get_trace(source_id: int, db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """서버 스캔이 화면을 열지 못했을 때 남긴 실패 기록(Playwright trace) — python -m playwright show-trace로 연다."""
+    path = infosource.trace_path(_row_or_404(db, source_id))
+    if path is None:
+        raise HTTPException(status_code=404, detail="실패 기록이 없습니다.")
+    return FileResponse(path, media_type="application/zip", filename=f"trace-{source_id}.zip")

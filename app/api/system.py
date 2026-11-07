@@ -973,6 +973,12 @@ def sw_update(
         "  if ($LASTEXITCODE -ne 0) { "
         "    Write-Host '[SW Update] !! pip install 실패 — 적재 중인 모듈은 덮어쓰지 못할 수 있습니다'; } "
         "} "
+        # 서버 스캔의 브라우저(Playwright 내장 Chromium) — 이미 있으면 건너뛴다. 못 받아도(사내망) 멈추지 않는다:
+        # 스캔은 서버에 설치된 Edge·Chrome으로 띄운다(infosource._launch).
+        "Write-Host '[SW Update] playwright install --only-shell chromium...'; "
+        f"& '{escaped_python}' -m playwright install --only-shell chromium; "
+        "if ($LASTEXITCODE -ne 0) { "
+        "  Write-Host '[SW Update] 내장 브라우저를 받지 못했습니다 — 서버 스캔은 설치된 Edge·Chrome으로 돕니다'; } "
         # **스키마도 올린다.** 코드만 당기면 컬럼이 늘어난 화면이 500으로 죽는다 — 플랫폼은
         # 기동 시 그 사실을 경고로 말하지만(main.py의 schema_missing), 경고를 읽고 alembic을
         # 손으로 돌리는 일은 잊힌다. 실측으로 세 컬럼이 그렇게 빠져 있었다

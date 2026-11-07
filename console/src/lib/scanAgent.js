@@ -795,9 +795,10 @@
   }
 
   /* ---------------- 위치 찾기 — 녹화·탐색이 남긴 요소와 틀을 다시 찾는다 ----------------
-   * 요소 하나를 여러 특징(태그·글자·id·name·title·onclick·href·class·XPath)으로 적어 두고, 다시 찾을 때는
-   * 같은 태그의 후보마다 맞는 특징의 점수를 더해 가장 비슷한 것을 고른다(Similo·ROBULA+의 생각 — 화면이
-   * 조금 바뀌어도 한 특징에 매달리지 않는다). 틀(iframe)은 위에서부터 차례로 이름·id·주소로 고른다. */
+   * 요소 하나를 여러 특징(태그·글자·id·name·title·onclick·href·class·XPath·역할·접근성 이름)으로 적어 두고,
+   * 다시 찾을 때는 같은 태그의 후보마다 맞는 특징의 점수를 더해 가장 비슷한 것을 고른다(Similo·ROBULA+의
+   * 생각 — 화면이 조금 바뀌어도 한 특징에 매달리지 않는다). 역할·접근성 이름은 Playwright의 getByRole처럼
+   * 사람이 보는 뜻이라 배치(XPath·class)가 바뀌어도 남는다. 틀(iframe)은 위에서부터 차례로 이름·id·주소로 고른다. */
   function pathOnly(u) {
     if (!u || /^\s*(javascript:|#)/i.test(u)) return '';
     try { var x = new URL(u, location.href); return x.origin === origin ? x.pathname + x.search : ''; } catch (e) { return ''; }
@@ -812,14 +813,39 @@
     return '/html/' + parts.join('/');
   }
   function clsOf(el) { return clean(typeof el.className === 'string' ? el.className : '', 120); }
+  /* 역할 — role 속성, 없으면 태그가 뜻하는 것(ARIA의 암묵 역할 중 누르고 채우는 것만). */
+  function roleOf(el) {
+    var r = el.getAttribute('role'), t = el.tagName, type = (el.getAttribute('type') || '').toLowerCase();
+    if (r) return clean(r, 40);
+    if (t === 'A' && el.hasAttribute('href')) return 'link';
+    if (t === 'BUTTON' || (t === 'INPUT' && /^(button|submit|reset|image)$/.test(type))) return 'button';
+    if (t === 'INPUT' && /^(checkbox|radio)$/.test(type)) return type;
+    if (t === 'INPUT' || t === 'TEXTAREA') return 'textbox';
+    if (t === 'SELECT') return 'combobox';
+    return '';
+  }
+  /* 접근성 이름 — aria-label·aria-labelledby·<label>·placeholder·alt. 글자가 없는 아이콘 버튼·입력 칸을 가른다. */
+  function ariaOf(el) {
+    var d = el.ownerDocument, v = el.getAttribute('aria-label') || '', by = el.getAttribute('aria-labelledby');
+    if (!v && by) v = by.split(/\s+/).map(function (id) { var x = d.getElementById(id); return x ? x.textContent : ''; }).join(' ');
+    if (!v && el.id) {
+      var l = Array.prototype.filter.call(d.getElementsByTagName('label'), function (x) { return x.htmlFor === el.id; })[0];
+      v = l ? l.textContent : '';
+    }
+    if (!v && el.closest) { var p = el.closest('label'); v = p ? p.textContent : ''; }
+    return clean(v || el.getAttribute('placeholder') || el.getAttribute('alt') || '', 120);
+  }
   function locOf(el) {
     return { tag: el.tagName.toLowerCase(), text: clean(labelOf(el), 120), id: clean(el.id, 120),
              name: clean(el.getAttribute('name'), 120), title: clean(el.getAttribute('title'), 120),
              code: clean(el.getAttribute('onclick'), 200), href: pathOnly(el.getAttribute('href')),
-             cls: clsOf(el), xpath: xpathOf(el) };
+             cls: clsOf(el), xpath: xpathOf(el), role: roleOf(el), aria: ariaOf(el) };
   }
   function scoreOf(el, loc) {
     return (loc.id && el.id === loc.id ? 5 : 0) + (loc.text && labelOf(el) === loc.text ? 4 : 0) +
+      // 역할은 이름과 함께일 때만(getByRole(역할, 이름)) — 역할만으로는 같은 태그가 거의 다 같아, 위치·class만
+      // 맞는 엉뚱한 요소가 문턱을 넘는다
+      (loc.aria && ariaOf(el) === loc.aria ? (loc.role && roleOf(el) === loc.role ? 5 : 4) : 0) +
       (loc.name && el.getAttribute('name') === loc.name ? 3 : 0) +
       (loc.code && clean(el.getAttribute('onclick'), 200) === loc.code ? 3 : 0) +
       (loc.title && el.getAttribute('title') === loc.title ? 2 : 0) +

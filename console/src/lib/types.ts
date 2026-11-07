@@ -1141,6 +1141,8 @@ export interface SourceScan {
   skipped?: { url: string; reason: string; status?: string }[];
   sitemap?: number;
   browser?: boolean;
+  // 서버 스캔이 열지 못한 화면이 있어 실패 기록(Playwright trace)을 남겼다 — /sources/{id}/trace
+  trace?: boolean;
   via?: 'browser';
   // 수집 결과 — 화면마다 결과 행·연 상세·받은 파일, 어떻게 열었는지, 막혔으면 막힌 곳의 보고,
   // 조회 응답으로 받은 목록의 보고(data — 받은 건수·전체 건수·빠짐없음·멈춘 까닭·요청의 모양)

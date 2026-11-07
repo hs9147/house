@@ -728,6 +728,16 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
     return URL.createObjectURL(await res.blob());
   },
+  // 실패 기록(trace.zip)도 키가 헤더로 가야 해서 받아서 내려받기로 넘긴다.
+  downloadSourceTrace: async (id: number): Promise<void> => {
+    const res = await fetch(apiUrl(`/sources/${id}/trace`), { headers: { 'x-api-key': getKey() } });
+    if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(await res.blob());
+    a.download = `trace-${id}.zip`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  },
   // 스마트워크
   // 스마트워크가 이 앱을 고르는 근거 — LLM이 배포된 커밋을 읽고 쓴 용도.
   agentProfile: (projectId: number) =>

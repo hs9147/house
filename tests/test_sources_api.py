@@ -959,3 +959,110 @@ def test_old_bookmark_is_flagged_when_conditions_changed_since(client, monkeypat
 
     assert any("옛 북마크로 돌았습니다" in n for n in upload())                 # 조건 저장 전의 북마크
     assert not any("옛 북마크" in n for n in upload(queries_version=version))  # 다시 끌어다 놓은 북마크
+
+
+def test_server_scan_renders_page_screens_to_markdown_and_keeps_a_trace(client, monkeypatch):
+    """서버 스캔은 브라우저가 기본이다 — 「페이지」로 받는 화면은 서버가 (조건을 채워) 그려 마크다운으로 받고,
+    열지 못한 화면이 있으면 실패 기록(trace)을 받는다. 조건 채우기는 tests/test_infosource_browser.py가 본다."""
+    made = _create(client, headers="")
+    sid = made["id"]
+    client.post(f"{API}/sources/{sid}/scan", headers=ADMIN)
+    res = client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [
+        {"url": "https://intra.test/leave", "conditions": [], "collect": "page"},
+        {"url": "https://intra.test/leave/history", "conditions": [{"field": "연도", "value": "2026"}],
+         "collect": "page"}]})
+    assert res.status_code == 200, res.text
+
+    seen = {}
+
+    def fake_browse(source_id, urls, headers, origin, extra=(), prepare=None):
+        seen["extra"] = list(extra)
+        out = [{"url": u, "shot": i, "aria": "", "html": SITE[u]} for i, u in enumerate(urls)]
+        out += [{"url": u, "html": SITE[u]} for u in extra]
+        out.append({"url": "https://intra.test/broken", "error": "net::ERR_CONNECTION_REFUSED"})
+        trace = infosource._shot_dir(source_id) / infosource.TRACE_NAME
+        trace.parent.mkdir(parents=True, exist_ok=True)
+        trace.write_bytes(b"PK-fake-trace")
+        return {"pages": out, "browser": "msedge", "trace": True}
+
+    monkeypatch.setattr(infosource, "browser_available", lambda: True)
+    monkeypatch.setattr(infosource, "_browse", fake_browse)
+    client.post(f"{API}/sources/{sid}/scan", headers=ADMIN)
+    detail = client.get(f"{API}/sources/{sid}", headers=ADMIN).json()
+    assert detail["status"] == "scanned", detail["error"]
+    scan = detail["scan"]
+    assert seen["extra"] == ["https://intra.test/leave", "https://intra.test/leave/history"]
+    caps = [f for f in scan["files"] if f["category"] == "captures"]
+    assert len(caps) == 2
+    md = next(t for t in (infosource.staged_file(infosource.InfoSource(id=sid), f).read_text(encoding="utf-8")
+                          for f in caps) if "휴가 조회" in t)
+    assert "- 조회 화면: 휴가 조회" in md and "| 일자 | 종류 | 일수 |" in md
+    notes = scan["notes"]
+    assert any("msedge" in n for n in notes) and any("trace" in n for n in notes)
+    assert scan["trace"] is True
+
+    got = client.get(f"{API}/sources/{sid}/trace", headers=ADMIN)
+    assert got.status_code == 200 and got.content == b"PK-fake-trace"
+
+
+def test_browser_launch_falls_back_to_installed_edge():
+    """내장 Chromium을 받지 못한 서버(사내망) — 설치된 Edge로 띄운다. 다 안 되면 받는 방법을 말한다."""
+    tried = []
+
+    class Chromium:
+        def __init__(self, ok):
+            self.ok = ok
+
+        def launch(self, **kw):
+            tried.append(kw.get("channel", ""))
+            if kw.get("channel", "") not in self.ok:
+                raise RuntimeError("Executable doesn't exist\nlong detail")
+            return "browser"
+
+    class PW:
+        def __init__(self, ok):
+            self.chromium = Chromium(ok)
+
+    assert infosource._launch(PW({"msedge"})) == ("browser", "msedge")
+    assert tried == ["", "msedge"]
+    with pytest.raises(infosource.SourceError, match="playwright install"):
+        infosource._launch(PW(set()))
+
+
+def test_markdown_keeps_tables_and_drops_scripts():
+    md = infosource._markdown(
+        "<html><head><title>t</title><style>p{}</style></head><body><h1>공지</h1><script>steal()</script>"
+        "<table><tr><th>번호</th><th>제목</th></tr><tr><td>1</td><td>휴가</td></tr></table>"
+        '<img src="x.png"><a href="/p">더보기</a></body></html>')
+    assert md.startswith("# 공지")
+    assert "| 번호 | 제목 |" in md and "| 1 | 휴가 |" in md and "[더보기](/p)" in md
+    assert "steal" not in md and "x.png" not in md and "p{}" not in md
+
+
+def test_relative_dates_take_the_shape_of_the_field():
+    """서버가 조건을 채울 때 — 북마크(dateValue·since)와 같은 규칙. 값은 그날 기준으로 풀린다."""
+    from datetime import date
+
+    today = date.today()
+    assert infosource._date_value("@today", "", "date") == today.isoformat()
+    assert infosource._date_value("@today", "2024.01.01", "text") == today.strftime("%Y.%m.%d")
+    assert infosource._date_value("@today", "20240101", "text") == today.strftime("%Y%m%d")
+    assert infosource._date_value("@today", "YYYY/MM/DD", "text") == today.strftime("%Y/%m/%d")
+    assert infosource._date_value("2026-03-31", "", "text") == "2026-03-31"
+    assert infosource._date_value("비밀-값", "", "text") == "비밀-값"
+    back = infosource._date_value("@today-1y", "", "text")
+    assert back[:4] == str(today.year - 1)
+    screen = {"last": "2026-10-01"}
+    assert infosource._condition_value("@last|@today-3y", screen) == "2026-10-01"
+    assert infosource._condition_value("@last|@today-3y", {}) == "@today-3y"
+
+
+def test_llm_plan_must_cover_every_condition_and_never_press_a_changing_button():
+    ok = {"fill": [{"i": 0, "role": "textbox", "name": "연도"}], "submit": {"role": "button", "name": "조회"}}
+    assert infosource._plan_in(ok, {0}) == ok
+    assert infosource._plan_in(ok, {0, 1}) is None                                  # 칸을 못 찾은 조건이 있다
+    assert infosource._plan_in({**ok, "submit": {"role": "button", "name": "저장"}}, {0}) is None
+    assert infosource._plan_in({**ok, "submit": {"role": "button", "name": "삭제하기"}}, {0}) is None
+    assert infosource._plan_in({**ok, "submit": {"role": "heading", "name": "조회"}}, {0}) is None
+    odd = {"fill": [{"i": 0, "role": "img", "name": "연도"}], "submit": ok["submit"]}
+    assert infosource._plan_in(odd, {0}) is None

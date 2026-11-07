@@ -364,6 +364,20 @@ class Settings(BaseSettings):
     # 보안·비용 검증을 마친 출처 id(쉼표) — 여기 없는 출처는 키가 있어도 쓰지 않는다(docs/web-search-review.md)
     search_approved: str = ""
 
+    # --- 정보 업데이트의 무인 수집(선택, services/infosource.collect) ---
+    # 켜면 ① 출처의 요청 헤더에 SSO 쿠키(SMSESSION 등)를 맡길 수 있고 — 그 사용자로 사내 시스템 전부에 들어갈 수
+    # 있는 값이라 꺼져 있으면 받지 않는다 — ② 한 번 저장한 웹 출처마다 주기 작업(source_collect, 기본 하루)이 생겨
+    # 서버 스캔 뒤 지난번 저장한 자리에 그대로 저장한다. 보안 검토를 거쳐 켠다(docs/source-unattended-review.md).
+    source_unattended: bool = False
+
+    # --- 웹 페이지 읽기(선택, services/webbrowse.py · MCP /mcp/browser) ---
+    # 서버 브라우저로 그린 화면을 마크다운으로 — 읽기만 한다. 서버가 사내망 안에 있어 아무 주소나 열면 사내 시스템을
+    # 대신 열어 주는 통로가 되므로, 연 호스트(와 하위 도메인)만 연다. 비우면 아무 곳도 열지 않는다.
+    browser_allowed_hosts: str = ""     # 예: www.lge.co.kr,data.go.kr
+    browser_max_per_hour: int = 30      # 부르는 사람(키·토큰)마다
+    # 보안·비용 검증을 마쳐야 켜진다(docs/web-browser-review.md)
+    browser_approved: bool = False
+
     # --- 콘솔 자기 배포 (옵트인, services/self_deploy.py) ---
     # true면 백엔드 기동 시 platform/console/을 일반 react Project(source_subdir 사용)로
     # 등록하고 기존 배포 파이프라인(build_image → DockerRuntime → 리버스프록시)으로 최초

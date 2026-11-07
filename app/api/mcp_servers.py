@@ -15,6 +15,7 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
   POST /mcp/graph                사내 문서 온톨로지 — 그래프와 스키마(읽기 전용)
   POST /mcp/mail                 메일 발송 — 사내 SMTP 중계로, 시스템 주소(noreply)에서 사내 수신자에게만
   POST /mcp/web                  웹 검색 — 지역마다 강한 출처(전 세계·한국·일본·중국) 중 LLM이 고른다
+  POST /mcp/browser              웹 페이지 읽기 — 서버 브라우저로 그린 화면을 마크다운으로(허용한 호스트만, 읽기만)
 
 저장소 목록은 모듈 레지스트리가 아니라 환경변수가 정한다(PAAS_STORAGE_ROOT ·
 PAAS_DOC_ROOTS, services/storage.py) — 디스크 경로는 서버를 설치한 사람이 아는
@@ -48,7 +49,9 @@ import time
 from collections.abc import Callable
 from fnmatch import fnmatchcase
 from pathlib import Path
+from urllib.parse import urlsplit
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
@@ -64,7 +67,7 @@ from ..models import (
 )
 from ..security import (accessible_document_stores, require_agent_key,
                         require_document_store, require_project_mcp_access, viewer_org_ids)
-from ..services import apisearch, mailer, websearch
+from ..services import apisearch, mailer, webbrowse, websearch
 from ..services import codemap as codemap_service
 from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, shareddb, workspace
 from ..services import modules as modules_service
@@ -1457,6 +1460,54 @@ def _web_call(db: Session, actor: str, name: str, args: dict) -> str:
     audit.record(db, actor, "mcp.web.search", source,
                  {"query_chars": len(result["query"]), "results": len(result["results"])})
     return _dump(result)
+
+
+# --- 웹 페이지 읽기 서버 (/mcp/browser) ---
+#
+# 검색(/mcp/web)이 「어디에 있나」라면 여기는 「그 화면에 무엇이 있나」다 — 스크립트가 그리는 화면도 그려서 읽는다.
+# 읽기만 하고, 허용한 호스트만 연다(services/webbrowse.py). 감사에는 호스트와 읽은 글자 수만 남긴다.
+
+_BROWSER_TOOLS = [
+    {
+        "name": "read_web_page",
+        "description": (
+            "웹 페이지를 서버 브라우저로 열어 다 그려진 화면을 읽는다 — 제목·본문(마크다운, 표 포함)·같은 곳의 링크."
+            " 스크립트가 그리는 화면도 읽는다. 읽기만 한다(누르기·입력·로그인 없음 — 로그인해야 보이는 화면은 못 본다)."
+            " 허용한 호스트만 열린다(막히면 오류에 열 수 있는 곳이 나온다). 링크를 따라가려면 그 주소로 다시 부른다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "http·https 주소"}},
+            "required": ["url"],
+        },
+    },
+]
+
+
+@router.post("/mcp/browser")
+async def browser_mcp_server(
+    request: Request,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_agent_key),
+):
+    """웹 페이지 읽기 MCP 서버(JSON-RPC 2.0). Playwright 동기 API는 이벤트 루프 안에서 돌지 않는다 — 스레드로."""
+    payload = await mcp_server.read_payload(request)
+    return await anyio.to_thread.run_sync(lambda: mcp_server.dispatch(
+        payload,
+        server_name="paas-browser",
+        tools=_BROWSER_TOOLS,
+        call=lambda name, args: _browser_call(db, key.name, name, args),
+    ))
+
+
+def _browser_call(db: Session, actor: str, name: str, args: dict) -> str:
+    try:
+        page = webbrowse.read_page(actor, _str_arg(args, "url"))
+    except webbrowse.BrowseError as e:
+        raise mcp_server.McpToolError(str(e))
+    audit.record(db, actor, "mcp.browser.read", urlsplit(page["url"]).hostname or "",
+                 {"chars": len(page["markdown"]), "status": page["status"], "blocked": len(page["blocked"])})
+    return _dump(page)
 
 
 # --- 문서 온톨로지 서버 (/mcp/graph) ---
