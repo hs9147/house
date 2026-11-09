@@ -6,6 +6,7 @@ import { NavLink, Outlet } from 'react-router-dom';
  *  - **기록**: 사람이 지시한 일 한 줄씩(배포·키 발급·승인 — audit_events).
  *  - **대시보드**: 그 안에서 실제로 일어난 모델 호출의 숫자(llm_calls) — 느려졌는지,
  *    실패하는지, 토큰을 얼마나 쓰는지.
+ *  - **추적**: 턴 하나(도구 왕복)의 호출 흐름 — 대시보드의 숫자 뒤에 있는 사건 하나를 연다.
  *  - **평가**: 그 답이 도움이 됐는지 — 사람이 누른 좋음·아쉬움(answer_ratings).
  *    숫자(지연·토큰)로는 "빠른 헛소리"가 좋아 보인다. 품질은 따로 재야 한다.
  *
@@ -16,6 +17,7 @@ import { NavLink, Outlet } from 'react-router-dom';
 const TABS: [string, string][] = [
   ['/audit', '기록'],
   ['/audit/dashboard', '대시보드'],
+  ['/audit/traces', '추적'],
   ['/audit/assessment', '평가'],
 ];
 

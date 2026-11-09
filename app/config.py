@@ -292,6 +292,8 @@ class Settings(BaseSettings):
     # 허용하지 않는 값을 보내면 프로바이더가 400으로 거부하니, 그 모델에서는 이 값을
     # 낮추면 된다(조용히 잘리는 것보다 거부가 낫다).
     llm_max_output_tokens: int = 32768
+    # LLM 호출 기록(llm_calls·llm_call_details·llm_turns)을 남기는 날 수 — 지난 것은 하루 한 번 지운다(0이면 두기)
+    llm_log_retention_days: int = 180
 
     # LLM 한 번 호출의 HTTP 읽기 제한(초). **출력 한도와 함께 움직인다** — 한도를 32768로
     # 올리자 생성이 길어져 예전의 고정 120초가 새 병목이 됐다("llm call failed: the read

@@ -313,6 +313,8 @@ def send(db: Session, key: ApiKey, provider, session_id: int, content: str,
               # 업무 원장 — 이 턴에 고친 것만(다음 턴이 여기서부터 읽는다). 이번 요청을 풀어 쓴 것도 함께.
               **{k: result[k] for k in ("brief", "restated") if result.get(k)},
               "model": provider.model, "provider": provider.name,
+              # 이 답을 만든 턴 — 평가 탭의 「아쉬움」에서 그 턴의 호출 흐름(작업 로그 「추적」)으로 간다
+              **({"turn_id": result["turn_id"]} if result.get("turn_id") else {}),
               # 어떤 과정을 거쳐 이 답이 나왔는지 — 다시 열어도 「진행 과정」으로 보인다.
               "steps": [s["label"] for s in steps]})
     db.add(answer)

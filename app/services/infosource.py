@@ -60,7 +60,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..models import InfoSource, InfoSourceQuery, InfoSourceScan
 from ..security import decrypt_value, encrypt_value
-from . import docsearch, jobs, llm, mcp_client, storage
+from . import docsearch, jobs, llm, mcp_client, storage, telemetry
 
 KINDS = ("web", "api", "mcp")
 USER_AGENT = "gpaas-infosource/1.0"
@@ -822,6 +822,7 @@ class _Actor:
             hint=f"조회 버튼 힌트: {hint}\n" if hint else "", aria=aria[:12000])
         plan = _plan_in(_parse(llm.chat_completion(provider, [{"role": "user", "content": text}], self.db)), need)
         if plan is None:
+            telemetry.signal("plan_rejected")
             raise SourceError("LLM이 조건 칸·조회 버튼을 찾지 못했습니다(고른 것이 화면에 맞지 않거나 바꾸는 버튼이었습니다)")
         return plan
 
@@ -842,6 +843,7 @@ class _Actor:
         try:
             _act(page, plan, screen)
         except _Stale as e:
+            telemetry.signal("plan_mismatch")
             raise SourceError(f"LLM이 고른 칸·버튼이 화면에 맞지 않습니다: {e}")
         self.saved[url] = {"sig": sig, **plan, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
         self.changed = True
@@ -1005,6 +1007,7 @@ def _parse(text: str) -> dict:
             continue
         if isinstance(data, dict):
             return data
+    telemetry.signal("json_unreadable")
     return {}
 
 
@@ -1135,6 +1138,8 @@ def _web_result(scan: dict, data: dict) -> tuple[dict, list[str]]:
         })
     notes = [f"LLM이 낸 주소 중 받지 않은 것을 버렸습니다: {', '.join(sorted(set(dropped))[:5])}"
              ] if dropped else []
+    if dropped:
+        telemetry.signal("invented_urls")
     if pages and all(p["requires_login"] for p in pages):
         notes.append("모든 페이지가 로그인 화면입니다 — 요청 헤더에 세션 쿠키를 넣고 다시 스캔하세요.")
     return {"menu": menu, "pages": out_pages}, notes

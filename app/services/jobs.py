@@ -20,4 +20,8 @@ def _get_executor() -> ThreadPoolExecutor:
 
 
 def submit(fn, *args, **kwargs) -> Future:
-    return _get_executor().submit(fn, *args, **kwargs)
+    # 그 안의 LLM 호출이 「(요청 밖)」으로 뭉치지 않게 함수 이름을 기능 이름으로(services/telemetry.feature)
+    from . import telemetry  # noqa: PLC0415
+
+    name = f"{fn.__module__.rsplit('.', 1)[-1]}.{getattr(fn, '__name__', 'job').lstrip('_')}"
+    return _get_executor().submit(telemetry.run_as, name, fn, *args, **kwargs)

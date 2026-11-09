@@ -1129,6 +1129,6 @@ def chat(db: Session, key: ApiKey, provider, history: list[dict],
     audit.record(db, key.name, "smartwork.chat", "-", {"tools": used})
     # 원장은 새로 고친 것만 남긴다 — 고치지 못한 턴에 지난 원장을 다시 남기면, 다음 턴이 그 사이의 대화를
     # 원장에 넣지 않고 건너뛴다(convcontext.last_brief 이후만 읽는다).
-    return {"reply": reply, **view, "tools": used, "provider": provider.name,
+    return {"reply": reply, **view, "tools": used, "provider": provider.name, "turn_id": turn_id,
             "brief": restated["brief"] if restated else None,
             "restated": {k: restated[k] for k in ("request", "refers")} if restated else None}

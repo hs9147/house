@@ -50,6 +50,7 @@ DEFAULT_INTERVALS = {
     JobKind.temp_job: 60,
     # 무인 수집은 사이트 하나를 통째로 스캔하고 LLM 정리를 한 번 부른다 — 하루에 한 번이면 된다.
     JobKind.source_collect: 86_400,
+    JobKind.llm_log_prune: 86_400,
 }
 
 _lock = threading.Lock()
@@ -67,6 +68,8 @@ def _wanted(db: Session) -> list[tuple[JobKind, str]]:
     from . import tempjobs  # noqa: PLC0415
 
     wanted: list[tuple[JobKind, str]] = [(JobKind.api_catalog, "")]
+    if get_settings().llm_log_retention_days > 0:
+        wanted.append((JobKind.llm_log_prune, ""))
     wanted += [(JobKind.temp_job, task_id) for task_id in tempjobs.TASKS]
     try:
         # 문서 색인은 PAAS_DOC_ROOTS의 문서 저장소만 — 내부 저장소(internal)는 색인 대상이 아니다(storage.indexed).
@@ -152,9 +155,12 @@ def due(db: Session, now: datetime | None = None) -> list[ScheduledJob]:
 def run(db: Session, job: ScheduledJob) -> dict:
     """job 하나를 지금 돌리고 결과를 행에 남긴다. **예외를 올리지 않는다** —
     한 job이 실패해도 다음 job은 돌아야 하고, 실패는 표에 적히는 것이 목적이다."""
+    from . import telemetry  # noqa: PLC0415
+
     started = time.monotonic()
     try:
-        status, detail = _dispatch(db, job)
+        with telemetry.feature(f"scheduler.{job.kind.value}"):
+            status, detail = _dispatch(db, job)
     except Exception as e:  # noqa: BLE001 — 어떤 실패든 표에 남긴다
         status, detail = JobStatus.failed, {"error": f"{type(e).__name__}: {e}"[:500]}
 
@@ -202,6 +208,12 @@ def _dispatch(db: Session, job: ScheduledJob) -> tuple[JobStatus, dict]:
             return JobStatus.skipped, {"reason": "코드에서 지운 임시 작업입니다"}
         result = tempjobs.run(db, job.target)
         return (JobStatus.ok if result.get("done") else JobStatus.skipped), result
+
+    if job.kind == JobKind.llm_log_prune:
+        from . import telemetry  # noqa: PLC0415
+
+        result = telemetry.prune(get_settings().llm_log_retention_days)
+        return (JobStatus.ok if result["calls"] + result["turns"] else JobStatus.skipped), result
 
     if job.kind == JobKind.source_collect:
         from ..models import InfoSource  # noqa: PLC0415

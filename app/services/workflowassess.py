@@ -21,7 +21,7 @@ import re
 from sqlalchemy.orm import Session
 
 from ..models import Workflow
-from . import llm, workflow as workflow_service
+from . import llm, telemetry, workflow as workflow_service
 
 VERDICTS = ("agent", "partial", "human")
 
@@ -221,4 +221,5 @@ def _parse(text: str) -> dict:
             continue
         if isinstance(data, dict):
             return data
+    telemetry.signal("json_unreadable")
     return {"summary": text[:2000]}

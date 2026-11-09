@@ -280,3 +280,124 @@ def test_cost_only_for_providers_whose_price_the_server_fetched(clean_calls, mon
     assert models["az / gpt-6.1-sol"]["cost_usd"] == pytest.approx(2.24)
     assert models["br / claude"]["cost_usd"] is None                      # Bedrock — 단가를 직접 얻지 못한다
     assert [p["provider"] for p in out["prices"]] == ["az"] and out["prices"][0]["source"] == llmprice.SOURCE
+
+
+# ---------------------------------------------------------------- 기능 이름·프롬프트 판·실패 신호·추적·보관
+
+def _ok_chat(monkeypatch, text="끝"):
+    monkeypatch.setattr(llm_service, "_post_chat", lambda url, headers, payload: {
+        "choices": [{"message": {"content": text}}], "usage": {"prompt_tokens": 5, "completion_tokens": 2}})
+
+
+def test_calls_outside_requests_carry_the_feature_name(monkeypatch, clean_calls):
+    """작업 큐·스케줄러의 호출은 경로가 없다 — 함수·job 이름이 기능 이름으로 남는다(「(요청 밖)」에 뭉치지 않게)."""
+    from app.services import jobs
+
+    _ok_chat(monkeypatch)
+
+    def _summarize_job():
+        return llm_service.chat_completion(_provider(), [{"role": "user", "content": "x"}])
+
+    jobs.submit(_summarize_job).result(timeout=30)
+    with telemetry.feature("scheduler.doc_index"):
+        llm_service.chat_completion(_provider(), [{"role": "user", "content": "y"}])
+    llm_service.chat_completion(_provider(), [{"role": "user", "content": "z"}])
+    assert [r.feature for r in _rows()] == ["test_telemetry.summarize_job", "scheduler.doc_index", ""]
+
+
+def test_prompt_version_is_found_from_the_template_in_the_input(monkeypatch, clean_calls):
+    """프롬프트를 코드에 둔 채로 판을 남긴다 — 「모듈.상수@템플릿 해시」. 템플릿이 아니면 비운다."""
+    from app.services import infosource
+
+    _ok_chat(monkeypatch)
+    text = infosource.ACT_PROMPT.format(fields="0. 연도", hint="", aria='- textbox "연도"')
+    llm_service.chat_completion(_provider(), [{"role": "user", "content": text}])
+    llm_service.chat_completion(_provider(), [{"role": "user", "content": "그냥 질문"}])
+    first, second = _rows()
+    assert first.prompt.startswith("infosource.ACT_PROMPT@") and len(first.prompt.split("@")[1]) == 8
+    assert second.prompt == ""
+
+
+def test_signal_lands_on_the_call_whose_answer_could_not_be_used(monkeypatch, clean_calls):
+    """호출은 성공했는데 응답을 쓸 수 없던 것 — 실패율에 잡히지 않아 신호로 남긴다(본문은 남기지 않는다)."""
+    from app.services import infosource
+
+    _ok_chat(monkeypatch, "JSON이 아닌 비밀 답")
+    assert infosource._parse(llm_service.chat_completion(_provider(), [{"role": "user", "content": "x"}])) == {}
+    row = _rows()[-1]
+    assert row.signals == ["json_unreadable"] and "비밀" not in str(row.signals)
+
+
+def test_turn_trace_lists_filters_and_opens_one_turn_with_its_rating(monkeypatch, clean_calls):
+    """추적 — 턴 목록을 거르고, 턴 하나의 왕복을 펼치고, 그 답에 매긴 평가(누가 매겼는지는 빼고)를 붙인다.
+    평가 탭의 「아쉬움」에서 그 턴으로 간다(답변 메시지가 턴 ID를 들고 있다)."""
+    from app.models import AnswerRating, SmartworkSession, SmartworkSessionMessage
+
+    calls = []
+
+    def fake_post_chat(url, headers, payload):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "function": {"name": "t", "arguments": "{}"}}]}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 3}}
+        return {"choices": [{"message": {"content": "끝"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 300, "completion_tokens": 20}}
+
+    monkeypatch.setattr(llm_service, "_post_chat", fake_post_chat)
+    with telemetry.feature("planning.draft"):
+        llm_service.chat_completion(_provider(), [{"role": "user", "content": "x"}],
+                                    tools=[{"type": "function", "function": {"name": "t"}}],
+                                    tool_executor=lambda name, args: "결과")
+    _ok_chat(monkeypatch)
+    llm_service.chat_completion(_provider(), [{"role": "user", "content": "y"}])
+    turn_id = _details()[0].turn_id
+
+    with SessionLocal() as db:
+        session = SmartworkSession(owner="a@lge.com")
+        db.add(session)
+        db.flush()
+        answer = SmartworkSessionMessage(session_id=session.id, role="assistant", author="a@lge.com",
+                                         content="답", view={"turn_id": turn_id})
+        db.add(answer)
+        db.flush()
+        db.add(AnswerRating(message_id=answer.id, rater="secret-rater@lge.com", score=-1, reason="표가 잘렸다"))
+        db.commit()
+
+    c = TestClient(create_app())
+    listed = c.get(f"{API}/telemetry/turns?days=1", headers=ADMIN).json()
+    assert listed["total"] == 2 and "planning.draft" in listed["options"]["labels"]
+    only = c.get(f"{API}/telemetry/turns?days=1&label=planning.draft", headers=ADMIN).json()["turns"]
+    assert [(t["turn_id"], t["rounds"], t["prompt_tokens"], t["tool_calls"]) for t in only] == [(turn_id, 2, 400, 1)]
+
+    detail = c.get(f"{API}/telemetry/turns/{turn_id}", headers=ADMIN).json()
+    assert [(r["round"], r["prompt_tokens"], r["finish_reason"]) for r in detail["rounds"]] == [
+        (0, 100, ""), (1, 300, "stop")]
+    assert detail["ratings"] == [{"at": detail["ratings"][0]["at"], "score": -1, "reason": "표가 잘렸다"}]
+    assert "secret-rater" not in str(detail)
+    assert c.get(f"{API}/telemetry/turns/nope", headers=ADMIN).status_code == 404
+    assert c.get(f"{API}/telemetry/turns?days=1").status_code in (401, 403)
+
+    poor = c.get(f"{API}/telemetry/quality?days=1", headers=ADMIN).json()["recent_poor"]
+    assert [p["turn_id"] for p in poor if p["reason"] == "표가 잘렸다"] == [turn_id]
+
+
+def test_old_call_records_are_pruned_but_ratings_stay(clean_calls):
+    """보관 기간을 넘긴 호출 기록만 지운다 — 사람이 매긴 평가는 대화 메시지에 붙어 있어 지우지 않는다."""
+    from app.models import LlmTurn
+
+    old = (datetime.now(timezone.utc) - timedelta(days=200)).replace(tzinfo=None)
+    with SessionLocal() as db:
+        db.query(LlmTurn).delete()
+        stale, fresh = LlmCallLog(created_at=old, provider="p", model="m"), LlmCallLog(provider="p", model="m")
+        db.add_all([stale, fresh])
+        db.flush()
+        db.add_all([LlmCallDetail(call_id=stale.id, turn_id="old"), LlmCallDetail(call_id=fresh.id, turn_id="new"),
+                    LlmTurn(turn_id="old", created_at=old), LlmTurn(turn_id="new")])
+        db.commit()
+    assert telemetry.prune(180) | {"before": ""} == {"calls": 1, "details": 1, "turns": 1, "before": ""}
+    assert [d.turn_id for d in _details()] == ["new"]
+    with SessionLocal() as db:
+        assert [t.turn_id for t in db.query(LlmTurn).all()] == ["new"]
+        db.query(LlmTurn).delete()
+        db.commit()

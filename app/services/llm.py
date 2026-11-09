@@ -203,7 +203,7 @@ def _completion_round(provider, messages, db, tools, tool_executor, finish_tools
     # 남는 곳이 없었다(services/telemetry.py). 도구 왕복마다 한 행이고, 본문은 싣지 않는다.
     with telemetry.llm_call(
             provider.name, provider.model,
-            "bedrock.converse" if native else "chat.completions", _round):
+            "bedrock.converse" if native else "chat.completions", _round, telemetry.prompt_of(messages)):
         # 입력의 구성 — 구간별 크기만(본문은 싣지 않는다). 실제 토큰은 응답의 usage로 나눈다.
         telemetry.note(parts=telemetry.composition(messages, tools))
         if native:

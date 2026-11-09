@@ -1,9 +1,11 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import Async from '../../components/Async';
 import { api } from '../../lib/api';
 import { fmtDate } from '../../lib/format';
 import { useApi } from '../../lib/hooks';
 import { BarList, StackedBars, StatTile, VIZ, fmt } from '../../lib/viz';
+import { SIGNAL } from './TracesTab';
 
 /** 비용 — 작은 값은 센트 아래까지(호출 몇 번이면 몇 센트다). */
 const usd = (v: number) => `$${v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(4)}`;
@@ -116,13 +118,46 @@ export default function DashboardTab() {
             }))} />
 
             <h3>기능별</h3>
-            {/* 요청 경로로 묶는다(숫자 id는 :id로) — "어느 화면이 토큰을 태우나"에 답하는 표다. */}
+            {/* 요청 경로로 묶는다(숫자 id는 :id로) — "어느 화면이 토큰을 태우나"에 답하는 표다.
+                요청 밖의 호출은 작업 큐의 함수·스케줄러 job 이름으로(services/telemetry.feature). */}
             <BarList rows={t.by_route.map((r) => ({
               label: r.key,
               value: r.calls,
               hint: `실패 ${fmt(r.failed)} · 평균 ${fmt(r.avg_ms)}ms · 토큰 ${fmt(r.tokens)}`
                 + (r.cost_usd !== null ? ` · ${usd(r.cost_usd)}` : ''),
             }))} />
+
+            {t.signals.length > 0 && (
+              <>
+                <h3>실패 신호</h3>
+                {/* 호출은 성공했는데 쓸 수 없던 응답 — 실패율에 잡히지 않는다. 「추적」에서 신호로 거른다. */}
+                <BarList rows={t.signals.map((s) => ({ label: SIGNAL[s.key] ?? s.key, value: s.calls }))} />
+              </>
+            )}
+
+            {t.by_prompt.length > 0 && (
+              <>
+                <h3>프롬프트 판별</h3>
+                {/* 판 = 템플릿의 해시. 같은 이름에 해시가 둘이면 고친 앞뒤다 — 호출당 토큰·실패·신호를 견준다. */}
+                <table style={{ fontSize: 12 }}>
+                  <thead>
+                    <tr><th>프롬프트@판</th><th>호출</th><th>실패</th><th>신호</th><th>평균 시간</th><th>호출당 토큰</th></tr>
+                  </thead>
+                  <tbody>
+                    {[...t.by_prompt].sort((a, b) => a.key.localeCompare(b.key)).map((p) => (
+                      <tr key={p.key}>
+                        <td className="mono">{p.key}</td>
+                        <td>{fmt(p.calls)}</td>
+                        <td>{fmt(p.failed)}</td>
+                        <td>{fmt(p.signals)}</td>
+                        <td>{fmt(p.avg_ms)}ms</td>
+                        <td>{fmt(p.calls ? Math.round(p.tokens / p.calls) : 0)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
 
             <h3>입력 구성 <span className="mutedtext" style={{ fontSize: 12 }}>(추정)</span></h3>
             {/* 프로바이더는 입력을 합계로만 준다 — 구간마다 크기를 재 그 비율로 나눈 값이다.
@@ -260,7 +295,7 @@ export default function DashboardTab() {
                   <tbody>
                     {t.turns.map((u, i) => (
                       <tr key={i}>
-                        <td className="mono">{fmtDate(u.at)}</td>
+                        <td className="mono"><Link to={`/audit/traces?turn=${encodeURIComponent(u.turn_id)}`}>{fmtDate(u.at)}</Link></td>
                         <td className="mono" style={{ fontSize: 11 }}>{u.route || '(요청 밖)'}</td>
                         <td>{u.outcome || '-'}</td>
                         <td>{u.rounds}{u.tool_calls ? ` · 도구 ${u.tool_calls}` : ''}</td>

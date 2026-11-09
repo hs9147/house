@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import Async from '../../components/Async';
 import { api } from '../../lib/api';
 import { fmtDate } from '../../lib/format';
@@ -100,6 +101,7 @@ export default function AssessmentTab() {
                       <th>시각</th>
                       <th>모델</th>
                       <th>사유</th>
+                      <th />
                     </tr>
                   </thead>
                   <tbody>
@@ -108,6 +110,8 @@ export default function AssessmentTab() {
                         <td className="mono">{fmtDate(r.at)}</td>
                         <td>{r.model || '-'}</td>
                         <td>{r.reason}</td>
+                        {/* 그 답을 만든 턴의 호출 흐름 — 왜 아쉬웠는지(잘림·도구 결과·실패)를 따라간다 */}
+                        <td>{r.turn_id && <Link to={`/audit/traces?turn=${encodeURIComponent(r.turn_id)}`}>추적</Link>}</td>
                       </tr>
                     ))}
                   </tbody>

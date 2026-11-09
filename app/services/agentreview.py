@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
 from ..models import AgentProfile, Project, utcnow
-from . import workspace
+from . import telemetry, workspace
 
 # LLM에 넣는 글자 예산 — 파일 하나와 전체. 설명 문서가 앞에 오므로 잘리는 것은 코드 쪽이다.
 MAX_FILE_CHARS = 8_000
@@ -134,6 +134,7 @@ def _parse(text: str) -> dict:
     try:
         data = json.loads(cleaned[start:end + 1] if start >= 0 and end > start else cleaned)
     except json.JSONDecodeError as e:
+        telemetry.signal("json_unreadable")
         raise ReviewError(f"검토 결과를 읽지 못했습니다(JSON 아님): {text[:120]}") from e
     if not isinstance(data, dict) or not str(data.get("purpose") or "").strip():
         raise ReviewError("검토 결과에 목적(purpose)이 없습니다.")

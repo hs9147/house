@@ -23,7 +23,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..models import Workflow, WorkflowLink, WorkflowRun
-from . import docsearch, storage
+from . import docsearch, storage, telemetry
 
 # 대상·상태 하나가 한 저장소에서 잇는 노드 수 — "계약" 같은 흔한 낱말이 노드 수백 개와 이어지지 않게.
 MAX_NODES = 8
@@ -357,4 +357,5 @@ def _parse(text: str) -> dict:
             continue
         if isinstance(data, dict):
             return data
+    telemetry.signal("json_unreadable")
     return {}

@@ -557,6 +557,7 @@ class JobKind(str, enum.Enum):
     semantic_tune = "semantic_tune"  # 내용 분석의 기준 다시 배우기 — 사람 정답으로(services/semantic.tune)
     temp_job = "temp_job"            # 임시 작업 — 한동안만 돌리는 운영 스크립트(services/tempjobs)
     source_collect = "source_collect"  # 정보 업데이트 무인 수집 — 서버 스캔 뒤 지난 자리에 저장(infosource.collect)
+    llm_log_prune = "llm_log_prune"    # LLM 호출 기록의 보관 기간을 넘긴 것 지우기(telemetry.prune)
 
 
 class JobStatus(str, enum.Enum):
@@ -737,6 +738,12 @@ class LlmCallLog(Base):
     path: Mapped[str] = mapped_column(String(32), default="")
     # 어느 화면에서 왔는지(요청 경로). 토큰을 태우거나 실패하는 기능을 찾는 열이다.
     route: Mapped[str] = mapped_column(String(128), default="")
+    # 요청 밖(작업 큐·스케줄러)에서 온 호출의 기능 이름 — 경로가 없어 모두 「(요청 밖)」으로 뭉쳤다(telemetry.feature).
+    feature: Mapped[str] = mapped_column(String(64), default="")
+    # 어느 프롬프트의 어느 판으로 나갔는지 — 「모듈.상수@템플릿 해시」(telemetry.prompt_of). 고친 뒤를 견주는 열이다.
+    prompt: Mapped[str] = mapped_column(String(96), default="")
+    # 응답을 받은 뒤에 안 실패 신호 — JSON이 아님·지어낸 주소·화면에 맞지 않는 동작 등(telemetry.signal)
+    signals: Mapped[list | None] = mapped_column(JSON, nullable=True)
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     ms: Mapped[int] = mapped_column(Integer, default=0)
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)

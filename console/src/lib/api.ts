@@ -22,6 +22,8 @@ import type {
   EnvVarRow,
   LlmProviderOut,
   LlmTelemetry,
+  LlmTurnDetail,
+  LlmTurnList,
   McpDirectoryItem,
   ModuleOut,
   ModuleSummary,
@@ -350,6 +352,11 @@ export const api = {
   // 평가 탭이 읽는 답변 평가 집계 — 창이 넓어서 기본 30일이다(평가는 호출보다 드물다).
   qualityTelemetry: (days = 30) =>
     request<QualityTelemetry>('GET', '/telemetry/quality', undefined, { days }),
+  // 작업 로그 「추적」 — 턴 목록(거르기)과 턴 하나의 왕복 흐름
+  telemetryTurns: (q: { days: number; label: string; model: string; outcome: string; signal: string; failed: boolean }) =>
+    request<LlmTurnList>('GET', '/telemetry/turns', undefined, { ...q, failed: q.failed ? 'true' : undefined }),
+  telemetryTurn: (turnId: string) =>
+    request<LlmTurnDetail>('GET', `/telemetry/turns/${encodeURIComponent(turnId)}`),
   issueKey: (name: string, is_admin: boolean) =>
     request<ApiKeyIssued>('POST', '/keys', { name, is_admin }),
 

@@ -10,12 +10,13 @@ DB별 차이에도 걸리지 않는다. 창은 행 수로 막는다(_MAX_ROWS).
 import statistics
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import String, cast, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import AnswerRating, ApiKey, LlmCallDetail, LlmCallLog, LlmProvider, LlmTurn
+from ..models import (AnswerRating, ApiKey, LlmCallDetail, LlmCallLog, LlmProvider, LlmTurn,
+                      SmartworkSessionMessage)
 from ..security import require_admin
 from ..services import llmprice
 
@@ -28,6 +29,11 @@ _MAX_ROWS = 20000
 _RECENT_TURNS = 20
 # 결과 종류별 비교의 구간 — 턴이 읽어 들인 도구 결과(입력 토큰, 추정)의 크기.
 _TOOL_RESULT_BINS = ((0, 10_000, "1만 미만"), (10_000, 50_000, "1만~5만"), (50_000, None, "5만 이상"))
+
+
+def _label(row) -> str:
+    """호출이 온 곳 — 화면(요청 경로), 없으면 기능 이름(작업 큐·스케줄러), 둘 다 없으면 「(요청 밖)」."""
+    return row.route or row.feature or "(요청 밖)"
 
 
 def _pct(values: list[int], q: float) -> int:
@@ -102,6 +108,8 @@ def llm_summary(
 
     by_model: dict = {}
     by_route: dict = {}
+    by_prompt: dict = {}
+    signals: dict[str, int] = {}
     by_day: dict = {}
     latencies: list[int] = []
     prompt_tokens = completion_tokens = failed = 0
@@ -115,7 +123,12 @@ def llm_summary(
             total_cost += cost
             priced += 1
         _bucket(by_model, f"{r.provider} / {r.model}", r, cost)
-        _bucket(by_route, r.route or "(요청 밖)", r, cost)
+        _bucket(by_route, _label(r), r, cost)
+        if r.prompt:
+            _bucket(by_prompt, r.prompt, r, cost)
+            by_prompt[r.prompt]["signals"] = by_prompt[r.prompt].get("signals", 0) + len(r.signals or [])
+        for s in r.signals or []:
+            signals[s] = signals.get(s, 0) + 1
         _bucket(by_day, r.created_at.date().isoformat(), r, cost)
         latencies.append(r.ms or 0)
         prompt_tokens += r.prompt_tokens or 0
@@ -135,16 +148,135 @@ def llm_summary(
         "prices": [{"provider": name, **price} for name, price in sorted(prices.items()) if price],
         "by_model": _ranked(by_model),
         "by_route": _ranked(by_route)[:12],
+        # 프롬프트 판별 — 같은 이름에 해시가 둘이면 고친 앞뒤다. 호출당 토큰·실패·신호를 견준다.
+        "by_prompt": [{**c, "signals": by_prompt[c["key"]].get("signals", 0)} for c in _ranked(by_prompt)][:20],
+        # 응답을 받은 뒤에 안 실패(JSON 아님·지어낸 주소·맞지 않는 동작) — 실패율에 잡히지 않는 실패다
+        "signals": sorted(({"key": k, "calls": v} for k, v in signals.items()), key=lambda c: -c["calls"]),
         # 일별은 시간 순으로 — 추세는 순서가 있어야 읽힌다.
         "daily": sorted(_ranked(by_day), key=lambda c: c["key"]),
         **_composition(db, rows),
         # 최근 실패 — 사유를 그 자리에 보여 준다(실패율만 보면 무엇을 고칠지 알 수 없다).
         "failures": [
             {"at": r.created_at.isoformat(), "model": r.model, "provider": r.provider,
-             "route": r.route, "path": r.path, "error": r.error}
+             "route": _label(r), "path": r.path, "error": r.error}
             for r in rows if not r.ok
         ][:20],
     }
+
+
+# ---------------------------------------------------------------- 추적 — 턴 하나의 호출 흐름
+
+_TURN_LIMIT = 200
+
+
+def _turn_key(row, detail) -> str:
+    """턴 — 도구 왕복을 묶은 것(telemetry.turn). 턴이 없던 옛 호출은 그 호출 하나가 턴이다."""
+    return detail.turn_id if detail is not None and detail.turn_id else f"call-{row.id}"
+
+
+@router.get("/telemetry/turns")
+def list_turns(
+    days: int = 7,
+    label: str = "",
+    model: str = "",
+    outcome: str = "",
+    failed: bool = False,
+    signal: str = "",
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _: ApiKey = Depends(require_admin),
+):
+    """턴 목록 — 기간·화면(기능)·모델·결과·실패·신호로 거른다. 본문은 없다(수치와 이름뿐)."""
+    days = max(1, min(days, 90))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)
+    rows = db.execute(
+        select(LlmCallLog).where(LlmCallLog.created_at >= cutoff)
+        .order_by(LlmCallLog.id.desc()).limit(_MAX_ROWS)
+    ).scalars().all()
+    ids = [r.id for r in rows]
+    details: dict[int, LlmCallDetail] = {}
+    for start in range(0, len(ids), 900):
+        for d in db.execute(select(LlmCallDetail).where(LlmCallDetail.call_id.in_(ids[start:start + 900]))).scalars():
+            details[d.call_id] = d
+    turns: dict[str, dict] = {}
+    for r in sorted(rows, key=lambda x: x.id):
+        d = details.get(r.id)
+        t = turns.setdefault(_turn_key(r, d), {
+            "turn_id": _turn_key(r, d), "at": r.created_at.isoformat(), "label": _label(r), "models": [],
+            "prompts": [], "rounds": 0, "ms": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0,
+            "tool_calls": 0, "failed": 0, "signals": [], "truncated": False, "outcome": ""})
+        t["rounds"] += 1
+        t["ms"] += r.ms or 0
+        t["prompt_tokens"] += r.prompt_tokens or 0
+        t["completion_tokens"] += r.completion_tokens or 0
+        t["cached_tokens"] += (d.cached_tokens or 0) if d else 0
+        t["tool_calls"] += r.tool_calls or 0
+        t["failed"] += 0 if r.ok else 1
+        t["truncated"] |= bool(d and (d.finish_reason or "").lower() in ("length", "max_tokens"))
+        for key, value in (("models", r.model), ("prompts", r.prompt)):
+            if value and value not in t[key]:
+                t[key].append(value)
+        t["signals"] += [s for s in r.signals or [] if s not in t["signals"]]
+    real = [k for k in turns if not k.startswith("call-")]
+    for start in range(0, len(real), 900):
+        for o in db.execute(select(LlmTurn).where(LlmTurn.turn_id.in_(real[start:start + 900]))).scalars():
+            turns[o.turn_id]["outcome"] = o.outcome
+    every = sorted(turns.values(), key=lambda t: t["at"], reverse=True)
+    picked = [t for t in every
+              if (not label or t["label"] == label) and (not model or model in t["models"])
+              and (not outcome or t["outcome"] == outcome) and (not failed or t["failed"] or t["truncated"])
+              and (not signal or signal in t["signals"])]
+    return {
+        "days": days, "truncated": len(rows) >= _MAX_ROWS, "total": len(picked),
+        "turns": picked[:max(1, min(limit, _TURN_LIMIT))],
+        # 거르기 칸의 고를 거리 — 이 기간에 나온 것만
+        "options": {"labels": sorted({t["label"] for t in every}),
+                    "models": sorted({m for t in every for m in t["models"]}),
+                    "outcomes": sorted({t["outcome"] for t in every if t["outcome"]}),
+                    "signals": sorted({s for t in every for s in t["signals"]})},
+    }
+
+
+@router.get("/telemetry/turns/{turn_id}")
+def get_turn(turn_id: str, db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """턴 하나 — 왕복마다 모델·시간·토큰·불린 도구·입력 구성·종료 사유·오류·신호, 턴의 결과·읽은 자료, 그 답에
+    매긴 평가(누가 매겼는지는 빼고). **본문은 없다** — 대화 내용은 그 세션의 참여자만 본다."""
+    if turn_id.startswith("call-") and turn_id[5:].isdigit():
+        rows = [r for r in [db.get(LlmCallLog, int(turn_id[5:]))] if r is not None]
+    else:
+        ids = [d.call_id for d in db.execute(select(LlmCallDetail).where(LlmCallDetail.turn_id == turn_id)).scalars()]
+        rows = db.execute(select(LlmCallLog).where(LlmCallLog.id.in_(ids))).scalars().all() if ids else []
+    if not rows:
+        raise HTTPException(status_code=404, detail="그 턴의 기록이 없습니다(보관 기간이 지났을 수 있습니다).")
+    rows = sorted(rows, key=lambda r: (r.tool_round, r.id))
+    details = {d.call_id: d for d in db.execute(
+        select(LlmCallDetail).where(LlmCallDetail.call_id.in_([r.id for r in rows]))).scalars()}
+    outcome = db.execute(select(LlmTurn).where(LlmTurn.turn_id == turn_id)).scalar_one_or_none()
+    ratings = []
+    if not turn_id.startswith("call-"):
+        since = (rows[0].created_at - timedelta(hours=1))
+        messages = db.execute(select(SmartworkSessionMessage).where(
+            SmartworkSessionMessage.role == "assistant", SmartworkSessionMessage.created_at >= since,
+            cast(SmartworkSessionMessage.view, String).like(f"%{turn_id}%"))).scalars().all()
+        if messages:
+            ratings = [{"at": a.created_at.isoformat(), "score": a.score, "reason": a.reason}
+                       for a in db.execute(select(AnswerRating).where(
+                           AnswerRating.message_id.in_([m.id for m in messages]))).scalars()]
+    rounds = []
+    for r in rows:
+        d = details.get(r.id)
+        rounds.append({
+            "id": r.id, "at": r.created_at.isoformat(), "round": r.tool_round, "provider": r.provider,
+            "model": r.model, "path": r.path, "ok": r.ok, "ms": r.ms, "error": r.error,
+            "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens,
+            "cached_tokens": d.cached_tokens if d else 0, "tool_calls": r.tool_calls,
+            "finish_reason": d.finish_reason if d else "", "prompt": r.prompt, "signals": r.signals or [],
+            "parts": d.parts if d else [], "output_parts": d.output_parts if d else [],
+        })
+    return {"turn_id": turn_id, "label": _label(rows[0]), "feature": rows[0].feature, "route": rows[0].route,
+            "trace_id": next((r.trace_id for r in rows if r.trace_id), None),
+            "outcome": outcome.outcome if outcome else "", "reads": outcome.reads if outcome else [],
+            "rounds": rounds, "ratings": ratings}
 
 
 def _composition(db: Session, rows: list) -> dict:
@@ -188,7 +320,7 @@ def _composition(db: Session, rows: list) -> dict:
         calls.sort(key=lambda c: (c[0].tool_round, c[0].id))
         first = calls[0][0]
         recent.append({
-            "at": first.created_at.isoformat(), "route": first.route, "model": first.model,
+            "turn_id": tid, "at": first.created_at.isoformat(), "route": _label(first), "model": first.model,
             "rounds": len(calls),
             "prompt_tokens": sum(c.prompt_tokens or 0 for c, _ in calls),
             "completion_tokens": sum(c.completion_tokens or 0 for c, _ in calls),
@@ -277,6 +409,10 @@ def quality_summary(
         .order_by(AnswerRating.id.desc()).limit(_MAX_ROWS)
     ).scalars().all()
 
+    poor = [r for r in rows if r.score < 0 and r.reason][:20]
+    # 그 답을 만든 턴 — 답변 메시지가 들고 있다(worksession.send). 「추적」에서 그 턴의 호출 흐름을 본다.
+    turns = {m.id: (m.view or {}).get("turn_id", "") for m in db.execute(select(SmartworkSessionMessage).where(
+        SmartworkSessionMessage.id.in_([r.message_id for r in poor]))).scalars()} if poor else {}
     by_model: dict = {}
     raters: set = set()
     good = 0
@@ -296,7 +432,7 @@ def quality_summary(
         # 아쉬움의 사유만 모은다 — 고칠 거리가 거기 있다(좋음에는 보통 아무 말도 안 적는다).
         "recent_poor": [
             {"at": r.created_at.isoformat(), "model": r.model, "provider": r.provider,
-             "reason": r.reason}
-            for r in rows if r.score < 0 and r.reason
-        ][:20],
+             "reason": r.reason, "turn_id": turns.get(r.message_id, "")}
+            for r in poor
+        ],
     }

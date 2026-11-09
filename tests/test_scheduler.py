@@ -29,6 +29,8 @@ def db(monkeypatch, tmp_path):
     # 임시 작업(services/tempjobs)은 그때그때 바뀌는 스크립트다 — job 개수가 흔들리지 않게 비운다(tests/test_tempjobs.py)
     from app.services import tempjobs
     monkeypatch.setattr(tempjobs, "TASKS", {})
+    # 호출 기록 보관 정리(llm_log_prune)도 끈다 — 기본으로 켜져 있어 job 개수가 하나 는다(아래 따로 본다)
+    monkeypatch.setenv("PAAS_LLM_LOG_RETENTION_DAYS", "0")
     (tmp_path / "docs").mkdir()
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_ROOTS", f"docs={tmp_path / 'docs'}")
@@ -366,3 +368,17 @@ def test_the_internal_store_is_never_indexed(db, tmp_path):
     assert [s.name for s in storage.indexed_stores()] == ["docs"]
     scheduler.reconcile(db)
     assert not [n for n in _names(db) if n.startswith("doc_index:internal")]
+
+
+def test_llm_log_prune_job_follows_the_retention_setting(db, monkeypatch, fresh_settings):
+    """호출 기록 보관 — 날 수를 두면 하루 한 번 지우는 job이 생기고, 0이면 없다."""
+    scheduler.reconcile(db)
+    assert "llm_log_prune" not in _names(db)
+    monkeypatch.setenv("PAAS_LLM_LOG_RETENTION_DAYS", "30")
+    get_settings.cache_clear()
+    scheduler.reconcile(db)
+    assert "llm_log_prune" in _names(db)
+    job = next(j for j in db.query(ScheduledJob).all() if j.name == "llm_log_prune")
+    assert job.interval_seconds == 86_400
+    out = scheduler.run(db, job)
+    assert out["status"] in ("ok", "skipped") and "calls" in out["detail"]

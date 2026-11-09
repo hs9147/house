@@ -10,12 +10,21 @@
 
 **본문은 절대 싣지 않는다.** 프롬프트·응답 텍스트는 개인 업무 맥락이 섞인다. 모델 이름,
 걸린 시간, 토큰 수, 실패 사유만 남긴다 — 관측은 그것으로 성립한다.
+
+**Langfuse 같은 별도 서버 없이** 같은 질문에 답하려고 셋을 더 남긴다: 요청 밖 호출의 기능 이름(feature —
+작업 큐·스케줄러), 프롬프트 판(prompt_of — 코드의 템플릿과 그 해시), 응답을 받은 뒤에 안 실패 신호(signal).
+작업 로그의 「추적」이 턴 하나의 왕복을, 평가 탭의 「아쉬움」이 그 답을 만든 턴을 연다. 기록은 보관 기간
+(PAAS_LLM_LOG_RETENTION_DAYS)이 지나면 지운다(prune).
 """
 import contextlib
 import contextvars
+import hashlib
 import json
+import re
+import sys
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
 from ..config import get_settings
@@ -32,6 +41,10 @@ _turn: contextvars.ContextVar[str] = contextvars.ContextVar("paas_llm_turn", def
 # 호출부가 아는 입력의 이름(hints) — 지시문의 구역, 대화 이력의 구역, 도구 결과의 출처.
 # 메시지만 보고는 알 수 없다(어디까지가 에이전트 목록인지, 어느 글이 첨부인지).
 _hints: contextvars.ContextVar[dict | None] = contextvars.ContextVar("paas_llm_hints", default=None)
+# 요청 밖에서 온 호출의 기능 이름(작업 큐의 함수·스케줄러 job) — 경로(_route)가 없는 호출을 가른다.
+_feature: contextvars.ContextVar[str] = contextvars.ContextVar("paas_feature", default="")
+# 이 흐름에서 마지막으로 끝난 호출(llm_calls.id) — 응답을 읽다 안 실패 신호(signal)를 붙일 자리.
+_last_call: contextvars.ContextVar[int | None] = contextvars.ContextVar("paas_last_call", default=None)
 
 # 토큰 추정의 무게. 영문·JSON(도구 정의)은 약 4자에 1토큰, 한글은 1~2자에 1토큰이라 글자 수를
 # 그대로 비율로 쓰면 한글이 많은 구간(지시문·문서)이 작게 잡힌다. 이미지는 글자가 없어 장당
@@ -59,6 +72,92 @@ def _tracer():
         except Exception:  # noqa: BLE001 — 관측이 호출을 막으면 본말전도다
             _tracer_cache = None
     return _tracer_cache
+
+
+@contextlib.contextmanager
+def feature(name: str) -> Iterator[None]:
+    """요청 밖의 일에 이름을 붙인다 — 그 안의 모든 호출이 llm_calls.feature로 남는다."""
+    token = _feature.set(name[:64])
+    try:
+        yield
+    finally:
+        _feature.reset(token)
+
+
+def run_as(name: str, fn, *args, **kwargs):
+    """작업 큐가 쓴다 — fn을 그 기능 이름 아래에서 돌린다."""
+    with feature(name):
+        return fn(*args, **kwargs)
+
+
+def signal(name: str) -> None:
+    """방금 끝난 호출에 실패 신호를 덧붙인다 — 응답이 JSON이 아님, LLM이 지어낸 주소를 버림, 고른 동작이 화면에
+    맞지 않음 등. 응답을 받은 **뒤에** 아는 것들이라 호출을 재는 동안(note)에는 적을 수 없다. 실패해도 조용히 넘어간다."""
+    call_id = _last_call.get()
+    if call_id is None:
+        return
+    try:
+        with SessionLocal() as db:
+            row = db.get(LlmCallLog, call_id)
+            if row is not None:
+                row.signals = [*(row.signals or []), name[:40]][:20]
+                db.commit()
+    except Exception as e:  # noqa: BLE001
+        print(f"[paas] 관측 신호 기록 실패(무시): {e}")
+
+
+# 프롬프트 판 — 코드의 프롬프트 상수(이름에 PROMPT가 든 대문자 str)를 모아, 호출의 입력에 그 템플릿의 고정 문구가
+# 들어 있으면 「모듈.상수@템플릿 해시」로 적는다. 프롬프트를 코드 밖(Langfuse 등)으로 옮기지 않고도 「고친 뒤에 토큰·실패·
+# 평가가 어떻게 바뀌었나」를 견줄 수 있다 — 해시가 바뀐 곳이 고친 곳이다. 호출부를 고칠 필요가 없다.
+_PLACEHOLDER = re.compile(r"\{[^{}]*\}")
+_templates_cache: tuple[int, list[tuple[str, str]]] = (-1, [])
+
+
+def _templates() -> list[tuple[str, str]]:
+    """[(고정 문구, 「모듈.상수@해시」)] — 불러온 app 모듈이 늘었을 때만 다시 모은다."""
+    global _templates_cache
+    modules = [m for name, m in list(sys.modules.items()) if name.startswith("app.") and m is not None]
+    if _templates_cache[0] == len(modules):
+        return _templates_cache[1]
+    found: dict[str, str] = {}
+    for module in modules:
+        for attr, value in list(vars(module).items()):
+            if "PROMPT" not in attr or not attr.isupper() or not isinstance(value, str) or len(value) < 60:
+                continue
+            literal = max(_PLACEHOLDER.split(value.replace("{{", "{").replace("}}", "}")), key=len).strip()
+            if len(literal) >= 30:
+                version = hashlib.sha1(value.encode("utf-8")).hexdigest()[:8]
+                found.setdefault(literal[:160], f"{module.__name__.rsplit('.', 1)[-1]}.{attr}@{version}"[:96])
+    _templates_cache = (len(modules), sorted(found.items(), key=lambda kv: -len(kv[0])))
+    return _templates_cache[1]
+
+
+def prompt_of(messages: list[dict]) -> str:
+    """이 호출이 어느 프롬프트 템플릿으로 만든 것인가 — 앞쪽 메시지에 고정 문구가 든 것 중 가장 긴 것. 없으면 ""."""
+    texts = []
+    for m in messages[:3]:
+        content = m.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts += [c.get("text") or "" for c in content if isinstance(c, dict)]
+    joined = "\n".join(texts)
+    return next((name for literal, name in _templates() if literal in joined), "")
+
+
+def prune(days: int) -> dict:
+    """보관 기간을 넘긴 호출 기록을 지운다 — 대시보드·추적이 읽는 llm_calls·llm_call_details·llm_turns.
+    사람이 매긴 평가(answer_ratings)는 지우지 않는다(대화 메시지에 붙어 있고, 쌓이기 어려운 것이다)."""
+    from sqlalchemy import delete, select  # noqa: PLC0415
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)
+    with SessionLocal() as db:
+        old = select(LlmCallLog.id).where(LlmCallLog.created_at < cutoff)
+        details = db.execute(delete(LlmCallDetail).where(LlmCallDetail.call_id.in_(old))).rowcount
+        calls = db.execute(delete(LlmCallLog).where(LlmCallLog.created_at < cutoff)).rowcount
+        turns = db.execute(delete(LlmTurn).where(LlmTurn.created_at < cutoff)).rowcount
+        db.commit()
+    return {"calls": calls or 0, "details": details or 0, "turns": turns or 0, "before": cutoff.date().isoformat()}
 
 
 def note(**fields) -> None:
@@ -205,11 +304,12 @@ def result_fields(data: dict) -> dict:
 
 
 @contextlib.contextmanager
-def llm_call(provider: str, model: str, path: str, tool_round: int = 0) -> Iterator[dict]:
+def llm_call(provider: str, model: str, path: str, tool_round: int = 0, prompt: str = "") -> Iterator[dict]:
     """모델 호출 한 번을 잰다. **실패도 남긴다** — 실패율이 대시보드의 첫 숫자다."""
     row: dict = {
         "provider": provider[:64], "model": model[:128], "path": path,
         "route": _route.get()[:128], "tool_round": tool_round, "turn_id": _turn.get(),
+        "feature": _feature.get(), "prompt": prompt[:96],
     }
     token = _current.set(row)
     started = time.monotonic()
@@ -271,6 +371,7 @@ def _save(row: dict) -> None:
                                  output_parts=_apportion(output, call.completion_tokens or 0),
                                  finish_reason=finish))
             db.commit()
+            _last_call.set(call.id)
     except Exception as e:  # noqa: BLE001 — 관측 실패가 LLM 호출을 깨뜨리면 안 된다
         print(f"[paas] 관측 기록 실패(무시): {e}")
 

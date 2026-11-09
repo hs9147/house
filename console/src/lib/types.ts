@@ -676,6 +676,10 @@ export interface LlmTelemetry {
             tier: string; effective: string; meters: Record<string, string> }[];
   by_model: LlmCallBucket[];
   by_route: LlmCallBucket[];
+  /** 프롬프트 판(「모듈.상수@해시」)별 — 같은 이름에 해시가 둘이면 고친 앞뒤다. signals는 실패 신호 수. */
+  by_prompt: (LlmCallBucket & { signals: number })[];
+  /** 응답을 받은 뒤에 안 실패(JSON 아님·지어낸 주소·맞지 않는 동작)별 호출 수. */
+  signals: { key: string; calls: number }[];
   daily: LlmCallBucket[];
   /** 입력 구성 — 구간(system·tools·history·tool_call·tool_result·image)별 **추정** 토큰. */
   composition: { key: string; tokens: number }[];
@@ -699,6 +703,7 @@ export interface LlmTelemetry {
   citations: { source: string; reads: number; cited: number; chars: number; uncited_chars: number }[];
   /** 최근 턴 — 도구 왕복을 묶은 한 번의 요청. round_inputs는 왕복마다의 입력 토큰. */
   turns: {
+    turn_id: string;
     at: string;
     route: string;
     model: string;
@@ -726,7 +731,53 @@ export interface QualityTelemetry {
   days: number;
   totals: { rated: number; good: number; poor: number; raters: number };
   by_model: { key: string; rated: number; good: number; poor: number }[];
-  recent_poor: { at: string; model: string; provider: string; reason: string }[];
+  recent_poor: { at: string; model: string; provider: string; reason: string; turn_id: string }[];
+}
+
+/** 작업 로그 「추적」의 턴 한 줄 — 수치와 이름뿐(본문 없음). */
+export interface LlmTurnRow {
+  turn_id: string;
+  at: string;
+  label: string;
+  models: string[];
+  prompts: string[];
+  rounds: number;
+  ms: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  tool_calls: number;
+  failed: number;
+  signals: string[];
+  truncated: boolean;
+  outcome: string;
+}
+
+export interface LlmTurnList {
+  days: number;
+  truncated: boolean;
+  total: number;
+  turns: LlmTurnRow[];
+  options: { labels: string[]; models: string[]; outcomes: string[]; signals: string[] };
+}
+
+export interface LlmTurnDetail {
+  turn_id: string;
+  label: string;
+  feature: string;
+  route: string;
+  trace_id: string | null;
+  outcome: string;
+  reads: { source: string; reads: number; cited: number; chars: number; uncited_chars: number }[];
+  rounds: {
+    id: number; at: string; round: number; provider: string; model: string; path: string; ok: boolean; ms: number;
+    error: string | null; prompt_tokens: number; completion_tokens: number; cached_tokens: number; tool_calls: number;
+    finish_reason: string; prompt: string; signals: string[];
+    parts: { part: string; name?: string; tokens: number }[];
+    output_parts: { part: string; name?: string; tokens: number }[];
+  }[];
+  /** 그 답에 매긴 평가 — 누가 매겼는지는 내려오지 않는다. */
+  ratings: { at: string; score: number; reason: string }[];
 }
 
 export interface GpuInfo {
