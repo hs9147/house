@@ -32,7 +32,11 @@ from uuid import uuid4
 # 분리의 단일 지점 — 실행기·인자를 여기서만 정한다.
 POWERSHELL_EXE = "powershell.exe"
 # -NoLogo: 배너 억제, 파이프된 stdin에서 REPL로 동작(명령을 한 줄씩 읽어 실행).
-_ARGS = ["-NoProfile", "-NoLogo"]
+# -NonInteractive: 입력을 기다리는 명령(Read-Host, 확인 질문 `-Confirm`, 자격증명 창)이 **오류로 끝나게** 한다.
+# 없으면 그 명령이 다음 줄(끝 표시를 찍는 줄, 다음 명령)을 답으로 읽고 계속 기다려 세션 전체가 멈춘다 —
+# 이후 명령이 모두 시간 초과가 된다(실측: Read-Host·Remove-Item -Confirm이 8초 넘게 끝 표시 없이 멈춤,
+# -NonInteractive면 둘 다 1초 안에 오류로 끝남).
+_ARGS = ["-NoProfile", "-NoLogo", "-NonInteractive"]
 
 # Windows 프로세스 생성 플래그 — paas 프로세스와 데몬을 분리하기 위한 것.
 # BREAKAWAY_FROM_JOB이 핵심: nssm 등으로 paas가 Job Object에 묶여 있을 때, 데몬이 그 Job에서
@@ -66,15 +70,16 @@ class PsResult:
 
 
 def _drain_until_marker(
-    q: "queue.Queue[str | None]", marker: str, timeout: float,
+    q: "queue.Queue[str | None]", marker: str, timeout: float, lines: list[str] | None = None,
 ) -> tuple[list[str], int | None, bool]:
     """큐에서 줄을 모아 marker 줄(또는 EOF·타임아웃)까지 읽는다.
 
     PowerShellDaemon(직접 파이프)과 BrokeredPowerShellDaemon(소켓)이 같은 마커/에코
     프로토콜을 쓰므로 이 부분은 전송 방식과 무관하게 공유한다.
     반환: (모은 출력 줄, 종료코드, EOF로 끝났는지). EOF면 호출측이 연결을 정리해야 한다.
+    lines를 주면 거기에 모은다 — 시간 초과로 끝나도 그때까지 읽은 줄이 호출측에 남는다(큐에서는 이미 빠졌다).
     """
-    lines: list[str] = []
+    lines = [] if lines is None else lines
     returncode: int | None = None
     deadline = time.monotonic() + timeout
     total = 0
@@ -220,6 +225,39 @@ def run_detached_script(script: str, cwd: str | None = None) -> None:
         subprocess.Popen(args, cwd=cwd, creationflags=_creation_flags(detached=False, breakaway=False), close_fds=True)
 
 
+class PsBusy(RuntimeError):
+    """시간 초과로 기다리기를 멈춘 앞 명령이 세션에서 아직 돈다 — 새 명령을 그 뒤에 줄 세우지 않는다."""
+
+    def __init__(self, command: str, seconds: float):
+        self.command, self.seconds = command, seconds
+        super().__init__(f"앞 명령이 아직 실행 중입니다({seconds:.0f}초째): {command}")
+
+
+def _listening_pid(port: int) -> int | None:
+    """127.0.0.1:port에서 듣는 프로세스 — netstat -ano(한국어 Windows에서도 상태는 LISTENING)."""
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=15,
+                             errors="replace").stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[0].upper() == "TCP" and parts[1].rsplit(":", 1)[-1] == str(port) \
+                and parts[3].upper() == "LISTENING" and parts[4].isdigit():
+            return int(parts[4])
+    return None
+
+
+def _image_name(pid: int) -> str:
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], capture_output=True,
+                             text=True, timeout=15, errors="replace").stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    first = out.strip().splitlines()[0] if out.strip() else ""
+    return first.split('","')[0].strip('"') if first.startswith('"') else ""
+
+
 def kill_broker(port: int) -> None:
     """브로커와 그 안의 powershell.exe를 완전히 끈다.
 
@@ -286,6 +324,8 @@ class BrokeredPowerShellDaemon:
         self._q: "queue.Queue[str | None]" = queue.Queue()
         self._reader: threading.Thread | None = None
         self._lock = threading.Lock()
+        # 시간 초과로 기다리기를 멈춘 명령 — 세션에서는 계속 돈다. (끝 표시, 명령 앞부분, 시작 시각, 읽은 출력)
+        self._pending: tuple[str, str, float, list[str]] | None = None
 
     @property
     def alive(self) -> bool:
@@ -321,11 +361,28 @@ class BrokeredPowerShellDaemon:
         self._reader.start()
 
     def run(self, command: str, timeout: float = 30.0) -> PsResult:
-        """명령을 브로커의 PowerShell 세션에서 실행한다. 세션 상태는 paas 재시작 후에도 유지된다."""
+        """명령을 브로커의 PowerShell 세션에서 실행한다. 세션 상태는 paas 재시작 후에도 유지된다.
+
+        시간 초과는 **기다리기를 멈춘 것**이지 명령을 멈춘 것이 아니다 — 세션은 하나라 그 명령이 끝나기 전에 보낸
+        명령은 뒤에 줄을 서고, 그 출력이 뒤 명령의 출력에 섞였다. 그래서 앞 명령이 남아 있으면 먼저 그 끝 표시를
+        찾는다: 끝났으면 남은 출력을 따로 표시해 함께 돌려주고, 아직 돌면 줄 세우지 않고 PsBusy로 바로 알린다."""
         with self._lock:
             if not self.alive:
                 self._connect()
             assert self._sock is not None
+            leftover = ""
+            if self._pending is not None:
+                pending_marker, pending_cmd, started, got = self._pending
+                try:
+                    _, _, eof = _drain_until_marker(self._q, pending_marker, 0.5, got)
+                except TimeoutError:
+                    raise PsBusy(pending_cmd, time.monotonic() - started)
+                self._pending = None
+                if eof:
+                    self._teardown()
+                    self._connect()
+                if "".join(got).strip():
+                    leftover = f"(앞 명령 `{pending_cmd}`의 나머지 출력)\n{''.join(got)}\n(여기부터 이번 명령)\n"
 
             marker = f"__PAAS_PS_DONE_{uuid4().hex}__"
             payload = (command + "\n" + f'Write-Output "{marker} $LASTEXITCODE"' + "\n").encode("utf-8")
@@ -335,10 +392,32 @@ class BrokeredPowerShellDaemon:
                 self._teardown()
                 raise RuntimeError(f"PowerShell 브로커에 명령을 쓸 수 없습니다: {e}")
 
-            lines, returncode, eof = _drain_until_marker(self._q, marker, timeout)
+            got: list[str] = []
+            try:
+                lines, returncode, eof = _drain_until_marker(self._q, marker, timeout, got)
+            except TimeoutError:
+                self._pending = (marker, command.strip().splitlines()[0][:80] if command.strip() else "",
+                                 time.monotonic() - timeout, got)
+                raise
             if eof:
                 self._teardown()
-            return PsResult(output="".join(lines), returncode=returncode)
+            return PsResult(output=leftover + "".join(lines), returncode=returncode)
+
+    def reset(self) -> dict:
+        """세션 다시 시작 — 브로커와 그 안의 powershell.exe를 프로세스째 끝낸다(멈춘 명령째). 다음 명령이 새 세션을
+        띄운다. 브로커에 `exit`를 보내는 것(kill_broker)으로는 안 된다: 멈춘 명령 뒤에 줄을 서고, 브로커는 연결을
+        하나씩만 받는다. 이 포트에서 듣는 프로세스를 찾아(netstat) 파이썬일 때만 끝낸다(taskkill /T)."""
+        with self._lock:
+            self._teardown()
+            self._pending = None
+            pid = _listening_pid(self._port)
+            if pid is None:
+                return {"killed": None, "note": "떠 있는 세션이 없습니다 — 다음 명령이 새로 띄웁니다."}
+            image = _image_name(pid)
+            if not image.lower().startswith("python"):
+                raise RuntimeError(f"포트 {self._port}에서 듣는 프로세스가 브로커(python)가 아닙니다: {image or '?'} (PID {pid})")
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=15)
+            return {"killed": pid, "note": "세션을 끝냈습니다 — 다음 명령이 새 세션을 띄웁니다(cd·변수는 처음부터)."}
 
     def _teardown(self) -> None:
         if self._sock is not None:

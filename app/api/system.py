@@ -573,10 +573,31 @@ def exec_powershell_cmd(
             "output": result.output or "(no output)",
             "cwd": cwd_dir or os.getcwd(),
         }
+    except powershell_daemon.PsBusy as e:
+        # 앞 명령(시간 초과로 기다리기를 멈춘 것)이 세션에서 아직 돈다 — 이번 명령은 보내지 않았다
+        raise HTTPException(status_code=409, detail=(
+            f"앞 명령이 아직 실행 중입니다({e.seconds:.0f}초째): {e.command} — 이번 명령은 보내지 않았습니다. "
+            "끝나기를 기다렸다가 다시 보내거나, 멈춘 것이면 「세션 다시 시작」을 누르세요."))
     except TimeoutError:
-        raise HTTPException(status_code=504, detail="PowerShell command execution timed out (30s)")
+        audit.record(db, admin.name, "powershell.exec", cmd[:100], {"timeout": True})
+        raise HTTPException(status_code=504, detail=(
+            "명령이 30초 안에 끝나지 않았습니다 — 기다리기만 멈췄고 명령은 세션에서 계속 돕니다. 다음 명령을 보내면 "
+            "끝났을 때 나머지 출력을 함께 보여 주고, 아직 돌면 그렇다고 알립니다. 멈춘 것이면 「세션 다시 시작」."))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PowerShell execution failed: {e}")
+
+
+@router.post("/system/powershell/reset")
+def reset_powershell_session(db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    """서버 연결의 PowerShell 세션 다시 시작 — 멈춘 명령째 끝내고, 다음 명령이 새 세션을 띄운다(관리자)."""
+    from ..services import powershell_daemon  # noqa: PLC0415
+
+    try:
+        result = powershell_daemon.shared_daemon().reset()
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    audit.record(db, admin.name, "powershell.reset", "-", result)
+    return result
 
 
 # 브라우저는 WebSocket 핸드셰이크에 임의 헤더를 붙일 수 없다. 쿼리스트링으로 받으면

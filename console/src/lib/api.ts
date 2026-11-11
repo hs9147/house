@@ -1034,6 +1034,9 @@ export const api = {
 
   execPowerShell: (command: string) =>
     request<{ command: string; returncode: number; output: string }>('POST', '/system/powershell/exec', { command }),
+  // 세션 다시 시작 — 멈춘 명령째 끝낸다(다음 명령이 새 세션을 띄운다)
+  resetPowerShell: () =>
+    request<{ killed: number | null; note: string }>('POST', '/system/powershell/reset'),
   listServerLogs: () =>
     request<{ files: { filename: string; relative_path: string; size_bytes: number; mtime: number }[]; log_dir: string }>('GET', '/system/server-logs'),
   getServerLogContent: (filename: string, tail_lines = 1000) =>

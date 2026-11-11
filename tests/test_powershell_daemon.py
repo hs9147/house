@@ -217,6 +217,11 @@ for raw in sys.stdin:
     line = raw.rstrip("\n")
     if line.strip() == "exit":
         break
+    m = re.match(r"^Start-Sleep ([\d.]+)$", line.strip())
+    if m:
+        import time
+        time.sleep(float(m.group(1)))
+        continue
     m = re.match(r"^cmd /c exit (-?\d+)$", line.strip())
     if m:
         last_exit = int(m.group(1))
@@ -698,3 +703,62 @@ def test_startup_warns_when_there_is_no_websocket_library(monkeypatch, capsys, f
 def test_startup_is_quiet_when_the_library_is_present(capsys, fresh_settings):
     create_app()
     assert "WebSocket 구현이 없습니다" not in capsys.readouterr().out
+
+
+def test_a_timed_out_command_does_not_queue_the_next_one_and_its_output_is_not_lost():
+    """시간 초과는 기다리기만 멈춘다 — 그 명령은 세션에서 계속 돈다. 아직 돌면 다음 명령을 그 뒤에 줄 세우지
+    않고 PsBusy로 바로 알리고(예전에는 뒤에 줄 서서 또 시간 초과가 됐다), 끝났으면 남은 출력을 따로 표시해
+    다음 명령의 출력과 함께 준다(예전에는 표시 없이 섞였다)."""
+    from app.services.powershell_daemon import BrokeredPowerShellDaemon, PsBusy, kill_broker
+
+    port = _free_port()
+    t = _start_fake_broker(port)
+    try:
+        client = BrokeredPowerShellDaemon(port=port)
+        with pytest.raises(TimeoutError):
+            client.run('Start-Sleep 1.5\nWrite-Output "late"', timeout=0.3)
+        with pytest.raises(PsBusy) as busy:
+            client.run('Write-Output "next"', timeout=3)
+        assert busy.value.command == "Start-Sleep 1.5"
+        time.sleep(1.5)
+        res = client.run('Write-Output "next"', timeout=3)
+        assert "앞 명령" in res.output and "late" in res.output
+        assert res.output.index("late") < res.output.rindex("next")
+        assert client.run('Write-Output "again"', timeout=3).output.strip() == "again"   # 더는 섞이지 않는다
+        client.stop()
+    finally:
+        kill_broker(port)
+        t.join(timeout=3)
+
+
+def test_session_reset_kills_only_a_python_broker(monkeypatch):
+    """세션 다시 시작 — 그 포트에서 듣는 프로세스가 브로커(python)일 때만 프로세스째(/T) 끝낸다."""
+    from app.services import powershell_daemon as psd
+
+    calls = []
+    monkeypatch.setattr(psd, "_listening_pid", lambda port: 4321)
+    monkeypatch.setattr(psd.subprocess, "run", lambda args, **kw: calls.append(args))
+    d = psd.BrokeredPowerShellDaemon(port=1)
+    d._pending = ("m", "Start-Sleep 99", 0.0, [])
+    monkeypatch.setattr(psd, "_image_name", lambda pid: "python.exe")
+    assert d.reset()["killed"] == 4321 and d._pending is None
+    assert calls == [["taskkill", "/PID", "4321", "/T", "/F"]]
+    monkeypatch.setattr(psd, "_image_name", lambda pid: "w3wp.exe")
+    with pytest.raises(RuntimeError, match="w3wp.exe"):
+        d.reset()
+    monkeypatch.setattr(psd, "_listening_pid", lambda port: None)
+    assert d.reset()["killed"] is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="실제 powershell.exe")
+def test_prompting_commands_fail_instead_of_freezing_the_session():
+    """-NonInteractive — 입력을 기다리는 명령(Read-Host)이 다음 줄을 답으로 먹고 멈추지 않고 오류로 끝난다."""
+    from app.services.powershell_daemon import PowerShellDaemon
+
+    d = PowerShellDaemon()
+    try:
+        res = d.run("$x = Read-Host 'name'; Write-Output \"got:$x\"", timeout=20)
+        assert "got:" in res.output
+        assert "still-alive" in d.run("Write-Output still-alive", timeout=20).output
+    finally:
+        d.stop()

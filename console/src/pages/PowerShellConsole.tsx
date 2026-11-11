@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import Async from '../components/Async';
 import PtyTerminal from '../components/PtyTerminal';
-import { api } from '../lib/api';
+import { ApiError, api } from '../lib/api';
 import { useApi } from '../lib/hooks';
 
 const PS_HISTORY_STORAGE_KEY = 'paas_powershell_cmd_history';
@@ -144,12 +144,19 @@ export default function PowerShellConsole() {
       const res = await api.execPowerShell(cmd);
       setLogs((prev) => [...prev, res.output]);
     } catch (err) {
+      // 백엔드가 답한 실패(시간 초과 504·앞 명령 실행 중 409)와 백엔드에 닿지 못한 것을 가른다 — 예전에는 전부
+      // 「백엔드에 닿지 못했습니다」로 보여, 세션에서 멈춘 명령을 백엔드 재기동으로 풀려 했다(세션은 브로커에 남는다).
+      const status = err instanceof ApiError ? err.status : 0;
+      const message = (err as Error).message;
       setLogs((prev) => [
         ...prev,
-        // 포트를 문구에 박아 두지 않는다 — 예전에는 "(8000)"이라고 적혀 있었지만
-        // 플랫폼은 7000에서 서비스하고, 그 오해가 /system/restart의 실제 버그였다.
-        `[Backend Unavailable] 백엔드에 닿지 못했습니다: ${(err as Error).message}`,
-        '[Hint] 백엔드 재기동 후 명령어를 재입력하세요. (PowerShell 세션은 브로커에 남아 유지됩니다)\n',
+        ...(status === 504 ? [`[시간 초과] ${message}\n`]
+          : status === 409 ? [`[실행 중] ${message}\n`]
+            : status > 0 ? [`[실패 ${status}] ${message}\n`]
+              // 포트를 문구에 박아 두지 않는다 — 예전에는 "(8000)"이라고 적혀 있었지만
+              // 플랫폼은 7000에서 서비스하고, 그 오해가 /system/restart의 실제 버그였다.
+              : [`[Backend Unavailable] 백엔드에 닿지 못했습니다: ${message}`,
+                '[Hint] 백엔드 재기동 후 명령어를 재입력하세요. (PowerShell 세션은 브로커에 남아 유지됩니다)\n']),
       ]);
     } finally {
       setRunning(false);
@@ -158,6 +165,18 @@ export default function PowerShellConsole() {
   };
 
   const [restarting, setRestarting] = useState(false);
+
+  // 세션 다시 시작 — 시간 초과 뒤에도 세션에서 계속 도는(멈춘) 명령째 PowerShell을 끝낸다. 백엔드 재시작으로는
+  // 풀리지 않는다(세션은 브로커 프로세스에 있다). cd·변수 같은 세션 상태도 처음부터다.
+  const handleSessionReset = async () => {
+    if (!window.confirm('PowerShell 세션을 끝내고 새로 시작합니다. 돌고 있는 명령도 함께 끝나고, cd·변수는 처음부터입니다. 진행하시겠습니까?')) return;
+    try {
+      const res = await api.resetPowerShell();
+      setLogs((prev) => [...prev, `\n[세션] ${res.note}${res.killed ? ` (PID ${res.killed})` : ''}\n`]);
+    } catch (err) {
+      setLogs((prev) => [...prev, `\n[세션] 다시 시작하지 못했습니다: ${(err as Error).message}\n`]);
+    }
+  };
 
   // 백엔드만 재기동. 터미널에 직접 칠 수도 있는 같은 헬퍼(infra/restart-paas.ps1)를
   // 서버가 실행한다 — 리포 경로·실제 바인딩 포트·인터프리터를 아는 쪽이 서버이므로
@@ -309,6 +328,16 @@ export default function PowerShellConsole() {
               + '.\\infra\\restart-paas.ps1'}
           >
             🔁 백엔드 재시작
+          </button>
+        )}
+        {me.data?.is_admin && (
+          <button
+            className="secondary small"
+            disabled={restarting}
+            onClick={() => void handleSessionReset()}
+            title="명령 실행의 PowerShell 세션을 끝내고 새로 시작합니다 — 시간 초과 뒤 계속 도는(멈춘) 명령째 끝냅니다"
+          >
+            ♻️ 세션 다시 시작
           </button>
         )}
         <button
