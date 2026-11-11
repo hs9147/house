@@ -456,3 +456,111 @@ def test_internal_storage_usage_lists_what_the_platform_writes(monkeypatch, tmp_
         db.query(DocumentStore).filter(DocumentStore.name == "inside").delete()
         db.query(InfoSource).filter(InfoSource.id == sid).delete()
         db.commit()
+
+
+def _cp949_zip(name: str, data: bytes) -> bytes:
+    """Windows 탐색기가 만든 것 같은 zip — 이름이 cp949 바이트이고 UTF-8 표시가 없다. zipfile은 ASCII가 아닌 이름에
+    UTF-8 표시를 스스로 켜므로, 같은 길이의 ASCII 이름으로 만든 뒤 이름 바이트만 바꿔 끼운다(CRC는 이름과 무관)."""
+    import io
+    import zipfile
+
+    legacy = name.encode("cp949")
+    placeholder = b"Q" * len(legacy)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(placeholder.decode("ascii"), data)
+    raw = buf.getvalue()
+    assert raw.count(placeholder) == 2      # 로컬 헤더와 중앙 디렉터리
+    return raw.replace(placeholder, legacy)
+
+
+def _mark_encrypted(raw: bytes, name: bytes) -> bytes:
+    """그 항목의 암호 표시(일반 목적 비트 0)를 켠다 — zipfile은 쓸 때 이 비트를 지운다. 로컬 헤더(이름 길이 +26,
+    이름 +30, 비트 +6)와 중앙 디렉터리(이름 길이 +28, 이름 +46, 비트 +8) 둘 다."""
+    import struct
+
+    data = bytearray(raw)
+    for sig, len_at, name_at, flag_at in ((b"PK\x03\x04", 26, 30, 6), (b"PK\x01\x02", 28, 46, 8)):
+        i = data.find(sig)
+        while i >= 0:
+            (n,) = struct.unpack_from("<H", data, i + len_at)
+            if bytes(data[i + name_at:i + name_at + n]) == name:
+                (flags,) = struct.unpack_from("<H", data, i + flag_at)
+                struct.pack_into("<H", data, i + flag_at, flags | 0x1)
+            i = data.find(sig, i + 4)
+    return bytes(data)
+
+
+def test_zip_upload_is_extracted_into_a_folder_when_asked(monkeypatch, tmp_path, fresh_settings):
+    """zip을 풀어 올린다 — 비우면 zip 이름의 폴더 아래에, 경로를 주면 그 폴더 아래에. 저장소 밖을 가리키는 항목과
+    군더더기(__MACOSX)는 건너뛰고, 풀지 않으면 zip 그대로 저장한다. 색인은 다 푼 뒤 한 번만(백그라운드)."""
+    import io
+    import zipfile
+
+    from app.services import storage as storage_service
+
+    reindexed = []
+    monkeypatch.setattr(storage_service, "index_later", lambda store: reindexed.append(store.name))
+    c = _client(monkeypatch, tmp_path)
+    internal = tmp_path / "internal"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("a.txt", "A")
+        z.writestr("sub/b.txt", "B")
+        z.writestr("../escape.txt", "X")
+        z.writestr("__MACOSX/._a.txt", "junk")
+        z.writestr("empty/", "")
+    data = buf.getvalue()
+
+    res = c.post(f"{API}/storage/internal/files", headers=ADMIN, data={"extract": "true"},
+                 files={"file": ("자료.zip", data)})
+    assert res.status_code == 201, res.text
+    out = res.json()
+    assert out["path"] == "자료" and out["extracted"] == 2 and sorted(out["files"]) == ["자료/a.txt", "자료/sub/b.txt"]
+    assert [s["path"] for s in out["skipped"]] == ["../escape.txt"]
+    assert (internal / "자료" / "sub" / "b.txt").read_text() == "B"
+    assert not (internal / "escape.txt").exists() and not (internal / "자료" / "__MACOSX").exists()
+    assert reindexed == ["internal"]
+
+    again = c.post(f"{API}/storage/internal/files", headers=ADMIN, data={"extract": "true", "path": "docs/2026"},
+                   files={"file": ("자료.zip", data)}).json()
+    assert again["path"] == "docs/2026" and (internal / "docs" / "2026" / "a.txt").is_file()
+    assert c.post(f"{API}/storage/internal/files", headers=ADMIN, data={"extract": "true"},
+                  files={"file": ("자료.zip", data)}).json()["replaced"] == 2
+
+    kept = c.post(f"{API}/storage/internal/files", headers=ADMIN, files={"file": ("자료.zip", data)}).json()
+    assert kept["path"] == "자료.zip" and (internal / "자료.zip").read_bytes() == data
+
+    bad = c.post(f"{API}/storage/internal/files", headers=ADMIN, data={"extract": "true"},
+                 files={"file": ("broken.zip", b"not a zip")})
+    assert bad.status_code == 400 and "zip" in bad.json()["detail"]
+
+    from app.db import SessionLocal
+    from app.models import AuditEvent
+    with SessionLocal() as s:
+        event = s.query(AuditEvent).filter(AuditEvent.action == "storage.upload.extract").first()
+        assert event.detail["files"] == 2 and event.detail["skipped"] == 1
+
+
+def test_zip_with_korean_cp949_names_and_encrypted_entries(monkeypatch, tmp_path, fresh_settings):
+    """Windows 탐색기·반디집의 zip은 한글 이름이 cp949인데 UTF-8 표시가 없다 — 깨지지 않게 읽는다.
+    암호 걸린 항목은 풀지 않고 까닭을 남긴다."""
+    import io
+    import zipfile
+
+    from app.services import storage as storage_service
+
+    monkeypatch.setattr(storage_service, "index_later", lambda store: None)
+    c = _client(monkeypatch, tmp_path)
+    out = c.post(f"{API}/storage/internal/files", headers=ADMIN, data={"extract": "true"},
+                 files={"file": ("k.zip", _cp949_zip("계약/견적서.txt", "견적".encode("utf-8")))}).json()
+    assert out["files"] == ["k/계약/견적서.txt"]
+    assert (tmp_path / "internal" / "k" / "계약" / "견적서.txt").read_text(encoding="utf-8") == "견적"
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("plain.txt", "p")
+        z.writestr("secret.txt", "s")
+    out = c.post(f"{API}/storage/internal/files", headers=ADMIN, data={"extract": "true"},
+                 files={"file": ("e.zip", _mark_encrypted(buf.getvalue(), b"secret.txt"))}).json()
+    assert out["files"] == ["e/plain.txt"] and out["skipped"] == [{"path": "secret.txt", "reason": "암호가 걸려 있습니다"}]

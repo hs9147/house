@@ -684,11 +684,16 @@ export const api = {
   storageFileText: (store: string, path: string) =>
     request<{ text: string; truncated: boolean }>('GET', `/storage/${encodeURIComponent(store)}/files/text`,
       undefined, { path }),
-  uploadStorageFile: (store: string, file: File, path?: string) => {
+  // extract=true면 zip을 풀어 저장한다(path는 풀 폴더, 비우면 zip 이름의 폴더)
+  uploadStorageFile: (store: string, file: File, path?: string, extract = false) => {
     const fd = new FormData();
     fd.append('file', file);
     if (path) fd.append('path', path);
-    return requestMultipart<{ path: string }>(`/storage/${store}/files`, fd);
+    if (extract) fd.append('extract', 'true');
+    return requestMultipart<{
+      path: string; extracted?: number; replaced?: number;
+      skipped?: { path: string; reason: string }[]; files?: string[];
+    }>(`/storage/${store}/files`, fd);
   },
 
   // 정보 업데이트 — 헤더는 "Name: value" 줄로 보내고, 돌려받는 것은 이름뿐이다.

@@ -284,7 +284,7 @@ export default function PowerShellConsole() {
         )}
       </div>
 
-      {/* 버튼 순서: 명령 실행 → 터미널(지원하는 서버만) → SW 업데이트 → 백엔드 재시작 → 서버 로그. */}
+      {/* 버튼 순서: 명령 실행 → 세션 다시 시작 → 터미널(지원하는 서버만) → SW 업데이트 → 백엔드 재시작 → 서버 로그. */}
       <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', paddingBottom: 8 }}>
         <button
           className={activeTab === 'console' ? 'primary small' : 'secondary small'}
@@ -292,6 +292,17 @@ export default function PowerShellConsole() {
         >
           ⚡ 명령 실행
         </button>
+        {/* 명령 실행의 세션을 다루는 동작이라 그 바로 옆에 둔다 */}
+        {me.data?.is_admin && (
+          <button
+            className="secondary small"
+            disabled={restarting}
+            onClick={() => void handleSessionReset()}
+            title="명령 실행의 PowerShell 세션을 끝내고 새로 시작합니다 — 시간 초과 뒤 계속 도는(멈춘) 명령째 끝냅니다"
+          >
+            ♻️ 세션 다시 시작
+          </button>
+        )}
         {terminal.data?.supported && (
           <button
             className={activeTab === 'terminal' ? 'primary small' : 'secondary small'}
@@ -328,16 +339,6 @@ export default function PowerShellConsole() {
               + '.\\infra\\restart-paas.ps1'}
           >
             🔁 백엔드 재시작
-          </button>
-        )}
-        {me.data?.is_admin && (
-          <button
-            className="secondary small"
-            disabled={restarting}
-            onClick={() => void handleSessionReset()}
-            title="명령 실행의 PowerShell 세션을 끝내고 새로 시작합니다 — 시간 초과 뒤 계속 도는(멈춘) 명령째 끝냅니다"
-          >
-            ♻️ 세션 다시 시작
           </button>
         )}
         <button

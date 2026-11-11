@@ -206,15 +206,33 @@ def upload_storage_file(
     store_name: str,
     file: UploadFile = File(...),
     path: str = Form(""),
+    extract: bool = Form(False),
     db: Session = Depends(get_db),
     key: ApiKey = Depends(require_api_key),
 ):
-    """path를 주면 그 이름으로, 비우면 업로드한 파일명 그대로 저장한다."""
+    """path를 주면 그 이름으로, 비우면 업로드한 파일명 그대로 저장한다.
+
+    extract=true이고 zip이면 풀어서 저장한다 — path(폴더)를 주면 그 아래에, 비우면 zip 이름의 폴더 아래에
+    (`자료.zip` → `자료/`). 색인은 다 푼 뒤 백그라운드에서 한 번."""
     store = _store(db, key, store_name)
     _require_writable(store)
     rel = (path or file.filename or "").strip()
     if not rel:
         raise HTTPException(status_code=400, detail="file name required")
+    if extract and (file.filename or "").lower().endswith(".zip"):
+        folder = (path or "").strip().strip("/\\") or Path(file.filename).stem
+        try:
+            result = storage_service.extract_zip(store, folder, file.file)
+        except storage_service.StorageError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not result["files"] and not result["skipped"]:
+            raise HTTPException(status_code=400, detail="zip 안에 파일이 없습니다.")
+        storage_service.index_later(store)
+        audit.record(db, key.name, "storage.upload.extract", store.name, {
+            "zip": file.filename, "folder": result["folder"], "files": len(result["files"]),
+            "replaced": result["replaced"], "skipped": len(result["skipped"]), "bytes": result["bytes"]})
+        return {"path": result["folder"], "extracted": len(result["files"]), "replaced": result["replaced"],
+                "skipped": result["skipped"][:50], "files": result["files"][:200]}
     try:
         saved = storage_service.write_file(store, rel, file.file.read())
     except storage_service.StorageError as e:

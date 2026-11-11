@@ -372,6 +372,89 @@ def write_file(store: "Store", rel: str, data: bytes) -> str:
     return saved
 
 
+# zip 풀기 상한 — 압축 폭탄(작은 zip이 수 GB로 풀리는 것)과 파일 수만 개짜리 묶음이 저장소·색인을 채우지 않게.
+MAX_ZIP_FILES = 2000
+MAX_ZIP_BYTES = 1_000_000_000          # 풀린 크기 합
+MAX_ZIP_RATIO = 200                    # 항목 하나의 압축률 상한(그 이상이면 폭탄으로 본다)
+_ZIP_JUNK = ("__MACOSX/", ".DS_Store", "Thumbs.db", "desktop.ini")
+
+
+def _zip_name(info) -> str:
+    """zip 안의 파일 이름. UTF-8 표시(0x800)가 없으면 zipfile이 cp437로 읽는데, Windows 탐색기·반디집이 만든
+    zip의 한글 이름은 cp949라 깨진다 — cp437 바이트로 되돌려 cp949로 읽어 본다(안 되면 그대로)."""
+    name = info.filename
+    if not info.flag_bits & 0x800:
+        try:
+            name = name.encode("cp437").decode("cp949")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return name.replace("\\", "/")
+
+
+def extract_zip(store: "Store", folder: str, fileobj) -> dict:
+    """zip을 저장소의 folder 아래에 푼다 — 저장소를 벗어나는 경로(../, 절대 경로)·암호 걸린 항목·상한을 넘는 것은
+    건너뛰고 까닭을 남긴다. 이미 있는 파일은 덮어쓴다(일반 업로드와 같다). 색인은 파일마다 하지 않는다 — 문서가
+    수백 개면 요청이 시간 초과가 된다. 다 푼 뒤 호출측이 저장소를 한 번 색인한다(index_later)."""
+    import zipfile  # noqa: PLC0415
+
+    try:
+        archive = zipfile.ZipFile(fileobj)
+    except zipfile.BadZipFile:
+        raise StorageError("zip 파일을 열 수 없습니다(손상됐거나 zip이 아닙니다).")
+    base = resolve(store.root, folder) if folder else store.root
+    written, replaced, skipped, total = [], 0, [], 0
+    with archive:
+        entries = [i for i in archive.infolist() if not i.is_dir()]
+        for info in entries:
+            name = _zip_name(info)
+            if any(part in _ZIP_JUNK or name.startswith(_ZIP_JUNK[0]) for part in name.split("/")):
+                continue
+            if len(written) >= MAX_ZIP_FILES:
+                skipped.append({"path": name, "reason": f"파일 수 상한({MAX_ZIP_FILES}개)을 넘었습니다"})
+                continue
+            if info.flag_bits & 0x1:
+                skipped.append({"path": name, "reason": "암호가 걸려 있습니다"})
+                continue
+            if info.file_size > MAX_ZIP_RATIO * max(info.compress_size, 1) and info.file_size > 10_000_000:
+                skipped.append({"path": name, "reason": "압축률이 비정상적으로 큽니다(압축 폭탄일 수 있습니다)"})
+                continue
+            if total + info.file_size > MAX_ZIP_BYTES:
+                skipped.append({"path": name, "reason": f"풀린 크기 합 상한({MAX_ZIP_BYTES // 1_000_000}MB)을 넘었습니다"})
+                continue
+            try:
+                target = resolve(base, name)
+                if not target.is_relative_to(store.root):
+                    raise StorageError(name)
+            except StorageError:
+                skipped.append({"path": name, "reason": "저장소 밖을 가리키는 경로입니다"})
+                continue
+            try:
+                with archive.open(info) as src:
+                    data = src.read(info.file_size + 1)
+            except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError) as e:
+                skipped.append({"path": name, "reason": f"풀지 못했습니다: {str(e)[:100]}"})
+                continue
+            if len(data) > info.file_size:   # 적힌 크기보다 크게 풀린다 — 적힌 크기를 믿을 수 없다
+                skipped.append({"path": name, "reason": "적힌 크기와 풀린 크기가 다릅니다"})
+                continue
+            replaced += 1 if target.exists() else 0
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            total += len(data)
+            written.append(target.relative_to(store.root).as_posix())
+    return {"folder": base.relative_to(store.root).as_posix() if base != store.root else "",
+            "files": written, "replaced": replaced, "skipped": skipped, "bytes": total}
+
+
+def index_later(store: "Store") -> None:
+    """저장소를 백그라운드에서 한 번 색인한다(바뀐 파일만) — 여러 파일을 한꺼번에 쓴 뒤(zip 풀기)."""
+    if not indexed(store):
+        return
+    from . import docsearch, jobs  # noqa: PLC0415
+
+    jobs.submit(docsearch.reindex, store.name, store.root)
+
+
 def delete_file(store: "Store", rel: str) -> str:
     """지우지 않고 저장소 안 휴지통으로 옮긴다. 옮겨진 자리(저장소 기준 상대경로)를 돌려준다.
 

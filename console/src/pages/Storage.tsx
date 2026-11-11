@@ -67,11 +67,31 @@ export default function Storage() {
   const upload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file || !active) return;
+    // zip이면 풀지 묻는다 — 확인이면 풀어서(저장 경로는 풀 폴더, 비우면 zip 이름의 폴더), 취소면 zip 그대로
+    const isZip = file.name.toLowerCase().endsWith('.zip');
+    const folder = path.trim() || file.name.replace(/\.zip$/i, '');
+    const extract = isZip && window.confirm(
+      `${file.name}의 압축을 풀어 저장할까요?\n\n`
+      + `확인: 풀어서 「${folder}/」 아래에 저장합니다(같은 이름의 파일은 덮어씁니다).\n`
+      + '취소: zip 파일 그대로 저장합니다.');
     setBusy(true);
     setError('');
     setDone('');
     try {
-      const saved = await api.uploadStorageFile(active.name, file, path.trim() || undefined);
+      const saved = await api.uploadStorageFile(active.name, file, path.trim() || undefined, extract);
+      if (extract) {
+        const skipped = saved.skipped ?? [];
+        setDone(`압축을 풀어 ${saved.extracted ?? 0}개를 저장했습니다: ${saved.path || '(저장소 맨 위)'}/`
+          + (saved.replaced ? ` · 덮어씀 ${saved.replaced}개` : '')
+          + (skipped.length ? ` · 건너뜀 ${skipped.length}개 — ${skipped.slice(0, 3).map((s) => `${s.path}(${s.reason})`).join(', ')}` : '')
+          + ' · 검색 색인은 잠시 뒤 반영됩니다.');
+        setPath('');
+        setFile(null);
+        if (fileInput.current) fileInput.current.value = '';
+        listing.reload();
+        setPicked(null);
+        return;
+      }
       setDone(`저장했습니다: ${saved.path}`);
       setPath('');
       setFile(null);
