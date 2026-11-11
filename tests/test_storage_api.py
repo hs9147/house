@@ -385,3 +385,26 @@ def test_preview_and_body_text_for_what_the_browser_cannot_draw(monkeypatch, tmp
                  headers=ADMIN).status_code == 400
     actions = {row["action"] for row in c.get(f"{API}/audit", headers=ADMIN).json()}
     assert {"storage.preview", "storage.read"} <= actions
+
+
+def test_path_lists_split_on_comma_or_semicolon(monkeypatch, tmp_path, fresh_settings):
+    """경로 목록(PAAS_DOC_ROOTS·_READONLY·_ALLOWED_ROOTS)은 쉼표·세미콜론 어느 쪽으로 나눠도 같다.
+    폴더 이름에 구분자가 들어 있으면 따옴표로 감싼 항목은 나누지 않는다."""
+    from app.config import get_settings
+    from app.services import storage as storage_service
+
+    split = storage_service.split_list
+    assert split(r"D:\a;D:\b, D:\c") == [r"D:\a", r"D:\b", r"D:\c"]
+    assert split('rules="D:\공유\규정, 2026";  ;') == ['rules="D:\공유\규정, 2026"']
+    assert split("rules; contracts") == ["rules", "contracts"] and split("") == []
+
+    a, b, odd = tmp_path / "a", tmp_path / "b", tmp_path / "c, d"
+    for p in (a, b, odd):
+        p.mkdir()
+    for raw in (f"{a},{b}", f"{a};{b}", f'{a}; "{odd}"'):
+        monkeypatch.setenv("PAAS_DOC_ALLOWED_ROOTS", raw)
+        get_settings.cache_clear()
+        assert storage_service.check_allowed_root(a / "x") == (a / "x").resolve()
+    assert storage_service.check_allowed_root(odd / "x") == (odd / "x").resolve()
+    with pytest.raises(storage_service.StorageError):
+        storage_service.check_allowed_root(tmp_path / "elsewhere")

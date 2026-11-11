@@ -63,6 +63,24 @@ def _unquote(value: str) -> str:
     return value
 
 
+def split_list(raw: str) -> list[str]:
+    """설정의 목록 — **쉼표(,)와 세미콜론(;) 둘 다** 나눈다(PAAS_DOC_ROOTS·_READONLY·_ALLOWED_ROOTS 공통).
+    예전에는 설정마다 구분자가 달라(쉼표·세미콜론) 하나를 다른 쪽 습관으로 적으면 목록 전체가 경로 하나로 읽혔다.
+    폴더 이름에 쉼표·세미콜론이 들어 있으면 그 항목을 따옴표로 감싼다 — 따옴표 안의 구분자는 나누지 않는다.
+    항목은 앞뒤 공백과 감싼 따옴표를 벗긴다(_unquote)."""
+    items, current, quoted = [], [], False
+    for ch in raw or "":
+        if ch in _QUOTES:
+            quoted = not quoted
+        if ch in ",;" and not quoted:
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    items.append("".join(current))
+    return [item for item in (_unquote(i) for i in items) if item]
+
+
 def _leaf(path: str) -> str:
     """경로의 마지막 조각. 윈도우 경로(D:\\공유\\규정)를 리눅스에서 파싱할 때도 맞아야
     한다 — Path().name은 posix에서 역슬래시를 구분자로 보지 않는다."""
@@ -86,8 +104,7 @@ def _check_name(name: str, entry: str) -> str:
 def check_allowed_root(path: Path) -> Path:
     """DB 등록 경로는 운영자가 허용한 상위 디렉터리 안으로 제한한다."""
     path = path.resolve()
-    raw = get_settings().doc_allowed_roots
-    allowed = [Path(item.strip()).resolve() for item in raw.split(";") if item.strip()]
+    allowed = [Path(item).resolve() for item in split_list(get_settings().doc_allowed_roots)]
     if not allowed:
         raise StorageError("PAAS_DOC_ALLOWED_ROOTS를 먼저 설정해야 새 저장소를 등록할 수 있습니다")
     if not any(path == base or path.is_relative_to(base) for base in allowed):
@@ -99,7 +116,7 @@ def _legacy_stores() -> list[Store]:
     """최초 기동에서만 읽는 기존 환경설정. 이관 후에는 다시 참조하지 않는다."""
     settings = get_settings()
     # 잠그는 것이 별도의 행위다 — 경로 옆이 아니라 목록에서 정한다.
-    locked = {n.strip() for n in settings.doc_roots_readonly.split(",") if n.strip()}
+    locked = set(split_list(settings.doc_roots_readonly))
     found = [Store(
         INTERNAL_STORE,
         Path(settings.storage_root or "./data/storage").resolve(),
@@ -107,8 +124,7 @@ def _legacy_stores() -> list[Store]:
         hidden=True,
     )]
     seen = {INTERNAL_STORE}
-    for entry in settings.doc_roots.split(","):
-        entry = _unquote(entry)
+    for entry in split_list(settings.doc_roots):
         if not entry:
             continue
         name, sep, path = entry.partition("=")

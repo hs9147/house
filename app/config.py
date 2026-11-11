@@ -112,14 +112,16 @@ class Settings(BaseSettings):
     #   PAAS_DOC_ROOTS=rules=D:\공유\사내규정,D:\shared\contracts
     # 사람이 파일 관리 화면에서 고르는 폴더는 이것들이고, 기본이 읽기/쓰기다.
     doc_roots: str = ""
-    # 그중 **잠글** 폴더 이름(쉼표 구분). 여기 적은 폴더만 업로드·삭제가 막힌다.
+    # 그중 **잠글** 폴더 이름(쉼표·세미콜론 구분). 여기 적은 폴더만 업로드·삭제가 막힌다.
     #   PAAS_DOC_ROOTS_READONLY=rules,contracts
     # 목록을 경로와 따로 두는 이유: 경로 문자열 안에 권한을 섞으면(`이름:ro=경로`)
     # 티켓에서 경로를 복사해 붙일 때 권한까지 딸려 온다.
     # 여기 적힌 이름이 PAAS_DOC_ROOTS에 없으면 기동을 막는다 — 오타는 조용히 "안 잠긴
     # 폴더"로 남고, 잠근 줄 알았던 폴더가 열려 있게 된다.
     doc_roots_readonly: str = ""
-    # DB에서 새 저장소를 등록할 때 허용하는 서버 경로의 상위 폴더(세미콜론 구분).
+    # DB에서 새 저장소를 등록할 때 허용하는 서버 경로의 상위 폴더.
+    # 경로 목록(PAAS_DOC_ROOTS·_READONLY·_ALLOWED_ROOTS)은 쉼표(,)와 세미콜론(;) 어느 쪽으로 나눠도 된다
+    # (storage.split_list) — 폴더 이름에 구분자가 들어 있으면 그 항목을 따옴표로 감싼다.
     # 비우면 새 경로 등록을 막는다. 기존 PAAS_DOC_ROOTS의 일회성 이관에는 적용하지 않는다.
     doc_allowed_roots: str = ""
     powershell_start_dir: str = ""
