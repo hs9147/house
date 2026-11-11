@@ -126,6 +126,14 @@ def scheduler_snapshot(
     return scheduler.snapshot(db)
 
 
+@router.get("/system/internal-storage")
+def internal_storage(db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """내부 저장소(PAAS_STORAGE_ROOT)를 플랫폼이 실제로 무엇에 쓰나 — 대시보드 「내부 저장소」(관리자)."""
+    from ..services import storage as storage_service  # noqa: PLC0415
+
+    return storage_service.internal_usage(db)
+
+
 @router.get("/temp-jobs")
 def list_temp_jobs(db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
     """임시 작업 — 작업마다 설명·현황·최근 이력(관리자). 스케줄러 job이 아직 없으면 만든다."""

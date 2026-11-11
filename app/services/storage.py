@@ -190,6 +190,90 @@ def stores(db: Session | None = None) -> list[Store]:
             db.close()
 
 
+# 내부 저장소에서 플랫폼이 실제로 쓰는 것 — 정보 업데이트의 작업 파일(.infosource, services/infosource).
+# 「무엇이 어느 출처의 것인가」를 보이려고 경로 모양으로 용도를 가른다(_file_dir·_dataset_dir·_shot_dir·_actions_file).
+_INFOSOURCE_DIR = ".infosource"
+_LISTED_PER_GROUP = 100     # 묶음 하나에 보여 줄 파일 수(수는 전부 센다)
+_LISTED_OTHERS = 200        # 맨 위의 나머지 항목 수
+
+
+def _infosource_purpose(parts: tuple[str, ...]) -> tuple[str, int | None]:
+    """.infosource 아래 경로 → (용도, 출처 id)."""
+    head = parts[0]
+    if head in ("files", "datasets") and len(parts) >= 3 and parts[1].isdigit():
+        return ("받은 파일(저장 전)" if head == "files" else "목록 누적본"), int(parts[1])
+    if head.isdigit() and len(parts) >= 2:
+        return ("실패 기록(trace)" if parts[-1] == "trace.zip" else "화면 캡처"), int(head)
+    if len(parts) == 1 and head.endswith(".actions.json") and head.split(".", 1)[0].isdigit():
+        return "조건 칸 동작(LLM이 찾아 저장)", int(head.split(".", 1)[0])
+    return "기타", None
+
+
+def internal_usage(db: Session) -> dict:
+    """내부 저장소(PAAS_STORAGE_ROOT)를 플랫폼이 실제로 무엇에 쓰고 있나 — 대시보드 「내부 저장소」.
+
+    플랫폼이 쓰는 것(.infosource)은 파일까지 센다(크지 않다). 그 밖의 맨 위 항목은 이름만 보인다 — 문서 폴더가
+    여기 아래에 있으면 파일이 수천 개라 매번 재면 화면이 멈춘다. 문서 저장소와 겹치는 폴더는 그 이름을 붙인다
+    (겹치면 새 저장소를 그 아래에 등록할 수 없고, internal 창구로 그 폴더의 파일을 고칠 수 있게 된다)."""
+    from ..models import InfoSource  # noqa: PLC0415
+
+    root = Path(get_settings().storage_root or "./data/storage").resolve()
+    out: dict = {"root": str(root), "exists": root.is_dir(), "groups": [], "others": [], "overlaps": [],
+                 "platform_files": 0, "platform_bytes": 0, "others_truncated": False}
+    stores_by_root = {Path(r.root_path).resolve(): r.name for r in db.execute(select(DocumentStore)).scalars()}
+    out["overlaps"] = sorted(
+        ({"store": name, "root": str(path), "inside": path != root and path.is_relative_to(root)}
+         for path, name in stores_by_root.items() if path == root or path.is_relative_to(root)
+         or root.is_relative_to(path)), key=lambda o: o["root"])
+    if not out["exists"]:
+        return out
+    names = {r.id: r.name for r in db.execute(select(InfoSource)).scalars()}
+    groups: dict[tuple, dict] = {}
+    base = root / _INFOSOURCE_DIR
+    for path in sorted(base.rglob("*")) if base.is_dir() else []:
+        try:
+            if not path.is_file():
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        purpose, source_id = _infosource_purpose(path.relative_to(base).parts)
+        g = groups.setdefault((purpose, source_id), {
+            "purpose": purpose, "source_id": source_id,
+            "source": names.get(source_id, f"(지운 출처 #{source_id})") if source_id is not None else "",
+            "count": 0, "bytes": 0, "modified": 0.0, "files": []})
+        g["count"] += 1
+        g["bytes"] += stat.st_size
+        g["modified"] = max(g["modified"], stat.st_mtime)
+        if len(g["files"]) < _LISTED_PER_GROUP:
+            g["files"].append({"path": path.relative_to(root).as_posix(), "size": stat.st_size,
+                               "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")})
+    for g in groups.values():
+        g["modified"] = datetime.fromtimestamp(g["modified"]).isoformat(timespec="seconds") if g["modified"] else None
+        out["platform_files"] += g["count"]
+        out["platform_bytes"] += g["bytes"]
+    out["groups"] = sorted(groups.values(), key=lambda g: (g["source"] or "~", g["purpose"]))
+    try:
+        entries = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        entries = []
+    for entry in entries:
+        if entry.name == _INFOSOURCE_DIR:
+            continue
+        if len(out["others"]) >= _LISTED_OTHERS:
+            out["others_truncated"] = True
+            break
+        try:
+            is_dir = entry.is_dir()
+            size = None if is_dir else entry.stat().st_size
+        except OSError:
+            continue
+        out["others"].append({"name": entry.name, "dir": is_dir, "size": size,
+                              "store": stores_by_root.get(entry.resolve()) if is_dir else None,
+                              "trash": entry.name == TRASH_DIRNAME})
+    return out
+
+
 def visible_stores(db: Session | None = None) -> list[Store]:
     """사람이 고를 수 있는 저장소 — 숨긴 것을 뺀 목록(파일 관리 화면·MCP 서버 디렉터리)."""
     return [s for s in stores(db) if not s.hidden]

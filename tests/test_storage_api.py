@@ -408,3 +408,51 @@ def test_path_lists_split_on_comma_or_semicolon(monkeypatch, tmp_path, fresh_set
     assert storage_service.check_allowed_root(odd / "x") == (odd / "x").resolve()
     with pytest.raises(storage_service.StorageError):
         storage_service.check_allowed_root(tmp_path / "elsewhere")
+
+
+def test_internal_storage_usage_lists_what_the_platform_writes(monkeypatch, tmp_path, fresh_settings):
+    """대시보드 「내부 저장소」 — 플랫폼이 쓰는 파일(.infosource)은 출처·용도별로 파일까지, 그 밖의 맨 위 항목은
+    이름만. 내부 저장소 아래에 둔 문서 저장소는 겹친다고 알린다."""
+    from app.db import SessionLocal
+    from app.models import DocumentStore, InfoSource
+
+    c = _client(monkeypatch, tmp_path)
+    internal = tmp_path / "internal"
+    work = internal / ".infosource"
+    (work / "files" / "7").mkdir(parents=True)
+    (work / "files" / "7" / "abc.pdf").write_bytes(b"x" * 10)
+    (work / "datasets" / "7").mkdir(parents=True)
+    (work / "datasets" / "7" / "list.json").write_text("{}")
+    (work / "7").mkdir()
+    (work / "7" / "0.jpg").write_bytes(b"j" * 5)
+    (work / "7" / "trace.zip").write_bytes(b"z")
+    (work / "7.actions.json").write_text("{}")
+    (internal / "uploaded.png").write_bytes(b"p" * 3)
+    (internal / "docs-inside").mkdir()
+    with SessionLocal() as db:
+        db.query(DocumentStore).filter(DocumentStore.name == "inside").delete()
+        db.add(DocumentStore(name="inside", root_path=str(internal / "docs-inside"), read_only=False, active=True))
+        src = InfoSource(name="인사 포털 사용량", kind="web", url="https://intra.test/")
+        db.add(src)
+        db.commit()
+        sid = src.id
+    (work / "files" / "7").rename(work / "files" / str(sid))
+    (work / "datasets" / "7").rename(work / "datasets" / str(sid))
+    (work / "7").rename(work / str(sid))
+    (work / "7.actions.json").rename(work / f"{sid}.actions.json")
+
+    u = c.get(f"{API}/system/internal-storage", headers=ADMIN).json()
+    assert u["exists"] and u["platform_files"] == 5 and u["platform_bytes"] == 10 + 2 + 5 + 1 + 2
+    by = {g["purpose"]: g for g in u["groups"]}
+    assert set(by) == {"받은 파일(저장 전)", "목록 누적본", "화면 캡처", "실패 기록(trace)", "조건 칸 동작(LLM이 찾아 저장)"}
+    assert all(g["source"] == "인사 포털 사용량" for g in u["groups"])
+    assert by["받은 파일(저장 전)"]["files"][0]["path"] == f".infosource/files/{sid}/abc.pdf"
+    others = {o["name"]: o for o in u["others"]}
+    assert others["uploaded.png"]["size"] == 3 and others["docs-inside"]["store"] == "inside"
+    assert ".infosource" not in others
+    assert [o["store"] for o in u["overlaps"]] == ["inside"] and u["overlaps"][0]["inside"]
+    assert c.get(f"{API}/system/internal-storage").status_code in (401, 403)
+    with SessionLocal() as db:
+        db.query(DocumentStore).filter(DocumentStore.name == "inside").delete()
+        db.query(InfoSource).filter(InfoSource.id == sid).delete()
+        db.commit()

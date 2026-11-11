@@ -97,6 +97,7 @@ function DiskTop({ s }: { s: StatusSnapshot }) {
 export default function Dashboard() {
   const state = useApi(() => api.status());
   const [tempOpen, setTempOpen] = useState(false);
+  const [storageOpen, setStorageOpen] = useState(false);
 
   return (
     <>
@@ -104,6 +105,7 @@ export default function Dashboard() {
         <div className="row" style={{ marginBottom: 12 }}>
           <h2 style={{ margin: 0 }}>시스템 상태</h2>
           <div className="spacer" />
+          <button className="secondary small" onClick={() => setStorageOpen(true)}>내부 저장소</button>{' '}
           <button className="secondary small" onClick={() => setTempOpen(true)}>임시 작업</button>{' '}
           <button className="secondary small" onClick={state.reload}>
             새로고침
@@ -180,7 +182,101 @@ export default function Dashboard() {
       </div>
       <SchedulerPanel />
       {tempOpen && <TempJobsModal onClose={() => setTempOpen(false)} />}
+      {storageOpen && <InternalStorageModal onClose={() => setStorageOpen(false)} />}
     </>
+  );
+}
+
+/** 내부 저장소(PAAS_STORAGE_ROOT) — 플랫폼이 실제로 쓰는 파일(.infosource)과 그 밖의 맨 위 항목. 옮길 때 무엇을
+ *  가져가야 하는지, 문서 폴더와 겹치는지를 본다. */
+function InternalStorageModal({ onClose }: { onClose: () => void }) {
+  const state = useApi(() => api.internalStorage());
+  return (
+    <Modal title="내부 저장소 (PAAS_STORAGE_ROOT)" onClose={onClose} wide>
+      <Async state={state}>
+        {(u) => (
+          <>
+            <p style={{ marginTop: 0 }}>
+              <span className="mono">{u.root}</span>{!u.exists && <span className="status bad" style={{ marginLeft: 6 }}>폴더 없음</span>}
+            </p>
+            <p className="mutedtext" style={{ fontSize: 12 }}>
+              플랫폼이 파일을 쓰는 자리입니다(정보 업데이트의 받은 파일·캡처·실패 기록·조건 칸 동작·목록 누적본 —
+              <span className="mono"> .infosource</span>). 문서 저장소가 아니며 검색·색인 대상도 아닙니다. 옮길 때는 GPAX를 멈추고
+              <span className="mono"> .infosource</span>를 새 위치로 옮긴 뒤 다시 시작합니다.
+            </p>
+            {u.overlaps.length > 0 && (
+              <div className="panel" style={{ borderColor: '#f59e0b' }}>
+                <strong style={{ color: '#f59e0b' }}>
+                  ⚠️ 문서 저장소 {u.overlaps.length}개와 겹칩니다
+                </strong>
+                <div className="mutedtext" style={{ fontSize: 12, margin: '4px 0' }}>
+                  겹치면 이 아래에 새 저장소를 등록할 수 없고, internal 창구로 그 폴더의 파일을 고칠 수 있게 됩니다.
+                  문서 폴더와 겹치지 않는 전용 폴더로 옮기세요.
+                </div>
+                <div style={{ fontSize: 12 }}>
+                  {u.overlaps.map((o) => (
+                    <span key={o.store} style={{ marginRight: 10 }}>
+                      <b>{o.store}</b> <span className="mono mutedtext">{o.root}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            <h4 style={{ margin: '12px 0 4px' }}>
+              플랫폼이 쓰는 파일 — {u.platform_files.toLocaleString()}개 · {fmtBytes(u.platform_bytes)}
+            </h4>
+            {u.groups.length === 0 ? <p className="mutedtext">없습니다.</p> : (
+              <table style={{ fontSize: 12 }}>
+                <thead><tr><th>출처</th><th>용도</th><th>파일</th><th>크기</th><th>최근 수정</th></tr></thead>
+                <tbody>
+                  {u.groups.map((g) => (
+                    <tr key={`${g.purpose}-${g.source_id}`}>
+                      <td>{g.source || '-'}</td>
+                      <td>
+                        <details>
+                          <summary style={{ cursor: 'pointer' }}>{g.purpose}</summary>
+                          <ul className="mono" style={{ fontSize: 11, margin: '4px 0', paddingLeft: 16 }}>
+                            {g.files.map((f) => (
+                              <li key={f.path} style={{ wordBreak: 'break-all' }}>
+                                {f.path} <span className="mutedtext">· {fmtBytes(f.size)} · {fmtDate(f.modified)}</span>
+                              </li>
+                            ))}
+                            {g.count > g.files.length && <li className="mutedtext">… 외 {g.count - g.files.length}개</li>}
+                          </ul>
+                        </details>
+                      </td>
+                      <td>{g.count.toLocaleString()}</td>
+                      <td>{fmtBytes(g.bytes)}</td>
+                      <td>{g.modified ? fmtDate(g.modified) : '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <h4 style={{ margin: '12px 0 4px' }}>그 밖의 항목 — 플랫폼이 쓰지 않습니다</h4>
+            <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 4px' }}>
+              맨 위의 폴더·파일 이름만 보입니다(폴더 크기는 재지 않습니다). 예전에 internal 창구로 올린 것이거나, 이 아래에 둔 다른 폴더입니다.
+            </p>
+            {u.others.length === 0 ? <p className="mutedtext">없습니다.</p> : (
+              <table style={{ fontSize: 12 }}>
+                <thead><tr><th>이름</th><th>종류</th><th>문서 저장소</th><th>크기</th></tr></thead>
+                <tbody>
+                  {u.others.map((o) => (
+                    <tr key={o.name}>
+                      <td className="mono">{o.name}</td>
+                      <td>{o.trash ? '휴지통' : o.dir ? '폴더' : '파일'}</td>
+                      <td>{o.store ? <span className="status warn">{o.store}</span> : '-'}</td>
+                      <td>{o.size !== null ? fmtBytes(o.size) : '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {u.others_truncated && <p className="mutedtext" style={{ fontSize: 12 }}>앞의 200개만 보입니다.</p>}
+          </>
+        )}
+      </Async>
+    </Modal>
   );
 }
 

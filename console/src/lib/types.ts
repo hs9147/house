@@ -821,6 +821,27 @@ export interface StatusSnapshot {
 }
 
 /** 임시 작업 — 코드에 둔 운영 스크립트(services/tempjobs). 현황은 스케줄러 job, 이력은 한 일이 있을 때만. */
+/** 대시보드 「내부 저장소」 — PAAS_STORAGE_ROOT를 플랫폼이 실제로 쓰는 것(.infosource)과 그 밖의 맨 위 항목. */
+export interface InternalStorageUsage {
+  root: string;
+  exists: boolean;
+  platform_files: number;
+  platform_bytes: number;
+  groups: {
+    purpose: string;
+    source_id: number | null;
+    source: string;
+    count: number;
+    bytes: number;
+    modified: string | null;
+    files: { path: string; size: number; modified: string }[];
+  }[];
+  others: { name: string; dir: boolean; size: number | null; store: string | null; trash: boolean }[];
+  others_truncated: boolean;
+  /** 내부 저장소와 겹치는 문서 저장소 — inside면 내부 저장소 아래에 있다. */
+  overlaps: { store: string; root: string; inside: boolean }[];
+}
+
 export interface TempJob {
   id: string;
   title: string;
