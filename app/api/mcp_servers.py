@@ -567,7 +567,9 @@ _DOCS_TOOLS = [
         "description": (
             "사내 문서 **본문**을 검색한다(파일명이 아니다). 공백으로 끊은 낱말을 모두"
             " 포함하는 문서를 찾아 어느 저장소의 어느 경로인지와 일치 대목 발췌를 준다."
-            " source를 주면 그 저장소만, 생략하면 전 저장소를 가로질러 찾는다."
+            " source를 주면 그 저장소만, 생략하면 전 저장소를 가로질러 찾는다 — 가로지를 때는 저장소마다"
+            " 번갈아 담아 결과가 있는 저장소가 모두 보이고, by_source에 저장소별 건수가 온다(「12+」는 더 있다)."
+            " 한 저장소의 것을 더 보려면 source를 주고 다시 찾는다."
         ),
         "inputSchema": {
             "type": "object",
@@ -577,6 +579,24 @@ _DOCS_TOOLS = [
                 "limit": {"type": "integer", "description": f"기본 10, 최대 {_MAX_LIST}"},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "locate",
+        "description": (
+            "이름이 붙은 대상(협력사·품목·계약 등)이 **어느 저장소에 몇 개 문서로** 나오는지. 저장소마다 다루는"
+            " 대상(협력사)이 달라서, 특정 대상의 정보·레포트를 만들 때 먼저 부른다. 법인 표기((주)·주식회사 등)는"
+            " 떼고 찾고, 내용 그래프에 그 대상의 별칭이 있으면 함께 찾는다. 결과의 저장소마다 search_docs(source=…)로"
+            " 읽고, absent의 저장소에는 그 대상의 자료가 없다(결과에 '자료 없음'으로 밝힌다)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "대상 이름(예: 이벌브소프트)"},
+                "aliases": {"type": "array", "items": {"type": "string"},
+                            "description": "다른 이름(영문명·약칭 등, 선택)"},
+            },
+            "required": ["name"],
         },
     },
     {
@@ -643,6 +663,58 @@ async def docs_mcp_server(
     )
 
 
+def _locate(db: Session, actor: str, sources: list, target: str, aliases) -> str:
+    """대상 하나가 저장소마다 몇 개 문서에 나오는지 — 저장소마다 다루는 협력사가 달라, 레포트가 볼 저장소를 고르는
+    지도다. 찾는 이름: 법인 표기를 뗀 이름, 사람이 준 다른 이름, 내용 그래프의 별칭(분석한 저장소에 그 대상이 있으면).
+    별칭은 그 이름을 이미 품은 것은 빼고 더한다(LIKE가 이미 잡는다)."""
+    from ..services import semantic  # noqa: PLC0415
+
+    core = docsearch.core_name(target) or target.strip()
+    terms = [core]
+
+    def add(name: str) -> None:
+        c = docsearch.core_name(str(name or ""))
+        if len(c) >= 2 and not any(t in c for t in terms) and len(terms) < 6:
+            terms.append(c)
+
+    for alias in (aliases if isinstance(aliases, list) else [])[:5]:
+        add(alias)
+    graph_aliases: list[str] = []
+    for store in sources:
+        try:
+            rows = semantic.search(store.name, "", core, 3)
+        except Exception:  # noqa: BLE001 — 내용 분석을 하지 않은 저장소
+            continue
+        for row in rows:
+            for name in [row["name"], *row.get("aliases", [])]:
+                if name not in graph_aliases:
+                    graph_aliases.append(name)
+                add(name)
+    found, absent = [], []
+    for store in sources:
+        by_term, top = {}, {}
+        for term in terms:
+            m = docsearch.mentions(store.name, term, 5)
+            by_term[term] = m["total"]
+            for hit in m["hits"]:
+                top[hit["path"]] = max(top.get(hit["path"], 0), hit["count"])
+        documents = max(by_term.values()) if by_term else 0
+        if documents:
+            found.append({"source": store.name, "documents": documents,
+                          **({"by_term": by_term} if len(terms) > 1 else {}),
+                          "top": [{"path": p, "count": n} for p, n in
+                                  sorted(top.items(), key=lambda kv: (-kv[1], kv[0]))[:5]]})
+        else:
+            absent.append(store.name)
+    found.sort(key=lambda f: -f["documents"])
+    audit.record(db, actor, "mcp.docs.locate", "*",
+                 {"terms": len(terms), "stores": len(found), "absent": len(absent)})
+    return _dump({"name": target, "terms": terms, "graph_aliases": graph_aliases[:10], "stores": found,
+                  "absent": absent,
+                  "note": "저장소마다 다루는 대상이 다르다 — stores의 저장소마다 search_docs(source=…, query=terms의 이름)"
+                          "로 읽고, absent의 저장소는 '자료 없음'으로 밝힌다. 영문명·약칭이 따로 있으면 aliases로 넘겨 다시 부른다."})
+
+
 def _all_stores(db: Session | None = None, key: ApiKey | None = None) -> list[storage_service.Store]:
     """/mcp/docs·/mcp/graph가 찾는 범위 — **색인 대상 저장소(PAAS_DOC_ROOTS)만**(storage.indexed). 내부
     저장소(internal)는 플랫폼 파일 자리라 색인하지 않으므로 여기서도 빠진다."""
@@ -697,20 +769,30 @@ def _docs_call(db: Session, actor: str, name: str, args: dict,
             raise mcp_server.McpToolError("source가 비어 있습니다(검색 결과의 source 값).")
         return _read_document(db, actor, sources[0], _str_arg(args, "path"))
 
-    # search_docs — 저장소를 가로질러 한 번에
+    if name == "locate":
+        return _locate(db, actor, sources, _str_arg(args, "name"), args.get("aliases"))
+
+    # search_docs — 저장소를 가로질러 한 번에. **저장소마다 번갈아 담는다**: 예전에는 앞 저장소부터 상한까지 채워,
+    # 문서가 많은 저장소(계약 문서)가 결과를 다 차지하고 뒤 저장소(신용평가 보고서)는 한 건도 나오지 않았다(실측:
+    # 협력사 이름으로 찾으면 50건이 모두 contracts, credit의 그 회사 보고서 6건은 빠짐). 저장소별 건수도 함께 준다.
     query = _str_arg(args, "query")
     limit = _int_arg(args, "limit", 10, _MAX_LIST)
-    hits: list[dict] = []
-    truncated = False
+    per_store = []
     for store in sources:
-        if len(hits) >= limit:
-            truncated = True
-            break
-        found = docsearch.search(store.name, query, limit - len(hits))
-        truncated = truncated or found["truncated"]
-        hits += [{"source": store.name, **hit} for hit in found["hits"]]
+        found = docsearch.search(store.name, query, limit)
+        if found["hits"]:
+            per_store.append((store.name, found))
+    hits: list[dict] = []
+    for i in range(limit):
+        for name, found in per_store:
+            if i < len(found["hits"]) and len(hits) < limit:
+                hits.append({"source": name, **found["hits"][i]})
+    available = sum(len(found["hits"]) for _, found in per_store)
+    truncated = available > len(hits) or any(found["truncated"] for _, found in per_store)
 
     result = {"query": query, "hits": hits, "truncated": truncated,
+              "by_source": {name: f"{len(found['hits'])}{'+' if found['truncated'] else ''}"
+                            for name, found in per_store},
               "searched": [store.name for store in sources]}
     if not hits:
         # 색인이 비어 있는 것과 "찾지 못한 것"은 다른 문제다 — 구분해서 알려 준다.

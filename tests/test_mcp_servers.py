@@ -664,7 +664,7 @@ def test_docs_server_searches_across_every_source(monkeypatch, fresh_settings, t
     import json
 
     names = [t["name"] for t in _rpc(c, "/mcp/docs", "tools/list")["result"]["tools"]]
-    assert names == ["list_sources", "search_docs", "read_doc", "reindex_docs", "index_status"]
+    assert names == ["list_sources", "search_docs", "locate", "read_doc", "reindex_docs", "index_status"]
     assert _rpc(c, "/mcp/docs", "initialize")["result"]["serverInfo"]["name"] == "paas-docs"
 
     built = json.loads(_text(_call(c, "/mcp/docs", "reindex_docs")))
@@ -958,3 +958,49 @@ def test_internal_store_server_keeps_files_but_not_an_index(monkeypatch, fresh_s
     assert not list((tmp_path / "index").glob("**/internal/**/*.md"))          # .ready를 남기지 않는다
     sources = json.loads(_text(_call(c, "/mcp/docs", "list_sources")))["sources"]
     assert [row["source"] for row in sources] == ["assets"]
+
+
+def test_cross_store_search_gives_every_store_a_turn(monkeypatch, fresh_settings, tmp_path):
+    """전 저장소 검색은 저장소마다 번갈아 담는다 — 문서가 많은 저장소가 상한을 다 채워 뒤 저장소(신용평가 보고서)가
+    빠지던 것(실측: 협력사 이름 → 50건 모두 계약 문서). 저장소별 건수(by_source)로 더 볼 곳을 알린다."""
+    import json
+
+    c = _docs_client(monkeypatch, tmp_path, ("contracts", "credit"))
+    for i in range(8):
+        (tmp_path / "shared" / "contracts" / f"계약-{i}.txt").write_text(f"이벌브소프트 견적 {i}", encoding="utf-8")
+    for year in (22, 24):
+        (tmp_path / "shared" / "credit" / f"{year}년 신용평가.txt").write_text("(주)이벌브소프트 기업신용평가", encoding="utf-8")
+    _call(c, "/mcp/docs", "reindex_docs")
+
+    out = json.loads(_text(_call(c, "/mcp/docs", "search_docs", {"query": "이벌브소프트", "limit": 5})))
+    assert [h["source"] for h in out["hits"]] == ["contracts", "credit", "contracts", "credit", "contracts"]
+    assert out["by_source"] == {"contracts": "5+", "credit": "2"} and out["truncated"] is True
+    more = json.loads(_text(_call(c, "/mcp/docs", "search_docs", {"query": "이벌브소프트", "source": "credit"})))
+    assert sorted(h["path"] for h in more["hits"]) == ["22년 신용평가.txt", "24년 신용평가.txt"]
+
+
+def test_locate_maps_which_stores_hold_the_supplier(monkeypatch, fresh_settings, tmp_path):
+    """저장소마다 다루는 협력사가 다르다 — locate가 그 협력사가 나오는 저장소와 문서 수, 없는 저장소를 알려 준다.
+    법인 표기((주)·주식회사)는 떼고 찾고, 사람이 준 다른 이름(영문명)도 함께 찾는다."""
+    import json
+
+    c = _docs_client(monkeypatch, tmp_path, ("contracts", "credit", "scoring"))
+    for i in range(3):
+        (tmp_path / "shared" / "contracts" / f"계약-{i}.txt").write_text(f"주식회사 이벌브소프트 견적 {i}", encoding="utf-8")
+    (tmp_path / "shared" / "contracts" / "영문.txt").write_text("Evolvesoft quotation", encoding="utf-8")
+    (tmp_path / "shared" / "credit" / "24년 신용평가.txt").write_text("(주)이벌브소프트 (주)이벌브소프트 기업신용평가",
+                                                                     encoding="utf-8")
+    (tmp_path / "shared" / "scoring" / "평가.txt").write_text("에이직랜드 스코어", encoding="utf-8")
+    _call(c, "/mcp/docs", "reindex_docs")
+
+    out = json.loads(_text(_call(c, "/mcp/docs", "locate", {"name": "㈜이벌브소프트"})))
+    assert out["terms"] == ["이벌브소프트"]
+    assert [(s["source"], s["documents"]) for s in out["stores"]] == [("contracts", 3), ("credit", 1)]
+    assert out["stores"][1]["top"] == [{"path": "24년 신용평가.txt", "count": 2}]
+    assert out["absent"] == ["scoring"]
+
+    with_alias = json.loads(_text(_call(c, "/mcp/docs", "locate",
+                                        {"name": "이벌브소프트", "aliases": ["Evolvesoft Co., Ltd."]})))
+    assert with_alias["terms"] == ["이벌브소프트", "Evolvesoft"]
+    contracts = next(s for s in with_alias["stores"] if s["source"] == "contracts")
+    assert contracts["by_term"] == {"이벌브소프트": 3, "Evolvesoft": 1}

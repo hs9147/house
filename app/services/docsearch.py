@@ -608,6 +608,16 @@ def search(store_name: str, query: str, limit: int = 10, *, width: int = 60,
         conn.close()
 
 
+# 법인 표기 — 같은 회사가 문서마다 「(주)이벌브소프트」「주식회사 이벌브소프트」「이벌브소프트」로 적힌다.
+_LEGAL_FORM = re.compile(r"\(\s*(주|유|재|사)\s*\)|㈜|주식회사|유한회사|유한책임회사|재단법인|사단법인"
+                         r"|\b(co\.?\s*,?\s*ltd\.?|inc\.?|corp\.?|corporation|limited|llc)(?=\W|$)", re.I)
+
+
+def core_name(name: str) -> str:
+    """법인 표기를 뗀 이름 — 본문 검색(LIKE)이 그 회사의 여러 표기를 한 번에 잡게."""
+    return " ".join(_LEGAL_FORM.sub(" ", name or "").replace(",", " ").split())
+
+
 def mentions(store_name: str, term: str, limit: int = 5) -> dict:
     """그 낱말이 **많이 나오는** 문서부터 — (경로, 횟수)와 나오는 문서 수(total).
 
