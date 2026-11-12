@@ -1017,6 +1017,11 @@ class WorkflowRun(Base):
         Enum(WorkflowRunStatus), default=WorkflowRunStatus.running
     )
     actor: Mapped[str] = mapped_column(String(64), default="")
+    # 이 실행이 진행하는 과제(업무 단위 한 건 — 워크플로 targets의 종류와 그 건의 이름). 「대기 중」은 실행이 아니라
+    # **과제**를 센다: 같은 과제를 여러 번 돌려도 한 건이고, 과제마다 멈춘 단계가 다르다(smartwork.department_workflows).
+    # 비어 있으면 과제 없이 시작한 실행이다(이 열이 생기기 전의 실행 포함) — 「과제 미지정」으로 따로 센다.
+    target_kind: Mapped[str] = mapped_column(String(64), default="")
+    target_name: Mapped[str] = mapped_column(String(200), default="")
     # [{"id","type","status","summary","ms"}] — 화면이 진행을 보여 주는 근거
     steps: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # 노드 id → {"text","paths"} (상한을 넘으면 잘라 표시한다)

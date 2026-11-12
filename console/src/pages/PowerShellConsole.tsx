@@ -284,7 +284,7 @@ export default function PowerShellConsole() {
         )}
       </div>
 
-      {/* 버튼 순서: 명령 실행 → 세션 다시 시작 → 터미널(지원하는 서버만) → SW 업데이트 → 백엔드 재시작 → 서버 로그. */}
+      {/* 버튼 순서: 명령 실행 → 세션 다시 시작 → 터미널(지원하는 서버만) → 백엔드 재시작 → SW 업데이트 → 서버 로그. */}
       <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid rgba(255, 255, 255, 0.1)', paddingBottom: 8 }}>
         <button
           className={activeTab === 'console' ? 'primary small' : 'secondary small'}
@@ -317,16 +317,6 @@ export default function PowerShellConsole() {
 
           엔드포인트가 `require_admin`이라 관리자에게만 보인다. 아니면 눌러야 403을 안다.
         */}
-        {me.data?.is_admin && (
-          <button
-            className="secondary small"
-            disabled={restarting}
-            onClick={handleSwUpdate}
-            title="git pull 후 paas·console 서비스를 재시작합니다 (백엔드가 잠시 내려갑니다)"
-          >
-            {restarting ? 'SW 업데이트 중...' : '⬆️ SW 업데이트'}
-          </button>
-        )}
         {/* git pull 없이 백엔드만 재기동한다. 터미널에서 직접 치는 것과 같은 스크립트를
             쓴다(infra/restart-paas.ps1) — 재시작 작업을 분리된 프로세스로 넘기고 즉시
             돌아오므로, 이 요청이 백엔드가 내려가면서 끊기지 않는다. */}
@@ -339,6 +329,16 @@ export default function PowerShellConsole() {
               + '.\\infra\\restart-paas.ps1'}
           >
             🔁 백엔드 재시작
+          </button>
+        )}
+        {me.data?.is_admin && (
+          <button
+            className="secondary small"
+            disabled={restarting}
+            onClick={handleSwUpdate}
+            title="git pull 후 paas·console 서비스를 재시작합니다 (백엔드가 잠시 내려갑니다)"
+          >
+            {restarting ? 'SW 업데이트 중...' : '⬆️ SW 업데이트'}
           </button>
         )}
         <button

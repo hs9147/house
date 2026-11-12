@@ -340,7 +340,9 @@ def test_agents_follow_organization_visibility(client):
         == ["public-agent"]
 
 
-def _workflow(org_id: int, name: str, nodes: list[dict], waiting: bool = False) -> None:
+def _workflow(org_id: int, name: str, nodes: list[dict], waiting: bool = False,
+              runs: list[tuple[str, str, str]] = ()) -> None:
+    """waiting=True면 과제 없이 시작한 대기 중 실행 하나, runs는 (과제 종류, 과제 이름, 멈춘 노드)마다 대기 중 실행."""
     with SessionLocal() as db:
         row = Workflow(organization_id=org_id, name=name, description=f"{name} 절차",
                        spec={"nodes": nodes, "edges": []},
@@ -356,6 +358,9 @@ def _workflow(org_id: int, name: str, nodes: list[dict], waiting: bool = False) 
         if waiting:
             db.add(WorkflowRun(workflow_id=row.id, status=WorkflowRunStatus.waiting,
                                pending_node="approve"))
+        for kind, task, node in runs:
+            db.add(WorkflowRun(workflow_id=row.id, status=WorkflowRunStatus.waiting, pending_node=node,
+                               target_kind=kind, target_name=task))
         db.commit()
 
 
@@ -390,7 +395,8 @@ def test_chat_opens_with_task_suggestions_from_department_workflows(client, monk
     dept = json.loads(script.results["dept__workflows"])
     assert [w["name"] for w in dept] == ["예산 집행"]  # 남의 부서 것은 없다
     assert dept[0]["steps"] == ["문서 검색: 예산안 찾기", "사람 작업: 집행 승인 (팀장)"]
-    assert dept[0]["waiting_runs"] == 1
+    # 과제 없이 시작한 대기 중 실행 하나 — 묶을 수 없어 수만 센다
+    assert (dept[0]["waiting_tasks"], dept[0]["waiting"], dept[0]["waiting_unassigned"]) == (1, [], 1)
     assert dept[0]["constraints"] == ["500만원 넘으면 팀장 승인"]
     # 제안이 찾을 대상의 종류와 그 상태 — 워크플로 대화에서 읽어 둔 업무 단위다
     assert dept[0]["targets"] == [{"kind": "집행 요청", "note": "예산을 쓰겠다는 건",
@@ -1142,3 +1148,18 @@ def test_the_window_is_a_character_budget_and_old_attachments_are_not_resent(cli
     assert roles[0] == "system" and roles[1] == "user"
     assert all(m["content"] != smartwork.OPENING_PROMPT for m in script.messages)
     assert len(script.messages) < 10 and "- 3천만원 이하" in script.messages[-1]["content"]
+
+
+def test_waiting_counts_tasks_not_runs_and_each_task_shows_its_own_step(client):
+    """「대기 중」은 과제 수다 — 같은 과제를 여러 번 돌려도 한 건이고, 과제마다 멈춘 단계가 다르다."""
+    org_id = client.post(f"{API}/orgs", json={"name": "procure"}, headers=ADMIN).json()["id"]
+    _workflow(org_id, "구매 집행", [
+        {"id": "review", "type": "human", "title": "담당 검토"},
+        {"id": "approve", "type": "human", "title": "집행 승인", "role": "팀장"},
+    ], waiting=True, runs=[("과제", "A 과제", "approve"), ("과제", "A 과제", "approve"),
+                           ("과제", "B 과제", "review"), ("과제", "C 과제", "approve")])
+    alice = _user(client, "bob@corp.com", org_id)
+    [w] = client.get(f"{API}/smartwork/workflows", headers=alice).json()
+    assert w["waiting_tasks"] == 4 and w["waiting_unassigned"] == 1      # 과제 셋 + 미지정 하나(실행은 다섯)
+    assert [(t["task"], t["steps"], t["runs"]) for t in w["waiting"]] == [
+        ("A 과제", ["집행 승인"], 2), ("B 과제", ["담당 검토"], 1), ("C 과제", ["집행 승인"], 1)]

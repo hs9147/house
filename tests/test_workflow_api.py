@@ -239,9 +239,11 @@ def test_run_stops_at_the_human_step_and_resumes_on_submit(client):
                   {"id": "검토", "type": "human", "title": "법무 검토", "role": "법무"}],
         "edges": [{"from": "목록", "to": "검토"}],
     }})
-    run = client.post(f"{API}/workflows/{wid}/runs", headers=ADMIN)
+    run = client.post(f"{API}/workflows/{wid}/runs", headers=ADMIN,
+                      json={"target_kind": "계약", "target_name": " A사   공급 계약 "})
     assert run.status_code == 201, run.text
     run_id = run.json()["id"]
+    assert run.json()["target"] == {"kind": "계약", "name": "A사 공급 계약"}   # 이 실행이 진행하는 과제
 
     detail = client.get(f"{API}/workflows/runs/{run_id}", headers=ADMIN).json()
     assert detail["status"] == "waiting" and detail["pending_node"] == "검토"

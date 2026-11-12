@@ -28,7 +28,7 @@ import type {
 import { FileView, WebView } from './smartwork/viewers';
 
 /**
- * 스마트워크 — 왼쪽 대화·설정(에이전트·부서 워크플로·내 업무 맥락), 오른쪽 화면(에이전트·보고서).
+ * 스마트워크 — 왼쪽 탭 셋(대화 · 에이전트 · 설정 — 부서 워크플로·내 업무 맥락), 오른쪽 화면(에이전트·보고서).
  *
  * 대화는 세션 단위다 — **세션 하나 = 업무 하나.** 소유자가 그 업무의 조직·워크플로를
  * 대화창에서 고르고, 필요하면 다른 사람(다른 부서여도)과 공유한다. 공유받은 사람은 읽고
@@ -81,7 +81,7 @@ export default function Smartwork() {
   const [web, setWeb] = useState<SmartworkWeb | null>(null);
   const [file, setFile] = useState<SmartworkFile | null>(null);
   const [view, setView] = useState<View>('agent');
-  const [leftTab, setLeftTab] = useState<'chat' | 'settings'>('chat');
+  const [leftTab, setLeftTab] = useState<'chat' | 'agents' | 'settings'>('chat');
   const opened = useRef(false);
   // 폴링(usePolling)은 처음 받은 함수를 계속 부른다 — 지금 세션은 ref로 읽는다.
   const current = useRef<SmartworkSession | null>(null);
@@ -521,36 +521,40 @@ export default function Smartwork() {
     </div>
   );
 
+  // 에이전트 — 운영 중(release)인 앱. 열면 오른쪽 화면에 띄운다(대화가 show_agent로 고르는 것과 같은 화면).
+  const agentsTab = (
+    <div className="panel">
+      <h2>에이전트</h2>
+      <Async state={agents} empty="쓸 수 있는 에이전트가 없습니다 — 운영 중(release)인 앱이 에이전트가 됩니다.">
+        {(list) => (
+          <table>
+            <thead><tr><th>이름</th><th>용도</th><th>조직</th><th /></tr></thead>
+            <tbody>
+              {list.map((a) => (
+                <tr key={a.name}>
+                  <td>{a.name}</td>
+                  {/* 대화가 이 앱을 고르는 근거와 같은 글이다 — 빗나갔으면 프로젝트 개요에서 다시 검토. */}
+                  <td style={{ fontSize: 12 }} title={a.does_not?.length ? `하지 않는 일: ${a.does_not.join(' · ')}` : undefined}>
+                    {a.purpose || <span className="mutedtext">검토 전</span>}
+                  </td>
+                  <td>{a.org ?? '공용'}</td>
+                  <td>
+                    <button className="small secondary" onClick={() => {
+                      setAgent(a);
+                      setView('agent');
+                    }}>열기</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Async>
+    </div>
+  );
+
   const settings = (
     <>
-      <div className="panel">
-        <h2>에이전트</h2>
-        <Async state={agents} empty="쓸 수 있는 에이전트가 없습니다 — 운영 중(release)인 앱이 에이전트가 됩니다.">
-          {(list) => (
-            <table>
-              <thead><tr><th>이름</th><th>용도</th><th>조직</th><th /></tr></thead>
-              <tbody>
-                {list.map((a) => (
-                  <tr key={a.name}>
-                    <td>{a.name}</td>
-                    {/* 대화가 이 앱을 고르는 근거와 같은 글이다 — 빗나갔으면 프로젝트 개요에서 다시 검토. */}
-                    <td style={{ fontSize: 12 }} title={a.does_not?.length ? `하지 않는 일: ${a.does_not.join(' · ')}` : undefined}>
-                      {a.purpose || <span className="mutedtext">검토 전</span>}
-                    </td>
-                    <td>{a.org ?? '공용'}</td>
-                    <td>
-                      <button className="small secondary" onClick={() => {
-                        setAgent(a);
-                        setView('agent');
-                      }}>열기</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </Async>
-      </div>
       <div className="panel">
         <h2>부서 워크플로</h2>
         <Async state={workflows} empty="소속 조직에 워크플로가 없습니다 — 업무 제안은 개인 업무 맥락으로만 합니다.">
@@ -567,9 +571,23 @@ export default function Smartwork() {
                     <td>{w.org}</td>
                     <td>{w.steps.length}</td>
                     <td>
-                      {w.waiting_runs > 0
-                        ? <span className="status warn">{w.waiting_runs}건</span>
-                        : <span className="mutedtext">-</span>}
+                      {w.waiting_tasks > 0 ? (
+                        <>
+                          {/* 과제 수 — 과제마다 멈춘 단계가 다르다 */}
+                          <span className="status warn">과제 {w.waiting_tasks}건</span>
+                          <div style={{ fontSize: 12, marginTop: 2 }}>
+                            {w.waiting.map((t) => (
+                              <div key={`${t.kind}/${t.task}`} title={t.runs > 1 ? `대기 중 실행 ${t.runs}개` : undefined}>
+                                {t.task}{t.kind && <span className="mutedtext"> ({t.kind})</span>}
+                                <span className="mutedtext"> — {t.steps.join(', ') || '-'}</span>
+                              </div>
+                            ))}
+                            {w.waiting_unassigned > 0 && (
+                              <div className="mutedtext">과제 미지정 {w.waiting_unassigned}건</div>
+                            )}
+                          </div>
+                        </>
+                      ) : <span className="mutedtext">-</span>}
                     </td>
                   </tr>
                 ))}
@@ -585,7 +603,7 @@ export default function Smartwork() {
   const left = (
     <>
       <div className="row viewtabs" role="tablist">
-        {([['chat', '대화'], ['settings', '설정']] as const).map(([key, label]) => (
+        {([['chat', '대화'], ['agents', '에이전트'], ['settings', '설정']] as const).map(([key, label]) => (
           <button key={key} role="tab" aria-selected={leftTab === key}
             className={leftTab === key ? 'small' : 'small secondary'}
             onClick={() => setLeftTab(key)}>
@@ -593,7 +611,7 @@ export default function Smartwork() {
           </button>
         ))}
       </div>
-      {leftTab === 'chat' ? chat : settings}
+      {leftTab === 'chat' ? chat : leftTab === 'agents' ? agentsTab : settings}
     </>
   );
 
@@ -643,8 +661,8 @@ export default function Smartwork() {
       ) : (
         <div className="panel">
           <p className="mutedtext">
-            대화에서 에이전트·보고서·웹 페이지·파일을 띄우면 여기에 나옵니다. 에이전트·부서
-            워크플로·내 업무 맥락은 왼쪽 「설정」에 있습니다.
+            대화에서 에이전트·보고서·웹 페이지·파일을 띄우면 여기에 나옵니다. 에이전트는 왼쪽 「에이전트」,
+            부서 워크플로·내 업무 맥락은 「설정」에 있습니다.
           </p>
         </div>
       )}

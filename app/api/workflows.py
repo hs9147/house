@@ -53,6 +53,12 @@ class HumanSubmit(BaseModel):
     approved: bool = True
 
 
+class RunStart(BaseModel):
+    """실행이 진행할 과제(선택) — 종류는 워크플로 targets의 kind(과제·계약·구매요청 등), 이름은 그 건의 이름."""
+    target_kind: str = Field(default="", max_length=64)
+    target_name: str = Field(default="", max_length=200)
+
+
 def _out(row: Workflow) -> dict:
     return {
         "id": row.id,
@@ -76,6 +82,7 @@ def _run_out(row: WorkflowRun) -> dict:
         "version": row.version,
         "status": row.status.value,
         "actor": row.actor,
+        "target": {"kind": row.target_kind, "name": row.target_name} if row.target_name else None,
         "steps": row.steps or [],
         "pending_node": row.pending_node,
         "error": row.error,
@@ -388,14 +395,17 @@ def assess_workflow(workflow_id: int, db: Session = Depends(get_db),
 
 
 @router.post("/workflows/{workflow_id}/runs", status_code=201)
-def start_run(workflow_id: int, db: Session = Depends(get_db),
+def start_run(workflow_id: int, body: RunStart | None = None, db: Session = Depends(get_db),
               key: ApiKey = Depends(require_api_key)):
+    """실행을 시작한다 — 본문에 과제(target_kind·target_name)를 주면 그 과제의 실행이 된다(없어도 된다)."""
     row = _workflow_or_404(db, workflow_id, key)
+    body = body or RunStart()
     try:
-        run = workflow_service.start(db, row, key.name)
+        run = workflow_service.start(db, row, key.name, body.target_kind, body.target_name)
     except workflow_service.WorkflowError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    audit.record(db, key.name, "workflow.run", row.name, {"run_id": run.id})
+    audit.record(db, key.name, "workflow.run", row.name,
+                 {"run_id": run.id, **({"target": run.target_name} if run.target_name else {})})
     return _run_out(run)
 
 

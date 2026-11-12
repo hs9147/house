@@ -188,21 +188,45 @@ def department_workflows(db: Session, key: ApiKey, org_id: int | None = None) ->
     out = []
     for row in rows:
         nodes = [n for n in (row.spec or {}).get("nodes", []) if isinstance(n, dict)]
-        # 사람 단계에서 멈춘 실행 = 지금 누군가의 손을 기다리는 일. 제안의 1순위 근거다.
-        waiting = db.execute(
-            select(WorkflowRun.id).where(WorkflowRun.workflow_id == row.id,
-                                         WorkflowRun.status == WorkflowRunStatus.waiting)
-        ).scalars().all()
+        waiting, unassigned = _waiting_tasks(db, row, nodes)
         out.append({
             "org": row.organization.name if row.organization else "",
             "name": row.name,
             "description": row.description,
             "steps": [_step(n) for n in nodes],
             "constraints": workflow_service.constraints_of(row),
-            "waiting_runs": len(waiting),
+            # 사람 단계에서 멈춘 **과제** = 지금 누군가의 손을 기다리는 일. 제안의 1순위 근거다.
+            "waiting_tasks": len(waiting) + unassigned,
+            "waiting": waiting[:20],
+            "waiting_unassigned": unassigned,
             **_targets_of(row.extracted or {}),
         })
     return out
+
+
+def _waiting_tasks(db: Session, workflow: Workflow, nodes: list[dict]) -> tuple[list[dict], int]:
+    """사람 단계에서 멈춘 실행을 **과제**로 묶는다 — 같은 과제를 여러 번 돌려도 한 건, 과제마다 멈춘 단계.
+    과제 없이 시작한 실행(옛 실행 포함)은 묶을 수 없어 수만 센다. → ([{task, kind, steps, runs, since}], 미지정 수)"""
+    runs = db.execute(
+        select(WorkflowRun).where(WorkflowRun.workflow_id == workflow.id,
+                                  WorkflowRun.status == WorkflowRunStatus.waiting)
+        .order_by(WorkflowRun.id)
+    ).scalars().all()
+    titles = {str(n.get("id")): str(n.get("title") or n.get("label") or n.get("id") or "") for n in nodes}
+    tasks: dict[tuple[str, str], dict] = {}
+    unassigned = 0
+    for run in runs:
+        if not run.target_name:
+            unassigned += 1
+            continue
+        task = tasks.setdefault((run.target_kind, run.target_name), {
+            "task": run.target_name, "kind": run.target_kind, "steps": [], "runs": 0,
+            "since": run.created_at.isoformat() if run.created_at else None})
+        task["runs"] += 1
+        step = titles.get(run.pending_node, run.pending_node)
+        if step and step not in task["steps"]:
+            task["steps"].append(step)
+    return sorted(tasks.values(), key=lambda t: t["since"] or ""), unassigned
 
 
 def _targets_of(extracted: dict) -> dict:
@@ -237,7 +261,8 @@ _DEPT_TOOLS = [{
     "name": "workflows",
     "description": (
         "우리 부서(소속 조직)의 워크플로 — 이름·설명·단계(사람 작업 포함)·업무 규칙, 사람"
-        " 단계에서 멈춰 있는 실행 수, 다루는 업무 단위(targets: 종류·상태)와 상태 전이."
+        " 단계에서 멈춰 있는 과제(waiting: 과제마다 멈춘 단계, waiting_tasks: 그 수), 다루는 업무 단위"
+        "(targets: 종류·상태)와 상태 전이."
         " 업무를 제안할 때 먼저 부른다."
     ),
     "inputSchema": {"type": "object", "properties": {}},

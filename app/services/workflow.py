@@ -349,8 +349,9 @@ def _topological(by_id: dict[str, dict], edges: list) -> list[str] | None:
 
 # --- 실행 ---
 
-def start(db: Session, workflow: Workflow, actor: str) -> WorkflowRun:
+def start(db: Session, workflow: Workflow, actor: str, target_kind: str = "", target_name: str = "") -> WorkflowRun:
     """실행을 시작한다 — 레코드를 먼저 만들고 작업 큐에서 돈다(배포와 같은 패턴).
+    target_kind·target_name은 이 실행이 진행하는 과제(업무 단위 한 건)다 — 「대기 중」이 과제를 센다.
 
     요청 안에서 끝내지 않는 이유: LLM 단계 하나가 분 단위다. 기다리는 쪽은 프록시 시간
     제한에 먼저 걸리고, 그러면 실행은 계속 도는데 화면은 실패로 본다.
@@ -362,6 +363,8 @@ def start(db: Session, workflow: Workflow, actor: str) -> WorkflowRun:
     run = WorkflowRun(
         workflow_id=workflow.id, version=workflow.version,
         status=WorkflowRunStatus.running, actor=actor, steps=[], outputs={},
+        target_kind=" ".join((target_kind or "").split())[:64],
+        target_name=" ".join((target_name or "").split())[:200],
     )
     db.add(run)
     db.commit()

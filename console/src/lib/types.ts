@@ -1461,7 +1461,12 @@ export interface DepartmentWorkflow {
   description: string;
   steps: string[];
   constraints: string[];
-  waiting_runs: number;
+  // 사람 단계에서 멈춘 과제 수(과제 미지정 실행 포함) — 같은 과제를 여러 번 돌려도 한 건
+  waiting_tasks: number;
+  // 과제마다 멈춘 단계(과제마다 다를 수 있다). runs는 그 과제의 대기 중 실행 수
+  waiting: { task: string; kind: string; steps: string[]; runs: number; since: string | null }[];
+  // 과제 없이 시작한 대기 중 실행 — 묶을 수 없어 수만 센다
+  waiting_unassigned: number;
   // 다루는 업무 단위(워크플로 대화에서 읽어 낸 entities)와 그 상태 — 제안이 찾을 대상의 종류
   targets: { kind: string; note: string; states: string[] }[];
   transitions: string[];
