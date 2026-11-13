@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import Async from '../../components/Async';
 import AgentProfilePanel from '../../components/AgentProfilePanel';
@@ -10,6 +10,7 @@ import DeployCheckModal from '../../components/DeployCheckModal';
 import StartScriptModal from '../../components/StartScriptModal';
 import StatusPill from '../../components/StatusPill';
 import { api, ApiError } from '../../lib/api';
+import { fmtElapsed, fmtKst, serverTime } from '../../lib/format';
 import { useApi, usePolling } from '../../lib/hooks';
 import type { BuildProfile } from '../../lib/types';
 import type { ProjectContext } from '../ProjectDetail';
@@ -23,8 +24,21 @@ export default function OverviewTab() {
   const history = useApi(() => api.deployments(project.id), [project.id]);
   const deploying = (profile: BuildProfile) =>
     (history.data ?? []).some((d) => d.profile === profile && d.status === 'building');
-  usePolling(async () => history.reload(), 3000,
-             (history.data ?? []).some((d) => d.status === 'building'));
+  const anyBuilding = (history.data ?? []).some((d) => d.status === 'building');
+  usePolling(async () => history.reload(), 3000, anyBuilding);
+  // 배포 중이면 1초마다 다시 그려 걸린 시간이 흐르게 한다(목록은 3초마다 다시 받는다).
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!anyBuilding) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [anyBuilding]);
+  // 그 프로필의 진행 중인 배포가 시작된 때 — 복합 프로젝트는 컴포넌트마다 행이 있어 가장 이른 것
+  const deployStarted = (profile: BuildProfile): number | null => {
+    const times = (history.data ?? []).filter((d) => d.profile === profile && d.status === 'building')
+      .map((d) => serverTime(d.created_at).getTime()).filter((t) => !Number.isNaN(t));
+    return times.length ? Math.min(...times) : null;
+  };
   const health = useApi(() => api.health());
   const [gitSha, setGitSha] = useState('');
   const [action, setAction] = useState<Action>(null);
@@ -116,7 +130,16 @@ export default function OverviewTab() {
                   return (
                     <tr key={profile}>
                       <td><StatusPill value={profile} /></td>
-                      <td><StatusPill value={status[profile] ?? 'unknown'} /></td>
+                      <td>
+                        <StatusPill value={status[profile] ?? 'unknown'} />
+                        {/* 배포 중이면 걸린 시간 — 멈춘 배포인지 오래 걸리는 배포인지 가늠한다 */}
+                        {deploying(profile) && deployStarted(profile) !== null && (
+                          <div className="mutedtext" style={{ fontSize: 12, marginTop: 2 }}>
+                            배포 중 · {fmtElapsed(now - deployStarted(profile)!)}
+                            <div>시작 {fmtKst(deployStarted(profile)!)}</div>
+                          </div>
+                        )}
+                      </td>
                       <td className="mono">
                         {/* 복합 프로젝트는 "running (2/2)"처럼 집계돼 온다 — 정확히
                             'running'만 보면 복합 배포의 주소 링크가 죽는다. */}
