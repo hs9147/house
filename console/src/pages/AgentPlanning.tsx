@@ -105,13 +105,9 @@ export default function AgentPlanning() {
   const [mergeResult, setMergeResult] = useState<PlanMergeOut | null>(null);
   const [draftSource, setDraftSource] = useState<PlanArtifactContent['source']>('');
   const history = useApi(() => api.listPlanSessions());
-  // 공통 제약사항은 관리자만 본다 — 일반 사용자가 손댈 수 없는 환경 제약이고, 어차피
-  // 서버가 각 단계 컨텍스트에 실어 주므로(services/planning.build_constraints) 화면에
-  // 두 번 보여 줄 이유가 없다. 관리자가 아니면 조회 자체를 하지 않는다.
-  const commonConstraints = useApi(
-    () => (me.data?.is_admin ? api.listCommonConstraints() : Promise.resolve([])),
-    [me.data?.is_admin],
-  );
+  // 공통 제약사항은 누구나 본다(어떤 제약 아래서 기획되는지 알 수 있게) — 등록·삭제·레포 검토는 관리자만.
+  // 서버도 조회는 누구나, 등록·삭제는 관리자만 받는다(api/planning).
+  const commonConstraints = useApi(() => api.listCommonConstraints());
   const [constraintText, setConstraintText] = useState('');
   // 등록된 레포 검토 결과 — 누를 때만 조회한다(리포를 훑으므로 화면을 열 때마다 돌릴 일이 아니다).
   const [advice, setAdvice] = useState<Awaited<ReturnType<typeof api.planAdvice>> | null>(null);
@@ -587,21 +583,18 @@ export default function AgentPlanning() {
         </>)}
       </div>
 
-      {/* 공통 제약사항 — 프로젝트와 무관하게 늘 지켜야 하는 환경 제약.
-          **관리자 전용 화면이다.** 일반 사용자가 바꿀 수 없는 값이고, 서버가 각 단계
-          컨텍스트에 알아서 실어 주므로(services/planning.build_constraints) 화면에 또
-          보여 줄 이유가 없다. */}
-      {me.data?.is_admin && (
-        <div className="panel">
+      {/* 공통 제약사항 — 프로젝트와 무관하게 늘 지켜야 하는 환경 제약. 서버가 각 단계 컨텍스트에
+          실어 준다(services/planning.build_constraints). 사용자는 열람만 하고, 등록·삭제·레포 검토는 관리자만. */}
+      <div className="panel">
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
             <h3 style={{ margin: 0 }}>📌 공통 제약사항 (에이전트 개발 제한 · 모든 프로젝트 적용)</h3>
             <div className="row" style={{ gap: 6 }}>
               {/* 무엇이 반복되는 실수인지는 등록된 레포에 이미 남아 있다 — 사람이 매번
                   발견해 문구를 손으로 고치는 대신 근거와 함께 제안받는다. */}
               {!foldConstraints && (<>
-                <button className="secondary small" onClick={runAdvice} disabled={advising}>
+                {me.data?.is_admin && <button className="secondary small" onClick={runAdvice} disabled={advising}>
                   {advising ? '레포 검토 중...' : '🔎 등록된 레포 검토'}
-                </button>
+                </button>}
                 <button className="secondary small" onClick={() => commonConstraints.reload()}>새로고침</button>
               </>)}
               <button className="secondary small" onClick={() => setFoldConstraints(!foldConstraints)}>
@@ -614,10 +607,11 @@ export default function AgentPlanning() {
             여기에 등록한 제약은 기획 ①~⑤ 각 단계의 제약 문서에 함께 실려 매 단계에서 고려되고,
             작업 지시 생성과 외주 빌더(MCP <span className="mono">get_constraints</span>)·
             위반 검사 수정 지시에도 그대로 전달됩니다.
+            {!me.data?.is_admin && ' 등록·삭제는 관리자만 할 수 있습니다.'}
           </p>
           {/* 검토 결과 — 근거 없는 제안은 지켜야 할 이유를 설명할 수 없어서, 어느 프로젝트의
               어느 파일 때문인지 함께 보여 준다. */}
-          {advice && (
+          {me.data?.is_admin && advice && (
             <div style={{ margin: '8px 0 12px', padding: 10, borderRadius: 8,
                           background: 'rgba(255,255,255,0.03)' }}>
               <div className="mutedtext" style={{ fontSize: 12, marginBottom: 6 }}>
@@ -669,7 +663,7 @@ export default function AgentPlanning() {
               ))}
             </div>
           )}
-          <form onSubmit={addConstraint} className="row" style={{ alignItems: 'flex-start', marginBottom: 8 }}>
+          {me.data?.is_admin && <form onSubmit={addConstraint} className="row" style={{ alignItems: 'flex-start', marginBottom: 8 }}>
             <textarea
               style={{ flex: 1, minHeight: 60, fontFamily: 'inherit' }}
               placeholder="예: 기업 내부 에이전트이므로 외부 솔루션은 사용하지 않는다(Redis 등 불필요)."
@@ -677,20 +671,22 @@ export default function AgentPlanning() {
               onChange={(e) => setConstraintText(e.target.value)}
             />
             <button type="submit" disabled={!constraintText.trim()}>+ 추가</button>
-          </form>
+          </form>}
           <Async state={commonConstraints} empty="등록된 공통 제약사항이 없습니다.">
             {(rows) => (
               <ul style={{ margin: 0, paddingLeft: 16, fontSize: 13 }}>
                 {rows.map((r) => (
                   <li key={r.id} style={{ marginBottom: 6 }}>
                     <span style={{ whiteSpace: 'pre-wrap' }}>{r.text}</span>
-                    <button
-                      className="small danger"
-                      style={{ marginLeft: 8 }}
-                      onClick={() => removeConstraint(r.id)}
-                    >
-                      삭제
-                    </button>
+                    {me.data?.is_admin && (
+                      <button
+                        className="small danger"
+                        style={{ marginLeft: 8 }}
+                        onClick={() => removeConstraint(r.id)}
+                      >
+                        삭제
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -698,7 +694,6 @@ export default function AgentPlanning() {
           </Async>
           </>)}
         </div>
-      )}
 
       {/* 기획 세션 이력 — 재개·삭제 */}
       <div className="panel">
