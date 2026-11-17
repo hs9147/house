@@ -192,7 +192,9 @@ export default function AgentPlanning() {
   // 머리줄은 남기고 「펼치기」로 다시 연다.
   const [foldIntro, setFoldIntro] = useState(false);
   const [foldHistory, setFoldHistory] = useState(false);
-  const [foldConstraints, setFoldConstraints] = useState(false);
+  // 공통 제약사항은 사용자에게는 접힌 채로 시작한다(열람만 하는 카드) — 누르기 전(null)에는 권한으로 정한다.
+  const [foldConstraintsPick, setFoldConstraints] = useState<boolean | null>(null);
+  const foldConstraints = foldConstraintsPick ?? !me.data?.is_admin;
 
   // 이력에서 세션을 다시 연다 — 대화·산출물을 복원하고 첫 미확정 단계로 이동한다.
   const resume = async (row: PlanSessionSummary) => {
