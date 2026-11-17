@@ -309,3 +309,23 @@ def test_env_vars_show_non_secret_values_and_can_be_deleted():
     assert left == {"TOKEN"}
     # 없는 키를 지우면 404 — 조용히 성공하면 무엇이 지워졌는지 알 수 없다.
     assert client.delete(f"{API}/projects/{pid}/env/NOPE", headers=ADMIN).status_code == 404
+
+
+def test_push_that_edits_the_tasks_doc_syncs_task_bodies(monkeypatch):
+    """기본 브랜치에 작업 지시 문서를 고친 push가 오면 본문 맞추기를 건다(배포와 별개) — 다른 문서만이면 걸지 않는다."""
+    from app.api import webhooks
+
+    calls: list[int] = []
+    monkeypatch.setattr(webhooks, "_tasks_doc_task", lambda project_id: calls.append(project_id))
+    c = _client()
+    c.post("/paas/api/v1/projects", json={
+        "name": "hooked-doc", "type": "react", "git_url": "https://git.example.com/o/hooked-doc",
+    }, headers=ADMIN)
+    repo = {"clone_url": "https://git.example.com/o/hooked-doc.git"}
+    other = {"ref": "refs/heads/main", "repository": repo, "commits": [
+        {"modified": ["docs/agent-planning/01-기획서.md"], "added": [], "removed": []}]}
+    assert _push(c, other).json()["skipped"] == "plan artifacts only" and calls == []
+    tasks_doc = {"ref": "refs/heads/main", "repository": repo, "commits": [
+        {"modified": ["docs/agent-planning/05-작업지시.md"], "added": [], "removed": []}]}
+    assert _push(c, tasks_doc).json()["skipped"] == "plan artifacts only"
+    assert len(calls) == 1

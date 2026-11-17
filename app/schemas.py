@@ -418,6 +418,8 @@ class BuildTaskSyncOut(BaseModel):
     # 이 값이 없으면 "반영 0건 · 대기 0건"이 찍혀서, 판정할 것이 없었던 것과 반영이 없는
     # 것이 구분되지 않는다 — 화면이 동작하는 것처럼 보이면서 아무 일도 하지 않는다.
     unmatched: int = 0
+    # 기본 브랜치의 작업 지시 문서에서 본문(제목·본문·완료 판정)을 고친 작업 번호(planning.sync_tasks_from_doc)
+    doc_updated: list[int] = []
     tasks: list[BuildTaskOut]
 
 

@@ -7,6 +7,7 @@
 설계 근거: docs/agent-planning/ (기획서·아키텍처·솔루션 구성·개발원칙·작업 지시).
 """
 import json
+import re
 from typing import Callable
 
 from sqlalchemy import select
@@ -545,6 +546,75 @@ def render_tasks_doc(tasks: list[dict]) -> str:
             lines += ["", f"- **완료 판정**: {task['verify']}"]
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+_TASK_HEADING = re.compile(r"^##\s+\d+\.\s+(?P<title>.+?)\s*\(task\s*#(?P<num>\d+)\)\s*$")
+_VERIFY_MARK = re.compile(r"^\s*-\s*\*\*완료 판정\*\*\s*[:：]\s*")
+
+
+def parse_tasks_doc(text: str) -> list[dict]:
+    """render_tasks_doc의 역 — 작업 지시 문서에서 절마다 {number, title, detail, verify}를 읽는다.
+
+    번호는 제목 끝의 `(task #N)`이다(문서 안의 순번이 아니다 — 커밋 규약이 가리키는 번호). 번호가 없는 절은 읽지
+    않는다: 어느 작업인지 알 수 없다. 본문은 제목 다음부터 「- **완료 판정**:」 줄 앞까지, 완료 판정은 그 뒤 절
+    끝까지(여러 줄이어도). 플랫폼이 렌더한 문서를 다시 읽으면 같은 값이 나온다 — 되먹임으로 바뀌지 않는다.
+    """
+    sections: list[dict] = []
+    current: dict | None = None
+    for line in (text or "").replace("\r\n", "\n").split("\n"):
+        m = _TASK_HEADING.match(line)
+        if m:
+            current = {"number": int(m["num"]), "title": m["title"].strip(), "lines": []}
+            sections.append(current)
+            continue
+        if line.startswith(("# ", "## ")):
+            current = None   # 작업이 아닌 절
+            continue
+        if current is not None:
+            current["lines"].append(line)
+    out = []
+    for sec in sections:
+        lines = sec.pop("lines")
+        at = next((i for i, ln in enumerate(lines) if _VERIFY_MARK.match(ln)), None)
+        detail_lines = lines if at is None else lines[:at]
+        verify = "" if at is None else "\n".join([_VERIFY_MARK.sub("", lines[at], count=1), *lines[at + 1:]])
+        out.append({**sec, "detail": "\n".join(detail_lines).strip(), "verify": verify.strip()})
+    return out
+
+
+def sync_tasks_from_doc(db: Session, project: Project, actor: str) -> dict:
+    """기본 브랜치의 작업 지시 문서(05-작업지시.md) → 작업 지시 본문. **문서를 고쳐 main에 반영하면 본문이 따라간다.**
+
+    예전에는 목록 → 문서 한 방향뿐이라, 사람이 문서를 고쳐 push해도 외주 빌더가 MCP list_tasks로 보는 본문은 그대로였다.
+    번호(task #N)가 같은 작업의 제목·본문·완료 판정만 고친다 — 상태·메모·커밋은 건드리지 않는다(진행 판정은 커밋이
+    한다). 문서에만 있는 번호나 문서에 없는 작업은 만들거나 지우지 않고 알린다(unknown·missing). 리포는 호출측이
+    최신화한다(checkout)."""
+    from ..models import BuildTask  # noqa: PLC0415
+    from . import workspace  # noqa: PLC0415
+
+    workdir = workspace.workdir_for(project)
+    ref = workspace.default_branch_ref(workdir, project.branch) if workdir.exists() else None
+    text = workspace.read_file_at_ref(workdir, ref, stage_repo_path(PlanStage.tasks)) if ref else None
+    if not text:
+        return {"read": False, "ref": ref or "", "updated": [], "unknown": [], "missing": []}
+    parsed = parse_tasks_doc(text)
+    tasks = {t.number: t for t in db.execute(select(BuildTask).where(BuildTask.project_id == project.id)).scalars()}
+    updated, unknown = [], []
+    for item in parsed:
+        task = tasks.get(item["number"])
+        if task is None:
+            unknown.append(item["number"])
+            continue
+        new = (item["title"][:255], item["detail"], item["verify"])
+        if (task.title, task.detail or "", task.verify or "") != new:
+            task.title, task.detail, task.verify = new
+            updated.append(task.number)
+    missing = sorted(set(tasks) - {i["number"] for i in parsed}) if parsed else []
+    if updated:
+        db.commit()
+        audit.record(db, actor, "plan.tasks.from_doc", project.name,
+                     {"ref": ref, "updated": updated, "unknown": unknown, "missing": missing})
+    return {"read": True, "ref": ref, "updated": updated, "unknown": unknown, "missing": missing}
 
 
 def auto_pull_request(project: Project, branch: str, title: str, body: str = "") -> dict:

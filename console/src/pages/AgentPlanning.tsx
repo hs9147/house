@@ -1031,6 +1031,9 @@ export default function AgentPlanning() {
                         <span className="mono">{taskSync.base_ref}</span> 기준 ·
                         <span style={{ color: '#10b981' }}> 반영 {taskSync.merged}건</span> ·
                         <span style={{ color: '#f59e0b' }}> 머지 대기 {taskSync.pending}건</span>
+                        {(taskSync.doc_updated ?? []).length > 0 && (
+                          <> · 문서에서 본문 갱신 {(taskSync.doc_updated ?? []).map((n) => `#${n}`).join(', ')}</>
+                        )}
                         {/* 근거를 못 찾은 작업을 드러낸다 — 이게 없으면 "반영 0건 · 대기
                             0건"이 찍혀서, 판정할 것이 없었던 것과 반영이 없는 것이
                             구분되지 않는다(동작하는 것처럼 보이면서 아무 일도 안 한다). */}

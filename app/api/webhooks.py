@@ -7,7 +7,7 @@ from sqlalchemy import select
 from .. import audit
 from ..config import get_settings
 from ..db import SessionLocal
-from ..models import Deployment, DeploymentStatus, Project, ProjectType
+from ..models import Deployment, DeploymentStatus, PlanStage, Project, ProjectType
 from ..security import verify_webhook_signature
 from ..services import compliance as compliance_service
 from ..services import deployer
@@ -51,6 +51,12 @@ async def git_push(
         for project in known:
             if project.branch != branch:
                 background.add_task(_pull_request_task, project.id, branch)
+
+        # 기본 브랜치의 작업 지시 문서가 바뀌었으면 작업 지시 본문을 그 문서에 맞춘다(배포와 별개)
+        if _touches(payload, planning_service.stage_repo_path(PlanStage.tasks)):
+            for project in known:
+                if project.branch == branch:
+                    background.add_task(_tasks_doc_task, project.id)
 
         # 기획 산출물만 바뀐 push는 배포 신호가 아니다 — 단계 확정 커밋이 기본 브랜치로
         # 머지될 때마다 운영본이 재배포되는 것을 막는다(변경 경로를 모르면 기존대로 배포).
@@ -176,6 +182,30 @@ def _compliance_task(project_id: int) -> None:
             "findings": [{"rule": f["rule"], "file": f["file"], "line": f["line"]}
                          for f in findings[:20]],
         })
+
+
+def _touches(payload: dict, path: str) -> bool:
+    """이번 push가 그 파일을 더하거나 고쳤는가(커밋의 added·modified)."""
+    return any(path in (commit.get("added") or []) + (commit.get("modified") or [])
+               for commit in payload.get("commits") or [])
+
+
+def _tasks_doc_task(project_id: int) -> None:
+    """작업 지시 문서 → 본문(planning.sync_tasks_from_doc). 방금 push된 것을 읽도록 리포부터 최신화한다."""
+    from ..services.build import checkout  # noqa: PLC0415
+
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        if project is None:
+            return
+        try:
+            checkout(project)
+        except Exception:  # noqa: BLE001 — 받아 오지 못해도 있는 것으로 맞춘다
+            pass
+        try:
+            planning_service.sync_tasks_from_doc(db, project, "webhook")
+        except Exception as e:  # noqa: BLE001 — 본문 맞추기 실패가 웹훅을 깨뜨리면 안 된다
+            audit.record(db, "webhook", "plan.tasks.from_doc.failed", project.name, {"error": str(e)[:500]})
 
 
 def _only_plan_artifacts(payload: dict) -> bool:

@@ -923,11 +923,13 @@ async def sync_build_tasks(
     except Exception:  # noqa: BLE001
         pass
 
+    # 문서를 고쳐 main에 반영했으면 본문부터 따라간다 — 웹훅이 빠져도 여기서 맞춘다
+    from_doc = await asyncio.to_thread(planning_service.sync_tasks_from_doc, db, project, key.name)
     tasks = _session_tasks(db, session_id)
     workdir = workspace.workdir_for(project)
     base_ref = workspace.default_branch_ref(workdir, project.branch) if workdir.exists() else None
     if base_ref is None:
-        return BuildTaskSyncOut(base_ref="", merged=0, pending=0, unmatched=len(tasks),
+        return BuildTaskSyncOut(doc_updated=from_doc["updated"], base_ref="", merged=0, pending=0, unmatched=len(tasks),
                                 tasks=[_task_out(t) for t in tasks])
 
     # 기본 브랜치 로그에서 작업 참조를 모은다 — 사람이 직접 커밋한 것도 여기서 잡힌다.
@@ -964,7 +966,7 @@ async def sync_build_tasks(
                  {"base_ref": base_ref, "merged": merged, "pending": pending,
                   "unmatched": unmatched, "from_commit_message": len(by_task),
                   "changed": changed})
-    return BuildTaskSyncOut(base_ref=base_ref, merged=merged, pending=pending,
+    return BuildTaskSyncOut(doc_updated=from_doc["updated"], base_ref=base_ref, merged=merged, pending=pending,
                             unmatched=unmatched,
                             tasks=[_task_out(t) for t in tasks])
 

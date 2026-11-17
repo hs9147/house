@@ -293,6 +293,8 @@ export interface BuildTaskSync {
   // 판정 근거(커밋 메시지의 `task #N` 참조 또는 빌더가 보고한 sha)를 찾지 못한 작업 수.
   // 화면이 이걸 보여줘야 "반영 0건 · 대기 0건"이 판정할 게 없었던 것인지 구분된다.
   unmatched: number;
+  // 기본 브랜치의 작업 지시 문서에서 본문을 고친 작업 번호 — 문서를 고쳐 main에 반영하면 본문이 따라간다
+  doc_updated?: number[];
   tasks: BuildTaskOut[];
 }
 

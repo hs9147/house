@@ -979,6 +979,66 @@ def test_generate_tasks_reads_main_after_the_session_branch_is_merged_and_gone(m
     assert "병합 뒤에도 읽힌다" in text
 
 
+
+
+def test_tasks_doc_round_trips_and_reads_hand_edited_sections():
+    """작업 지시 문서 ↔ 본문 — 플랫폼이 렌더한 문서는 다시 읽어도 같고(되먹임 없음), 사람이 고친 절(여러 문단·목록,
+    여러 줄 완료 판정)도 읽는다. 번호는 제목 끝의 (task #N)이다 — 번호가 없는 절은 어느 작업인지 몰라 읽지 않는다."""
+    from app.services import planning as planning_service
+
+    tasks = [{"id": 1, "number": 7, "title": "M0 기준선 (W-01)", "detail": "기준선을 남긴다.\n\n- 정답지 대조",
+              "verify": "정답지 20개 일치"},
+             {"id": 2, "number": 9, "title": "주소 상대화", "detail": "템플릿을 고친다.", "verify": ""}]
+    doc = planning_service.render_tasks_doc(tasks)
+    assert planning_service.parse_tasks_doc(doc) == [
+        {k: t[k] for k in ("number", "title", "detail", "verify")} for t in tasks]
+
+    edited = doc.replace("기준선을 남긴다.", "기준선 산출물 4종을 남긴다.\n\n### 참고\n코드로 확인함") \
+        .replace("- **완료 판정**: 정답지 20개 일치", "- **완료 판정**: 1) 정답지 20개 일치\n2) 로그 첨부") \
+        + "\n## 3. 번호 없는 절\n\n무시된다\n"
+    parsed = planning_service.parse_tasks_doc(edited)
+    assert [p["number"] for p in parsed] == [7, 9]
+    assert parsed[0]["detail"] == "기준선 산출물 4종을 남긴다.\n\n### 참고\n코드로 확인함\n\n- 정답지 대조"
+    assert parsed[0]["verify"] == "1) 정답지 20개 일치\n2) 로그 첨부"
+
+
+def test_editing_the_tasks_doc_on_main_updates_task_bodies(monkeypatch, fresh_settings, tmp_path):
+    """05-작업지시.md를 고쳐 main에 반영하면 작업 지시 본문이 따라간다(진행 현황 업데이트·웹훅). 상태·메모는 그대로,
+    문서에만 있는 번호는 만들지 않는다."""
+    from app.services import planning as planning_service
+
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo)
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    tasks = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN).json()
+    _mcp(c, pid, "update_task", {"task_id": tasks[0]["id"], "status": "in_progress", "note": "착수"})
+
+    rendered = planning_service.render_tasks_doc(tasks)
+    edited = rendered.replace("게이트웨이 경유로 호출", "게이트웨이 경유로 호출하고 재시도 3회") \
+        .replace("pytest tests/test_pay.py 통과", "pytest tests/test_pay.py 통과, 응답 1초 이내") \
+        + "\n## 3. 문서에만 있는 작업 (task #99)\n\n없는 번호\n"
+    doc = repo / "docs" / "agent-planning" / "05-작업지시.md"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(edited, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "docs(plan): 작업 지시 보완")
+
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
+    first = next(t for t in r["tasks"] if t["id"] == tasks[0]["id"])
+    assert r["doc_updated"] == [tasks[0]["number"]]
+    assert first["detail"] == "게이트웨이 경유로 호출하고 재시도 3회"
+    assert first["verify"] == "pytest tests/test_pay.py 통과, 응답 1초 이내"
+    assert (first["status"], first["note"]) == ("in_progress", "착수")      # 진행 판정은 커밋이 한다
+    assert len(r["tasks"]) == 2                                                # #99는 만들지 않는다
+    again = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/sync", headers=ADMIN).json()
+    assert again["doc_updated"] == []                                          # 이미 같다
+    listed = _mcp(c, pid, "list_tasks")["result"]["content"][0]["text"]
+    assert "재시도 3회" in listed                                               # 빌더가 보는 본문도 바뀌었다
 def test_generate_tasks_refuses_to_overwrite_started_work(monkeypatch, fresh_settings, tmp_path):
     repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
     c = _client()
