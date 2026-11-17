@@ -72,7 +72,7 @@ def _auto_org(db: Session) -> dict:
 
 TASKS: dict[str, TempJob] = {t.id: t for t in (
     TempJob(id="auto_approve", title="사용자 등록 즉시 승인",
-            description="가입 요청을 바로 승인한다(부서는 「소속 없는 계정에 gp3」이 넣는다). "
+            description="가입 요청을 바로 승인한다. "
                         "가입할 때 바로, 그리고 1분마다 남은 대기 계정을.",
             run=_auto_approve, events=("user.register",)),
     TempJob(id="auto_org", title=f"소속 없는 계정에 {DEFAULT_ORG}",

@@ -72,7 +72,7 @@ def test_dashboard_lists_runs_and_toggles_temp_jobs(monkeypatch, fresh_settings)
     assert c.get(f"{API}/temp-jobs").status_code == 401
     tasks = c.get(f"{API}/temp-jobs", headers=ADMIN).json()["tasks"]
     task = next(t for t in tasks if t["id"] == "auto_approve")
-    assert task["job"]["enabled"] is True and task["events"] == ["user.register"] and "gp3" in task["description"]
+    assert task["job"]["enabled"] is True and task["events"] == ["user.register"] and "gp3" not in task["description"]   # 승인만 — 부서는 auto_org
     with SessionLocal() as db:
         db.add(UserAccount(email="later@lge.com", name="", password_hash="x", is_approved=False))
         db.commit()
