@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import ApiKey, BuildProfile, LlmProvider, LlmProviderKind, Project
+from ..models import ApiKey, BuildProfile, LlmProvider, LlmProviderKind, Organization, Project
 from ..security import decrypt_value
 from . import bedrock, telemetry
 
@@ -44,15 +44,24 @@ Reply in Korean as a JSON array of findings:
 Return [] if the diff looks fine. Reply with JSON only."""
 
 
-def default_provider(db: Session) -> LlmProvider | None:
+def default_provider(db: Session, organization_id: int | None = None) -> LlmProvider | None:
     """자동으로 도는 판단(배포 점검·실패 원인·레포 검토)이 쓸 프로바이더.
 
     **없으면 None을 돌려준다.** 예외를 올리면 그 기능 전체가 죽는데, 그 기능들은 LLM 없이도
     돌려줄 사실(파일·로그·설정)을 이미 가지고 있다 — 사실을 주고 "기본 LLM이 없어 판단은
     붙이지 못했다"고 말하는 쪽이 낫다. 기본값이 없고 프로바이더가 하나뿐이면 그것을 쓴다:
     하나뿐인 설치본에서 "기본값 미지정"으로 멈추는 것은 설명이 아니라 실수다.
+
+    **부서가 정해진 호출이면 그 부서의 기본 LLM이 먼저다**(Organization.llm_provider_id) — 부서마다 다른 AWS
+    프로필(프로바이더)을 쓰게 하려고. 그 부서가 쓸 수 없는 것(다른 부서 전용)이거나 지워졌으면 무시한다.
     """
     rows = list(db.execute(select(LlmProvider).order_by(LlmProvider.id)).scalars())
+    if organization_id is not None:
+        org = db.get(Organization, organization_id)
+        chosen = org.llm_provider_id if org is not None else None
+        found = next((r for r in rows if r.id == chosen and r.organization_id in (None, organization_id)), None)
+        if found is not None:
+            return found
     for row in rows:
         if row.is_default:
             return row

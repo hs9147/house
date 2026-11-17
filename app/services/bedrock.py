@@ -315,14 +315,24 @@ def start_sso_login(profile: str, log_dir: Path) -> dict:
     호출부가 profile_status를 다시 물어 확인한다. 주소를 못 읽어도 로그 꼬리를 함께 돌려준다 —
     판정 불가를 감추면 사람이 볼 것이 아무것도 없다.
     """
+    key = _login_key(profile)
     with _logins_lock:
-        running = _logins.get(profile)
+        running = _logins.get(key)
         if running and running[0].poll() is None and time.monotonic() - running[1] < LOGIN_REUSE_SECONDS:
             return running[2]
         result, proc = _start_sso_login(profile, log_dir)
         if result["verification_url"]:
-            _logins[profile] = (proc, time.monotonic(), result)
+            _logins[key] = (proc, time.monotonic(), result)
         return result
+
+
+def _login_key(profile: str) -> str:
+    """로그인을 묶는 열쇠 — SSO 토큰은 **SSO 세션마다 하나**다(sso_session, 구형은 sso_start_url). 같은 세션의
+    프로필이 여럿이면 로그인 하나가 모두를 살린다 — 프로필마다 따로 띄우면 한 번이면 될 승인을 두 번 한다.
+    세션을 모르는 프로필(정적 키 등)은 프로필 이름으로 묶는다."""
+    entry = next((p for p in list_profiles() if p["name"] == profile), {})
+    session = entry.get("sso_session") or entry.get("sso_start_url") or ""
+    return f"sso:{session}" if session else f"profile:{profile}"
 
 
 def _start_sso_login(profile: str, log_dir: Path) -> tuple[dict, subprocess.Popen]:
@@ -334,7 +344,9 @@ def _start_sso_login(profile: str, log_dir: Path) -> tuple[dict, subprocess.Pope
         )
     argv = [exe, "sso", "login", "--profile", profile, "--no-browser", "--use-device-code"]
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "aws-sso-login.log"
+    # 프로필마다 따로 — 하나로 두면 두 프로필의 로그인이 겹칠 때 같은 파일에 쓰고, 승인 주소를 거기서 뽑으므로
+    # 다른 프로필의 주소가 돌아갈 수 있다(승인해도 이 프로필은 그대로 만료).
+    log_path = log_dir / f"aws-sso-login-{re.sub(r'[^A-Za-z0-9._-]', '_', profile)}.log"
     with log_path.open("w", encoding="utf-8") as log:
         log.write(f"[paas] {' '.join(argv[1:])}\n")
         log.flush()

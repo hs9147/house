@@ -151,7 +151,7 @@ def resources(db: Session, organization_id: int) -> dict:
             | (LlmProvider.organization_id == organization_id)
         ).order_by(LlmProvider.name)
     ).scalars().all()
-    default = llm.default_provider(db)
+    default = llm.default_provider(db, organization_id)
     return {
         "organization": org.name if org else "",
         "stores": [
@@ -664,7 +664,7 @@ def _provider_or_fail(db: Session, workflow: Workflow, name: str) -> LlmProvider
         if provider is None:
             raise WorkflowError(f"LLM 프로바이더 '{name}'가 없습니다.")
     else:
-        provider = llm.default_provider(db)
+        provider = llm.default_provider(db, workflow.organization_id)
         if provider is None:
             raise WorkflowError(
                 "기본 LLM 프로바이더가 없습니다 — LLM 관리에서 「설정」을 누르세요.")

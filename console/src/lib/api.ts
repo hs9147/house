@@ -466,6 +466,9 @@ export const api = {
   // 조직 (사내 Gitea 작업공간)
   listOrgs: () => request<OrgOut[]>('GET', '/orgs'),
   createOrg: (name: string) => request<OrgOut>('POST', '/orgs', { name }),
+  // 부서별 기본 LLM — null이면 전역 기본(관리자)
+  setOrgLlm: (orgId: number, llmProviderId: number | null) =>
+    request<OrgOut>('PUT', `/orgs/${orgId}/llm`, { llm_provider_id: llmProviderId }),
   syncOrgsFromGitea: (onMissingRepo: 'create' | 'delete' = 'create') =>
     request<GiteaSyncResult>('POST', '/orgs/sync', undefined, { on_missing_repo: onMissingRepo }),
   // 비블로킹 배포 — 즉시 building 레코드(들)를 받아 진행 상황을 폴링으로 추적한다.

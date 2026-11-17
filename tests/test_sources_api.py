@@ -64,7 +64,7 @@ def client(monkeypatch, tmp_path, fresh_settings, fake_site):
     monkeypatch.setenv("PAAS_STORAGE_ROOT", str(tmp_path / "internal"))
     monkeypatch.setenv("PAAS_DOC_INDEX_DIR", str(tmp_path / "index"))
     monkeypatch.setenv("PAAS_DOC_ALLOWED_ROOTS", str(tmp_path))
-    monkeypatch.setattr(llm, "default_provider", lambda db: None)
+    monkeypatch.setattr(llm, "default_provider", lambda db, organization_id=None: None)
     monkeypatch.setattr(infosource, "_submit", infosource._scan_job)
     get_settings.cache_clear()
     c = TestClient(create_app())
@@ -187,7 +187,7 @@ def test_new_store_rejects_overlapping_folder(client):
 
 
 def test_llm_made_up_urls_are_dropped(client, monkeypatch):
-    monkeypatch.setattr(llm, "default_provider", lambda db: object())
+    monkeypatch.setattr(llm, "default_provider", lambda db, organization_id=None: object())
     monkeypatch.setattr(llm, "chat_completion", lambda provider, messages, db=None, **kw: json.dumps({
         "summary": "인사 정보 포털", "keywords": ["휴가"],
         "menu": [{"label": "휴가", "url": "https://intra.test/leave", "children": [
@@ -581,7 +581,7 @@ def test_query_suggestion_keeps_only_real_screens_and_fields(client, monkeypatch
     assert out["screens"][0]["conditions"] == [{"field": "등록일", "value": "@last|@today-3y"},
                                                {"field": "등록일", "value": "@today"}]
 
-    monkeypatch.setattr(llm, "default_provider", lambda db: object())
+    monkeypatch.setattr(llm, "default_provider", lambda db, organization_id=None: object())
     monkeypatch.setattr(llm, "chat_completion", lambda provider, messages, db=None, **kw: json.dumps({
         "screens": [{"url": "https://intra.test/notice", "why": "최근 공지",
                      "conditions": [{"field": "등록일", "value": "@today-7d"},
@@ -612,7 +612,7 @@ def test_query_analysis_plans_how_to_collect_and_keeps_to_the_facts(client, monk
             "method": "path", "method_reason": "메뉴로 연다", "search": "조회", "export": "엑셀 다운로드",
             "detail_column": "제목", "risks": ["팝업 차단"]}]}, ensure_ascii=False)
 
-    monkeypatch.setattr(llm, "default_provider", lambda db: object())
+    monkeypatch.setattr(llm, "default_provider", lambda db, organization_id=None: object())
     monkeypatch.setattr(llm, "chat_completion", fake)
     screen = client.post(url, headers=ADMIN).json()["screens"][0]
     assert '"has_path": false' in seen["prompt"]
@@ -898,7 +898,7 @@ def test_blocked_route_gets_a_repair_chosen_only_from_what_was_on_screen(client,
         "target"]["text"] == "공지 조회"
 
     # LLM이 목록 밖의 번호를 내면 버리고 비슷한 것으로
-    monkeypatch.setattr(llm, "default_provider", lambda db: object())
+    monkeypatch.setattr(llm, "default_provider", lambda db, organization_id=None: object())
     monkeypatch.setattr(llm, "chat_completion", lambda *a, **k: json.dumps({"pick": 7, "reason": "x"}))
     assert client.post(url, headers=ADMIN, json=body).json()["via"] == "similar"
     monkeypatch.setattr(llm, "chat_completion", lambda *a, **k: json.dumps({"pick": 1, "reason": "이름이 바뀜"}))
@@ -937,7 +937,7 @@ def test_recording_and_analysis_keep_what_the_person_chose_to_collect(client, mo
     screens = client.get(f"{API}/sources/{sid}/queries", headers=ADMIN).json()["screens"]
     assert len(screens) == 1 and screens[0]["path"]               # 녹화가 화면을 바꿨다(길이 생겼다)
     assert (screens[0]["collect"], screens[0]["page_format"]) == ("page", "md")
-    monkeypatch.setattr(llm, "default_provider", lambda db: None)
+    monkeypatch.setattr(llm, "default_provider", lambda db, organization_id=None: None)
     suggested = client.post(f"{API}/sources/{sid}/queries/suggest", headers=ADMIN).json()["screens"]
     assert [s.get("collect") for s in suggested if s["url"] == "https://intra.test/notice"] == ["page"]
 

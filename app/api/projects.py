@@ -452,7 +452,7 @@ async def propose_start_script(
     # 화면은 모델을 고르게 하지만(스크립트는 사람이 읽고 저장하는 물건이다), 비워 보내면
     # 기본 프로바이더로 돈다 — 자동으로 부르는 쪽과 규칙을 맞춘다.
     provider = (db.get(LlmProvider, body.provider_id) if body.provider_id
-                else llm_service.default_provider(db))
+                else llm_service.default_provider(db, project.organization_id))
     if provider is None:
         raise HTTPException(
             status_code=404,
@@ -794,7 +794,7 @@ async def explain_deploy_failure(
     # "어느 모델로?"를 다시 묻는 것은 일을 하나 더 만드는 것이다(화면은 그 선택을 덮어쓸 수
     # 있게 남겨 둔다).
     provider = (db.get(LlmProvider, body.provider_id) if body.provider_id
-                else llm_service.default_provider(db))
+                else llm_service.default_provider(db, project.organization_id))
     if provider is None:
         raise HTTPException(
             status_code=404,

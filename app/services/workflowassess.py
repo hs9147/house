@@ -73,7 +73,7 @@ def assess(db: Session, workflow: Workflow) -> dict:
     nodes = [n for n in spec.get("nodes", []) if isinstance(n, dict)]
     if not nodes:
         raise workflow_service.WorkflowError("단계가 없습니다 — 먼저 워크플로를 구성하세요.")
-    provider = llm.default_provider(db)
+    provider = llm.default_provider(db, workflow.organization_id)
     if provider is None:
         raise workflow_service.WorkflowError(
             "기본 LLM 프로바이더가 없습니다 — LLM 관리에서 「설정」을 누르세요.")

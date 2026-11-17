@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .. import audit
 from ..db import get_db
 from ..models import ApiKey, LlmProvider, Module
-from ..security import decrypt_value, require_agent_key
+from ..security import decrypt_value, require_agent_key, viewer_org_ids
 from ..services import egress
 from ..services import llm as llm_service
 from ..services import modules as modules_service
@@ -27,6 +27,12 @@ def proxy_llm_call(
     provider = db.get(LlmProvider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="LLM provider not found")
+    # 부서 전용 프로바이더(그 부서의 AWS 프로필)는 그 부서 사람의 열쇠로만 — 예전에는 검사가 없어 어느 앱이든 아무
+    # 부서의 것을 썼다. 전역 것은 누구나, 관리자 키는 모두. 부서가 없는 서비스 키는 전역 것만.
+    if not key.is_admin and provider.organization_id is not None \
+            and provider.organization_id not in viewer_org_ids(db, key):
+        raise HTTPException(status_code=403,
+                            detail=f"'{provider.name}'는 그 부서 전용 LLM이라 이 열쇠로는 쓸 수 없습니다")
 
     messages = body.get("messages", [])
     if not messages:

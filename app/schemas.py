@@ -14,6 +14,12 @@ class OrgOut(BaseModel):
     name: str
     created_at: datetime
     project_count: int
+    # 부서별 기본 LLM(비면 전역 기본) — 그 부서 사용자의 대화·자동 판단이 고르지 않으면 이것으로 돈다
+    llm_provider_id: int | None = None
+
+
+class OrgLlm(BaseModel):
+    llm_provider_id: int | None = None
 
 
 class GiteaSyncSkip(BaseModel):

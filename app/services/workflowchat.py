@@ -86,7 +86,7 @@ def propose(db: Session, workflow: Workflow, request: str, history: list[dict]) 
     facts를 함께 주는 이유는 기동 스크립트와 같다: 무엇을 보고 쓴 것인지 사람이 확인할 수
     있어야 한다.
     """
-    provider = llm.default_provider(db)
+    provider = llm.default_provider(db, workflow.organization_id)
     if provider is None:
         raise workflow_service.WorkflowError(
             "기본 LLM 프로바이더가 없습니다 — LLM 관리에서 「설정」을 누르세요.")

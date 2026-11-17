@@ -137,7 +137,7 @@ def test_llm_suggestions_come_only_from_candidates_and_need_confirmation(client,
         return json.dumps({"links": [{"subject": 0, "candidate": 0, "reason": "같은 규칙"},
                                      {"subject": 0, "candidate": 999, "reason": "지어낸 것"}]})
 
-    monkeypatch.setattr(llm, "default_provider", lambda db: object())
+    monkeypatch.setattr(llm, "default_provider", lambda db, organization_id=None: object())
     monkeypatch.setattr(llm, "chat_completion", fake)
     out = client.post(f"{API}/workflows/{wid}/links/suggest", headers=ADMIN).json()
     assert out["suggested"] == 1                              # 후보 밖 번호는 버린다

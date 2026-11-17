@@ -9,6 +9,18 @@ import type { GiteaSyncResult } from '../lib/types';
 
 export default function Organizations() {
   const state = useApi(() => api.listOrgs());
+  // 부서별 기본 LLM을 고를 목록 — 관리자만 바꾼다
+  const providers = useApi(() => (isAdmin() ? api.listProviders() : Promise.resolve([])));
+  const [llmError, setLlmError] = useState('');
+  const setLlm = async (orgId: number, value: string) => {
+    setLlmError('');
+    try {
+      await api.setOrgLlm(orgId, value ? Number(value) : null);
+      state.reload();
+    } catch (err) {
+      setLlmError((err as Error).message);
+    }
+  };
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -141,6 +153,7 @@ export default function Organizations() {
         </label>
       </form>
       {error && <p className="error">{error}</p>}
+      {llmError && <p className="error">{llmError}</p>}
       <Async state={state} empty="등록된 조직이 없습니다.">
         {(rows) => (
           <table>
@@ -148,6 +161,9 @@ export default function Organizations() {
               <tr>
                 <th>이름</th>
                 <th>프로젝트 수</th>
+                <th title="이 부서 사용자의 대화·자동 판단이 LLM을 고르지 않으면 이것으로 돕니다(부서마다 다른 AWS 프로필)">
+                  기본 LLM
+                </th>
                 <th>생성일</th>
               </tr>
             </thead>
@@ -156,6 +172,25 @@ export default function Organizations() {
                 <tr key={o.id}>
                   <td>{o.name}</td>
                   <td className="mono">{o.project_count}</td>
+                  <td>
+                    {isAdmin() ? (
+                      <select value={o.llm_provider_id ?? ''} onChange={(e) => void setLlm(o.id, e.target.value)}>
+                        <option value="">전역 기본</option>
+                        {/* 전역 것과 이 부서 전용만 — 다른 부서 전용은 서버도 거절한다 */}
+                        {(providers.data ?? [])
+                          .filter((p) => p.organization_id == null || p.organization_id === o.id)
+                          .map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name} · {p.model}{p.aws_profile ? ` (${p.aws_profile})` : ''}
+                            </option>
+                          ))}
+                      </select>
+                    ) : (
+                      <span className="mutedtext">
+                        {(providers.data ?? []).find((p) => p.id === o.llm_provider_id)?.name ?? '전역 기본'}
+                      </span>
+                    )}
+                  </td>
                   <td className="mono">{fmtDate(o.created_at)}</td>
                 </tr>
               ))}

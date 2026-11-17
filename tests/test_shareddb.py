@@ -313,7 +313,7 @@ def test_db_purpose_is_rewritten_by_the_llm_only_when_its_use_changed(server, mo
     """DB의 용도 설명은 LLM이 실제 쓰임(표·표 설명·쓰는 과제)을 보고 적는다 — 바뀐 것이 없으면 부르지 않는다."""
     from app.services import llm
     asked = []
-    monkeypatch.setattr(llm, "default_provider", lambda db: object())
+    monkeypatch.setattr(llm, "default_provider", lambda db, organization_id=None: object())
     monkeypatch.setattr(llm, "chat_completion", lambda provider, messages, db=None, *a, **k: (
         asked.append(messages[0]["content"]) or "「협력사 기준 정보와 견적 자료를 모으는 DB」"))
     _provision(_project("supplier-pool", _org("GP실")))

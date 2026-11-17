@@ -379,7 +379,7 @@ def advise(db: Session, project: Project, result: dict, files: list[str]) -> dic
     """
     from . import llm as llm_service  # noqa: PLC0415 — 순환 import 회피
 
-    provider = llm_service.default_provider(db)
+    provider = llm_service.default_provider(db, project.organization_id)
     if provider is None:
         return {"advice": "", "provider": "",
                 "error": "기본 LLM 프로바이더가 없습니다 — LLM 관리에서 기본값을 지정하세요."}

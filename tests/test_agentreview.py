@@ -87,7 +87,7 @@ def test_review_reads_the_deployed_commit_and_records_what_it_fed(repo, app_db, 
     pid = _project(sha=sha)
     seen: list = []
     monkeypatch.setattr(workspace, "code_workdir", lambda project: root)
-    monkeypatch.setattr(llm_service, "default_provider", lambda db: _provider())
+    monkeypatch.setattr(llm_service, "default_provider", lambda db, organization_id=None: _provider())
     monkeypatch.setattr(llm_service, "chat_completion",
                         lambda p, messages, db=None: seen.append(messages) or f"```json\n{REPLY}\n```")
     with SessionLocal() as db:
@@ -106,16 +106,16 @@ def test_failed_review_keeps_the_previous_summary_and_says_why(repo, app_db, mon
     root, sha = repo
     pid = _project(sha=sha)
     monkeypatch.setattr(workspace, "code_workdir", lambda project: root)
-    monkeypatch.setattr(llm_service, "default_provider", lambda db: _provider())
+    monkeypatch.setattr(llm_service, "default_provider", lambda db, organization_id=None: _provider())
     monkeypatch.setattr(llm_service, "chat_completion", lambda p, m, db=None: REPLY)
     with SessionLocal() as db:
         agentreview.review(db, db.get(Project, pid), sha)
-    monkeypatch.setattr(llm_service, "default_provider", lambda db: None)
+    monkeypatch.setattr(llm_service, "default_provider", lambda db, organization_id=None: None)
     with SessionLocal() as db:
         row = agentreview.review(db, db.get(Project, pid), "b" * 40)
         assert "기본 LLM" in row.error
         assert row.purpose == "협력사 풀을 조회·관리한다"
-    monkeypatch.setattr(llm_service, "default_provider", lambda db: _provider())
+    monkeypatch.setattr(llm_service, "default_provider", lambda db, organization_id=None: _provider())
     monkeypatch.setattr(llm_service, "chat_completion", lambda p, m, db=None: "잘 모르겠습니다")
     with SessionLocal() as db:
         assert "JSON" in agentreview.review(db, db.get(Project, pid), sha).error
@@ -177,7 +177,7 @@ def test_profile_api_reviews_only_release_deployments(repo, app_db, monkeypatch)
         {"release_sha": sha, "stale": True, "profile": None}
 
     monkeypatch.setattr(workspace, "code_workdir", lambda project: root)
-    monkeypatch.setattr(llm_service, "default_provider", lambda db: _provider())
+    monkeypatch.setattr(llm_service, "default_provider", lambda db, organization_id=None: _provider())
     monkeypatch.setattr(llm_service, "chat_completion", lambda p, m, db=None: REPLY)
     out = c.post(f"{API}/projects/{pid}/agent-profile/review", headers=ADMIN).json()
     assert out["stale"] is False and out["profile"]["does"] == ["협력사 검색", "등급 확인"]

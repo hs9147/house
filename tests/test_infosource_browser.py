@@ -108,7 +108,7 @@ def test_actor_asks_the_llm_once_then_replays_without_it(site, browser_ok, monke
         return ('{"fill": [{"i": 0, "role": "textbox", "name": "연도"}], '
                 f'"submit": {{"role": "button", "name": "{label}"}}}}')
 
-    monkeypatch.setattr(infosource.llm, "default_provider", lambda db: object())
+    monkeypatch.setattr(infosource.llm, "default_provider", lambda db, organization_id=None: object())
     monkeypatch.setattr(infosource.llm, "chat_completion", chat)
     url = f"{site}/search"
     screen = {"screen": "기간 조회", "url": url, "conditions": [{"field": "등록일", "value": "@last|@today"}],

@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from .. import audit
 from ..db import get_db
-from ..models import ApiKey, Organization, Project
-from ..schemas import GiteaSyncResult, OrgCreate, OrgOut
+from ..models import ApiKey, LlmProvider, Organization, Project
+from ..schemas import GiteaSyncResult, OrgCreate, OrgLlm, OrgOut
 from ..security import require_admin, require_api_key
 from ..services import gitea, gitea_sync
 from ..services.gitea import GiteaError, GiteaNotConfigured
@@ -49,9 +49,32 @@ def list_orgs(db: Session = Depends(get_db), _: ApiKey = Depends(require_api_key
         .order_by(Organization.id)
     ).all()
     return [
-        OrgOut(id=org.id, name=org.name, created_at=org.created_at, project_count=count)
+        OrgOut(id=org.id, name=org.name, created_at=org.created_at, project_count=count,
+               llm_provider_id=org.llm_provider_id)
         for org, count in rows
     ]
+
+
+@router.put("/{org_id}/llm", response_model=OrgOut)
+def set_org_llm(org_id: int, body: OrgLlm, db: Session = Depends(get_db),
+                admin: ApiKey = Depends(require_admin)):
+    """부서별 기본 LLM — 그 부서 사용자의 대화·자동 판단이 프로바이더를 고르지 않으면 이것으로 돈다(비우면 전역 기본).
+    전역 프로바이더이거나 이 부서 전용이어야 한다(다른 부서 전용은 이 부서가 쓸 수 없다)."""
+    org = db.get(Organization, org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    if body.llm_provider_id is not None:
+        provider = db.get(LlmProvider, body.llm_provider_id)
+        if provider is None:
+            raise HTTPException(status_code=404, detail="LLM 프로바이더를 찾을 수 없습니다")
+        if provider.organization_id not in (None, org.id):
+            raise HTTPException(status_code=400, detail=f"'{provider.name}'는 다른 부서 전용이라 이 부서의 기본으로 둘 수 없습니다")
+    org.llm_provider_id = body.llm_provider_id
+    db.commit()
+    audit.record(db, admin.name, "org.llm.default", org.name, {"llm_provider_id": body.llm_provider_id})
+    count = db.execute(select(func.count(Project.id)).where(Project.organization_id == org.id)).scalar() or 0
+    return OrgOut(id=org.id, name=org.name, created_at=org.created_at, project_count=count,
+                  llm_provider_id=org.llm_provider_id)
 
 
 @router.post("/sync", response_model=GiteaSyncResult)

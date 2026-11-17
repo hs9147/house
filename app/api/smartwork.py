@@ -250,7 +250,7 @@ class SessionMessageIn(BaseModel):
 
 def _provider_for(db: Session, provider_id: int | None, organization_id: int | None, key: ApiKey):
     if provider_id is None:
-        provider = llm_service.default_provider(db)
+        provider = llm_service.default_provider(db, organization_id)   # 이 업무 부서의 기본 LLM이 먼저
         if provider is None:
             raise HTTPException(status_code=503, detail=(
                 "기본 LLM 프로바이더가 없습니다 — 관리자가 LLM 메뉴에서 기본 프로바이더를 지정해야 합니다."))

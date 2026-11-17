@@ -42,12 +42,12 @@ def test_create_org_calls_gitea_and_persists(monkeypatch, fresh_settings):
     c = TestClient(create_app())
     r = c.post("/paas/api/v1/orgs", json={"name": "shop-team"}, headers=ADMIN)
     assert r.status_code == 201, r.text
-    assert r.json() == {"id": 1, "name": "shop-team", "project_count": 0,
+    assert r.json() == {"id": 1, "name": "shop-team", "project_count": 0, "llm_provider_id": None,
                         "created_at": r.json()["created_at"]}
     assert calls == ["https://git.example.com/api/v1/orgs"]
 
     listing = c.get("/paas/api/v1/orgs", headers=ADMIN).json()
-    assert listing == [{"id": 1, "name": "shop-team", "project_count": 0,
+    assert listing == [{"id": 1, "name": "shop-team", "project_count": 0, "llm_provider_id": None,
                         "created_at": listing[0]["created_at"]}]
 
 

@@ -282,7 +282,7 @@ def suggest_workflow_links(workflow_id: int, db: Session = Depends(get_db),
                            key: ApiKey = Depends(require_api_key)):
     """아직 이어지지 않은 낱말에 LLM이 짝을 제안한다 — 온톨로지 후보 안에서만, 확인 전으로 둔다."""
     row = _workflow_or_404(db, workflow_id, key)
-    provider = llm_service.default_provider(db)
+    provider = llm_service.default_provider(db, row.organization_id)
     if provider is None:
         raise HTTPException(status_code=400, detail="기본 LLM 프로바이더가 없습니다 — LLM 관리에서 기본값을 지정하세요.")
 

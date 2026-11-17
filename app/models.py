@@ -46,6 +46,10 @@ class Organization(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # 이 부서의 기본 LLM(llm_providers.id) — 부서 사용자의 대화·자동 판단이 고르지 않으면 이것으로 돈다
+    # (llm.default_provider). 비면 전역 기본. 외래키를 두지 않는다: LlmProvider가 이미 조직을 가리켜 순환이 된다 —
+    # 가리키는 프로바이더가 지워졌거나 이 부서가 쓸 수 없게 되면 무시하고 전역 기본으로 간다.
+    llm_provider_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     projects: Mapped[list["Project"]] = relationship(back_populates="organization")
 

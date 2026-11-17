@@ -12,13 +12,15 @@ const TERMINAL: DeploymentStatus[] = ['running', 'failed', 'stopped'];
 // 완료(모든 레코드가 종료 상태) 전까지는 닫기가 막히고, 완료 후 "확인"으로만 닫는다.
 // 완료돼도 로그는 그대로 남는다 — 사용자가 닫기 전까지 창이 저절로 사라지지 않는다.
 export default function DeployProgressModal({
-  projectId, projectName, profile, deploymentIds, onClose,
+  projectId, projectName, profile, deploymentIds, onClose, onCancelRequested,
 }: {
   projectId: number;
   projectName: string;
   profile: BuildProfile;
   deploymentIds: number[];
   onClose: () => void;
+  // 취소를 요청하고 창을 닫았다 — 원래 화면이 「취소 요청함」을 알리고 진행(멈춤)을 이어 보여 준다
+  onCancelRequested?: (detail: string) => void;
 }) {
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState(false);
@@ -26,9 +28,9 @@ export default function DeployProgressModal({
   // 실패를 본 자리에서 원인을 묻는다 — 예전에는 배포 이력 화면으로 가야 했다. 진단은
   // 리포와 로그를 실제로 보고 짚어 주고, 고침 적용·재시도는 사람이 확인한다(취소 가능).
   const [diagnosing, setDiagnosing] = useState(false);
-  // 취소는 **진짜 취소**다 — 서버가 실행 중인 설치 프로세스를 끝낸다. 요청한 뒤에도 폴링은
-  // 계속한다: 레코드가 닫히는 것을 보고 끝을 알려야 한다(요청만 하고 창을 닫으면 무슨 일이
-  // 일어났는지 알 수 없다).
+  // 취소는 **진짜 취소**다 — 서버가 실행 중인 설치 프로세스를 끝낸다. 멈추는 것은 뒤에서 일어나므로
+  // 요청이 받아들여지면 창은 바로 닫는다(멈출 때까지 붙잡아 두지 않는다). 진행은 원래 화면의 실행 상태·배포
+  // 이력이 이어 보여 준다. 요청 자체가 실패하면 닫지 않고 이유를 보인다 — 닫으면 취소가 안 된 것을 모른다.
   const [cancelling, setCancelling] = useState(false);
   // 재시도하면 새 배포 레코드가 생긴다 — 그 진행을 이 창에서 그대로 이어 본다. 창을 닫고
   // 다시 찾아 들어가게 하면 "무엇이 달라졌나"를 따라갈 수 없다.
@@ -198,16 +200,23 @@ export default function DeployProgressModal({
             disabled={cancelling}
             onClick={async () => {
               setCancelling(true);
+              const details: string[] = [];
               try {
                 for (const id of ids) {
                   const res = await api.cancelDeployment(projectId, id);
-                  append(`· #${id}: ${res.detail}`);
+                  details.push(res.detail);
                 }
               } catch (e) {
-                append(`취소 요청 실패: ${(e as ApiError).message}`);
-              } finally {
-                setCancelling(false);
+                // 이미 끝난 레코드(409)는 취소할 것이 없다 — 나머지 요청이 받아들여졌으면 닫는다
+                if (!(e instanceof ApiError && e.status === 409 && details.length)) {
+                  append(`취소 요청 실패: ${(e as ApiError).message}`);
+                  setCancelling(false);
+                  return;
+                }
               }
+              cancelledRef.current = true;   // 폴링을 멈춘다 — 이어 보는 것은 원래 화면이다
+              onCancelRequested?.(details.join(' · '));
+              onClose();
             }}
           >
             {cancelling ? '취소 요청 중…' : '배포 취소'}

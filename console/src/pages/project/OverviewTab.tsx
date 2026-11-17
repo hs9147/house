@@ -274,6 +274,8 @@ export default function OverviewTab() {
             state.reload();
             history.reload();
           }}
+          onCancelRequested={() => setMessage(
+            `${deployFor.profile} 배포 취소를 요청했습니다 — 멈추는 것은 뒤에서 진행되고 아래 실행 상태에 반영됩니다.`)}
         />
       )}
     </>

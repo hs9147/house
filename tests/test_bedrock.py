@@ -651,3 +651,30 @@ def test_converse_timeout_says_what_to_change(monkeypatch, fresh_settings):
     message = str(err.value)
     assert "90초" in message and "32768" in message
     assert "PAAS_LLM_TIMEOUT_SECONDS" in message
+
+
+def test_profiles_sharing_an_sso_session_share_one_login(monkeypatch, tmp_path):
+    """SSO 토큰은 SSO 세션마다 하나다 — 같은 세션의 프로필은 로그인 하나를 함께 쓴다(승인 한 번). 세션이 다르면
+    따로 로그인하고, 기록 파일도 프로필마다 따로다(하나로 두면 겹칠 때 다른 프로필의 승인 주소를 읽었다)."""
+    config = tmp_path / "config"
+    config.write_text("""\
+[profile team-a]
+sso_session = corp-sso
+[profile team-b]
+sso_session = corp-sso
+[profile other]
+sso_session = other-sso
+[sso-session corp-sso]
+sso_start_url = https://corp.awsapps.com/start
+[sso-session other-sso]
+sso_start_url = https://other.awsapps.com/start
+""", encoding="utf-8")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    seen = _fake_cli(monkeypatch, _DEVICE_OUTPUT)
+    logs = tmp_path / "logs"
+    first = bedrock.start_sso_login("team-a", logs)
+    again = bedrock.start_sso_login("team-b", logs)       # 같은 세션 — 새로 띄우지 않는다
+    assert seen["starts"] == 1 and again == first
+    bedrock.start_sso_login("other", logs)                 # 다른 세션 — 따로
+    assert seen["starts"] == 2
+    assert sorted(f.name for f in logs.iterdir()) == ["aws-sso-login-other.log", "aws-sso-login-team-a.log"]
