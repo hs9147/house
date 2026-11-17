@@ -35,6 +35,7 @@ from ..models import (
     RedirectRule,
 )
 from ..schemas import (
+    AutoDeployIn,
     DeploymentOut,
     ProjectSourceSubdirSet,
     StartScriptOut,
@@ -842,6 +843,26 @@ async def explain_deploy_failure(
                   "cause": result.get("cause")})
     return {"deployment_id": last.id, "profile": profile.value,
             "cause": result.get("cause"), "analysis": analysis, "facts": facts}
+
+
+@router.put("/{project_id}/auto-deploy", response_model=ProjectOut,
+            dependencies=[Depends(require_feature("deploy"))])
+def set_auto_deploy(
+    project_id: int,
+    body: AutoDeployIn,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_api_key),
+):
+    """프로필별 자동배포 켜고 끄기 — 켜진 프로필은 기본 브랜치에 push·merge가 들어오면 웹훅이 다시 배포한다."""
+    project = _get_project(db, project_id)
+    if body.profile == BuildProfile.release:
+        project.auto_deploy_release = body.enabled
+    else:
+        project.auto_deploy_development = body.enabled
+    db.commit()
+    audit.record(db, key.name, "project.auto_deploy", project.name,
+                 {"profile": body.profile.value, "enabled": body.enabled})
+    return _serialize_project(project, key, viewer_org_ids(db, key))
 
 
 @router.post("/{project_id}/deploy", response_model=DeploymentOut | list[DeploymentOut],

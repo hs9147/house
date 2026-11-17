@@ -170,6 +170,7 @@ def server_config(db: Session = Depends(get_db), _: ApiKey = Depends(require_api
                 components=components,
                 in_proxy=in_proxy,
                 deploying=(p.id, profile) in deploying,
+                auto_deploy=p.auto_deploy(profile),
             ))
     unregistered: list[UnregisteredSite] = []
     if configured_routes is not None:

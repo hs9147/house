@@ -96,7 +96,15 @@ class ProjectOut(BaseModel):
     # 프론트엔드처럼 서로 다른 템플릿·포트로 빌드돼야 하는 구성을 표현할 수 없다.
     # 화면은 이 목록을 배지로 보여준다. 아직 감지하지 않은 프로젝트는 null.
     structure: dict | None = None
+    # 프로필별 자동배포(기본 브랜치에 push·merge가 들어오면 웹훅이 다시 배포) — 기본 development 켬, release 끔
+    auto_deploy_release: bool = False
+    auto_deploy_development: bool = True
     created_at: datetime
+
+
+class AutoDeployIn(BaseModel):
+    profile: BuildProfile
+    enabled: bool
 
 
 class DeployRequest(BaseModel):
@@ -644,6 +652,8 @@ class ServerConfigSite(BaseModel):
     components: list[ComponentStatus] | None = None
     # 이 프로필에 진행 중(building)인 배포가 있는지 — 있으면 화면의 배포 버튼이 「재배포」가 된다
     deploying: bool = False
+    # 이 프로필의 자동배포가 켜져 있는지(Project.auto_deploy_*)
+    auto_deploy: bool = False
     # 프록시 설정(IIS web.config 등)에 실제로 라우팅이 구성돼 있는지 — 프록시가
     # 설정 멤버십을 추적하지 않는 백엔드(caddy/apache)에서는 None.
     in_proxy: bool | None = None

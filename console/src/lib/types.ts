@@ -33,6 +33,9 @@ export interface ProjectOut {
   // 타입 하나로는 표현할 수 없는 복합 구성을 담는다. 아직 감지하지 않았으면 null —
   // 다음 배포나 '구조 다시 감지'에서 채워진다.
   structure: ProjectStructure | null;
+  // 프로필별 자동배포 — 기본 development 켬, release 끔
+  auto_deploy_release?: boolean;
+  auto_deploy_development?: boolean;
   created_at: string;
 }
 
@@ -602,6 +605,8 @@ export interface ServerConfigSite {
   // 프록시 설정(IIS web.config 등)에 실제로 라우팅이 구성됐는지 — 추적하지 않는
   // 백엔드(caddy/apache)에서는 null
   in_proxy: boolean | null;
+  // 이 프로필의 자동배포가 켜져 있는지
+  auto_deploy?: boolean;
 }
 
 export interface UnregisteredSite {
@@ -897,6 +902,8 @@ export interface HealthInfo {
   // 배포된 앱 주소의 스킴(PAAS_PLATFORM_PUBLIC_URL 기준). 미설정이면 null —
   // 콘솔이 자기 자신이 열린 스킴을 쓴다.
   public_scheme: string | null;
+  // 배포된 앱의 공개 경로 접두사(프로필마다) — dev_suffix는 두 접두사가 같을 때만 붙는 형제 이름(~dev)
+  app_paths?: { release: string; development: string; dev_suffix: string };
 }
 
 export interface ApiKeyIssued {

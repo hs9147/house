@@ -1,4 +1,4 @@
-"""GitHub / Gitea push 웹훅 → 자동 배포 (프로젝트의 default_profile 사용)."""
+"""GitHub / Gitea push 웹훅 → 자동 배포 — 자동배포가 켜진 프로필마다(Project.auto_deploy_*, 기본 development만)."""
 import json
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
@@ -7,7 +7,7 @@ from sqlalchemy import select
 from .. import audit
 from ..config import get_settings
 from ..db import SessionLocal
-from ..models import Deployment, DeploymentStatus, PlanStage, Project, ProjectType
+from ..models import BuildProfile, Deployment, DeploymentStatus, PlanStage, Project, ProjectType
 from ..security import verify_webhook_signature
 from ..services import compliance as compliance_service
 from ..services import deployer
@@ -72,29 +72,34 @@ async def git_push(
         triggered = []
         skipped_duplicate = []
         for project in matched:
-            if after_sha and _already_deployed(db, project, after_sha):
-                skipped_duplicate.append(project.name)
-                continue
-            audit.record(db, "webhook", "deploy.trigger", project.name, {"branch": branch})
-            background.add_task(_deploy_task, project.id)
-            background.add_task(_compliance_task, project.id)
-            triggered.append(project.name)
+            # 자동배포가 켜진 프로필만 — 기본은 development(개발본은 최신을 따른다), release는 사람이 켠다
+            profiles = [p for p in (BuildProfile.release, BuildProfile.development) if project.auto_deploy(p)]
+            fired = []
+            for profile in profiles:
+                if after_sha and _already_deployed(db, project, after_sha, profile):
+                    skipped_duplicate.append(f"{project.name}:{profile.value}")
+                    continue
+                audit.record(db, "webhook", "deploy.trigger", project.name,
+                             {"branch": branch, "profile": profile.value})
+                background.add_task(_deploy_task, project.id, profile)
+                fired.append(profile)
+            if fired:
+                background.add_task(_compliance_task, project.id)
+                triggered.append(project.name)
     return {"triggered": triggered, "pull_requests": pulls, "skipped_duplicate": skipped_duplicate}
 
 
-def _already_deployed(db, project: Project, sha: str) -> bool:
+def _already_deployed(db, project: Project, sha: str, profile: BuildProfile | None = None) -> bool:
     """이 커밋으로 이미 배포 완료(running)됐거나 지금 배포 중(building)이면 True.
 
     최신 배포 레코드 하나만 보면 충분하다 — 다음 커밋이 오면 자연히 최신이 그걸로
     바뀌므로, 과거에 이 sha로 배포했던 적이 있다는 사실만으로는(예: 되돌린 커밋을
     다시 push) 건너뛰지 않는다. composite 프로젝트도 두 컴포넌트 레코드가 같은
     sha로 한꺼번에 커밋되므로 가장 최근 레코드 하나로 충분하다."""
-    latest = db.execute(
-        select(Deployment)
-        .where(Deployment.project_id == project.id)
-        .order_by(Deployment.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    query = select(Deployment).where(Deployment.project_id == project.id)
+    if profile is not None:   # 프로필마다 따로 — release와 development는 따로 떠 있다
+        query = query.where(Deployment.profile == profile)
+    latest = db.execute(query.order_by(Deployment.id.desc()).limit(1)).scalar_one_or_none()
     return bool(
         latest and latest.git_sha == sha
         and latest.status in (DeploymentStatus.running, DeploymentStatus.building)
@@ -139,16 +144,17 @@ def _pull_request_task(project_id: int, branch: str) -> None:
                      {"branch": branch, "number": pr.get("number"), "url": pr.get("html_url")})
 
 
-def _deploy_task(project_id: int) -> None:
+def _deploy_task(project_id: int, profile: BuildProfile | None = None) -> None:
     with SessionLocal() as db:
         project = db.get(Project, project_id)
         if project is None:
             return
+        profile = profile or project.default_profile
         try:
             if project.type == ProjectType.composite:
-                deployer.deploy_composite_sync(db, project, project.default_profile)
+                deployer.deploy_composite_sync(db, project, profile)
             else:
-                deployer.deploy_sync(db, project, project.default_profile)
+                deployer.deploy_sync(db, project, profile)
         except deployer.DeployInProgress:
             # 연속 push: 진행 중 배포가 최신 커밋을 집도록 두고 이번 이벤트는 스킵
             pass

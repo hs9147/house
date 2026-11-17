@@ -124,8 +124,9 @@ export default function ServerConfig() {
       </div>
       <p className="mutedtext" style={{ fontSize: 12 }}>
         프로젝트별 라우팅(URL)·실행 상태·리다이렉트 규칙 수를 한눈에 봅니다. 배포는
-        기본적으로 서브패스로 구성됩니다 — <code>/apps/조직/프로젝트/</code>(development는
-        그 형제인 <code>/apps/조직/프로젝트~dev/</code>), 조직이 없는 프로젝트는 <code>/apps/_/프로젝트/</code>.
+        기본적으로 서브패스로 구성됩니다 — release는 <code>/apps/조직/프로젝트/</code>, development는
+        <code>/dev/조직/프로젝트/</code>(접두사는 PAAS_RELEASE_PATH_PREFIX·PAAS_DEV_PATH_PREFIX), 조직이 없는 프로젝트는
+        조직 자리가 <code>_</code>입니다.
         커스텀 도메인을 지정한 release 배포만 예외로 그 도메인 루트를 그대로 씁니다.
         리다이렉트/재작성 규칙은 프로젝트당 하나로 관리되며 다음 배포·롤백부터
         반영됩니다. 복합(백엔드+프론트엔드) 프로젝트는 같은 경로 아래 <code>api/*</code>
@@ -191,7 +192,7 @@ export default function ServerConfig() {
                         : s.internal_port ? <>{url(s.internal_port)}{clashed(s.internal_port) && ' ⚠'}</> : '-'}
                     </td>
                     <td><StatusPill value={s.status} /></td>
-                    <td><AutoDeployMark status={s.status} /></td>
+                    <td><AutoDeployMark enabled={s.auto_deploy} /></td>
                     <td>{s.redirect_count}</td>
                   </tr>
                 );

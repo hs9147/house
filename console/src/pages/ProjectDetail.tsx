@@ -7,6 +7,8 @@ import type { ProjectOut } from '../lib/types';
 
 export interface ProjectContext {
   project: ProjectOut;
+  // 프로젝트 값을 다시 받는다(자동배포처럼 탭에서 바꾼 설정)
+  reload: () => void;
 }
 
 const TABS = [
@@ -52,7 +54,7 @@ export default function ProjectDetail() {
               </NavLink>
             ))}
           </div>
-          <Outlet context={{ project } satisfies ProjectContext} />
+          <Outlet context={{ project, reload: state.reload } satisfies ProjectContext} />
         </>
       )}
     </Async>

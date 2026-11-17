@@ -52,7 +52,11 @@ def domain_for(project_name: str, profile: BuildProfile) -> str:
 def path_prefix_for(
     org_name: str | None, project_name: str, profile: BuildProfile,
 ) -> str:
-    """모든 배포 URL은 /apps/{조직 또는 "_"}/{프로젝트}[~dev]/ 서브패스로 통일한다.
+    """모든 배포 URL은 {접두사}/{조직 또는 "_"}/{프로젝트}/ 서브패스로 통일한다.
+
+    **접두사는 프로필마다**다(PAAS_RELEASE_PATH_PREFIX 기본 /apps, PAAS_DEV_PATH_PREFIX 기본 /dev) — 운영본과
+    개발본의 주소가 첫 조각부터 갈려 한눈에 구분되고, 두 경로가 서로소라 규칙 순서가 무관하다. 둘을 같게 두면
+    development는 같은 접두사 아래 형제(…/{프로젝트}~dev/)가 된다(아래 사정).
 
     **dev는 release의 형제다**(자식이 아니다). 예전에는 /apps/{조직}/{프로젝트}/dev/ 로
     release 안에 넣었는데, 그러면 release 규칙이 dev 요청까지 매칭해서 어느 규칙이 먼저
@@ -64,8 +68,22 @@ def path_prefix_for(
     if settings.tier == "enterprise":
         return "/"
     org_segment = org_name or "_"
-    suffix = DEV_SUFFIX if profile == BuildProfile.development else ""
-    return f"/apps/{org_segment}/{project_name}{suffix}/"
+    release, dev = path_bases()
+    if profile == BuildProfile.development:
+        # 접두사가 같으면 release와 겹치지 않게 형제 이름(~dev)으로 — 다르면 접두사가 이미 가른다
+        return f"{dev}/{org_segment}/{project_name}{DEV_SUFFIX if dev == release else ''}/"
+    return f"{release}/{org_segment}/{project_name}/"
+
+
+def path_bases() -> tuple[str, str]:
+    """(release 접두사, development 접두사) — 앞에 '/'를 두고 끝의 '/'는 뗀다(루트면 "")."""
+    settings = get_settings()
+
+    def norm(value: str, fallback: str) -> str:
+        value = (value if value is not None else fallback).strip().strip("/")
+        return f"/{value}" if value else ""
+
+    return norm(settings.release_path_prefix, "/apps"), norm(settings.dev_path_prefix, "/dev")
 
 
 def configure(

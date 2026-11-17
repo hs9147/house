@@ -3,7 +3,7 @@ import { useOutletContext } from 'react-router-dom';
 import Async from '../../components/Async';
 import AgentProfilePanel from '../../components/AgentProfilePanel';
 import SharedDbPanel from '../../components/SharedDbPanel';
-import AutoDeployMark from '../../components/AutoDeployMark';
+import { autoDeployTitle } from '../../components/AutoDeployMark';
 import DeployProgressModal from '../../components/DeployProgressModal';
 import { Confirm } from '../../components/Modal';
 import DeployCheckModal from '../../components/DeployCheckModal';
@@ -18,7 +18,21 @@ import type { ProjectContext } from '../ProjectDetail';
 type Action = { kind: 'deploy' | 'redeploy' | 'rollback' | 'stop'; profile: BuildProfile } | null;
 
 export default function OverviewTab() {
-  const { project } = useOutletContext<ProjectContext>();
+  const { project, reload } = useOutletContext<ProjectContext>();
+  // 자동배포 켜고 끄기 — 켜진 프로필은 기본 브랜치에 push·merge가 들어오면 다시 배포된다
+  const [autoBusy, setAutoBusy] = useState(false);
+  const toggleAuto = async (profile: BuildProfile, enabled: boolean) => {
+    setAutoBusy(true);
+    setError('');
+    try {
+      await api.setAutoDeploy(project.id, profile, enabled);
+      reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setAutoBusy(false);
+    }
+  };
   const state = useApi(() => api.projectStatus(project.id), [project.id]);
   // 진행 중인 배포 — 그 프로필의 배포 버튼이 「재배포」가 된다(취소를 요청하고 그것이 멈추면 새로 배포).
   const history = useApi(() => api.deployments(project.id), [project.id]);
@@ -111,11 +125,14 @@ export default function OverviewTab() {
               <tbody>
                 {(['release', 'development'] as BuildProfile[]).map((profile) => {
                   const orgSegment = project.org_name || '_';
-                  // development는 release의 **형제** 경로다(서버 proxy.path_prefix_for — `~dev`). 예전 규칙
-                  // (`/{프로젝트}/dev/`)으로 링크를 만들면 release 규칙에 걸려 release 앱으로 가고 오류가 난다(실측).
+                  // development 경로는 release 안에 두지 않는다(서버 proxy.path_prefix_for) — 예전 규칙(`/{프로젝트}/dev/`)
+                  // 으로 링크를 만들면 release 규칙에 걸려 release 앱으로 가고 오류가 났다(실측).
+                  // 접두사는 서버 설정이 정한다(health.app_paths — 기본 release /apps, development /dev).
+                  // 받기 전에는 기본값으로 — 서버의 proxy.path_prefix_for와 같은 규칙이다.
+                  const paths = health.data?.app_paths ?? { release: '/apps', development: '/dev', dev_suffix: '' };
                   const pathUrl = profile === 'release'
-                    ? `/apps/${orgSegment}/${project.name}/`
-                    : `/apps/${orgSegment}/${project.name}~dev/`;
+                    ? `${paths.release}/${orgSegment}/${project.name}/`
+                    : `${paths.development}/${orgSegment}/${project.name}${paths.dev_suffix}/`;
                   // base_domain을 아직 못 불러왔으면(로딩 중) 경로만 보여준다 —
                   // 잘못된 호스트로 링크를 만드는 것보다 안전하다.
                   // 스킴을 https로 박아 두면 80포트만 여는 구성에서 죽은 링크가 된다.
@@ -202,7 +219,15 @@ export default function OverviewTab() {
                           </button>
                         </div>
                       </td>
-                      <td><AutoDeployMark status={status[profile] ?? ''} branch={project.branch} /></td>
+                      <td>
+                        <label title={autoDeployTitle(project.branch)} style={{ cursor: 'pointer' }}>
+                          <input type="checkbox" disabled={autoBusy}
+                            checked={profile === 'release'
+                              ? project.auto_deploy_release ?? false
+                              : project.auto_deploy_development ?? true}
+                            onChange={(e) => void toggleAuto(profile, e.target.checked)} />
+                        </label>
+                      </td>
                     </tr>
                   );
                 })}

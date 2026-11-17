@@ -496,6 +496,9 @@ export const api = {
     ),
   logs: (id: number, profile: BuildProfile, tail: number) =>
     request<{ logs: string }>('GET', `/projects/${id}/logs`, undefined, { profile, tail }),
+  // 프로필별 자동배포 켜고 끄기
+  setAutoDeploy: (id: number, profile: BuildProfile, enabled: boolean) =>
+    request<ProjectOut>('PUT', `/projects/${id}/auto-deploy`, { profile, enabled }),
   projectStatus: (id: number) =>
     request<Record<BuildProfile, string>>('GET', `/projects/${id}/status`),
   // 배포 실패 진단 — 원인과 고칠 것을 돌려준다(바꾸지는 않는다). 적용·재시도는 사람이 확인한다.

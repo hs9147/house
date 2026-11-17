@@ -231,6 +231,10 @@ class Settings(BaseSettings):
     # 웹훅 자동 등록 시 플랫폼 자신을 가리키는 공개 URL (예: https://paas.example.com)
     # 비우면 웹훅 자동 등록을 건너뛰고 infra/gitea/README.md의 수동 절차를 안내한다.
     platform_public_url: str = ""
+    # 배포된 앱의 공개 경로 접두사 — 프로필마다(services/proxy.path_prefix_for). release는 /apps/{조직}/{프로젝트}/,
+    # development는 /dev/{조직}/{프로젝트}/. 둘을 같게 두면 development는 같은 접두사 아래 형제(…/{프로젝트}~dev/)가 된다.
+    release_path_prefix: str = "/apps"
+    dev_path_prefix: str = "/dev"
 
     # --- 문서 텍스트 추출 (services/doctext.py) ---
     # 97-2003 바이너리 오피스 파일(.doc/.xls/.ppt)은 순수 파이썬으로 뽑을 수 없어

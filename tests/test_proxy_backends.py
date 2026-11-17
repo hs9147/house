@@ -49,11 +49,25 @@ def test_domain_for_is_shared_base_domain_by_default(fresh_settings):
     assert proxy.domain_for("shop", BuildProfile.development) == "apps.test"
 
 
-def test_path_prefix_for_org_and_legacy_and_dev(fresh_settings):
+def test_path_prefix_for_org_and_legacy_and_dev(monkeypatch, fresh_settings):
     assert proxy.path_prefix_for("acme", "shop", BuildProfile.release) == "/apps/acme/shop/"
-    # dev는 release의 자식이 아니라 **형제**다 — 두 경로가 서로소여야 규칙 순서가 무관해진다
-    assert proxy.path_prefix_for("acme", "shop", BuildProfile.development) == "/apps/acme/shop~dev/"
+    # 접두사는 프로필마다 — 기본 release /apps, development /dev(첫 조각부터 갈린다)
+    assert proxy.path_prefix_for("acme", "shop", BuildProfile.development) == "/dev/acme/shop/"
     assert proxy.path_prefix_for(None, "shop", BuildProfile.release) == "/apps/_/shop/"
+    # 둘을 같게 두면 dev는 release의 자식이 아니라 **형제**다 — 두 경로가 서로소여야 규칙 순서가 무관해진다
+    _same_prefix(monkeypatch)
+    assert proxy.path_prefix_for("acme", "shop", BuildProfile.development) == "/apps/acme/shop~dev/"
+    monkeypatch.setenv("PAAS_RELEASE_PATH_PREFIX", "/svc/")
+    monkeypatch.setenv("PAAS_DEV_PATH_PREFIX", "test")
+    get_settings.cache_clear()
+    assert proxy.path_prefix_for("acme", "shop", BuildProfile.release) == "/svc/acme/shop/"   # 슬래시를 고른다
+    assert proxy.path_prefix_for("acme", "shop", BuildProfile.development) == "/test/acme/shop/"
+
+
+def _same_prefix(monkeypatch):
+    """두 프로필이 같은 접두사(/apps)를 쓰는 구성 — development가 형제 이름(~dev)으로 갈린다."""
+    monkeypatch.setenv("PAAS_DEV_PATH_PREFIX", "/apps")
+    get_settings.cache_clear()
 
 
 def test_domain_and_path_prefix_unaffected_on_enterprise_tier(monkeypatch, fresh_settings):
@@ -570,6 +584,7 @@ def test_site_name_cannot_collide_between_a_project_and_another_projects_dev(fre
 def test_two_projects_that_used_to_collide_keep_separate_fragments(
         monkeypatch, tmp_path, fresh_settings):
     _iis_env(monkeypatch, tmp_path)
+    _same_prefix(monkeypatch)   # 같은 접두사일 때 shop의 dev(shop~dev)와 shop-dev의 release가 갈리는지
     for project, profile, port in (("shop", BuildProfile.development, 8002),
                                    ("shop-dev", BuildProfile.release, 9001)):
         IISProxy().configure(
@@ -595,9 +610,10 @@ def test_release_and_dev_are_disjoint_whatever_the_rule_order(
     예전에는 dev가 release 안에 있어서(/apps/_/shop/ ⊃ /apps/_/shop/dev/) 어느 규칙이
     먼저 놓이느냐가 라우팅을 정했고, 그 순서는 조각 파일 정렬이 정했다 — 눈에 안 보이는
     성질이었고 실제로 뒤집혀 있어서 dev 요청이 전부 release로 갔다. 형제가 되면 어느
-    패턴도 상대의 URL에 매칭되지 않으므로 순서를 물을 필요가 없다.
+    패턴도 상대의 URL에 매칭되지 않으므로 순서를 물을 필요가 없다(같은 접두사일 때 — 기본은 접두사가 다르다).
     """
     _iis_env(monkeypatch, tmp_path)
+    _same_prefix(monkeypatch)
     for profile, port in ((BuildProfile.release, 8001), (BuildProfile.development, 8002)):
         IISProxy().configure(
             "shop", profile, "apps.test", proxy.path_prefix_for(None, "shop", profile),
@@ -635,3 +651,16 @@ def test_dev_suffix_is_not_a_regex_metacharacter(fresh_settings):
     assert re.match(f"^{prefix}/(.*)", f"{prefix}/x").group(1) == "x"
     # 프로젝트 이름에 못 쓰는 문자여야 site_name도 경로도 충돌하지 않는다
     assert not re.match(r"^[a-z0-9][a-z0-9-]{1,40}$", DEV_SUFFIX)
+
+
+def test_dev_under_its_own_prefix_routes_apart_from_release(monkeypatch, tmp_path, fresh_settings):
+    """기본 구성 — release /apps/…, development /dev/… 두 접두사가 첫 조각부터 갈려 서로의 요청을 받지 않는다."""
+    _iis_env(monkeypatch, tmp_path)
+    for profile, port in ((BuildProfile.release, 8001), (BuildProfile.development, 8002)):
+        IISProxy().configure(
+            "shop", profile, "apps.test", proxy.path_prefix_for(None, "shop", profile),
+            Endpoint(host="127.0.0.1", port=port), [])
+    rules = _composed_rules(tmp_path)
+    for order in (rules, list(reversed(rules))):
+        assert _route(order, "apps/_/shop/index.html") == "http://127.0.0.1:8001/index.html"
+        assert _route(order, "dev/_/shop/index.html") == "http://127.0.0.1:8002/index.html"

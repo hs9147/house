@@ -91,6 +91,9 @@ def health():
         "features": sorted(enabled_features()),
         "gitea_url": settings.gitea_url or None,
         "base_domain": settings.base_domain,
+        # 배포된 앱의 공개 경로 접두사(프로필마다) — 콘솔이 앱 주소를 만들 때 쓴다(services/proxy.path_prefix_for).
+        # dev_suffix는 두 접두사가 같을 때만 붙는 형제 이름(~dev)이다.
+        "app_paths": _app_paths(),
         # 배포된 앱 주소를 만들 때 쓸 스킴. base_domain은 호스트만이라 스킴 정보가 없어
         # 콘솔이 https로 박아 두고 있었다 — 80포트만 여는 구성에서는 죽은 링크가 된다.
         # 공개 주소가 설정돼 있으면 그 스킴이 정답이고, 없으면 None(콘솔이 자기 자신이
@@ -380,6 +383,13 @@ def approve_user_account(
     db.commit()
     audit.record(db, admin.name, "user.approve", user.email, {})
     return _build_user_account_out(db, user)
+
+
+def _app_paths() -> dict:
+    from ..services import proxy  # noqa: PLC0415
+
+    release, dev = proxy.path_bases()
+    return {"release": release, "development": dev, "dev_suffix": proxy.DEV_SUFFIX if release == dev else ""}
 
 
 def _sync_gitea_membership(db: Session, actor: str, user: UserAccount, org: Organization, member: bool) -> None:

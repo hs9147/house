@@ -156,7 +156,7 @@ def test_plan_artifact_only_push_does_not_deploy():
     assert _push(c, unknown).json()["triggered"] == ["hooked"]
 
 
-def _set_latest_deployment(project_name: str, sha: str, status: str):
+def _set_latest_deployment(project_name: str, sha: str, status: str, profile: str = "development"):
     """이 프로젝트의 "최신" 배포 레코드를 직접 심어(웹훅 재전달 중복 스킵 검증용)."""
     from sqlalchemy import select as sa_select
 
@@ -168,7 +168,7 @@ def _set_latest_deployment(project_name: str, sha: str, status: str):
             sa_select(Project).where(Project.name == project_name)
         ).scalar_one()
         db.add(Deployment(
-            project_id=project.id, git_sha=sha, image_tag="", profile="release",
+            project_id=project.id, git_sha=sha, image_tag="", profile=profile,
             status=DeploymentStatus(status),
         ))
         db.commit()
@@ -188,7 +188,7 @@ def test_webhook_redelivery_of_already_running_commit_is_skipped():
             "commits": [{"modified": ["src/app.py"], "added": [], "removed": []}]}
     body = _push(c, push).json()
     assert body["triggered"] == []
-    assert body["skipped_duplicate"] == ["redelivered"]
+    assert body["skipped_duplicate"] == ["redelivered:development"]   # 자동배포는 기본 development
 
 
 def test_webhook_redelivery_while_still_building_is_skipped():
@@ -205,7 +205,7 @@ def test_webhook_redelivery_while_still_building_is_skipped():
             "commits": [{"modified": ["src/app.py"], "added": [], "removed": []}]}
     body = _push(c, push).json()
     assert body["triggered"] == []
-    assert body["skipped_duplicate"] == ["still-building"]
+    assert body["skipped_duplicate"] == ["still-building:development"]
 
 
 def test_webhook_still_triggers_for_a_new_commit():
@@ -329,3 +329,35 @@ def test_push_that_edits_the_tasks_doc_syncs_task_bodies(monkeypatch):
         {"modified": ["docs/agent-planning/05-작업지시.md"], "added": [], "removed": []}]}
     assert _push(c, tasks_doc).json()["skipped"] == "plan artifacts only"
     assert len(calls) == 1
+
+
+def test_auto_deploy_follows_the_per_profile_switch(monkeypatch):
+    """자동배포는 프로필마다 켜고 끈다 — 기본은 development 켬, release 끔. 켜진 프로필만 push로 다시 배포된다."""
+    from app.api import webhooks
+
+    fired: list[str] = []
+    monkeypatch.setattr(webhooks, "_deploy_task", lambda project_id, profile=None: fired.append(profile.value))
+    monkeypatch.setattr(webhooks, "_compliance_task", lambda project_id: None)
+    c = _client()
+    made = c.post("/paas/api/v1/projects", json={
+        "name": "auto-switch", "type": "react", "git_url": "https://git.example.com/o/auto-switch",
+    }, headers=ADMIN).json()
+    assert (made["auto_deploy_development"], made["auto_deploy_release"]) == (True, False)
+    repo = {"clone_url": "https://git.example.com/o/auto-switch.git"}
+    push = {"ref": "refs/heads/main", "repository": repo,
+            "commits": [{"modified": ["src/app.py"], "added": [], "removed": []}]}
+    assert _push(c, push).json()["triggered"] == ["auto-switch"] and fired == ["development"]
+
+    pid = made["id"]
+    out = c.put(f"/paas/api/v1/projects/{pid}/auto-deploy", json={"profile": "release", "enabled": True},
+                headers=ADMIN).json()
+    assert out["auto_deploy_release"] is True
+    c.put(f"/paas/api/v1/projects/{pid}/auto-deploy", json={"profile": "development", "enabled": False},
+          headers=ADMIN)
+    fired.clear()
+    _push(c, push)
+    assert fired == ["release"]
+    c.put(f"/paas/api/v1/projects/{pid}/auto-deploy", json={"profile": "release", "enabled": False},
+          headers=ADMIN)
+    fired.clear()
+    assert _push(c, push).json()["triggered"] == [] and fired == []

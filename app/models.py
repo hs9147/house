@@ -98,10 +98,17 @@ class Project(Base):
     health_check_path: Mapped[str] = mapped_column(String(255), default="/")
     memory_limit: Mapped[str | None] = mapped_column(String(16), nullable=True)
     cpu_limit: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # 웹훅 자동 배포 시 사용할 기본 프로필
+    # 수동 배포에서 프로필을 고르지 않았을 때의 기본 프로필
     default_profile: Mapped[BuildProfile] = mapped_column(
         Enum(BuildProfile), default=BuildProfile.release
     )
+    # 자동배포 — 기본 브랜치에 push·merge가 들어오면 웹훅이 그 프로필을 다시 배포한다(api/webhooks.git_push).
+    # 기본: development는 켬(개발본은 늘 최신을 따른다), release는 끔(운영본은 사람이 배포한다).
+    auto_deploy_release: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_deploy_development: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    def auto_deploy(self, profile: "BuildProfile") -> bool:
+        return bool(self.auto_deploy_release if profile == BuildProfile.release else self.auto_deploy_development)
     # LLM 전용 확장 필드 (vLLM 옵션 등)
     llm_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 리포에서 감지한 **배포 단위 목록**(services/structure.py). type 하나로는 백엔드+
