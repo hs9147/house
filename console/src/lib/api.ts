@@ -22,6 +22,7 @@ import type {
   EnvVarRow,
   LlmProviderOut,
   InternalStorageUsage,
+  AdminInfo,
   LlmTelemetry,
   LlmTurnDetail,
   LlmTurnList,
@@ -398,6 +399,7 @@ export const api = {
   status: () => request<StatusSnapshot>('GET', '/status'),
   tempJobs: () => request<{ tasks: TempJob[] }>('GET', '/temp-jobs'),
   internalStorage: () => request<InternalStorageUsage>('GET', '/system/internal-storage'),
+  adminInfo: () => request<AdminInfo>('GET', '/system/admin-info'),
   runTempJob: (id: string) =>
     request<{ job: string; status: string; ms: number; detail: Record<string, unknown> }>('POST', `/temp-jobs/${id}/run`),
   audit: (limit = 100) => request<AuditRow[]>('GET', '/audit', undefined, { limit }),

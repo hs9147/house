@@ -361,6 +361,9 @@ class Settings(BaseSettings):
     mail_max_per_hour: int = 30         # 보내는 사람(키·토큰)마다 한 시간에
     mail_max_recipients: int = 20       # 받는 사람 + 참조
     mail_max_bytes: int = 20_000_000    # 본문 + 첨부(중계 상한은 약 42MB)
+    # 사용자 등록 요청을 알릴 주소(쉼표) — 승인된 관리자 계정에 더해 보낸다. 관리자가 계정이 아니라 API 키뿐인
+    # 설치본(bootstrap-admin)은 여기를 채워야 알림을 받는다. 메일 발송이 설정돼 있어야 보낸다(smtp_host·mail_from).
+    register_notify_to: str = ""
 
     # --- 웹 검색(선택, services/websearch.py · MCP /mcp/web) ---
     # 출처는 키를 넣은 것만 켜진다. Brave 키 하나로 전 세계·일본이 함께 켜진다(야후 재팬은 공식 API가 없다).

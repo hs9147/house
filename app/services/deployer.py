@@ -405,6 +405,8 @@ def deploy_sync(
         else:
             record.git_sha = sha
         db.commit()
+        # 프록시가 접두사를 남겨 넘길지 — 자기 공개 경로(base) 아래에서만 받는 dev 서버일 때만(아래 configure)
+        keep_prefix = False
         try:
             if get_settings().runtime_backend == "windows_service":
                 # windows_service 런타임은 이미지 대신 start.cmd를 nssm으로 Windows Service에
@@ -426,6 +428,8 @@ def deploy_sync(
                         "— 프로젝트의 source_subdir를 확인하세요."
                     )
                 write_start_script(rundir, project, profile=profile)
+                # start.cmd가 package.json이 있을 때만 dev 서버(--base %PAAS_BASE_PATH%)로 띄운다 — 같은 판정이다
+                keep_prefix = profile == BuildProfile.development and (rundir / "package.json").is_file()
                 # npm/pip install을 여기서 먼저 끝낸다(build_image의 docker build와 대응
                 # 되는 명시적 build 단계) — runtime.start()의 헬스체크 창 안에서 설치까지
                 # 겸하면, 설치가 느릴 때 원인이 "헬스체크 실패"로만 보이고 배포 상태도
@@ -474,11 +478,12 @@ def deploy_sync(
                 proxy.configure(
                     project.name, profile, spec.domain, path_prefix, endpoint,
                     redirects_for(db, project),
-                    # dev는 빌드본이 아니라 dev 서버가 소스를 그대로 서빙한다. dev 서버는
+                    # node의 dev는 빌드본이 아니라 dev 서버가 소스를 그대로 서빙한다. dev 서버는
                     # 자기 공개 경로(base)가 붙은 요청만 받으므로 접두사를 벗기면 안 된다
-                    # (/@vite/client 같은 요청이 어긋난다). release는 반대로 벗겨야 한다 —
-                    # 빌드된 HTML에 전체 경로가 박혀 있고 서버는 루트에서 서빙한다.
-                    strip_prefix=profile != BuildProfile.development,
+                    # (/@vite/client 같은 요청이 어긋난다). 그 밖은 벗긴다 — release는 빌드된 HTML에
+                    # 전체 경로가 박혀 있고 서버는 루트에서 서빙한다. 파이썬·streamlit은 dev여도 루트에서
+                    # 받는다(예전에는 dev면 모두 남겨서 Flask 앱이 /dev/조직/앱/api/health를 받아 404였다).
+                    strip_prefix=not keep_prefix,
                 )
                 record.host_port = endpoint.port
 

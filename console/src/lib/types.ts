@@ -830,6 +830,25 @@ export interface StatusSnapshot {
 }
 
 /** 임시 작업 — 코드에 둔 운영 스크립트(services/tempjobs). 현황은 스케줄러 job, 이력은 한 일이 있을 때만. */
+/** 대시보드 「관리자 정보」 — 관리자 계정·관리자 키(이름만)와 메일 발송 설정(GET /system/admin-info). */
+export interface AdminInfo {
+  admins: { email: string; name: string; approved: boolean; created_at: string | null }[];
+  admin_keys: { name: string; created_at: string | null }[];
+  pending_users: number;
+  mail: {
+    configured: boolean;
+    smtp_host: string;
+    smtp_port: number;
+    smtp_starttls: boolean;
+    mail_from: string;
+    allowed_domains: string[];
+    max_per_hour: number;
+    max_recipients: number;
+    max_bytes: number;
+    register_notify_to: string[];
+  };
+}
+
 /** 대시보드 「내부 저장소」 — PAAS_STORAGE_ROOT를 플랫폼이 실제로 쓰는 것(.infosource)과 그 밖의 맨 위 항목. */
 export interface InternalStorageUsage {
   root: string;

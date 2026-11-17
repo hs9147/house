@@ -4,7 +4,7 @@ import Modal from '../components/Modal';
 import { api } from '../lib/api';
 import { fmtBytes, fmtDate } from '../lib/format';
 import { useApi } from '../lib/hooks';
-import type { ScheduledJobRow, StatusSnapshot, TopConsumer } from '../lib/types';
+import type { AdminInfo, ScheduledJobRow, StatusSnapshot, TopConsumer } from '../lib/types';
 
 function Gauge({ label, percent, detail }: { label: string; percent: number; detail?: string }) {
   const cls = percent >= 90 ? 'bad' : percent >= 70 ? 'warn' : '';
@@ -98,6 +98,7 @@ export default function Dashboard() {
   const state = useApi(() => api.status());
   const [tempOpen, setTempOpen] = useState(false);
   const [storageOpen, setStorageOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
 
   return (
     <>
@@ -105,6 +106,7 @@ export default function Dashboard() {
         <div className="row" style={{ marginBottom: 12 }}>
           <h2 style={{ margin: 0 }}>시스템 상태</h2>
           <div className="spacer" />
+          <button className="secondary small" onClick={() => setAdminOpen(true)}>관리자 정보</button>{' '}
           <button className="secondary small" onClick={() => setStorageOpen(true)}>내부 저장소</button>{' '}
           <button className="secondary small" onClick={() => setTempOpen(true)}>임시 작업</button>{' '}
           <button className="secondary small" onClick={state.reload}>
@@ -183,7 +185,74 @@ export default function Dashboard() {
       <SchedulerPanel />
       {tempOpen && <TempJobsModal onClose={() => setTempOpen(false)} />}
       {storageOpen && <InternalStorageModal onClose={() => setStorageOpen(false)} />}
+      {adminOpen && <AdminInfoModal onClose={() => setAdminOpen(false)} />}
     </>
+  );
+}
+
+/** 관리자 정보 — 관리자 계정·관리자 API 키(이름만)와 메일 발송 설정(가입 알림을 받는 사람 포함). */
+function AdminInfoModal({ onClose }: { onClose: () => void }) {
+  const state = useApi(() => api.adminInfo());
+  return (
+    <Modal title="관리자 정보" onClose={onClose} wide>
+      <Async state={state}>
+        {(info: AdminInfo) => (
+          <>
+            <h4 style={{ margin: '0 0 4px' }}>
+              관리자 계정 — {info.admins.length}명
+              {info.pending_users > 0 && <span className="status warn" style={{ marginLeft: 8 }}>승인 대기 {info.pending_users}명</span>}
+            </h4>
+            {info.admins.length === 0 ? <p className="mutedtext">없습니다 — 관리자 API 키로만 운영 중입니다.</p> : (
+              <table style={{ fontSize: 12 }}>
+                <thead><tr><th>이름</th><th>이메일</th><th>상태</th><th>등록</th></tr></thead>
+                <tbody>
+                  {info.admins.map((a) => (
+                    <tr key={a.email}>
+                      <td>{a.name || '-'}</td>
+                      <td className="mono">{a.email}</td>
+                      <td>{a.approved ? '승인' : <span className="status warn">승인 대기</span>}</td>
+                      <td>{a.created_at ? fmtDate(a.created_at) : '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <h4 style={{ margin: '12px 0 4px' }}>관리자 API 키 — {info.admin_keys.length}개</h4>
+            <p style={{ fontSize: 12, margin: 0 }}>
+              {info.admin_keys.length === 0 ? <span className="mutedtext">없습니다.</span>
+                : info.admin_keys.map((k) => (
+                  <span key={k.name} style={{ marginRight: 12 }}>
+                    <b className="mono">{k.name}</b>{k.created_at && <span className="mutedtext"> · {fmtDate(k.created_at)}</span>}
+                  </span>
+                ))}
+            </p>
+            <h4 style={{ margin: '12px 0 4px' }}>
+              메일 발송{' '}
+              <span className={`status ${info.mail.configured ? 'ok' : 'bad'}`}>{info.mail.configured ? '켜짐' : '꺼짐'}</span>
+            </h4>
+            {!info.mail.configured && (
+              <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 4px' }}>
+                PAAS_SMTP_HOST와 PAAS_MAIL_FROM이 둘 다 있어야 켜집니다 — 꺼져 있으면 가입 알림도 보내지 않습니다.
+              </p>
+            )}
+            <table style={{ fontSize: 12 }}>
+              <tbody>
+                <tr><th style={{ width: 160 }}>SMTP 중계</th>
+                  <td className="mono">{info.mail.smtp_host ? `${info.mail.smtp_host}:${info.mail.smtp_port}` : '-'}
+                    {info.mail.smtp_host && (info.mail.smtp_starttls ? ' · STARTTLS' : ' · 평문')}</td></tr>
+                <tr><th>보내는 주소</th><td className="mono">{info.mail.mail_from || '-'}</td></tr>
+                <tr><th>받을 수 있는 도메인</th><td className="mono">{info.mail.allowed_domains.join(', ') || '-'}</td></tr>
+                <tr><th>한도</th>
+                  <td>한 시간에 {info.mail.max_per_hour}통 · 받는 사람 {info.mail.max_recipients}명 · {fmtBytes(info.mail.max_bytes)}</td></tr>
+                <tr><th>가입 알림 받는 사람</th>
+                  <td className="mono">{info.mail.register_notify_to.join(', ')
+                    || <span className="mutedtext">없습니다(관리자 계정 또는 PAAS_REGISTER_NOTIFY_TO)</span>}</td></tr>
+              </tbody>
+            </table>
+          </>
+        )}
+      </Async>
+    </Modal>
   );
 }
 

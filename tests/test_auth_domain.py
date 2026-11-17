@@ -301,3 +301,81 @@ def test_approval_endpoints_are_admin_only(monkeypatch):
                        headers=member).status_code == 403
     assert client.delete(f"/paas/api/v1/auth/accounts/{account_id}",
                          headers=member).status_code == 403
+
+
+def test_registration_request_is_mailed_to_admins(monkeypatch):
+    """가입 요청이 들어오면 승인된 관리자 계정과 PAAS_REGISTER_NOTIFY_TO에 메일로 알린다(메일 발송이 설정돼 있을 때).
+    본인에게는 보내지 않고, 승인 대기인지 자동 승인됐는지를 적는다. 메일 설정이 없으면 보내지 않는다."""
+    import uuid
+
+    from fastapi.testclient import TestClient
+
+    from app.db import SessionLocal
+    from app.main import create_app
+    from app.models import AuditEvent, UserAccount
+    from app.security import hash_password
+    from app.services import mailer
+
+    monkeypatch.setenv("PAAS_ALLOWED_EMAIL_DOMAIN", "lge.com")
+    monkeypatch.setenv("PAAS_REGISTER_NOTIFY_TO", "ops@lge.com; boss@lge.com")
+    get_settings.cache_clear()
+    tag = uuid.uuid4().hex[:6]
+    c = TestClient(create_app())                     # 표를 먼저 만든다
+    with SessionLocal() as db:
+        db.add(UserAccount(email=f"admin-{tag}@lge.com", name="관리자", password_hash=hash_password("x"),
+                           is_approved=True, is_admin=True))
+        db.commit()
+    sent: list[dict] = []
+    monkeypatch.setattr(mailer, "configured", lambda: True)
+    monkeypatch.setattr(mailer, "send", lambda actor, to, subject, body, **kw: (
+        sent.append({"to": to, "subject": subject, "body": body}) or {"recipients": len(to)}))
+    from app.services import tempjobs
+    monkeypatch.setattr(tempjobs, "TASKS", {})       # 자동 승인 없이 — 승인 대기
+
+    email = f"new-{tag}@lge.com"
+    r = c.post("/paas/api/v1/auth/register", json={"email": email, "name": "새 사람", "password": "pw-1234"})
+    assert r.status_code == 201
+    [mail] = sent
+    assert f"admin-{tag}@lge.com" in mail["to"] and "ops@lge.com" in mail["to"] and "boss@lge.com" in mail["to"]
+    assert email not in mail["to"] and "새 사람" in mail["subject"]
+    assert email in mail["body"] and "승인 대기" in mail["body"] and "KST" in mail["body"]
+    with SessionLocal() as db:
+        event = db.query(AuditEvent).filter(AuditEvent.action == "user.register.notify",
+                                            AuditEvent.target == email).one()
+        assert event.detail["sent"] is True
+
+    monkeypatch.setattr(mailer, "configured", lambda: False)
+    sent.clear()
+    c.post("/paas/api/v1/auth/register", json={"email": f"other-{tag}@lge.com", "name": "x", "password": "pw-1234"})
+    assert sent == []
+
+
+def test_admin_info_lists_admins_and_mail_settings(monkeypatch):
+    """대시보드 「관리자 정보」 — 관리자 계정·관리자 키 이름과 메일 설정(가입 알림 수신자 포함). 관리자만 본다."""
+    import uuid
+
+    from fastapi.testclient import TestClient
+
+    from app.db import SessionLocal
+    from app.main import create_app
+    from app.models import UserAccount
+    from app.security import hash_password
+
+    monkeypatch.setenv("PAAS_SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("PAAS_MAIL_FROM", "GPAX <noreply@lge.com>")
+    monkeypatch.setenv("PAAS_REGISTER_NOTIFY_TO", "ops@lge.com")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    tag = uuid.uuid4().hex[:6]
+    with SessionLocal() as db:
+        db.add(UserAccount(email=f"boss-{tag}@lge.com", name="대장", password_hash=hash_password("x"),
+                           is_approved=True, is_admin=True))
+        db.commit()
+    r = c.get("/paas/api/v1/system/admin-info", headers=ADMIN)
+    assert r.status_code == 200
+    info = r.json()
+    assert any(a["email"] == f"boss-{tag}@lge.com" and a["name"] == "대장" for a in info["admins"])
+    assert all(set(k) == {"name", "created_at"} for k in info["admin_keys"])   # 키 값·해시는 내보내지 않는다
+    mail = info["mail"]
+    assert mail["configured"] is True and mail["smtp_host"] == "smtp.example.com"
+    assert f"boss-{tag}@lge.com" in mail["register_notify_to"] and "ops@lge.com" in mail["register_notify_to"]

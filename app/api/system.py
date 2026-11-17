@@ -3,7 +3,7 @@ from datetime import timedelta
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, WebSocket
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response, WebSocket
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -137,6 +137,35 @@ def internal_storage(db: Session = Depends(get_db), _: ApiKey = Depends(require_
     return storage_service.internal_usage(db)
 
 
+@router.get("/system/admin-info")
+def admin_info(db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """관리자 정보 — 관리자 계정·관리자 API 키(이름만)와 메일 발송 설정. 대시보드 「관리자 정보」(관리자)."""
+    from ..services import mailer  # noqa: PLC0415
+
+    settings = get_settings()
+    users = db.execute(select(UserAccount).where(UserAccount.is_admin.is_(True))
+                       .order_by(UserAccount.email)).scalars()
+    keys = db.execute(select(ApiKey).where(ApiKey.is_admin.is_(True)).order_by(ApiKey.name)).scalars()
+    pending = db.query(UserAccount).filter(UserAccount.is_approved.is_(False)).count()
+    return {
+        "admins": [{"email": u.email, "name": u.name, "approved": u.is_approved,
+                    "created_at": u.created_at.isoformat() if u.created_at else None} for u in users],
+        "admin_keys": [{"name": k.name, "created_at": k.created_at.isoformat() if k.created_at else None}
+                       for k in keys],
+        "pending_users": pending,
+        "mail": {
+            "configured": mailer.configured(),
+            "smtp_host": settings.smtp_host, "smtp_port": settings.smtp_port,
+            "smtp_starttls": settings.smtp_starttls, "mail_from": settings.mail_from,
+            "allowed_domains": mailer.allowed_domains(),
+            "max_per_hour": settings.mail_max_per_hour, "max_recipients": settings.mail_max_recipients,
+            "max_bytes": settings.mail_max_bytes,
+            # 가입 알림을 받는 사람 — 승인된 관리자 계정 + PAAS_REGISTER_NOTIFY_TO
+            "register_notify_to": _register_notify_recipients(db),
+        },
+    }
+
+
 @router.get("/temp-jobs")
 def list_temp_jobs(db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
     """임시 작업 — 작업마다 설명·현황·최근 이력(관리자). 스케줄러 job이 아직 없으면 만든다."""
@@ -219,6 +248,7 @@ def get_current_user_profile(
 @router.post("/auth/register", response_model=UserRegisterOut, status_code=201)
 def register_user_account(
     body: UserRegisterRequest,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     settings = get_settings()
@@ -251,6 +281,8 @@ def register_user_account(
     # 임시 작업(사용자 등록 즉시 승인 등) — 켜져 있으면 바로 돈다(services/tempjobs)
     tempjobs.on_event(db, "user.register")
     user = db.execute(select(UserAccount).where(UserAccount.email == email)).scalar_one()
+    # 관리자에게 알린다 — 가입 응답을 늦추지 않게 응답 뒤에(메일 서버가 느려도 가입은 끝난다)
+    background.add_task(_notify_registration, email, body.name.strip(), user.is_approved)
     if user.is_approved:
         return UserRegisterOut(name=body.name, email=email, is_approved=True, is_admin=False)
 
@@ -383,6 +415,46 @@ def approve_user_account(
     db.commit()
     audit.record(db, admin.name, "user.approve", user.email, {})
     return _build_user_account_out(db, user)
+
+
+def _notify_registration(email: str, name: str, approved: bool) -> None:
+    """사용자 등록 요청을 관리자에게 메일로 알린다 — 승인된 관리자 계정과 PAAS_REGISTER_NOTIFY_TO. 메일 발송이
+    설정되지 않았거나 받을 사람이 없으면 보내지 않는다. 결과(받은 사람 수·실패 사유)는 감사에 남긴다."""
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+
+    from ..db import SessionLocal  # noqa: PLC0415
+    from ..services import mailer  # noqa: PLC0415
+
+    if not mailer.configured():
+        return
+    settings = get_settings()
+    with SessionLocal() as db:
+        to = [a for a in _register_notify_recipients(db) if a != email]
+        if not to:
+            audit.record(db, "register-notify", "user.register.notify", email,
+                         {"sent": False, "reason": "받을 관리자가 없습니다(관리자 계정·PAAS_REGISTER_NOTIFY_TO)"})
+            return
+        kst = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M KST")
+        state = "임시 작업이 자동 승인했습니다" if approved else "승인 대기 중입니다 — 계정 관리에서 승인하세요"
+        console = (settings.platform_public_url.rstrip("/") + "/console/#/accounts") \
+            if settings.platform_public_url else "콘솔 「계정 관리」"
+        body = (f"GPAX에 새 사용자 등록 요청이 들어왔습니다.\n\n"
+                f"- 이름: {name or '(없음)'}\n- 이메일: {email}\n- 요청 시각: {kst}\n- 상태: {state}\n\n"
+                f"계정 관리: {console}\n")
+        try:
+            result = mailer.send("GPAX 가입 알림", to, f"[GPAX] 사용자 등록 요청 — {name or email}", body)
+            audit.record(db, "register-notify", "user.register.notify", email,
+                         {"sent": True, "recipients": result["recipients"], "approved": approved})
+        except mailer.MailError as e:
+            audit.record(db, "register-notify", "user.register.notify", email, {"sent": False, "error": str(e)[:300]})
+
+
+def _register_notify_recipients(db: Session) -> list[str]:
+    """가입 알림을 받는 사람 — 승인된 관리자 계정과 PAAS_REGISTER_NOTIFY_TO(쉼표·세미콜론), 겹치면 한 번."""
+    admins = [u.email for u in db.execute(select(UserAccount).where(
+        UserAccount.is_admin.is_(True), UserAccount.is_approved.is_(True))).scalars()]
+    extra = [a.strip() for a in get_settings().register_notify_to.replace(";", ",").split(",") if a.strip()]
+    return list(dict.fromkeys([*admins, *extra]))
 
 
 def _app_paths() -> dict:

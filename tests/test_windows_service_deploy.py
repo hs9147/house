@@ -200,3 +200,38 @@ def test_windows_service_deploy_regenerates_start_script_unconditionally(
         assert (workdir / START_SCRIPT_NAME).read_text(encoding="utf-8") != "@echo custom start\n"
     finally:
         db.close()
+
+
+
+@pytest.mark.parametrize("marker, profile, strip", [
+    ("requirements.txt", BuildProfile.development, True),   # 파이썬 dev — 앱은 루트에서 받는다
+    ("package.json", BuildProfile.development, False),      # node dev 서버 — --base 아래에서만 받는다
+    ("package.json", BuildProfile.release, True),           # 빌드본은 루트에서 서빙한다
+])
+def test_dev_keeps_the_prefix_only_for_a_node_dev_server(monkeypatch, fresh_settings, tmp_path,
+                                                         marker, profile, strip):
+    """프록시가 접두사를 남겨 넘기는 것은 start.cmd가 dev 서버(--base)로 띄울 때뿐이다 — dev의 파이썬 앱이
+    /dev/조직/앱/api/health를 그대로 받아 404가 나던 회귀."""
+    monkeypatch.setenv("PAAS_RUNTIME_BACKEND", "windows_service")
+    get_settings.cache_clear()
+    name = f"strip-{marker.split('.')[0]}-{profile.value}"
+    workdir = tmp_path / name
+    workdir.mkdir()
+    (workdir / marker).write_text("{}\n" if marker == "package.json" else "flask\n", encoding="utf-8")
+    monkeypatch.setattr(deployer, "checkout", lambda project, git_sha=None, **kw: (workdir, "e" * 40))
+    monkeypatch.setattr(deployer, "install_dependencies", lambda *a, **kw: None)
+    monkeypatch.setattr(deployer, "get_runtime", lambda: _FakeRuntime())
+    seen = {}
+    monkeypatch.setattr(deployer.proxy, "configure", lambda *a, **kw: seen.update(kw))
+
+    db = SessionLocal()
+    try:
+        project_type = ProjectType.react if marker == "package.json" else ProjectType.python
+        project = Project(name=name, type=project_type, git_url="https://git.example.com/x")
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+        deployer.deploy_sync(db, project, profile)
+        assert seen["strip_prefix"] is strip
+    finally:
+        db.close()
