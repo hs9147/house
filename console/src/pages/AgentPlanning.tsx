@@ -7,7 +7,7 @@ import ZipDownloadButton from '../components/ZipDownloadButton';
 import { ApiError, api } from '../lib/api';
 import { getEmail } from '../lib/auth';
 import { fmtDate } from '../lib/format';
-import { renderMarkdown } from '../lib/markdown';
+import { renderMarkdown, stripC4Blocks } from '../lib/markdown';
 import { useApi } from '../lib/hooks';
 import type {
   BuildTaskOut, BuildTaskSync, ComplianceOut, PlanArtifactContent, PlanArtifactOut,
@@ -1038,14 +1038,35 @@ export default function AgentPlanning() {
                     {label}
                   </button>
                 ))}
+                {/* 확정은 보기·편집 어느 쪽에서든 — 고친 것을 바로 확정하도록 편집 바로 옆에 둔다 */}
+                <button
+                  className={activeStage === TASK_STAGE && taskStep !== 'confirm' ? 'small secondary' : 'small primary'}
+                  onClick={confirm}
+                  disabled={busy || !draft.trim()}
+                >
+                  ✅ 이 단계 확정 (Gitea 커밋)
+                </button>
+                {/* 작업 지시는 대화가 아니라 이 버튼이 문서를 만든다 — 만드는 버튼과
+                    확정하는 버튼이 같은 줄에 있어야 순서가 보인다. */}
+                {gitResult?.git_action && (
+                  <span className="mutedtext" style={{ fontSize: 12 }}>
+                    {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
+                    {gitResult.pull_request_url && (
+                      <> · <a href={gitResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
+                    )}
+                    {gitResult.git_detail && <> · {gitResult.git_detail}</>}
+                  </span>
+                )}
               </div>
               {artifactView === 'view' ? (
                 draft.trim() ? (
                   // 저장소 미리보기와 같은 뷰어(lib/markdown — 먼저 이스케이프하고 서식을 입힌다)
                   <div className="report-md"
-                    style={{ border: '1px solid var(--border)', borderRadius: 6, padding: '8px 12px',
-                      maxHeight: '70vh', overflow: 'auto' }}
-                    dangerouslySetInnerHTML={{ __html: renderMarkdown(draft) }} />
+                    // 펼친 채로 — 안쪽 스크롤 없이 문서 끝까지 보인다
+                    style={{ border: '1px solid var(--border)', borderRadius: 6, padding: '8px 12px' }}
+                    // C4 다이어그램 블록은 오른쪽 「단계별 시각화」가 그린다 — 본문에서는 빼고 한 줄로 알린다
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(stripC4Blocks(
+                      draft, '> C4 다이어그램은 오른쪽 「단계별 시각화」에 있습니다.').text) }} />
                 ) : (
                   <p className="mutedtext" style={{ fontSize: 12 }}>
                     {activeStage === TASK_STAGE
@@ -1064,26 +1085,6 @@ export default function AgentPlanning() {
                     : '생성 요청 결과가 여기에 들어옵니다. 직접 편집해도 됩니다.'}
                 />
               )}
-              <div className="row" style={{ marginTop: 8 }}>
-                <button
-                  className={activeStage === TASK_STAGE && taskStep !== 'confirm' ? 'secondary' : 'primary'}
-                  onClick={confirm}
-                  disabled={busy || !draft.trim()}
-                >
-                  ✅ 이 단계 확정 (Gitea 커밋)
-                </button>
-                {/* 작업 지시는 대화가 아니라 이 버튼이 문서를 만든다 — 만드는 버튼과
-                    확정하는 버튼이 같은 줄에 있어야 순서가 보인다. */}
-                {gitResult?.git_action && (
-                  <span className="mutedtext" style={{ fontSize: 12 }}>
-                    {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
-                    {gitResult.pull_request_url && (
-                      <> · <a href={gitResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
-                    )}
-                    {gitResult.git_detail && <> · {gitResult.git_detail}</>}
-                  </span>
-                )}
-              </div>
             </div>
           </div>
 

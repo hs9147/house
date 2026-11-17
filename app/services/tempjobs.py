@@ -29,44 +29,56 @@ class TempJob:
     events: tuple[str, ...] = field(default=())
 
 
-# --- 사용자 등록 즉시 승인 ---
+# --- 사용자 등록 즉시 승인 · 소속 없는 계정에 gp3 ---
+# 둘로 나눈다 — 승인은 그대로 두고 부서만 자동으로 넣거나, 그 반대로 쓸 수 있게(대시보드에서 따로 켜고 끈다).
 
-AUTO_APPROVE_ORG = "gp3"
+DEFAULT_ORG = "gp3"
 
 
 def _auto_approve(db: Session) -> dict:
-    """승인 대기 계정을 승인하고 조직 gp3을 붙인다(소속 조직이 없으면 기본 조직으로). 조직이 없으면 승인만 하고
-    그 사실을 남긴다 — 조직은 관리자가 만든다(Gitea 조직이 함께 생기는 일이라 스크립트가 만들지 않는다)."""
-    from ..api.system import _sync_gitea_membership  # noqa: PLC0415 — 조직 소속을 Gitea 팀에도(화면의 배지와 같다)
-
+    """승인 대기 계정을 승인한다(부서는 건드리지 않는다 — auto_org)."""
     pending = list(db.execute(select(UserAccount).where(UserAccount.is_approved.is_(False))).scalars())
     if not pending:
         return {"done": 0}
-    org = db.execute(select(Organization).where(Organization.name == AUTO_APPROVE_ORG)).scalar_one_or_none()
-    approved, joined = [], []
     for user in pending:
         user.is_approved = True
-        approved.append(user.email)
-        if org is not None and org not in user.organizations:
-            user.organizations.append(org)
-            joined.append(user)
-        if org is not None and user.organization_id is None:
+    db.commit()
+    return {"done": len(pending), "approved": [u.email for u in pending]}
+
+
+def _auto_org(db: Session) -> dict:
+    """소속 조직(부서)이 하나도 없는 계정에 조직 gp3을 붙이고 기본 조직으로 둔다(승인 여부와 무관 — 대기 계정도).
+    이미 다른 부서가 있는 계정에는 더하지 않는다. 조직이 없으면 아무것도 하지 않고 그 사실을 남긴다 — 조직은
+    관리자가 만든다(Gitea 조직이 함께 생기는 일이라 스크립트가 만들지 않는다)."""
+    from ..api.system import _sync_gitea_membership  # noqa: PLC0415 — 조직 소속을 Gitea 팀에도(화면의 배지와 같다)
+
+    orphans = [u for u in db.execute(select(UserAccount)).scalars() if not u.organizations]
+    if not orphans:
+        return {"done": 0}
+    org = db.execute(select(Organization).where(Organization.name == DEFAULT_ORG)).scalar_one_or_none()
+    if org is None:
+        # 이력은 남기지 않는다(done 0) — 1분마다 같은 말이 쌓인다. 현황(마지막 실행 결과)에는 보인다.
+        return {"done": 0, "waiting": len(orphans),
+                "note": f"조직 {DEFAULT_ORG}이 없어 부서를 넣지 못했습니다 — 조직을 만들면 다음 실행에 넣습니다"}
+    for user in orphans:
+        user.organizations.append(org)
+        if user.organization_id is None:
             user.organization_id = org.id
     db.commit()
-    for user in joined:
-        _sync_gitea_membership(db, "tempjob:auto_approve", user, org, member=True)
-    out = {"done": len(approved), "approved": approved,
-           "organization": AUTO_APPROVE_ORG if org is not None else None}
-    if org is None:
-        out["note"] = f"조직 {AUTO_APPROVE_ORG}이 없어 조직은 붙이지 못했습니다 — 조직을 만든 뒤 소속을 더하세요"
-    return out
+    for user in orphans:
+        _sync_gitea_membership(db, "tempjob:auto_org", user, org, member=True)
+    return {"done": len(orphans), "joined": [u.email for u in orphans], "organization": DEFAULT_ORG}
 
 
 TASKS: dict[str, TempJob] = {t.id: t for t in (
     TempJob(id="auto_approve", title="사용자 등록 즉시 승인",
-            description=f"가입 요청을 바로 승인하고 조직 {AUTO_APPROVE_ORG}을 붙인다(소속이 없으면 기본 조직으로). "
+            description="가입 요청을 바로 승인한다(부서는 「소속 없는 계정에 gp3」이 넣는다). "
                         "가입할 때 바로, 그리고 1분마다 남은 대기 계정을.",
             run=_auto_approve, events=("user.register",)),
+    TempJob(id="auto_org", title=f"소속 없는 계정에 {DEFAULT_ORG}",
+            description=f"부서(조직)가 하나도 없는 계정에 조직 {DEFAULT_ORG}을 붙이고 기본 조직으로 둔다 — 다른 부서가 "
+                        "있는 계정은 건드리지 않는다. 가입할 때 바로, 그리고 1분마다.",
+            run=_auto_org, events=("user.register",)),
 )}
 
 

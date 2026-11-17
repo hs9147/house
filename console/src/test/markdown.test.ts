@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseCsv, renderMarkdown } from '../lib/markdown';
+import { parseCsv, renderMarkdown, stripC4Blocks } from '../lib/markdown';
 
 // 보고서는 모델이 쓴 글이고, 메일 본문을 옮겨 올 수도 있다 — 서식보다 먼저 볼 것은
 // **HTML이 그대로 살아나지 않는가**다.
@@ -44,5 +44,20 @@ describe('parseCsv', () => {
       ['김, 철수', '말하길 "네"\n다음 줄'],
       ['b', '2'],
     ]);
+  });
+});
+
+describe('stripC4Blocks', () => {
+  const note = '> 오른쪽에 있습니다';
+  it('C4 mermaid 블록만 빼고 그 자리에 한 줄을 남긴다(연속한 블록은 한 줄)', () => {
+    const src = ['# 기획', '본문', '## C4 다이어그램', '```mermaid', 'C4Context', 'Person(u, "사용자")', '```',
+      '```mermaid', '', 'C4Container', '```', '```mermaid', 'flowchart LR', 'A-->B', '```', '```sql', 'select 1', '```'].join('\n');
+    const out = stripC4Blocks(src, note);
+    expect(out.removed).toBe(2);
+    expect(out.text.split('\n')).toEqual(['# 기획', '본문', '## C4 다이어그램', note,
+      '```mermaid', 'flowchart LR', 'A-->B', '```', '```sql', 'select 1', '```']);
+  });
+  it('C4 블록이 없으면 그대로', () => {
+    expect(stripC4Blocks('# 제목\n본문', note)).toEqual({ text: '# 제목\n본문', removed: 0 });
   });
 });

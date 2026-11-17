@@ -551,6 +551,35 @@ async def plan_session_branch(
     return PlanBranchOut(branch=session.branch, base=project.branch, unmerged=count)
 
 
+def _stage_text(project: Project, branch: str, path: str) -> str | None:
+    """확정 산출물 본문 — 세션 브랜치 → 원격 세션 브랜치 → 기본 브랜치(main) → 원격 기본 브랜치 → 워킹카피.
+
+    세션 브랜치는 병합(merge)하면 지운다 — 그 뒤 확정 문서는 기본 브랜치에 있다. 예전에는 작업 지시 생성이 세션
+    브랜치만 봐서, 병합한 세션에서 「확정 산출물 본문을 리포에서 읽지 못했습니다」로 실패했다. 어디에도 없으면 리포를
+    한 번 최신화해(checkout) 다시 본다 — 병합은 Gitea에서 일어나 서버의 리포 사본이 아직 받지 않았을 수 있다.
+    """
+    workdir = workspace.workdir_for(project)
+    refs = [r for r in (branch, f"origin/{branch}" if branch else "", project.branch,
+                        f"origin/{project.branch}" if project.branch else "") if r]
+
+    def look() -> str | None:
+        if not workdir.exists():
+            return None
+        return next((body for ref in dict.fromkeys(refs)
+                     if (body := workspace.read_file_at_ref(workdir, ref, path))), None)
+
+    found = look()
+    if found is None:
+        try:
+            checkout(project)
+        except Exception:  # noqa: BLE001 — 원격이 없어도 있는 것으로 읽는다
+            pass
+        found = look()
+    if found is None and workdir.exists():
+        found = workspace.read_context_files(workdir, [path]).get(path)
+    return found
+
+
 def _artifact_content(db: Session, project: Project, session: ChatSession,
                       stage: PlanStage) -> str | None:
     """단계 산출물 본문 — 세션 확정본이 없으면 리포의 표준 경로 문서를 그대로 쓴다.
@@ -559,21 +588,13 @@ def _artifact_content(db: Session, project: Project, session: ChatSession,
     (다른 세션·외부 개발도구가 남긴 문서) 그것이 이 단계의 현재 산출물이다.
     세션 브랜치 → 기본 브랜치 → 워킹카피 순으로 찾는다.
     """
-    workdir = workspace.workdir_for(project)
-    if not workdir.exists():
-        return None
     artifact = db.execute(
         select(PlanArtifact).where(
             PlanArtifact.session_id == session.id, PlanArtifact.stage == stage
         )
     ).scalar_one_or_none()
     path = artifact.repo_path if artifact else planning_service.stage_repo_path(stage)
-    for ref in (session.branch, f"origin/{session.branch}", project.branch,
-                f"origin/{project.branch}"):
-        content = workspace.read_file_at_ref(workdir, ref, path)
-        if content:
-            return content
-    return workspace.read_context_files(workdir, [path]).get(path)
+    return _stage_text(project, session.branch, path)
 
 
 def _next_task_number(db: Session, project_id: int) -> int:
@@ -821,11 +842,11 @@ async def generate_build_tasks(
     if not confirmed:
         raise HTTPException(status_code=409, detail="확정된 산출물이 없습니다. 단계를 먼저 확정하세요.")
 
-    workdir = workspace.workdir_for(project)
     documents = []
     for stage in confirmed:
         path = planning_service.stage_repo_path(stage)
-        content = workspace.read_file_at_ref(workdir, session.branch, path) if workdir.exists() else None
+        # 병합한 세션은 브랜치가 없다 — main에서 읽는다(_stage_text)
+        content = await asyncio.to_thread(_stage_text, project, session.branch, path)
         if content:
             documents.append(f"=== {planning_service.stage_title(stage)} ({path}) ===\n{content}")
     if not documents:
@@ -1333,14 +1354,7 @@ def _read_confirmed_artifact(db: Session, project: Project, stage: PlanStage) ->
     if row is None:
         return None
     artifact, session = row
-    workdir = workspace.workdir_for(project)
-    if not workdir.exists():
-        return None
-    for ref in (session.branch, project.branch):
-        content = workspace.read_file_at_ref(workdir, ref, artifact.repo_path)
-        if content:
-            return content
-    return workspace.read_context_files(workdir, [artifact.repo_path]).get(artifact.repo_path)
+    return _stage_text(project, session.branch, artifact.repo_path)
 
 
 def _mcp_build_report(db: Session, actor: str, project: Project, tool: str, args: dict) -> str:

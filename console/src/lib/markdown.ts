@@ -105,6 +105,31 @@ export function renderMarkdown(src: string): string {
 }
 
 /** CSV → 행 배열. 따옴표로 감싼 칸(쉼표·줄바꿈·"" 포함)을 읽는다. */
+const C4_KIND = /^\s*C4(Context|Container|Component|Dynamic|Deployment)\b/;
+
+/** 문서에서 mermaid C4 블록(첫 줄이 C4Context·C4Container·C4Component …)을 뺀다 — 에이전트 기획의 산출물 보기는
+ *  그 그림을 오른쪽 「단계별 시각화」가 그리므로 본문에서 코드로 또 보일 필요가 없다. 뺀 자리에는 note 한 줄을
+ *  남긴다(연속한 블록은 한 줄로). C4가 아닌 코드 블록은 그대로다. 원문(편집·확정되는 문서)은 건드리지 않는다. */
+export function stripC4Blocks(src: string, note: string): { text: string; removed: number } {
+  const lines = src.replace(/\r\n?/g, '\n').split('\n');
+  const out: string[] = [];
+  let removed = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const open = /^\s*```\s*mermaid\s*$/i.test(lines[i]);
+    const first = open ? lines.slice(i + 1).find((l) => l.trim() !== '') ?? '' : '';
+    if (open && C4_KIND.test(first)) {
+      let j = i + 1;
+      while (j < lines.length && !/^\s*```\s*$/.test(lines[j])) j++;
+      if (!out.length || out[out.length - 1] !== note) out.push(note);
+      removed++;
+      i = j;
+      continue;
+    }
+    out.push(lines[i]);
+  }
+  return { text: out.join('\n'), removed };
+}
+
 export function parseCsv(src: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];

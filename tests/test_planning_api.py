@@ -957,6 +957,28 @@ def test_generate_build_tasks_from_confirmed_artifacts(monkeypatch, fresh_settin
     assert c.get(f"/paas/api/v1/plan/sessions/{sid}/tasks", headers=ADMIN).json() == tasks
 
 
+def test_generate_tasks_reads_main_after_the_session_branch_is_merged_and_gone(monkeypatch, fresh_settings, tmp_path):
+    """병합하면 세션 브랜치를 지운다 — 그 뒤 작업 지시 생성·read_artifact는 확정 문서를 기본 브랜치(main)에서 읽는다.
+    예전에는 세션 브랜치만 봐서 「확정 산출물 본문을 리포에서 읽지 못했습니다」로 실패했다."""
+    repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    _mock_llm(monkeypatch)
+    _confirm_spec(c, monkeypatch, sid, repo, body="# 기획서 확정본\n병합 뒤에도 읽힌다\n")
+    branch = c.get(f"/paas/api/v1/plan/sessions/{sid}", headers=ADMIN).json()["branch"]
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge plan", branch)     # Gitea에서 병합한 것과 같다
+    _git(repo, "branch", "-q", "-D", branch)                               # 병합 뒤 세션 브랜치를 지운다
+
+    _mock_llm(monkeypatch, draft_reply=TASKS_JSON)
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/tasks/generate", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert [t["title"] for t in r.json()] == ["결제 API 구현", "화면 연결"]
+    text = _mcp(c, pid, "read_artifact", {"stage": "spec"})["result"]["content"][0]["text"]
+    assert "병합 뒤에도 읽힌다" in text
+
+
 def test_generate_tasks_refuses_to_overwrite_started_work(monkeypatch, fresh_settings, tmp_path):
     repo = _workspace_repo(monkeypatch, fresh_settings, tmp_path)
     c = _client()
