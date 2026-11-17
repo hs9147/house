@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Modal from './Modal';
 import { api } from '../lib/api';
+import { isAdmin } from '../lib/auth';
 import type { BuildProfile, StartScriptOut } from '../lib/types';
 
 /**
@@ -48,6 +49,8 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
   const [components, setComponents] = useState<string[]>([]);
   const [providers, setProviders] = useState<{ id: number; name: string; model: string }[]>([]);
   const [providerId, setProviderId] = useState(0);
+  // 기본 LLM — 고르지 않았을 때 서버가 쓰는 것과 같다(llm.default_provider: 이 과제 부서의 기본 → 전역 기본)
+  const [defaultId, setDefaultId] = useState(0);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -96,16 +99,28 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
 
   useEffect(() => {
     let alive = true;
-    api.listProviders().then(
-      (rows) => {
+    // 처음 선택은 **기본 LLM**이다 — 예전에는 목록의 첫 번째라 기본으로 정해 둔 것과 달랐다. 과제의 부서와 그 부서의
+    // 기본 LLM도 함께 읽는다(못 읽으면 전역 기본으로).
+    Promise.all([api.listProviders(), api.listProjects().catch(() => []), api.listOrgs().catch(() => [])]).then(
+      ([allRows, projects, orgs]) => {
         if (!alive) return;
+        const orgId = projects.find((p) => p.id === projectId)?.organization_id ?? null;
+        // 쓸 수 있는 것만 — 전역 프로바이더와 이 과제 부서의 것(관리자는 모두). 서버가 막는 규칙과 같다
+        // (llm.require_provider_access). 못 쓰는 것을 고르면 작성 요청이 403으로 돌아왔다.
+        const rows = allRows.filter((p) => isAdmin() || p.organization_id == null || p.organization_id === orgId);
         setProviders(rows);
-        if (rows.length) setProviderId((cur) => cur || rows[0].id);
+        const deptDefault = orgs.find((o) => o.id === orgId)?.llm_provider_id ?? null;
+        const pick = rows.find((p) => p.id === deptDefault && (p.organization_id == null || p.organization_id === orgId))
+          ?? rows.find((p) => p.is_default) ?? rows[0];
+        if (pick) {
+          setDefaultId(pick.id);
+          setProviderId((cur) => cur || pick.id);
+        }
       },
       () => {},  // 프로바이더를 못 읽어도 스크립트 확인·직접 수정은 된다
     );
     return () => { alive = false; };
-  }, []);
+  }, [projectId]);
 
   const run = async (label: string, fn: () => Promise<StartScriptOut>) => {
     setBusy(label);
@@ -255,7 +270,7 @@ export default function StartScriptModal({ projectId, profile, onClose, onRedepl
           >
             {providers.length === 0 && <option value={0}>등록된 프로바이더가 없습니다</option>}
             {providers.map((p) => (
-              <option key={p.id} value={p.id}>{p.name} ({p.model})</option>
+              <option key={p.id} value={p.id}>{p.name} ({p.model}){p.id === defaultId ? ' · 기본' : ''}</option>
             ))}
           </select>
         </label>
