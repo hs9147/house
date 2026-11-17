@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api, SSO_LOGIN_EVENT } from '../lib/api';
+import { api, hostSsoRetries, SSO_LOGIN_EVENT, SSO_RETRY_EVENT } from '../lib/api';
 import { loginWithAccount } from '../lib/auth';
 
 // api.ts는 요청 시점에 sessionStorage에서 키를 읽는다 — node 환경이라 최소 스텁을 심는다.
@@ -128,6 +128,23 @@ describe('SSO 만료 응답은 승인 주소를 화면 전체에 알린다', () 
     await expect(api.sendSessionMessage(1, '')).rejects.toThrow('AWS SSO 토큰이 만료됐습니다');
     expect(seen).toEqual([login]);
   });
+
+  // 실패를 삼킨 응답(성공 포함)도 서버가 만료를 만났으면 머리글에 승인 정보를 싣는다(SsoWatchMiddleware)
+  it('x-paas-sso-login 머리글도 같은 이벤트로 알리고, 응답은 그대로 쓴다', async () => {
+    const target = new EventTarget();
+    vi.stubGlobal('window', target);
+    const seen: unknown[] = [];
+    target.addEventListener(SSO_LOGIN_EVENT, (e) => seen.push((e as CustomEvent).detail));
+    const login = { profile: 'bedrock-dev', verification_url: 'https://d-1/#/device?user_code=B',
+      code_autofilled: true, user_code: 'B' };
+    vi.stubGlobal('fetch', async () => new Response(
+      JSON.stringify({ release_sha: 'abc', stale: false, profile: null }),
+      { status: 200, headers: { 'content-type': 'application/json', 'x-paas-sso-login': JSON.stringify(login) } }));
+
+    const out = await api.reviewAgentProfile(1);
+    expect(out.release_sha).toBe('abc');
+    expect(seen).toEqual([login]);
+  });
 });
 
 describe('개인 폴더 파일은 하나씩 본문 그대로 올린다', () => {
@@ -169,5 +186,68 @@ describe('개인 폴더 파일은 하나씩 본문 그대로 올린다', () => {
     expect([q.get('folder'), q.get('path'), q.get('mtime')]).toEqual(['1.계약&품의', 'plan/q3.md', '1700000000']);
     expect(body).toBe(file);
     expect(headers['x-api-key']).toBe('test-key');
+  });
+});
+
+describe('SSO 만료로 실패한 요청은 로그인 뒤 다시 실행한다', () => {
+  // 안내 창(SsoLoginNotice)이 떠 있으면 원래 호출을 붙잡아 두고, 다시 실행한 결과를 원래 호출로 돌려준다 —
+  // 화면이 스스로 다시 그려진다. 닫으면 원래 실패(또는 원래 응답)로 끝난다.
+  const login = { profile: 'bedrock-dev', verification_url: 'https://d-1/#/device?user_code=C',
+    code_autofilled: true, user_code: 'C' };
+
+  function setup(responses: Response[]) {
+    const target = new EventTarget();
+    vi.stubGlobal('window', target);
+    const held: { retry: () => void; dismiss: () => void; label: string }[] = [];
+    target.addEventListener(SSO_RETRY_EVENT, (e) => held.push((e as CustomEvent).detail));
+    let calls = 0;
+    vi.stubGlobal('fetch', async () => responses[Math.min(calls++, responses.length - 1)]);
+    return { held, calls: () => calls };
+  }
+
+  const expired = () => new Response(JSON.stringify({ detail: { message: 'AWS SSO 토큰이 만료됐습니다', sso_login: login } }),
+    { status: 502, headers: { 'content-type': 'application/json' } });
+  const ok = (body: unknown, extra: Record<string, string> = {}) => new Response(JSON.stringify(body),
+    { status: 200, headers: { 'content-type': 'application/json', ...extra } });
+
+  it('다시 실행 — 같은 요청을 다시 보내 원래 호출이 그 결과로 끝난다', async () => {
+    const unhost = hostSsoRetries();
+    try {
+      const { held, calls } = setup([expired(), ok({ reply: '답', messages: [] })]);
+      const pending = api.sendSessionMessage(1, '질문');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(held.map((h) => h.label)).toEqual(['POST /smartwork/sessions/1/messages']);
+      held[0].retry();
+      await expect(pending).resolves.toMatchObject({ reply: '답' });
+      expect(calls()).toBe(2);
+    } finally {
+      unhost();
+    }
+  });
+
+  it('닫기 — 원래 실패로 끝나고, 실패를 삼킨 응답은 그 응답 그대로', async () => {
+    const unhost = hostSsoRetries();
+    try {
+      let { held } = setup([expired()]);
+      const failed = api.sendSessionMessage(1, '질문');
+      await new Promise((r) => setTimeout(r, 0));
+      held[0].dismiss();
+      await expect(failed).rejects.toThrow('AWS SSO 토큰이 만료됐습니다');
+
+      ({ held } = setup([ok({ release_sha: 'abc', stale: false, profile: null },
+        { 'x-paas-sso-login': JSON.stringify(login) })]));
+      const degraded = api.reviewAgentProfile(1);
+      await new Promise((r) => setTimeout(r, 0));
+      held[0].dismiss();
+      await expect(degraded).resolves.toMatchObject({ release_sha: 'abc' });
+    } finally {
+      unhost();
+    }
+  });
+
+  it('안내 창이 없으면 붙잡지 않는다 — 원래 호출이 영영 끝나지 않으면 안 된다', async () => {
+    const { held } = setup([expired()]);
+    await expect(api.sendSessionMessage(1, '질문')).rejects.toThrow('AWS SSO 토큰이 만료됐습니다');
+    expect(held).toEqual([]);
   });
 });

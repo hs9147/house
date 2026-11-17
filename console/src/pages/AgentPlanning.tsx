@@ -7,6 +7,7 @@ import ZipDownloadButton from '../components/ZipDownloadButton';
 import { ApiError, api } from '../lib/api';
 import { getEmail } from '../lib/auth';
 import { fmtDate } from '../lib/format';
+import { renderMarkdown } from '../lib/markdown';
 import { useApi } from '../lib/hooks';
 import type {
   BuildTaskOut, BuildTaskSync, ComplianceOut, PlanArtifactContent, PlanArtifactOut,
@@ -90,6 +91,8 @@ export default function AgentPlanning() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [draft, setDraft] = useState('');
+  // 산출물은 마크다운 뷰어로 본다(기본) — 고칠 때만 편집 칸으로
+  const [artifactView, setArtifactView] = useState<'view' | 'edit'>('view');
   const [task, setTask] = useState<RunningTask | null>(null);
   const busy = task !== null;
   const [error, setError] = useState('');
@@ -1027,15 +1030,40 @@ export default function AgentPlanning() {
                   </span>
                 )}
               </div>
-              <textarea
-                className="mono"
-                style={{ width: '100%', minHeight: 220, fontSize: 12 }}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder={activeStage === TASK_STAGE
-                  ? '작업 지시를 생성하면 여기에 문서가 만들어집니다. 직접 편집해도 됩니다.'
-                  : '생성 요청 결과가 여기에 들어옵니다. 직접 편집해도 됩니다.'}
-              />
+              <div className="row viewtabs" role="tablist" style={{ marginBottom: 6 }}>
+                {([['view', '보기'], ['edit', '편집']] as const).map(([key, label]) => (
+                  <button key={key} role="tab" aria-selected={artifactView === key}
+                    className={artifactView === key ? 'small' : 'small secondary'}
+                    onClick={() => setArtifactView(key)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {artifactView === 'view' ? (
+                draft.trim() ? (
+                  // 저장소 미리보기와 같은 뷰어(lib/markdown — 먼저 이스케이프하고 서식을 입힌다)
+                  <div className="report-md"
+                    style={{ border: '1px solid var(--border)', borderRadius: 6, padding: '8px 12px',
+                      maxHeight: '70vh', overflow: 'auto' }}
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(draft) }} />
+                ) : (
+                  <p className="mutedtext" style={{ fontSize: 12 }}>
+                    {activeStage === TASK_STAGE
+                      ? '작업 지시를 생성하면 여기에 문서가 만들어집니다.'
+                      : '생성 요청 결과가 여기에 들어옵니다.'} 직접 쓰려면 「편집」을 누르세요.
+                  </p>
+                )
+              ) : (
+                <textarea
+                  className="mono"
+                  style={{ width: '100%', minHeight: 220, fontSize: 12 }}
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder={activeStage === TASK_STAGE
+                    ? '작업 지시를 생성하면 여기에 문서가 만들어집니다. 직접 편집해도 됩니다.'
+                    : '생성 요청 결과가 여기에 들어옵니다. 직접 편집해도 됩니다.'}
+                />
+              )}
               <div className="row" style={{ marginTop: 8 }}>
                 <button
                   className={activeStage === TASK_STAGE && taskStep !== 'confirm' ? 'secondary' : 'primary'}
@@ -1063,60 +1091,63 @@ export default function AgentPlanning() {
               둘은 같은 질문의 두 면이다: 외주 빌더가 무엇을 했고(이벤트·커밋), 그것이
               제약을 지켰는지(LLM·도구 사용). 패널을 갈라 두면 커밋이 올라온 것을 보고도
               검증은 다른 자리에서 따로 눌러야 해서 그냥 넘어가기 쉽다. */}
-          <div className="panel plan-aside">
-            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={{ margin: 0 }}>🛠️ 외부 빌드 모니터링</h3>
-              <div className="row" style={{ gap: 6 }}>
-                <button className="secondary small" onClick={runCompliance} disabled={busy}>
-                  🔍 LLM·도구 사용 검증
-                </button>
+          {/* 작업 지시(⑤)를 확정한 뒤에만 — 그 전에는 외주 빌더가 할 일이 정해지지 않아 볼 것이 없다. */}
+          {isConfirmed(TASK_STAGE) && (
+            <div className="panel plan-aside">
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                <h3 style={{ margin: 0 }}>🛠️ 외부 빌드 모니터링</h3>
+                <div className="row" style={{ gap: 6 }}>
+                  <button className="secondary small" onClick={runCompliance} disabled={busy}>
+                    🔍 LLM·도구 사용 검증
+                  </button>
+                </div>
               </div>
-            </div>
-            <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
-              빌드는 외부 개발도구에서 수행됩니다. 커밋(Gitea 웹훅)과 도구 사용·진행 보고(MCP)가
-              아래에 집계되고, 커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 도구를 쓰는지도
-              여기서 검증합니다.
-            </p>
+              <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
+                빌드는 외부 개발도구에서 수행됩니다. 커밋(Gitea 웹훅)과 도구 사용·진행 보고(MCP)가
+                아래에 집계되고, 커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 도구를 쓰는지도
+                여기서 검증합니다.
+              </p>
 
-            <div style={{ fontSize: 12, fontWeight: 600, margin: '16px 0 4px' }}>
-              LLM·도구 사용 검증
-              {!compliance && (
-                <span className="mutedtext" style={{ fontWeight: 400 }}>
-                  {' '}— 아직 검사하지 않았습니다 (위 버튼으로 실행)
-                </span>
-              )}
+              <div style={{ fontSize: 12, fontWeight: 600, margin: '16px 0 4px' }}>
+                LLM·도구 사용 검증
+                {!compliance && (
+                  <span className="mutedtext" style={{ fontWeight: 400 }}>
+                    {' '}— 아직 검사하지 않았습니다 (위 버튼으로 실행)
+                  </span>
+                )}
+              </div>
+              {compliance && (compliance.findings.length === 0 ? (
+                <p style={{ fontSize: 13, color: '#10b981' }}>✅ 위반 없음 — 제약을 지켰습니다.</p>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                    {Object.entries(compliance.summary).map(([rule, count]) => (
+                      <span key={rule} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                        {COMPLIANCE_RULE_LABEL[rule] ?? rule} {count}건
+                      </span>
+                    ))}
+                  </div>
+                  <ul style={{ margin: '0 0 12px', paddingLeft: 16, fontSize: 12 }}>
+                    {compliance.findings.map((f, i) => (
+                      <li key={i}>
+                        <span className="mono">{f.file}:{f.line}</span> — {COMPLIANCE_RULE_LABEL[f.rule] ?? f.rule}
+                        {' '}(<span className="mono">{f.detail}</span>)
+                      </li>
+                    ))}
+                  </ul>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                    📤 외주 빌더 전달용 수정 지시 프롬프트
+                  </div>
+                  <textarea
+                    className="mono"
+                    readOnly
+                    style={{ width: '100%', minHeight: 180, fontSize: 12 }}
+                    value={compliance.builder_prompt}
+                  />
+                </>
+              ))}
             </div>
-            {compliance && (compliance.findings.length === 0 ? (
-              <p style={{ fontSize: 13, color: '#10b981' }}>✅ 위반 없음 — 제약을 지켰습니다.</p>
-            ) : (
-              <>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-                  {Object.entries(compliance.summary).map(([rule, count]) => (
-                    <span key={rule} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
-                      {COMPLIANCE_RULE_LABEL[rule] ?? rule} {count}건
-                    </span>
-                  ))}
-                </div>
-                <ul style={{ margin: '0 0 12px', paddingLeft: 16, fontSize: 12 }}>
-                  {compliance.findings.map((f, i) => (
-                    <li key={i}>
-                      <span className="mono">{f.file}:{f.line}</span> — {COMPLIANCE_RULE_LABEL[f.rule] ?? f.rule}
-                      {' '}(<span className="mono">{f.detail}</span>)
-                    </li>
-                  ))}
-                </ul>
-                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
-                  📤 외주 빌더 전달용 수정 지시 프롬프트
-                </div>
-                <textarea
-                  className="mono"
-                  readOnly
-                  style={{ width: '100%', minHeight: 180, fontSize: 12 }}
-                  value={compliance.builder_prompt}
-                />
-              </>
-            ))}
-          </div>
+          )}
         </div>
       )}
 

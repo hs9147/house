@@ -4,6 +4,7 @@
 개발도구가 맡고(에이전트 기획 → 작업 지시 → MCP), 플랫폼은 제약·검증·모니터링만 한다.
 """
 import asyncio
+import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -62,6 +63,7 @@ def provider_error(db: Session, actor: str, e: Exception, message: str = "") -> 
     message = message or str(e)
     if not isinstance(e, bedrock.SsoExpired):
         return HTTPException(status_code=502, detail=message)
+    bedrock.expired_handled()   # 이 응답이 승인 주소를 싣는다 — 미들웨어가 머리글로 또 알리지 않게
     try:
         login = bedrock.start_sso_login(e.profile, get_settings().resolved_repo_root / "logs")
     except bedrock.BedrockError as failed:
@@ -74,6 +76,65 @@ def provider_error(db: Session, actor: str, e: Exception, message: str = "") -> 
         "message": message,
         "sso_login": {k: login[k] for k in ("profile", "verification_url", "code_autofilled", "user_code")},
     })
+
+
+SSO_LOGIN_HEADER = "x-paas-sso-login"
+
+
+class SsoWatchMiddleware:
+    """요청 중에 SSO 만료가 났으면(호출부가 실패를 삼켰어도) 응답을 보낼 때 서버 로그인을 시작하고 승인 정보를
+    머리글(x-paas-sso-login)에 싣는다 — 콘솔은 모든 응답에서 이 머리글을 보고 provider_error와 같은 승인 창을 연다.
+
+    provider_error를 부르는 입구는 7곳뿐이었고, LLM을 부르는 나머지(기동 스크립트 작성·배포 원인 분석·에이전트
+    검토·배포 점검 조언·기획 조언·작업 지시 생성·정보 업데이트 분석 …)는 만료를 「LLM 호출 실패」 문구로만
+    돌려주거나 삼켜, 로그인이 필요하다는 사실이 묻혔다. 입구마다 고치면 새 입구가 또 빠진다 — 여기서 한 번에 잡는다.
+    브라우저가 없는 호출(MCP·앱 게이트웨이·웹훅)은 승인할 사람이 없어 건너뛴다. 순수 ASGI(RouteTagMiddleware와 같다)."""
+
+    SKIP = ("/paas/api/v1/mcp", "/paas/api/v1/proxy", "/paas/webhooks")
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        path = str(scope.get("path") or "")
+        if scope.get("type") != "http" or path.startswith(self.SKIP):
+            await self.app(scope, receive, send)
+            return
+        import anyio  # noqa: PLC0415
+
+        seen, token = bedrock.watch_expired()
+
+        async def send_with_login(message):
+            if message["type"] == "http.response.start" and seen:
+                login = await anyio.to_thread.run_sync(_watch_login, seen[0], path)
+                if login:
+                    message = {**message, "headers": [
+                        *message.get("headers", []),
+                        (SSO_LOGIN_HEADER.encode(), json.dumps(login).encode("ascii"))]}
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_login)
+        finally:
+            bedrock.unwatch_expired(token)
+
+
+def _watch_login(profile: str, path: str) -> dict | None:
+    """만료를 삼킨 요청 — 로그인을 시작해(대기 중인 것이 있으면 그것을) 승인 정보를 돌려준다. 실패하면 None."""
+    from ..db import SessionLocal  # noqa: PLC0415
+
+    try:
+        login = bedrock.start_sso_login(profile, get_settings().resolved_repo_root / "logs")
+    except bedrock.BedrockError:
+        return None
+    if not login["verification_url"]:
+        return None
+    try:
+        with SessionLocal() as db:
+            audit.record(db, "sso-watch", "aws.sso.login.auto", profile, {"url_found": True, "route": path[:120]})
+    except Exception:  # noqa: BLE001 — 기록 실패가 승인 안내를 막지 않는다
+        pass
+    return {k: login[k] for k in ("profile", "verification_url", "code_autofilled", "user_code")}
 
 
 @router.post("/llm/providers", response_model=LlmProviderOut, status_code=201)

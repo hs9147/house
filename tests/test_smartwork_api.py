@@ -580,6 +580,8 @@ def test_expired_sso_starts_the_login_and_hands_the_url_to_the_user(client, monk
     assert "만료" in detail["message"]
     assert detail["sso_login"]["verification_url"].endswith("user_code=AAAA-BBBB")
     assert "log_tail" not in detail["sso_login"]  # 서버 로그는 일반 사용자에게 내보내지 않는다
+    # 본문이 이미 승인 정보를 싣는다 — 머리글로 또 알리지 않고 로그인도 한 번만(api/llm.SsoWatchMiddleware)
+    assert "x-paas-sso-login" not in r.headers
     assert client.get(f"{API}/smartwork/sessions/{sid}", headers=alice).json()["messages"] == []
 
 

@@ -137,6 +137,10 @@ def create_app() -> FastAPI:
     from .services.telemetry import RouteTagMiddleware, setup_tracing  # noqa: PLC0415
 
     app.add_middleware(RouteTagMiddleware)
+    # SSO 만료를 삼킨 요청도 그 사람의 화면에 승인 창을 띄운다(api/llm.SsoWatchMiddleware)
+    from .api.llm import SsoWatchMiddleware  # noqa: PLC0415
+
+    app.add_middleware(SsoWatchMiddleware)
     # 외부 수집기로도 보낼지는 설정이 정한다(PAAS_OTEL_ENDPOINT) — 비어 있으면 아무것도
     # 켜지 않는다. 기록은 그와 무관하게 DB에 남는다.
     setup_tracing()

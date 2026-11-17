@@ -131,6 +131,47 @@ export class ApiError extends Error {
 export type SsoLogin = { profile: string; verification_url: string; code_autofilled: boolean; user_code: string };
 export const SSO_LOGIN_EVENT = 'paas:sso-login';
 
+/** 실패를 삼킨 응답(성공 포함)도 SSO 만료를 만났으면 서버가 로그인을 시작해 머리글에 싣는다
+ *  (app/api/llm.py SsoWatchMiddleware) — 같은 안내(SsoLoginNotice)로 알린다. 같은 주소는 다시 열지 않는다.
+ *  알렸으면 true. */
+function noticeSsoHeader(res: Response): boolean {
+  const raw = res.headers.get('x-paas-sso-login');
+  if (!raw) return false;
+  try {
+    window.dispatchEvent(new CustomEvent<SsoLogin>(SSO_LOGIN_EVENT, { detail: JSON.parse(raw) as SsoLogin }));
+    return true;
+  } catch {
+    return false;   /* 깨진 머리글 — 무시한다 */
+  }
+}
+
+/** SSO 만료로 실패한(또는 실패를 삼킨) 요청 — 로그인이 끝난 뒤 다시 실행할지 사람이 정한다(SsoLoginNotice).
+ *  retry는 같은 요청을 다시 보내 **원래 호출의 결과로** 돌려주고(화면이 스스로 다시 그려진다), dismiss는 원래의
+ *  실패(또는 원래 응답)로 끝낸다. 그때까지 원래 호출은 기다린다. */
+export type SsoRetry = { id: number; label: string; retry: () => void; dismiss: () => void };
+export const SSO_RETRY_EVENT = 'paas:sso-retry';
+let retryHosts = 0;
+let retryIds = 0;
+
+/** 다시 실행을 받아 줄 화면(SsoLoginNotice)이 떠 있는 동안만 붙잡는다 — 없는 화면(북마크 팝업 등)에서 붙잡으면
+ *  원래 호출이 영영 끝나지 않는다. 돌려준 함수로 내린다. */
+export function hostSsoRetries(): () => void {
+  retryHosts += 1;
+  return () => { retryHosts -= 1; };
+}
+
+function holdForRetry<T>(label: string, again: () => Promise<T>, settle: () => T | never): Promise<T> | null {
+  if (retryHosts <= 0) return null;
+  return new Promise<T>((resolve, reject) => {
+    const entry: SsoRetry = {
+      id: ++retryIds, label,
+      retry: () => { again().then(resolve, reject); },
+      dismiss: () => { try { resolve(settle()); } catch (e) { reject(e); } },
+    };
+    window.dispatchEvent(new CustomEvent<SsoRetry>(SSO_RETRY_EVENT, { detail: entry }));
+  });
+}
+
 function ssoLoginOf(detail: unknown): SsoLogin | null {
   if (!detail || typeof detail !== 'object' || !('sso_login' in detail)) return null;
   return (detail as { sso_login: SsoLogin }).sso_login;
@@ -190,6 +231,7 @@ async function request<T>(
     body: body !== undefined ? JSON.stringify(body) : undefined,
     signal,
   });
+  const ssoNoticed = noticeSsoHeader(res);
   if (res.status === 401) {
     // 만료/무효 키 — 전역 단일 처리 지점
     logout();
@@ -203,12 +245,22 @@ async function request<T>(
   } catch {
     /* 본문 없는 응답 */
   }
+  const label = `${method} ${path}`;
+  const again = () => request<T>(method, path, body, query, signal);
   if (!res.ok) {
-    const detail =
-      data && typeof data === 'object' && 'detail' in data
-        ? formatDetail((data as { detail: unknown }).detail)
-        : `HTTP ${res.status}`;
-    throw new ApiError(res.status, detail);
+    const raw = data && typeof data === 'object' && 'detail' in data ? (data as { detail: unknown }).detail : undefined;
+    const failure = new ApiError(res.status, raw !== undefined ? formatDetail(raw) : `HTTP ${res.status}`);
+    // SSO 만료로 실패했다 — 로그인이 끝난 뒤 다시 실행할지 묻는다(닫으면 이 실패로 끝난다)
+    if (ssoLoginOf(raw) || ssoNoticed) {
+      const held = holdForRetry<T>(label, again, () => { throw failure; });
+      if (held) return held;
+    }
+    throw failure;
+  }
+  // 실패를 삼킨 응답 — 다시 실행하면 LLM이 제대로 돈 결과로 바뀐다(닫으면 이 응답 그대로)
+  if (ssoNoticed) {
+    const held = holdForRetry<T>(label, again, () => data as T);
+    if (held) return held;
   }
   return data as T;
 }
@@ -219,6 +271,7 @@ async function requestMultipart<T>(path: string, formData: FormData): Promise<T>
     headers: { 'x-api-key': getKey() },
     body: formData,
   });
+  noticeSsoHeader(res);
   if (res.status === 401) {
     logout();
     window.location.hash = '#/login';

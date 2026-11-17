@@ -13,6 +13,7 @@ botocore는 **선택 의존성**이다. Bedrock을 쓰지 않는 설치본에 bo
 tool-call 루프를 Bedrock용으로 다시 쓰지 않기 위한 경계다.
 """
 import configparser
+import contextvars
 import hashlib
 import json
 import os
@@ -38,9 +39,34 @@ class BedrockError(RuntimeError):
     """자격증명·서명 단계의 실패. 메시지는 화면에 그대로 뜨는 것을 전제로 쓴다."""
 
 
+# 이 요청에서 SSO 만료를 만났는가 — 요청마다 그릇(list)을 두고(api/llm.SsoWatchMiddleware) 만료가 나면 프로필을
+# 적는다. 호출부가 실패를 삼켜도(「LLM이 없어도 화면은 돈다」 — 에이전트 검토·배포 점검 조언·기획 조언 …) 응답을
+# 보낼 때 로그인을 시작해 그 사람의 화면에 승인 창을 띄울 수 있게. 변수가 아니라 **객체**에 적는 까닭: 동기
+# 엔드포인트는 스레드에서(컨텍스트 사본으로) 돌아, 사본에서 바꾼 변수는 미들웨어에 보이지 않지만 같은 객체는 보인다.
+_expired_seen: contextvars.ContextVar[list | None] = contextvars.ContextVar("paas_sso_expired", default=None)
+
+
+def watch_expired() -> tuple[list, contextvars.Token]:
+    """요청 하나의 그릇을 연다 — (그릇, 되돌릴 토큰)."""
+    seen: list = []
+    return seen, _expired_seen.set(seen)
+
+
+def unwatch_expired(token: contextvars.Token) -> None:
+    _expired_seen.reset(token)
+
+
+def expired_handled() -> None:
+    """호출부가 이미 로그인을 시작해 응답에 실었다(api/llm.provider_error) — 응답 머리글로 또 알리지 않는다."""
+    seen = _expired_seen.get()
+    if seen is not None:
+        seen.clear()
+
+
 class SsoExpired(BedrockError):
     """SSO 토큰 만료 — 다른 실패와 달리 재로그인으로 풀린다. 호출부가 로그인을 바로 시작할
-    수 있게 어느 프로필인지 들고 간다(api/llm.py provider_error)."""
+    수 있게 어느 프로필인지 들고 간다(api/llm.py provider_error). 만들어지는 순간 이 요청의 그릇에도
+    적힌다 — 호출부가 삼켜도 응답 머리글로 승인 창이 뜬다(SsoWatchMiddleware)."""
 
     def __init__(self, profile: str):
         super().__init__(
@@ -48,6 +74,9 @@ class SsoExpired(BedrockError):
             f"서버에서 `{login_command(profile)}`로 재로그인하세요."
         )
         self.profile = profile
+        seen = _expired_seen.get()
+        if seen is not None and profile not in seen:
+            seen.append(profile)
 
 
 def config_path() -> Path:
