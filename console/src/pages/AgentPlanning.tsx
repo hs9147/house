@@ -506,6 +506,30 @@ export default function AgentPlanning() {
     }
   };
 
+  // 단계 확정 버튼과 커밋 결과 — ①~④는 산출물 보기·편집 옆, ⑤는 작업 지시 버튼 줄(생성 → 확정 → 진행 현황)
+  const confirmControls = (
+    <>
+      <button
+        className={activeStage === TASK_STAGE && taskStep !== 'confirm' ? 'small secondary' : 'small primary'}
+        onClick={confirm}
+        disabled={busy || !draft.trim()}
+      >
+        ✅ 이 단계 확정 (Gitea 커밋)
+      </button>
+      {/* 작업 지시는 대화가 아니라 이 버튼이 문서를 만든다 — 만드는 버튼과
+          확정하는 버튼이 같은 줄에 있어야 순서가 보인다. */}
+      {gitResult?.git_action && (
+        <span className="mutedtext" style={{ fontSize: 12 }}>
+          {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
+          {gitResult.pull_request_url && (
+            <> · <a href={gitResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
+          )}
+          {gitResult.git_detail && <> · {gitResult.git_detail}</>}
+        </span>
+      )}
+    </>
+  );
+
   return (
     <>
       <div className="panel">
@@ -736,7 +760,7 @@ export default function AgentPlanning() {
       </div>
 
       {session && (
-        <div className="plan-grid">{/* 좌: 단계 대화·산출물·빌드 모니터링 · 우: 그림(콘솔 2단 규약) */}
+        <div className="plan-grid">{/* 좌: 단계 대화·산출물 · 우: 그림·빌드 모니터링(콘솔 2단 규약) */}
           {/* 진행단계 표시 */}
           <div className="panel plan-stages">
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -760,26 +784,91 @@ export default function AgentPlanning() {
             </div>
           </div>
 
-          {/* 단계별 시각화 — 산출물에 실린 mermaid C4 블록이 그림의 원천이다.
-              어느 레벨이 열리는지는 문서가 정한다(app/services/c4.py): 기획서의
-              C4Context → 사용자·외부 환경, 아키텍처 설계의 C4Container·C4Component,
-              솔루션 구성이 같은 레벨을 다시 그리면 그것으로 구체화된다.
-              **확정을 기다리지 않는다** — 편집 중인 초안을 함께 넘겨 바로 그린다.
-              그림은 확정 여부를 검토하기 위한 도구이고, 확정은 그 검토의 결과다. */}
-          <div className="panel plan-aside">
-            <h3 style={{ margin: 0 }}>🗺️ 단계별 시각화 (C4 모델)</h3>
-            <C4Diagram
-              // 세션을 바꾸면 보고 있던 레벨·선택 컴포넌트를 초기화한다 — 이전 세션의
-              // 컴포넌트 코드가 새 세션 화면에 남으면 안 된다.
-              key={session.id}
-              sessionId={session.id}
-              projectId={session.project_id}
-              reloadKey={session.artifacts
-                .filter((a) => a.confirmed).map((a) => a.commit_sha ?? '').join(',')}
-              stage={activeStage}
-              draft={draft}
-              stageLabels={Object.fromEntries(STAGES.map((s) => [s.key, s.label]))}
-            />
+          {/* 오른쪽 칸 — 그림 아래에 외부 빌드 모니터링을 쌓는다(왼쪽 작업 영역과 줄 높이를 나눠 쓰지 않게 한 칸으로) */}
+          <div className="plan-right">
+            {/* 단계별 시각화 — 산출물에 실린 mermaid C4 블록이 그림의 원천이다.
+                어느 레벨이 열리는지는 문서가 정한다(app/services/c4.py): 기획서의
+                C4Context → 사용자·외부 환경, 아키텍처 설계의 C4Container·C4Component,
+                솔루션 구성이 같은 레벨을 다시 그리면 그것으로 구체화된다.
+                **확정을 기다리지 않는다** — 편집 중인 초안을 함께 넘겨 바로 그린다.
+                그림은 확정 여부를 검토하기 위한 도구이고, 확정은 그 검토의 결과다. */}
+            <div className="panel">
+              <h3 style={{ margin: 0 }}>🗺️ 단계별 시각화 (C4 모델)</h3>
+              <C4Diagram
+                // 세션을 바꾸면 보고 있던 레벨·선택 컴포넌트를 초기화한다 — 이전 세션의
+                // 컴포넌트 코드가 새 세션 화면에 남으면 안 된다.
+                key={session.id}
+                sessionId={session.id}
+                projectId={session.project_id}
+                reloadKey={session.artifacts
+                  .filter((a) => a.confirmed).map((a) => a.commit_sha ?? '').join(',')}
+                stage={activeStage}
+                draft={draft}
+                stageLabels={Object.fromEntries(STAGES.map((s) => [s.key, s.label]))}
+              />
+            </div>
+
+            {/* 외부 빌드 모니터링 — 진행 현황과 결과 검증을 한 화면에 둔다.
+                둘은 같은 질문의 두 면이다: 외주 빌더가 무엇을 했고(이벤트·커밋), 그것이
+                제약을 지켰는지(LLM·도구 사용). 패널을 갈라 두면 커밋이 올라온 것을 보고도
+                검증은 다른 자리에서 따로 눌러야 해서 그냥 넘어가기 쉽다. */}
+            {/* 작업 지시(⑤)를 확정한 뒤에만 — 그 전에는 외주 빌더가 할 일이 정해지지 않아 볼 것이 없다. */}
+            {isConfirmed(TASK_STAGE) && (
+              <div className="panel">
+                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                  <h3 style={{ margin: 0 }}>🛠️ 외부 빌드 모니터링</h3>
+                  <div className="row" style={{ gap: 6 }}>
+                    <button className="secondary small" onClick={runCompliance} disabled={busy}>
+                      🔍 LLM·도구 사용 검증
+                    </button>
+                  </div>
+                </div>
+                <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
+                  빌드는 외부 개발도구에서 수행됩니다. 커밋(Gitea 웹훅)과 도구 사용·진행 보고(MCP)가
+                  아래에 집계되고, 커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 도구를 쓰는지도
+                  여기서 검증합니다.
+                </p>
+
+                <div style={{ fontSize: 12, fontWeight: 600, margin: '16px 0 4px' }}>
+                  LLM·도구 사용 검증
+                  {!compliance && (
+                    <span className="mutedtext" style={{ fontWeight: 400 }}>
+                      {' '}— 아직 검사하지 않았습니다 (위 버튼으로 실행)
+                    </span>
+                  )}
+                </div>
+                {compliance && (compliance.findings.length === 0 ? (
+                  <p style={{ fontSize: 13, color: '#10b981' }}>✅ 위반 없음 — 제약을 지켰습니다.</p>
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                      {Object.entries(compliance.summary).map(([rule, count]) => (
+                        <span key={rule} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                          {COMPLIANCE_RULE_LABEL[rule] ?? rule} {count}건
+                        </span>
+                      ))}
+                    </div>
+                    <ul style={{ margin: '0 0 12px', paddingLeft: 16, fontSize: 12 }}>
+                      {compliance.findings.map((f, i) => (
+                        <li key={i}>
+                          <span className="mono">{f.file}:{f.line}</span> — {COMPLIANCE_RULE_LABEL[f.rule] ?? f.rule}
+                          {' '}(<span className="mono">{f.detail}</span>)
+                        </li>
+                      ))}
+                    </ul>
+                    <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                      📤 외주 빌더 전달용 수정 지시 프롬프트
+                    </div>
+                    <textarea
+                      className="mono"
+                      readOnly
+                      style={{ width: '100%', minHeight: 180, fontSize: 12 }}
+                      value={compliance.builder_prompt}
+                    />
+                  </>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* 단계 작업 영역 — ①~④는 대화로, ⑤는 작업 지시 목록으로 산출물을 만든다 */}
@@ -883,6 +972,7 @@ export default function AgentPlanning() {
                   >
                     {tasks.length === 0 ? '확정 산출물에서 작업 지시 생성' : '작업 지시 재생성'}
                   </button>
+                  {confirmControls}
                   {/* 작업 지시까지 나오면 다음은 실제 구현이다 — 이 세션의 프로젝트
                       리포를 바로 VS Code로 받게 한다. 세션에는 project_id만 있으므로
                       목록에서 프로젝트를 찾아 넘긴다. */}
@@ -1017,13 +1107,13 @@ export default function AgentPlanning() {
               </>
             )}
 
-            {/* 확정용 산출물 편집기 — 모든 단계 공통. 여기서 확정하면 Gitea에 커밋된다. */}
+            {/* 확정용 산출물 편집기 — ①~④ 단계. 여기서 확정하면 Gitea에 커밋된다. ⑤ 작업 지시는 위 목록이 곧
+                산출물이라 숨기고, 확정 버튼은 작업 지시 버튼 줄에 둔다. */}
+            {activeStage !== TASK_STAGE && (
             <div style={{ marginTop: 16 }}>
               <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
-                📄 산출물 (마크다운) — 검토·수정 후 확정하면 Gitea에 커밋됩니다.
-                {activeStage === TASK_STAGE
-                  ? ' 위 작업 지시 목록에서 생성된 문서입니다'
-                  : ' 생성 요청 시 이 내용이 수정 대상으로 함께 전달됩니다'}
+                📄 산출물 (마크다운) — 검토·수정 후 확정하면 Gitea에 커밋됩니다. 생성 요청 시 이 내용이 수정
+                대상으로 함께 전달됩니다
                 {draftSource === 'repo' && (
                   <span style={{ marginLeft: 6, fontWeight: 400, color: '#f59e0b' }}>
                     · 리포에 이미 있는 문서를 불러왔습니다 (이 세션에서는 아직 미확정)
@@ -1038,25 +1128,7 @@ export default function AgentPlanning() {
                     {label}
                   </button>
                 ))}
-                {/* 확정은 보기·편집 어느 쪽에서든 — 고친 것을 바로 확정하도록 편집 바로 옆에 둔다 */}
-                <button
-                  className={activeStage === TASK_STAGE && taskStep !== 'confirm' ? 'small secondary' : 'small primary'}
-                  onClick={confirm}
-                  disabled={busy || !draft.trim()}
-                >
-                  ✅ 이 단계 확정 (Gitea 커밋)
-                </button>
-                {/* 작업 지시는 대화가 아니라 이 버튼이 문서를 만든다 — 만드는 버튼과
-                    확정하는 버튼이 같은 줄에 있어야 순서가 보인다. */}
-                {gitResult?.git_action && (
-                  <span className="mutedtext" style={{ fontSize: 12 }}>
-                    {gitResult.title} 커밋 · {GIT_ACTION_LABEL[gitResult.git_action] ?? gitResult.git_action}
-                    {gitResult.pull_request_url && (
-                      <> · <a href={gitResult.pull_request_url} target="_blank" rel="noreferrer">PR 열기</a></>
-                    )}
-                    {gitResult.git_detail && <> · {gitResult.git_detail}</>}
-                  </span>
-                )}
+                {confirmControls}
               </div>
               {artifactView === 'view' ? (
                 draft.trim() ? (
@@ -1069,9 +1141,7 @@ export default function AgentPlanning() {
                       draft, '> C4 다이어그램은 오른쪽 「단계별 시각화」에 있습니다.').text) }} />
                 ) : (
                   <p className="mutedtext" style={{ fontSize: 12 }}>
-                    {activeStage === TASK_STAGE
-                      ? '작업 지시를 생성하면 여기에 문서가 만들어집니다.'
-                      : '생성 요청 결과가 여기에 들어옵니다.'} 직접 쓰려면 「편집」을 누르세요.
+                    생성 요청 결과가 여기에 들어옵니다. 직접 쓰려면 「편집」을 누르세요.
                   </p>
                 )
               ) : (
@@ -1080,75 +1150,13 @@ export default function AgentPlanning() {
                   style={{ width: '100%', minHeight: 220, fontSize: 12 }}
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
-                  placeholder={activeStage === TASK_STAGE
-                    ? '작업 지시를 생성하면 여기에 문서가 만들어집니다. 직접 편집해도 됩니다.'
-                    : '생성 요청 결과가 여기에 들어옵니다. 직접 편집해도 됩니다.'}
+                  placeholder="생성 요청 결과가 여기에 들어옵니다. 직접 편집해도 됩니다."
                 />
               )}
             </div>
+            )}
           </div>
 
-          {/* 외부 빌드 모니터링 — 진행 현황과 결과 검증을 한 화면에 둔다.
-              둘은 같은 질문의 두 면이다: 외주 빌더가 무엇을 했고(이벤트·커밋), 그것이
-              제약을 지켰는지(LLM·도구 사용). 패널을 갈라 두면 커밋이 올라온 것을 보고도
-              검증은 다른 자리에서 따로 눌러야 해서 그냥 넘어가기 쉽다. */}
-          {/* 작업 지시(⑤)를 확정한 뒤에만 — 그 전에는 외주 빌더가 할 일이 정해지지 않아 볼 것이 없다. */}
-          {isConfirmed(TASK_STAGE) && (
-            <div className="panel plan-aside">
-              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                <h3 style={{ margin: 0 }}>🛠️ 외부 빌드 모니터링</h3>
-                <div className="row" style={{ gap: 6 }}>
-                  <button className="secondary small" onClick={runCompliance} disabled={busy}>
-                    🔍 LLM·도구 사용 검증
-                  </button>
-                </div>
-              </div>
-              <p className="mutedtext" style={{ fontSize: 12, marginTop: 6 }}>
-                빌드는 외부 개발도구에서 수행됩니다. 커밋(Gitea 웹훅)과 도구 사용·진행 보고(MCP)가
-                아래에 집계되고, 커밋된 코드가 게이트웨이를 우회하거나 가용 목록 밖 도구를 쓰는지도
-                여기서 검증합니다.
-              </p>
-
-              <div style={{ fontSize: 12, fontWeight: 600, margin: '16px 0 4px' }}>
-                LLM·도구 사용 검증
-                {!compliance && (
-                  <span className="mutedtext" style={{ fontWeight: 400 }}>
-                    {' '}— 아직 검사하지 않았습니다 (위 버튼으로 실행)
-                  </span>
-                )}
-              </div>
-              {compliance && (compliance.findings.length === 0 ? (
-                <p style={{ fontSize: 13, color: '#10b981' }}>✅ 위반 없음 — 제약을 지켰습니다.</p>
-              ) : (
-                <>
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-                    {Object.entries(compliance.summary).map(([rule, count]) => (
-                      <span key={rule} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
-                        {COMPLIANCE_RULE_LABEL[rule] ?? rule} {count}건
-                      </span>
-                    ))}
-                  </div>
-                  <ul style={{ margin: '0 0 12px', paddingLeft: 16, fontSize: 12 }}>
-                    {compliance.findings.map((f, i) => (
-                      <li key={i}>
-                        <span className="mono">{f.file}:{f.line}</span> — {COMPLIANCE_RULE_LABEL[f.rule] ?? f.rule}
-                        {' '}(<span className="mono">{f.detail}</span>)
-                      </li>
-                    ))}
-                  </ul>
-                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
-                    📤 외주 빌더 전달용 수정 지시 프롬프트
-                  </div>
-                  <textarea
-                    className="mono"
-                    readOnly
-                    style={{ width: '100%', minHeight: 180, fontSize: 12 }}
-                    value={compliance.builder_prompt}
-                  />
-                </>
-              ))}
-            </div>
-          )}
         </div>
       )}
 
