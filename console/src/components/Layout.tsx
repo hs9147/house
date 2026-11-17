@@ -68,8 +68,8 @@ export default function Layout() {
           <NavLink to="/projects">프로젝트 관리</NavLink>
           {admin && has('workspace') && <NavLink to="/providers">LLM 관리</NavLink>}
           {admin && <NavLink to="/modules">도구 관리</NavLink>}
-          {admin && <NavLink to="/storage">저장소 관리</NavLink>}
           {admin && <NavLink to="/sources">데이터 수집</NavLink>}
+          {admin && <NavLink to="/storage">저장소 관리</NavLink>}
           {admin && <NavLink to="/ontology">온톨로지 관리</NavLink>}
           {admin && has('deploy') && <NavLink to="/server-config">서버구성</NavLink>}
           {admin && <NavLink to="/powershell">서버연결</NavLink>}
