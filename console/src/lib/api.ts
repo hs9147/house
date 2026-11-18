@@ -100,6 +100,7 @@ import type {
   UserAccountOut,
   UserOrgOut, OntologyCleanse, SemanticForm, SemanticHit, SemanticMapping, SemanticMergeRules, SemanticTemplate, SemanticTemplateRules, SemanticNeighbors, SemanticGoldItem,
   OntologyQuality,
+  OntologyOperations,
   SemanticGoldKind, SemanticGoldMetrics, SemanticTuneEntry, SemanticSchema, SemanticStatus,
 } from './types';
 
@@ -637,6 +638,8 @@ export const api = {
   semanticNeighbors: (store: string, cls: string, name: string, asOf = '') =>
     request<SemanticNeighbors>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/neighbors`, undefined,
       { cls, name, as_of: asOf || undefined }),
+  ontologyOperations: (store: string) =>
+    request<OntologyOperations>('GET', `/ontology/stores/${encodeURIComponent(store)}/operations`),
   ontologyQuality: (store: string) =>
     request<OntologyQuality>('GET', `/ontology/stores/${encodeURIComponent(store)}/quality`),
   // 재구성 — 내용 그래프 지우기(facts: 추출 결과만 · all: 확정한 것까지), 형식 그래프의 판 정보 다시 만들기

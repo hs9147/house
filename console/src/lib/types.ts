@@ -1912,6 +1912,13 @@ export interface SemanticNeighbors {
   mentions: { path: string; evidence: string; origin: string; observed_at?: string }[];
 }
 
+/** 온톨로지 운영 기준 점검 — 기준마다 수치·판정·조치(GET /ontology/stores/{s}/operations). */
+export interface OntologyOperations {
+  store: string;
+  checks: { key: string; label: string; level: 'ok' | 'warn' | 'fail'; value: string; target: string; action: string }[];
+  summary: Record<'ok' | 'warn' | 'fail', number>;
+}
+
 /** 품질 점검 — 개정 계열(지금 판·대체된 판)과 정의가 갈리는 용어(GET /ontology/stores/{s}/quality). */
 export interface OntologyQuality {
   revisions: { family: string; docs: { path: string; effective: string; current: boolean }[] }[];

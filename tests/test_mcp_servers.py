@@ -88,7 +88,8 @@ def test_ops_tools_list():
     assert names == [
         "list_routes", "get_deploy_status", "list_deployments", "tail_app_log",
         "host_snapshot", "list_ports", "list_scheduled_jobs", "run_scheduled_job",
-        "search_audit",
+        "search_audit", "ontology_rebuild", "ontology_regraph", "ontology_propose_schema",
+        "ontology_semantic_status", "ontology_analyze", "ontology_checks", "source_coverage",
     ]
 
 

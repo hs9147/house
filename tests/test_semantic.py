@@ -955,3 +955,60 @@ def test_mcp_relations_take_as_of_and_flag_superseded_evidence(store):
     rel = json.loads(mcp_servers._graph_call("concept_relations", {
         "source": "docs", "cls": "협력사", "name": "에이전자", "as_of": "2025-02-01"}))
     assert [r["name"] for r in rel[0]["relations"]] == ["A"] and rel[0]["as_of"] == "2025-02-01"
+
+
+def test_operations_checks_judge_each_criterion_with_an_action(store):
+    """운영 기준 점검 — 기준마다 수치·판정·조치. 층위 없이 확정한 스키마는 주의, 정답이 모자라면 주의(조치에 남은 수)."""
+    from app.services import ontology_ops
+
+    out = ontology_ops.checks("docs")
+    by = {c["key"]: c for c in out["checks"]}
+    assert by["schema"]["level"] == "fail" and "스키마 제안" in by["schema"]["action"]
+    assert by["index_failure"]["level"] == "ok"
+    semantic.confirm_schema("docs", {"classes": [{"name": "협력사", "description": ""}], "relations": []}, "admin")
+    conn = semantic._conn("docs")
+    try:   # 층위 없이 확정한 옛 스키마(confirm은 기본 층위를 넣는다 — 옛 판을 흉내 낸다)
+        old = semantic._get(conn, "schema")
+        semantic._put(conn, "schema", {**old, "classes": [{k: v for k, v in c.items() if k != "layer"}
+                                                           for c in old["classes"]]})
+        conn.commit()
+    finally:
+        conn.close()
+    by = {c["key"]: c for c in ontology_ops.checks("docs")["checks"]}
+    assert by["schema"]["level"] == "warn" and "재구성" in by["schema"]["action"]
+    assert by["gold"]["level"] == "warn" and "20개" in by["gold"]["action"]
+    assert by["versioned"]["level"] == "ok"
+    from app.api import mcp_servers
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        got = json.loads(mcp_servers._ops_call(db, "admin", "ontology_checks", {"source": "docs"}))
+    assert got[0]["store"] == "docs" and got[0]["summary"]["warn"] >= 2
+
+
+def test_ops_rebuild_tools_are_admin_only_need_confirmation_and_stay_out_of_chat(store, tmp_path):
+    """재구성 도구(/mcp/ops) — 관리자만, 지우기는 저장소 이름을 한 번 더. 대화·통합 서버 묶음에는 없다(상태 보기만)."""
+    from app.api import mcp_servers
+    from app.db import SessionLocal
+
+    admin, member = (type("K", (), {"name": n, "is_admin": a})() for n, a in (("admin", True), ("member", False)))
+    _confirm_schema_and_form()
+    with SessionLocal() as db:
+        semantic.analyze(db, "docs")
+
+        def call(name, args, key=admin):
+            return json.loads(mcp_servers._ops_call(db, key.name, name, args, key=key))
+
+        with pytest.raises(mcp_servers.mcp_server.McpToolError, match="관리자"):
+            call("ontology_rebuild", {"source": "docs", "scope": "all", "confirm": "docs"}, member)
+        with pytest.raises(mcp_servers.mcp_server.McpToolError, match="confirm"):
+            call("ontology_rebuild", {"source": "docs", "scope": "all", "confirm": "doc"})
+        out = call("ontology_rebuild", {"source": "docs", "scope": "all", "confirm": "docs"})
+        assert out["removed"]["sem_edges"] > 0 and semantic.status("docs")["schema"] is None
+        assert call("ontology_regraph", {"source": "docs"})["done"]
+        st = call("ontology_semantic_status", {"source": "docs"}, member)     # 상태 보기는 누구나
+        assert st["schema"] is None and st["draft"] is None
+        with pytest.raises(mcp_servers.mcp_server.McpToolError, match="확정한 스키마"):
+            call("ontology_analyze", {"source": "docs", "action": "start"})
+    names = {t["name"] for t in mcp_servers._read_only(mcp_servers._OPS_TOOLS)}
+    assert "ontology_semantic_status" in names and not names & {"ontology_rebuild", "ontology_regraph",
+                                                                 "ontology_propose_schema", "ontology_analyze"}

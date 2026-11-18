@@ -105,6 +105,15 @@ def ontology_quality(store_name: str, _: ApiKey = Depends(require_admin)):
     return os_.quality(store_name)
 
 
+@router.get("/ontology/stores/{store_name}/operations")
+def ontology_operations(store_name: str, _: ApiKey = Depends(require_admin)):
+    """운영 기준 점검 — 기준마다 수치·판정(ok·warn·fail)·조치(services/ontology_ops)."""
+    from ..services import ontology_ops  # noqa: PLC0415
+
+    _store_or_404(store_name)
+    return ontology_ops.checks(store_name)
+
+
 @router.post("/ontology/stores/{store_name}/rebuild")
 def ontology_rebuild(store_name: str, scope: str = Body(..., embed=True), db: Session = Depends(get_db),
                      admin: ApiKey = Depends(require_admin)):

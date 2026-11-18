@@ -3,7 +3,7 @@ import { api } from '../../lib/api';
 import { useApi, usePolling } from '../../lib/hooks';
 import { runTask } from '../../lib/tasks';
 import type {
-  OntologyQuality, SemanticForm, SemanticHit, SemanticMapping, SemanticMergeRules, SemanticNeighbors, SemanticReview, SemanticSchema,
+  OntologyOperations, OntologyQuality, SemanticForm, SemanticHit, SemanticMapping, SemanticMergeRules, SemanticNeighbors, SemanticReview, SemanticSchema,
   SemanticStatus, SemanticTemplate, SemanticTemplateEval, SemanticTemplateRules, SemanticGoldItem, SemanticGoldKind,
 } from '../../lib/types';
 
@@ -134,6 +134,7 @@ export default function SemanticTab() {
       {stores.length === 0 && !overview.loading && <p className="mutedtext">본문을 읽어 낸 저장소가 없습니다 — 먼저 색인하세요.</p>}
       {notice && <p className="mutedtext" style={{ fontSize: 12 }}>{notice}</p>}
       {error && <p className="error">{error}</p>}
+      {status && <OperationsStep store={store} version={`${status.schema?.version ?? ''}:${status.running}`} />}
       {status && (
         <>
           <SchemaStep status={status} busy={busy}
@@ -596,6 +597,46 @@ function GoldStep({ store, status, busy, onLabeled, onTune, onRollback }: {
           </ul>
         </details>
       )}
+    </section>
+  );
+}
+
+const LEVEL: Record<OntologyOperations['checks'][number]['level'], { label: string; cls: string }> = {
+  ok: { label: '정상', cls: 'ok' }, warn: { label: '주의', cls: 'warn' }, fail: { label: '위반', cls: 'bad' },
+};
+
+/** 운영 기준 점검 — 이 저장소의 온톨로지가 운영에 쓸 만한지 기준마다 수치·판정·조치(services/ontology_ops). */
+function OperationsStep({ store, version }: { store: string; version: string }) {
+  const [ops, setOps] = useState<OntologyOperations | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    setOps(null);
+    api.ontologyOperations(store).then(setOps, (e) => setError((e as Error).message));
+  }, [store, version]);
+  if (error) return <p className="error">{error}</p>;
+  if (!ops) return null;
+  return (
+    <section style={{ marginTop: 8 }}>
+      <h3 style={{ fontSize: 14 }}>
+        운영 기준 점검{' '}
+        {(['fail', 'warn', 'ok'] as const).map((k) => (
+          <span key={k} className={`status ${LEVEL[k].cls}`} style={{ marginLeft: 4 }}>{LEVEL[k].label} {ops.summary[k] ?? 0}</span>
+        ))}
+      </h3>
+      <table style={{ fontSize: 12 }}>
+        <thead><tr><th>기준</th><th>판정</th><th>지금</th><th>기준값</th><th>조치</th></tr></thead>
+        <tbody>
+          {ops.checks.map((c) => (
+            <tr key={c.key}>
+              <td>{c.label}</td>
+              <td><span className={`status ${LEVEL[c.level].cls}`}>{LEVEL[c.level].label}</span></td>
+              <td className="mono">{c.value}</td>
+              <td className="mutedtext">{c.target}</td>
+              <td className="mutedtext">{c.action}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </section>
   );
 }

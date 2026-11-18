@@ -234,6 +234,52 @@ _OPS_TOOLS = [
         },
     },
     {
+        "name": "ontology_rebuild",
+        "description": (
+            "온톨로지 재구성 ① — 내용 그래프를 지운다(scope: facts 추출 결과만 · all 확정한 스키마·양식·템플릿·묶기 기준까지)"
+            " 그리고 형식 그래프의 판 정보를 비운다. 원본 문서와 문서 색인은 그대로. **되돌릴 수 없다** — confirm에 저장소 이름을"
+            " 한 번 더 적어야 돈다. 이어서 ontology_regraph를 done이 될 때까지 부른다. 관리자 전용(대화 도구 묶음에는 없다)."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "source": {"type": "string"}, "scope": {"type": "string", "enum": ["facts", "all"]},
+            "confirm": {"type": "string", "description": "저장소 이름을 그대로 — 실수로 지우지 않게"}},
+            "required": ["source", "scope", "confirm"]},
+    },
+    {
+        "name": "ontology_regraph",
+        "description": "온톨로지 재구성 ② — 형식 그래프의 판 정보(시행일·개정 계열)를 .ready에서 다시 만든다. 시간 예산 안에서"
+                       " 돌고 남은 수를 준다 — done이 될 때까지 다시 부른다.",
+        "inputSchema": {"type": "object", "properties": {"source": {"type": "string"}}, "required": ["source"]},
+    },
+    {
+        "name": "ontology_propose_schema",
+        "description": "온톨로지 재구성 ③ — 내용 분석 스키마(층위 포함)를 LLM이 제안·검토한다(뒤에서). 확정은 사람이 콘솔"
+                       " 내용 분석 ①에서 한다. 진행은 ontology_semantic_status로.",
+        "inputSchema": {"type": "object", "properties": {"source": {"type": "string"}}, "required": ["source"]},
+    },
+    {
+        "name": "ontology_semantic_status",
+        "description": "내용 분석 상태 — 제안 작업(task)·스키마 초안(개념·층위·관계)·확정 판·분석 진행·멈춤·표본 검토.",
+        "inputSchema": {"type": "object", "properties": {"source": {"type": "string"}}, "required": ["source"]},
+    },
+    {
+        "name": "ontology_analyze",
+        "description": "온톨로지 재구성 ④ — 내용 분석을 시작(start)·멈춤 뒤 다시(resume)·멈추기(stop). 확정한 스키마가 있어야"
+                       " 시작한다(사람이 콘솔에서 확정한 뒤).",
+        "inputSchema": {"type": "object", "properties": {
+            "source": {"type": "string"}, "action": {"type": "string", "enum": ["start", "resume", "stop"]}},
+            "required": ["source", "action"]},
+    },
+    {
+        "name": "ontology_checks",
+        "description": (
+            "온톨로지 운영 기준 점검 — 저장소마다 기준(색인 실패율·구조 전환율·판 정보·스키마 층위·분석 진행·분석 실패율·"
+            "표본 검토 오류율·시점 기록·사람 정답·정의 충돌)의 수치와 판정(ok·warn·fail)·조치."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "source": {"type": "string", "description": "저장소 이름(비우면 색인된 저장소 전부)"}}},
+    },
+    {
         "name": "source_coverage",
         "description": (
             "데이터 수집의 하네스 현황 — 출처마다 최신 라운드(받을 수 있는 정보의 판정 수: 관리 중·중복·비슷함·신규),"
@@ -258,12 +304,14 @@ async def ops_mcp_server(
     호출 횟수다 — job의 종류가 무엇을 어디에 쓸지 정하므로 인자로 대상이 바뀌지 않고,
     되풀이 호출은 최소 간격이 막는다.
     """
-    return mcp_server.dispatch(
-        await mcp_server.read_payload(request),
+    # 스레드로 — 재구성 도구(판 정보 다시 만들기)는 수십 초 돈다(이벤트 루프를 붙들지 않게)
+    payload = await mcp_server.read_payload(request)
+    return await anyio.to_thread.run_sync(lambda: mcp_server.dispatch(
+        payload,
         server_name="paas-ops",
         tools=_OPS_TOOLS,
-        call=lambda name, args: _ops_call(db, key.name, name, args),
-    )
+        call=lambda name, args: _ops_call(db, key.name, name, args, key=key),
+    ))
 
 
 def _project_by_name(db: Session, args: dict, discover: str = "list_routes") -> Project:
@@ -276,7 +324,20 @@ def _project_by_name(db: Session, args: dict, discover: str = "list_routes") -> 
     return row
 
 
-def _ops_call(db: Session, actor: str, name: str, args: dict) -> str:
+def _ops_call(db: Session, actor: str, name: str, args: dict, *, key: ApiKey | None = None) -> str:
+    if name in ("ontology_rebuild", "ontology_regraph", "ontology_propose_schema", "ontology_semantic_status",
+                "ontology_analyze"):
+        # 운영 서버의 다른 도구는 읽기라 키를 가리지 않지만, 재구성은 지우고 바꾼다 — 관리자만
+        if name != "ontology_semantic_status" and not (key is not None and key.is_admin):
+            raise mcp_server.McpToolError("온톨로지 재구성은 관리자만 합니다.")
+        return _ontology_ops_call(db, actor, name, args)
+
+    if name == "ontology_checks":
+        from ..services import ontology_ops  # noqa: PLC0415
+
+        wanted = _str_arg(args, "source", required=False)
+        return _dump([ontology_ops.checks(_doc_source(wanted, db).name)] if wanted else ontology_ops.all_checks())
+
     if name == "source_coverage":
         from ..models import InfoSource  # noqa: PLC0415
         from ..services import coverage  # noqa: PLC0415
@@ -1627,6 +1688,63 @@ def _browser_call(db: Session, actor: str, name: str, args: dict) -> str:
     return _dump(page)
 
 
+# 온톨로지 재구성 도구 — 관리자 전용 운영 도구(/mcp/ops). 대화·통합 서버 묶음에는 넣지 않는다(_EXCLUDED): 지우는 일은 대화
+# 한 줄로 일어날 일이 아니다. 지우기는 저장소 이름을 한 번 더 받는다(confirm).
+def _ontology_ops_call(db: Session, actor: str, name: str, args: dict) -> str:
+    from ..services import semantic  # noqa: PLC0415
+
+    store = _doc_source(_str_arg(args, "source"), db)
+    try:
+        if name == "ontology_rebuild":
+            scope = _str_arg(args, "scope")
+            if _str_arg(args, "confirm", required=False) != store.name:
+                raise mcp_server.McpToolError(f"confirm에 저장소 이름({store.name})을 그대로 적어야 지웁니다 — 되돌릴 수 없습니다.")
+            out = semantic.reset(store.name, scope, actor)
+            audit.record(db, actor, "ontology.rebuild", store.name, {**out, "via": "mcp"})
+            return _dump({**out, "next": "ontology_regraph를 done이 될 때까지 부르세요"})
+        if name == "ontology_regraph":
+            return _dump(docsearch.regraph(store.name, store.root, budget_seconds=60.0))
+        if name == "ontology_propose_schema":
+            semantic.provider_for(db, store.name)
+            if not semantic.submit(store.name, "스키마 제안·검토",
+                                   lambda s, report: semantic.propose_schema(s, store.name, report)):
+                raise mcp_server.McpToolError("이 저장소에서 이미 돌고 있는 제안이 있습니다.")
+            audit.record(db, actor, "ontology.semantic.schema.propose", store.name, {"via": "mcp"})
+            return _dump({"started": True, "next": "ontology_semantic_status로 진행을 보고, 초안을 콘솔 ①에서 확정하세요"})
+        if name == "ontology_semantic_status":
+            st = semantic.status(store.name)
+            draft = st.get("schema_draft") or {}
+            summary = lambda sc: sc and {  # noqa: E731
+                "classes": [{"name": c["name"], "layer": c.get("layer")} for c in sc.get("classes") or []],
+                "relations": [f"{r['from']}-{r['name']}->{r['to']}{' (temporal)' if r.get('temporal') else ''}"
+                              for r in sc.get("relations") or []]}
+            return _dump({"task": st["task"], "running": st["running"], "documents": st["documents"],
+                          "analyzed": st["analyzed"], "paused": st["paused"],
+                          "draft": summary(draft.get("revised")) if draft else None,
+                          "draft_problems": draft.get("problems"), "draft_at": draft.get("created_at"),
+                          "schema": summary(st.get("schema")) and {
+                              **summary(st["schema"]), "version": st["schema"].get("version"),
+                              "confirmed_by": st["schema"].get("confirmed_by"),
+                              "confirmed_at": st["schema"].get("confirmed_at")},
+                          "review": {k: st["review"][k] for k in ("items", "wrong", "error_rate")}})
+        action = _str_arg(args, "action")
+        if action == "stop":
+            semantic.stop(store.name)
+        elif action in ("start", "resume"):
+            semantic.provider_for(db, store.name)
+            if not semantic.status(store.name)["schema"]:
+                raise mcp_server.McpToolError("확정한 스키마가 없습니다 — 콘솔 내용 분석 ①에서 확정한 뒤에 시작하세요.")
+            if action == "resume":
+                semantic.resume(store.name)
+            semantic.start(store.name)
+        else:
+            raise mcp_server.McpToolError("action은 start·resume·stop 중 하나입니다.")
+        audit.record(db, actor, f"ontology.semantic.analyze.{action}", store.name, {"via": "mcp"})
+        return _dump({"running": semantic.running(store.name)})
+    except semantic.SemanticError as e:
+        raise mcp_server.McpToolError(str(e))
+
+
 # --- ML 로직 서버 (/mcp/ml) ---
 #
 # LLM이 숫자를 어림하지 않고 **계산하게** 한다(services/mllogic) — 예측(회귀)·분류·클러스터링·시계열 예측·선형/정수
@@ -2107,7 +2225,9 @@ def _concept_call(name: str, args: dict, sources) -> str:
 
 # 대화·통합 서버가 쓰는 도구는 **읽기**만 고른다. 색인 다시 돌리기·카탈로그 동기화·주기 작업 실행은
 # 대화 한 줄로 일어날 일이 아니다 — 그건 각 메뉴(또는 개별 서버)에서 사람이 한다.
-_EXCLUDED = {"reindex_docs", "sync_catalog", "run_scheduled_job"}
+_EXCLUDED = {"reindex_docs", "sync_catalog", "run_scheduled_job",
+             # 온톨로지 재구성 — 지우고 다시 만드는 일은 운영 서버(/mcp/ops)에서만, 관리자가
+             "ontology_rebuild", "ontology_regraph", "ontology_propose_schema", "ontology_analyze"}
 
 # 저장소 서버(/mcp/storage/{저장소})는 저장소마다 따로라, 묶음에는 목록 보기 하나만 source 인자를
 # 붙여 얹는다. 검색·읽기는 docs 도구가 저장소를 가로질러 이미 한다.
