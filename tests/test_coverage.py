@@ -16,7 +16,7 @@ PAGES = [
     {"url": "https://intra.test/contract", "title": "구매 계약 현황", "fields": ["계약일"],
      "tables": [["계약번호", "업체", "금액"]], "links": []},
     {"url": "https://intra.test/guide", "title": "이용 안내", "links": [], "text": "안내 본문"},
-    {"url": "https://intra.test/notices", "title": "공지 조회 목록", "fields": ["구분"], "tables": [["구분", "내용"]],
+    {"url": "https://intra.test/notices", "title": "공지 조회 목록", "fields": ["구분"], "tables": [["구분", "내용", "일자"]],
      "links": []},
     {"url": "https://intra.test/login", "title": "로그인", "requires_login": True, "links": []},
 ]
@@ -112,7 +112,10 @@ def test_harness_rounds_cross_check_the_source_and_the_stores_and_take_correctio
 
     root = client.tmp / "docs"
     for i in range(5):     # 저장소에 되풀이되는 표 두 가지 — 하나는 출처 화면과 겹치고, 하나는 출처가 없다
-        (root / f"공지대장{i}.md").write_text(f"# 대장 {i}\n\n| 구분 | 내용 |\n|---|---|\n| 인사 | 휴가 |\n", encoding="utf-8")
+        (root / f"공지대장{i}.md").write_text(f"# 대장 {i}\n\n| 구분 | 내용 | 일자 |\n|---|---|---|\n| 인사 | 휴가 | 1 |\n",
+                                          encoding="utf-8")
+        (root / f"서식{i}.md").write_text(f"# 서식 {i}\n\n| 1)계 약 구 분 : | 건별계약 | 비고 |\n|---|---|---|\n| a | b | c |\n",
+                                        encoding="utf-8")   # 양식의 칸 배치 — 데이터 유형이 아니다
         (root / f"재고표{i}.md").write_text(f"# 재고 {i}\n\n| 품번 | 수량 | 창고 |\n|---|---|---|\n| A | 1 | 1 |\n",
                                          encoding="utf-8")
     docsearch.reindex("docs", root)
@@ -131,7 +134,8 @@ def test_harness_rounds_cross_check_the_source_and_the_stores_and_take_correctio
     assert notices["status"] == "similar" and notices["store_match"]["store"] == "docs"
     assert notices["store_match"]["documents"] == 5
     assert any(g["name"] == "품번 | 수량 | 창고" for g in h["gaps"])                     # 출처 미확인
-    assert not any(g["name"] == "구분 | 내용" for g in h["gaps"])                        # 출처 화면이 덮는다
+    assert not any(g["name"] == "구분 | 내용 | 일자" for g in h["gaps"])                 # 출처 화면이 덮는다
+    assert not any("계 약 구 분" in g["name"] for g in h["gaps"])                       # 서식의 칸 배치는 유형이 아니다
     assert [i["kind"] for i in h["issues"]] == ["막힘"]
     # 사람의 교정 — 다음 라운드부터 먼저, 바뀐 판정이 기록된다
     h = client.post(f"{API}/sources/{a}/coverage/decide", headers=ADMIN,

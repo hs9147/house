@@ -26,6 +26,10 @@ from .infosource import SourceError, USER_AGENT, _launch, _origin, os_trusted
 _LOGIN_URL = re.compile(r"log-?in|sign-?in|logon|/sso(?:[/._?-]|$)|unauthori[sz]ed|/auth/|session-?expired", re.I)
 _LOGIN_TITLE = re.compile(r"로그인|login|sign in|인증", re.I)
 
+class LoginRequired(SourceError):
+    """서버 브라우저에 그 사이트의 세션이 없다 — 사람이 자기 브라우저에서 로그인해야 한다(skills.browser_url로 요청)."""
+
+
 RUNNER = "http://gpax-bot.invalid"   # 받는 창의 가짜 출처 — 네트워크로 나가지 않는다(가로채 답한다)
 ENGINE_DIR = Path(__file__).resolve().parents[2] / "console" / "src" / "lib"
 DEFAULT_TIMEOUT = 600.0              # 무인 수집 한 번의 상한(초)
@@ -105,19 +109,17 @@ def run(source: dict, screens: list[dict], headers: dict, *, start_url: str,
             page.goto(start_url, wait_until="networkidle", timeout=60_000)
             landed = _origin(page.url)
             if landed != origin:
-                raise SourceError(f"다른 주소({landed})로 넘어갔습니다 — 로그인(SSO) 화면입니다. 서버에 맡긴 세션이 없거나 "
-                                  "만료됐습니다(무인 수집 설정과 출처의 요청 헤더를 보세요).")
+                raise LoginRequired(f"다른 주소({landed})로 넘어갔습니다 — 로그인(SSO) 화면입니다. 서버에 맡긴 세션이 없거나 "
+                                    "만료됐습니다.")
             landed_title, landed_url = page.title()[:80], page.url[:200]
             step(f"열린 화면: {landed_title} · {landed_url}")
             parts = urlsplit(page.url)
             if _LOGIN_URL.search(parts.path + "?" + parts.query) or (
                     _LOGIN_TITLE.search(landed_title) and not _LOGIN_URL.search(urlsplit(start_url).path)):
-                raise SourceError(f"로그인 화면이 떴습니다({landed_title or '제목 없음'} · {parts.path}) — 서버에 이 사이트의 "
-                                  "세션이 없거나 만료됐습니다(무인 수집 설정과 출처의 요청 헤더를 보세요). 북마크로는 로그인한 "
-                                  "내 브라우저에서 돌릴 수 있습니다.")
+                raise LoginRequired(f"로그인 화면이 떴습니다({landed_title or '제목 없음'} · {parts.path}) — 서버에 이 사이트의 "
+                                    "세션이 없거나 만료됐습니다.")
             if page.locator("input[type=password]").count():
-                raise SourceError("로그인 화면이 떴습니다 — 서버에 맡긴 세션이 없거나 만료됐습니다(무인 수집 설정과 "
-                                  "출처의 요청 헤더를 보세요). 북마크로는 로그인한 내 브라우저에서 돌릴 수 있습니다.")
+                raise LoginRequired("로그인 화면이 떴습니다 — 서버에 맡긴 세션이 없거나 만료됐습니다.")
             page.evaluate(_engine())
             deadline = time.monotonic() + timeout
             while "payload" not in box:

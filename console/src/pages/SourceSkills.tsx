@@ -119,12 +119,18 @@ function SkillRunModal({ skill, onClose }: { skill: SkillOut; onClose: () => voi
         <span className="mutedtext" style={{ fontSize: 11 }}>몇십 초에서 몇 분 걸립니다. 같은 입력은 5분 동안 지난 결과를 줍니다.</span>
       </div>
       {error && <p className="error">{error}</p>}
+      {/* 서버가 그 사이트에 로그인돼 있지 않다 — 내 브라우저에서(로그인 → 북마크) 돌리는 화면으로 */}
+      {error.includes('#/skill-run?') && (
+        <a className="button" href={`#/skill-run?${error.split('#/skill-run?')[1].split(/\s/)[0]}`}>
+          🔐 내 브라우저로 로그인해 실행
+        </a>
+      )}
       {out && <SkillResult out={out} />}
     </Modal>
   );
 }
 
-function SkillResult({ out }: { out: SkillRunResult }) {
+export function SkillResult({ out }: { out: SkillRunResult }) {
   return (
     <div style={{ fontSize: 12 }}>
       <p className="mutedtext" style={{ margin: '4px 0' }}>

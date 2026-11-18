@@ -384,3 +384,43 @@ def test_engine_stops_at_a_same_origin_login_page(site):
     with pytest.raises(infosource.SourceError, match="로그인 화면"):
         sourcebot.run({"id": 7, "name": "시험"}, [{"screen": "x", "url": f"{site}/notice", "conditions": []}], {},
                       start_url=f"{site}/locked", timeout=60)
+
+
+def test_login_is_requested_from_the_person_and_their_browser_result_is_kept(client, monkeypatch, fake_bot):
+    """서버 브라우저가 로그인 화면에 막히면 사람에게 로그인을 요청한다 — 실행 오류에 내 브라우저에서 돌릴 콘솔 주소가 온다.
+    그 화면이 북마크로 돌린 결과를 올리면 같은 입력의 결과로 보관되고, 에이전트가 다시 부르면 받는다(서버를 다시 돌리지 않는다)."""
+    import base64  # noqa: F401
+
+    sid = _notice_scan(client, monkeypatch)
+    _with_skill(client, sid)
+
+    def locked(*a, **kw):
+        raise sourcebot.LoginRequired("로그인 화면이 떴습니다(GPS · /sys/auth/SY_LOGIN/UNAUTHORIZED)")
+
+    monkeypatch.setattr(sourcebot, "run", locked)
+    res = client.post(f"{API}/skills/run", headers=ADMIN, json={"skill": "인사 포털/공지-검색", "params": {"구분": "보안"}})
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert "#/skill-run?skill=" in detail["login_url"] and "로그인을 요청" in detail["message"]
+    from app.api import mcp_servers
+    with pytest.raises(mcp_servers.mcp_server.McpToolError, match="skill-run"):
+        with SessionLocal() as db:
+            mcp_servers._skills_call(db, type("K", (), {"name": "admin", "is_admin": True})(), "run",
+                                     {"skill": "인사 포털/공지-검색", "params": {"구분": "보안"}})
+
+    prep = client.post(f"{API}/skills/prepare", headers=ADMIN,
+                       json={"skill": "인사 포털/공지-검색", "params": {"구분": "보안"}}).json()
+    assert prep["source"]["id"] == sid and {"field": "구분", "value": "보안"} in prep["screen"]["conditions"]
+    payload = _payload(sid, [{"no": 7, "title": "브라우저에서 받음"}])
+    up = client.post(f"{API}/skills/browser-result", headers=ADMIN,
+                     data={"skill": "인사 포털/공지-검색", "params": json.dumps({"구분": "보안"}, ensure_ascii=False)},
+                     files={"file": ("r.json", json.dumps(payload, ensure_ascii=False).encode(), "application/json")})
+    assert up.status_code == 200, up.text
+    assert up.json()["via"] == "browser" and up.json()["lists"][0]["rows"][0]["제목"] == "브라우저에서 받음"
+    again = client.post(f"{API}/skills/run", headers=ADMIN, json={"skill": "인사 포털/공지-검색", "params": {"구분": "보안"}})
+    assert again.status_code == 200 and again.json()["cached"] is True     # 로그인한 사람의 결과를 받는다
+    bad = client.post(f"{API}/skills/browser-result", headers=ADMIN,
+                      data={"skill": "인사 포털/공지-검색", "params": "{}"},
+                      files={"file": ("r.json", json.dumps({**payload, "origin": "https://other.test"}).encode(),
+                                      "application/json")})
+    assert bad.status_code == 400                                           # 다른 사이트의 결과는 받지 않는다

@@ -29,6 +29,8 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from urllib.parse import quote
+
 from ..models import ApiKey, InfoSource
 from . import infosource, llm, sourcebot
 from .infosource import SourceError
@@ -345,10 +347,26 @@ def _shape(result: dict, rows: int) -> dict:
             + [f"받지 않은 파일: {m['url']} — {m['reason']}" for m in missed[:5]]}
 
 
-def run(db: Session, key: ApiKey, ident: str, params: dict | None = None, *, rows: int = MAX_ROWS) -> dict:
-    """스킬 하나를 지금 돌려 결과를 돌려준다(저장소에 쓰지 않는다 — 저장은 데이터 수집의 수집이 한다)."""
-    from .. import audit  # noqa: PLC0415
+def browser_url(ident: str, params: dict | None) -> str:
+    """사람의 브라우저에서 스킬을 돌리는 콘솔 주소 — 그 화면이 업무 사이트를 열고, 로그인한 뒤 북마크를 누르면 돈다."""
+    from ..config import get_settings  # noqa: PLC0415
 
+    s = get_settings()
+    base = s.platform_public_url.rstrip("/") or f"https://{s.base_domain}"
+    query = f"skill={quote(ident)}" + (f"&params={quote(json.dumps(params, ensure_ascii=False))}" if params else "")
+    return f"{base}/console/#/skill-run?{query}"
+
+
+class LoginRequired(SourceError):
+    """서버에서 돌지 못한다 — 그 사이트에 로그인해야 한다. 사람의 브라우저에서 돌릴 주소(url)를 함께 싣는다."""
+
+    def __init__(self, message: str, url: str):
+        super().__init__(message)
+        self.url = url
+
+
+def _prepare(db: Session, key: ApiKey, ident: str, params: dict | None) -> tuple[InfoSource, dict, dict, dict, str]:
+    """(출처, 화면, 돌 화면, 쓴 입력, 캐시 키) — 서버 실행과 브라우저 실행이 같은 입력이면 같은 키다."""
     row, screen = find(db, ident)
     if not can_use(db, key, screen["skill"]):
         raise SourceError(f"이 스킬을 부를 권한이 없습니다: {ident} — 관리자가 공개 범위에 조직을 더해야 합니다.")
@@ -357,6 +375,50 @@ def run(db: Session, key: ApiKey, ident: str, params: dict | None = None, *, row
     if last:   # @last — 지난번에 빠짐없이 받은 날(served_screens와 같다)
         ran["last"] = last
     cache_key = hashlib.sha256(json.dumps([row.id, ran], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    return row, screen, ran, values, cache_key
+
+
+def _finish_run(db: Session, key: ApiKey, row: InfoSource, screen: dict, values: dict, result: dict, rows: int,
+                started: float, cache_key: str, via: str) -> dict:
+    from .. import audit  # noqa: PLC0415
+
+    out = {"skill": skill_id(row, screen["skill"]["name"]), "screen": screen["screen"],
+           "params": values, **_shape(result, max(1, min(rows, MAX_ROWS))),
+           "seconds": round(time.monotonic() - started, 1), "cached": False, "via": via}
+    _CACHE[cache_key] = (time.monotonic(), out)
+    for k in [k for k, (at, _) in _CACHE.items() if time.monotonic() - at >= CACHE_SECONDS]:
+        _CACHE.pop(k, None)
+    audit.record(db, key.name, "source.skill.run", out["skill"],
+                 {"ok": True, "via": via, "params": sorted(values), "rows": sum(x["got"] for x in out["lists"]),
+                  "files": len(out["files"]), "pages": len(out["pages"]), "seconds": out["seconds"],
+                  # 메모는 화면 이름·막힌 까닭뿐이다(입력값은 싣지 않는다) — 하네스가 0건의 까닭으로 읽는다
+                  "notes": [n[:200] for n in out["notes"][:3]]})
+    return out
+
+
+def prepare_browser(db: Session, key: ApiKey, ident: str, params: dict | None) -> dict:
+    """사람의 브라우저에서 돌릴 것 — 북마크에 보낼 출처·화면(입력을 채운 것)과 판(version)."""
+    row, screen, ran, values, _ = _prepare(db, key, ident, params)
+    return {"skill": skill_id(row, screen["skill"]["name"]), "description": screen["skill"]["description"],
+            "params": values, "source": {"id": row.id, "name": row.name, "url": row.url,
+                                         "origin": infosource._origin(row.url)},
+            "screen": ran, "version": infosource.queries_version(row)}
+
+
+def accept_browser(db: Session, key: ApiKey, ident: str, params: dict | None, payload, rows: int = MAX_ROWS) -> dict:
+    """북마크가 사람의 로그인 세션으로 돌린 결과 — 같은 입력의 결과로 보관한다(에이전트가 다시 부르면 받는다)."""
+    row, screen, _ran, values, cache_key = _prepare(db, key, ident, params)
+    started = time.monotonic()
+    result = infosource.from_browser(row, payload)   # 이 출처의 북마크·이 사이트에서 만든 것만(검사)
+    return _finish_run(db, key, row, screen, values, result, rows, started, cache_key, "browser")
+
+
+def run(db: Session, key: ApiKey, ident: str, params: dict | None = None, *, rows: int = MAX_ROWS) -> dict:
+    """스킬 하나를 지금 돌려 결과를 돌려준다(저장소에 쓰지 않는다 — 저장은 데이터 수집의 수집이 한다). 서버 브라우저가
+    그 사이트에 로그인돼 있지 않으면 LoginRequired — 사람의 브라우저에서 돌릴 주소를 싣는다(로그인을 사람에게 요청한다)."""
+    from .. import audit  # noqa: PLC0415
+
+    row, screen, ran, values, cache_key = _prepare(db, key, ident, params)
     hit = _CACHE.get(cache_key)
     if hit and time.monotonic() - hit[0] < CACHE_SECONDS:
         return {**hit[1], "cached": True}
@@ -364,24 +426,21 @@ def run(db: Session, key: ApiKey, ident: str, params: dict | None = None, *, row
     try:
         payload = bot(row, [ran], timeout=RUN_TIMEOUT)
         result = infosource.from_browser(row, payload)
+    except sourcebot.LoginRequired as e:
+        url = browser_url(skill_id(row, screen["skill"]["name"]), params)
+        audit.record(db, key.name, "source.skill.run", skill_id(row, screen["skill"]["name"]),
+                     {"ok": False, "params": sorted(values), "error": str(e)[:300], "login": True})
+        raise LoginRequired(f"{e} 사용자에게 로그인을 요청하세요 — 이 주소를 열면 업무 사이트가 열리고, 로그인한 뒤 GPAX "
+                            f"북마크를 누르면 사용자의 브라우저에서 이 스킬이 돕니다: {url} (끝나면 같은 입력으로 다시 부르면 "
+                            f"그 결과를 받습니다 — {CACHE_SECONDS // 60}분 안)", url)
     except SourceError as e:
         audit.record(db, key.name, "source.skill.run", skill_id(row, screen["skill"]["name"]),
                      {"ok": False, "params": sorted(values), "error": str(e)[:300]})
         raise
-    out = {"skill": skill_id(row, screen["skill"]["name"]), "screen": screen["screen"],
-           "params": values, **_shape(result, max(1, min(rows, MAX_ROWS))),
-           "seconds": round(time.monotonic() - started, 1), "cached": False}
+    out = _finish_run(db, key, row, screen, values, result, rows, started, cache_key, "server")
     landed = payload.get("landed") or {}
     if landed.get("url") and not out["lists"] and not out["files"] and not out["pages"]:
         out["notes"].append(f"서버 브라우저의 첫 화면: {landed.get('title') or '(제목 없음)'} · {landed['url']}")
-    _CACHE[cache_key] = (time.monotonic(), out)
-    for k in [k for k, (at, _) in _CACHE.items() if time.monotonic() - at >= CACHE_SECONDS]:
-        _CACHE.pop(k, None)
-    audit.record(db, key.name, "source.skill.run", out["skill"],
-                 {"ok": True, "params": sorted(values), "rows": sum(x["got"] for x in out["lists"]),
-                  "files": len(out["files"]), "pages": len(out["pages"]), "seconds": out["seconds"],
-                  # 메모는 화면 이름·막힌 까닭뿐이다(입력값은 싣지 않는다) — 하네스가 0건의 까닭으로 읽는다
-                  "notes": [n[:200] for n in out["notes"][:3]]})
     return out
 
 

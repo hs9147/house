@@ -825,6 +825,18 @@ export const api = {
   listSkills: () => request<{ skills: SkillOut[]; runnable: boolean; reason: string }>('GET', '/skills'),
   runSkill: (skill: string, params: Record<string, string>) =>
     request<SkillRunResult>('POST', '/skills/run', { skill, params }),
+  // 사람의 브라우저에서 — 로그인이 필요한 스킬(서버가 409와 #/skill-run 주소를 준다)
+  prepareSkill: (skill: string, params: Record<string, string>) =>
+    request<{ skill: string; description: string; params: Record<string, string>;
+              source: { id: number; name: string; url: string; origin: string }; screen: SourceQueryScreen;
+              version: string }>('POST', '/skills/prepare', { skill, params }),
+  skillBrowserResult: (skill: string, params: Record<string, string>, file: File) => {
+    const fd = new FormData();
+    fd.append('skill', skill);
+    fd.append('params', JSON.stringify(params));
+    fd.append('file', file);
+    return requestMultipart<SkillRunResult>('/skills/browser-result', fd);
+  },
   // 북마크릿이 사용자 브라우저에서 내려받은 JSON 파일
   uploadBrowserScan: (id: number, file: File) => {
     const fd = new FormData();

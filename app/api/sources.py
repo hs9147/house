@@ -10,7 +10,7 @@
 """
 import json
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -173,9 +173,38 @@ def list_skills(db: Session = Depends(get_db), key: ApiKey = Depends(require_api
 
 @router.post("/skills/run")
 def run_skill(body: SkillRun, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
-    """스킬 하나를 지금 돌린다 — 서버 브라우저가 수집 조건대로 조회해 결과를 돌려준다(저장소에 쓰지 않는다)."""
+    """스킬 하나를 지금 돌린다 — 서버 브라우저가 수집 조건대로 조회해 결과를 돌려준다(저장소에 쓰지 않는다). 로그인이
+    필요하면 409와 사람의 브라우저에서 돌릴 주소(login_url)."""
     try:
         return skills.run(db, key, body.skill, body.params, rows=body.rows)
+    except skills.LoginRequired as e:
+        raise HTTPException(status_code=409, detail={"message": str(e), "login_url": e.url})
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/skills/prepare")
+def prepare_skill(body: SkillRun, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """사람의 브라우저에서 돌릴 것 — 북마크에 보낼 출처와 입력을 채운 화면(콘솔 #/skill-run이 읽는다)."""
+    try:
+        return skills.prepare_browser(db, key, body.skill, body.params)
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/skills/browser-result")
+def skill_browser_result(skill: str = Form(...), params: str = Form("{}"), file: UploadFile = File(...),
+                         db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """북마크가 사람의 로그인 세션으로 돌린 결과 — 검사하고 같은 입력의 결과로 보관한다(에이전트가 다시 부르면 받는다)."""
+    raw = file.file.read(infosource.MAX_UPLOAD_BYTES + 1)
+    if len(raw) > infosource.MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="결과 파일이 너무 큽니다.")
+    try:
+        payload, values = json.loads(raw.decode("utf-8")), json.loads(params or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="JSON이 아닙니다.")
+    try:
+        return skills.accept_browser(db, key, skill, values if isinstance(values, dict) else {}, payload)
     except infosource.SourceError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

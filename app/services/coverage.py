@@ -466,7 +466,9 @@ def store_types() -> list[dict]:
             for r in conn.execute("SELECT name, COUNT(DISTINCT path) AS n FROM nodes WHERE kind = 'table'"
                                   " GROUP BY name HAVING n >= ? ORDER BY n DESC LIMIT 200", (STORE_TYPE_MIN_DOCS,)):
                 cols = [c for c in r["name"].split(" | ") if c]
-                if len(cols) >= 2:
+                # 데이터 목록의 머리글만 — 칸이 셋 이상이고 「라벨 :」 같은 양식 칸이 없는 것(실측 contracts: 「1)계 약 구 분 :
+                # | 건별계약」, 「견 적 서 | LG전자 귀중」은 서식의 칸 배치다)
+                if len(cols) >= 3 and not any(c.rstrip().endswith((":", "：")) for c in cols):
                     out.append({"store": store.name, "kind": "표", "name": r["name"][:200], "documents": r["n"],
                                 "columns": frozenset(_norm(c) for c in cols)})
             for d in semantic._list_docs(conn):

@@ -13,6 +13,7 @@ import Dashboard from './pages/Dashboard';
 import Git from './pages/Git';
 import Login from './pages/Login';
 import AgentReceive from './pages/AgentReceive';
+import SkillRun from './pages/SkillRun';
 import Modules from './pages/Modules';
 import Organizations from './pages/Organizations';
 import ProjectDetail from './pages/ProjectDetail';
@@ -73,6 +74,8 @@ export default function App() {
           }
         />
         <Route path="/smartwork" element={<Smartwork />} />
+        {/* 로그인이 필요한 스킬을 내 브라우저에서 — 에이전트·스킬 탭이 이 주소로 로그인을 요청한다(pages/SkillRun) */}
+        <Route path="/skill-run" element={<SkillRun />} />
         <Route path="/projects" element={<Projects />} />
         <Route path="/git" element={<Git />} />
         <Route path="/projects/:id" element={<ProjectDetail />}>
