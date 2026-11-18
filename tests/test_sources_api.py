@@ -1066,3 +1066,20 @@ def test_llm_plan_must_cover_every_condition_and_never_press_a_changing_button()
     assert infosource._plan_in({**ok, "submit": {"role": "heading", "name": "조회"}}, {0}) is None
     odd = {"fill": [{"i": 0, "role": "img", "name": "연도"}], "submit": ok["submit"]}
     assert infosource._plan_in(odd, {0}) is None
+
+
+def test_browser_scan_keeps_up_to_150_screens_from_menu_exploration(client, monkeypatch):
+    """메뉴 탐색이 100개까지 누른다 — 열린 화면·GET 메뉴와 합쳐 150장까지 받는다(예전에는 60장에서 말없이 잘랐다).
+    화면이 많으면 LLM 정리에는 화면마다 덜 싣는다(상한 안에 더 많은 화면이 들어가게)."""
+    monkeypatch.setattr(infosource, "_submit_result", infosource._result_job)
+    made = _create(client, headers="", name="큰 사이트")
+    pages = [{"url": f"https://intra.test/main#menu{i}", "title": f"메뉴 {i}", "fields": ["조회일"],
+              "text": "본문 " * 200, "links": []} for i in range(160)]
+    res = client.post(f"{API}/sources/{made['id']}/browser-result", headers=ADMIN,
+                      files=_browser_file(made["id"], pages=pages))
+    assert res.status_code == 202, res.text
+    scan = client.get(f"{API}/sources/{made['id']}", headers=ADMIN).json()["scan"]
+    assert len(scan["pages"]) == infosource.MAX_BROWSER_PAGES == 150
+    facts = json.loads(infosource._facts("web", {"pages": [{**p, "headings": [], "tables": [], "requires_login": False,
+                                                            "links": []} for p in pages[:50]]}))
+    assert len(facts["pages"]) == 50 and len(facts["pages"][0]["text"]) == 150

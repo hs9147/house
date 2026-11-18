@@ -1044,13 +1044,16 @@ def _parse(text: str) -> dict:
 
 def _facts(kind: str, scan: dict) -> str:
     if kind == "web":
+        # 화면이 많으면(메뉴 탐색 100개) 화면마다 덜 싣는다 — 상한(6만 자) 안에 화면이 더 많이 들어가게. 제목·표
+        # 머리글·조회 칸은 그대로 두고 본문 발췌·메뉴 링크·접근성 트리를 줄인다(정리에 덜 쓰이는 것부터).
+        many = len(scan.get("pages") or []) > 40
         pages = [{
-            "url": p["url"], "title": p["title"], "headings": p["headings"][:10],
+            "url": p["url"], "title": p["title"], "headings": p["headings"][:5 if many else 10],
             "menu_links": [{"url": link["url"], "text": link["text"]}
-                           for link in p["links"] if link["nav"]][:40],
+                           for link in p["links"] if link["nav"]][:10 if many else 40],
             "tables": p["tables"][:5], "fields": p["fields"][:15],
-            "requires_login": p["requires_login"], "text": p["text"][:500],
-            **({"aria": p["aria"][:2000]} if p.get("aria") else {}),
+            "requires_login": p["requires_login"], "text": p["text"][:150 if many else 500],
+            **({"aria": p["aria"][:600 if many else 2000]} if p.get("aria") else {}),
         } for p in scan.get("pages", [])]
         files = [{"name": f["name"], "link_text": f["text"], "type": f["category"]}
                  for f in scan.get("files") or []]
@@ -1596,6 +1599,9 @@ BROWSER_AGENT = "gpax-scan/1"
 # 파일 수는 수집(조회 결과 파일 + 행마다 상세의 첨부, 화면마다 20행)이 채운다.
 MAX_UPLOAD_BYTES = 80_000_000
 MAX_BROWSER_FILES = 60
+# 브라우저 결과의 화면 — 열린 화면 + 메뉴의 GET 화면(scanAgent.js MAX_FETCH 25) + 메뉴 탐색(MAX_EXPLORE 100). 서버 스캔의
+# 쪽수(MAX_PAGES)와 따로 둔다: 예전에는 그 두 배(60)에서 잘라, 탐색이 찾은 뒤쪽 화면이 말없이 버려졌다.
+MAX_BROWSER_PAGES = 150
 
 
 def _s(value, cap: int) -> str:
@@ -1724,7 +1730,7 @@ def from_browser(row: InfoSource, payload) -> dict:
                 "captures": _captures_in(payload.get("captures"), origin, query_screens(row)),
                 "queries_version": _s(payload.get("queries_version"), 32)}
     pages, seen = [], set()
-    for p in (payload.get("pages") if isinstance(payload.get("pages"), list) else [])[:MAX_PAGES * 2]:
+    for p in (payload.get("pages") if isinstance(payload.get("pages"), list) else [])[:MAX_BROWSER_PAGES]:
         url = _same(p.get("url"), origin) if isinstance(p, dict) else ""
         if not url or url in seen:
             continue

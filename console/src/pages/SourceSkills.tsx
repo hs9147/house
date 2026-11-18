@@ -5,7 +5,10 @@ import Modal from '../components/Modal';
 import { api } from '../lib/api';
 import { fmtBytes } from '../lib/format';
 import { useApi } from '../lib/hooks';
-import type { OrgOut, SkillOut, SkillRunResult, SourceQueryCondition, SourceSkill } from '../lib/types';
+import type {
+  OrgOut, SkillChange, SkillOut, SkillRunResult, SourceOut, SourceQueryCondition, SourceQueryScreen,
+  SourceSkill,
+} from '../lib/types';
 
 /**
  * 수집 스킬 — 크롤링(스캔)이 읽은 화면을 수집 조건으로 정하고, 그 화면에 이름·용도·입력·출력·공개 범위를 붙이면
@@ -255,5 +258,166 @@ export function SkillEditor({ sourceId, url, skill, conditions, saved, orgs, onC
       </div>
       {error && <p className="error">{error}</p>}
     </div>
+  );
+}
+
+/** 수집 조건 편집본 — 출처 상세의 왼쪽(수집 조건)과 오른쪽(스킬 작업)이 함께 쓴다(SourceDetail.useQueryDraft). */
+export interface QueryDraft {
+  screens: SourceQueryScreen[] | null;
+  busy: boolean;
+  saved: boolean;
+  error: string;
+  savedUrls: Set<string>;
+  edit: (next: SourceQueryScreen[]) => void;
+  setScreen: (i: number, s: SourceQueryScreen) => void;
+  save: () => Promise<void>;
+}
+
+type ChatTurn = { role: 'user' | 'assistant'; content: string; changes?: SkillChange[]; notes?: string[]; applied?: boolean };
+
+const STARTERS = [
+  '화면마다 스킬 초안을 만들어 줘',
+  '부를 때 바꿀 칸(입력)을 골라 줘 — 날짜는 수집 조건대로 두고',
+  '에이전트가 언제 이 스킬을 써야 하는지(쓸 때)를 업무 말로 다듬어 줘',
+];
+
+/** 바뀐 것 한 줄 — 화면 이름 · 스킬 이름 · 입력 · 조건 */
+function changeLine(c: SkillChange, screens: SourceQueryScreen[]): string {
+  const name = c.screen ?? screens.find((s) => s.url === c.url)?.screen ?? c.url;
+  if (c.skill === null) return `${name}: 스킬 빼기`;
+  const skill = c.skill
+    ? ` → 🧩 ${c.skill.name}${c.skill.params.length ? ` (입력 ${c.skill.params.map((p) => p.name).join(', ')})` : ''}`
+    : '';
+  return `${c.new ? '+ ' : ''}${name}${skill} · 조건 ${c.conditions.map((x) => `${x.field}=${x.value}`).join(', ') || '없음'}`;
+}
+
+/**
+ * 스킬 작업 — 출처 상세의 오른쪽(왼쪽은 폭이 좁다). 크롤링이 읽은 화면을 LLM과 **대화로** 스킬로 정리한다: 말하면
+ * LLM이 답과 고칠 것을 내고(사실에 있는 칸·열만 — 서버가 다시 본다), 「적용」하면 편집본에 들어가며, 아래 카드에서
+ * 손으로도 고친 뒤 저장한다. 대화는 이 화면만 들고 있다(저장하지 않는다 — 남는 것은 저장한 스킬이다).
+ */
+export function SkillWorkspace({ row, q }: { row: SourceOut; q: QueryDraft }) {
+  const orgs = useApi(() => api.listOrgs(), []);
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const screens = q.screens ?? [];
+
+  const send = async (said: string) => {
+    if (!said.trim() || busy) return;
+    const next: ChatTurn[] = [...turns, { role: 'user', content: said.trim() }];
+    setTurns(next);
+    setText('');
+    setBusy(true);
+    setError('');
+    try {
+      const out = await api.chatSourceSkill(row.id, next.map(({ role, content }) => ({ role, content })),
+        screens.map(({ why: _why, ...s }) => s));
+      setTurns([...next, { role: 'assistant', content: out.reply, changes: out.changes, notes: out.notes }]);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const apply = (at: number) => {
+    let next = [...screens];
+    for (const c of turns[at].changes ?? []) {
+      const i = next.findIndex((s) => s.url === c.url);
+      const base: SourceQueryScreen = i >= 0 ? next[i] : {
+        screen: c.screen ?? c.url, url: c.url, conditions: [],
+        ...(c.path ? { path: c.path, start: c.start, frame: c.frame } : {}),
+      };
+      const { skill: _old, ...rest } = base;
+      const kept = c.skill === null ? undefined : c.skill ?? base.skill;
+      const s: SourceQueryScreen = { ...rest, conditions: c.conditions, ...(kept ? { skill: kept } : {}) };
+      next = i >= 0 ? next.map((x, j) => (j === i ? s : x)) : [...next, s];
+    }
+    q.edit(next);
+    setTurns(turns.map((t, j) => (j === at ? { ...t, applied: true } : t)));
+  };
+
+  return (
+    <>
+      <div className="panel">
+        <h3 style={{ marginTop: 0 }}>🧩 스킬 작업 — LLM과 대화로 정리</h3>
+        <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+          크롤링이 읽은 화면(칸·결과 열·지난 수집)을 보고 LLM이 스킬(이름·용도·쓸 때·입력·결과 열)을 제안합니다. 고칠 것은
+          「적용」해야 편집본에 들어가고 「저장」해야 남습니다 — 왼쪽 수집 조건과 같은 편집본입니다. 공개 범위는 아래 카드에서
+          직접 고릅니다.
+        </p>
+        <div style={{ maxHeight: 420, overflow: 'auto', margin: '6px 0' }}>
+          {turns.length === 0 && (
+            <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+              {STARTERS.map((t) => (
+                <button key={t} className="small secondary" disabled={busy || !screens.length}
+                        onClick={() => void send(t)}>{t}</button>
+              ))}
+              {!screens.length && (
+                <span className="mutedtext" style={{ fontSize: 11 }}>
+                  수집 조건에 화면이 없습니다 — 왼쪽에서 화면을 더하거나 「LLM 분석」을 하세요.
+                </span>
+              )}
+            </div>
+          )}
+          {turns.map((t, i) => (
+            <div key={i} style={{ margin: '6px 0', padding: 6, borderRadius: 4, fontSize: 12,
+                                  background: t.role === 'user' ? 'rgba(255,255,255,0.04)' : 'rgba(56,189,248,0.06)' }}>
+              <b>{t.role === 'user' ? '나' : 'LLM'}</b>
+              <div style={{ whiteSpace: 'pre-wrap' }}>{t.content}</div>
+              {!!t.changes?.length && (
+                <div style={{ marginTop: 4 }}>
+                  {t.changes.map((c, k) => (
+                    <div key={k} className="mono" style={{ fontSize: 11 }}>{changeLine(c, screens)}</div>
+                  ))}
+                  <button className="small" style={{ marginTop: 4 }} disabled={t.applied} onClick={() => apply(i)}>
+                    {t.applied ? '적용함' : `적용(${t.changes.length})`}
+                  </button>
+                </div>
+              )}
+              {t.notes?.map((n) => <div key={n} className="mutedtext" style={{ fontSize: 11 }}>{n}</div>)}
+            </div>
+          ))}
+          {busy && <p className="mutedtext" style={{ fontSize: 12 }}>LLM이 정리하는 중…</p>}
+        </div>
+        <div className="row" style={{ gap: 6, alignItems: 'flex-end' }}>
+          <textarea value={text} rows={2} style={{ flex: 1, fontFamily: 'inherit' }} aria-label="스킬 대화"
+                    placeholder="예: 공지 조회는 구분을 입력으로 받고, 쓸 때는 '최근 공지를 물을 때'로 해 줘 (Ctrl+Enter로 보내기)"
+                    onChange={(e) => setText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void send(text); }} />
+          <button className="small" disabled={busy || !text.trim()} onClick={() => void send(text)}>보내기</button>
+          {turns.length > 0 && (
+            <button className="small secondary" disabled={busy} onClick={() => setTurns([])}>새 대화</button>
+          )}
+        </div>
+        {error && <p className="error">{error}</p>}
+      </div>
+      <div className="panel">
+        <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <h3 style={{ margin: 0, flex: 1 }}>화면별 스킬</h3>
+          {!q.saved && q.screens && <span className="status warn">저장 전</span>}
+          <button className="small" disabled={q.busy || !q.screens} onClick={() => void q.save()}>저장</button>
+        </div>
+        {q.saved && <p className="mutedtext" style={{ fontSize: 11 }}>저장했습니다 — 스킬 탭·스마트워크·MCP에 바로 보입니다.</p>}
+        {q.error && <p className="error">{q.error}</p>}
+        {screens.length === 0 && <p className="mutedtext" style={{ fontSize: 12 }}>수집 조건에 화면이 없습니다.</p>}
+        {screens.map((s, i) => (
+          <div key={s.url} style={{ border: '1px solid var(--border)', borderRadius: 4, padding: 6, marginTop: 6 }}>
+            <b style={{ fontSize: 12 }}>{s.screen}</b>
+            <span className="mutedtext mono" style={{ fontSize: 10, marginLeft: 6 }}>
+              조건 {s.conditions.map((c) => `${c.field}=${c.value}`).join(', ') || '없음'}
+            </span>
+            <SkillEditor sourceId={row.id} url={s.url} skill={s.skill} conditions={s.conditions}
+              saved={q.savedUrls.has(s.url)} orgs={orgs.data ?? []}
+              onChange={(skill, conditions) => {
+                const { skill: _old, ...rest } = s;
+                q.setScreen(i, { ...rest, ...(skill ? { skill } : {}), ...(conditions ? { conditions } : {}) });
+              }} />
+          </div>
+        ))}
+      </div>
+    </>
   );
 }

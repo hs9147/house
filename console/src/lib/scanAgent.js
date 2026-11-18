@@ -1496,7 +1496,9 @@
    * (스크립트·POST로 여는 메뉴 — 주소가 있는 메뉴는 위에서 GET으로 이미 읽는다)이고, 무언가를 바꾸는 글자는 뺀다.
    * 누른 뒤 새로 뜨거나 바뀐 틀에 조회 칸·표가 있으면 그 화면을 길(누른 메뉴·그 화면의 틀)과 함께 남긴다.
    * 한 번에 MAX_EXPLORE개, 하나씩 가라앉기를 기다리며. */
-  var MAX_EXPLORE = 40;
+  /* 100 — 업무 사이트의 메뉴가 90여 개였다(40이면 앞쪽만 눌러 다시 스캔해도 뒤쪽 화면을 영영 찾지 못한다). 서버는
+   * 브라우저 결과의 화면을 MAX_BROWSER_PAGES(150)장까지 받는다 — 열린 화면 + GET 메뉴(25) + 탐색(100). */
+  var MAX_EXPLORE = 100;
   function menuLeaves(doc) {
     var out = [];
     doc.querySelectorAll('nav,[role],[id],[class]').forEach(function (nav) {

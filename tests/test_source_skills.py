@@ -268,3 +268,49 @@ def test_engine_runs_in_the_server_browser_and_hands_back_the_result(site):
     [got] = payload["collected"]
     assert got["url"] == f"{site}/notice" and got["rows"] >= 1, got
     assert steps        # 엔진의 기록이 실시간으로 왔다
+
+
+def test_chat_proposes_changes_that_stay_within_the_facts(client, monkeypatch):
+    """스킬 대화 — LLM이 답과 고칠 것을 낸다. 화면에 없는 칸·모르는 화면·정의 안 된 자리는 서버가 거르고, 저장하지 않는다.
+    LLM이 받는 사실에는 편집 중인 것(저장 전)이 실린다."""
+    sid = _notice_scan(client, monkeypatch)
+    client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [{"url": NOTICE, "conditions": [
+        {"field": "등록일", "value": "@today-1m"}]}]})
+    seen = {}
+    answer = {"reply": "구분을 입력으로 두었습니다.", "changes": [
+        {"url": NOTICE, "conditions": [{"field": "등록일", "value": "@today-1m"}, {"field": "구분", "value": "{kind}"}],
+         "skill": {"name": "notice", "description": "공지 목록", "when": "공지를 물을 때",
+                   "params": [{"name": "kind", "description": "구분", "default": "전체"}]}},
+        {"url": NOTICE + "#x", "skill": {"name": "ghost"}},
+    ]}
+
+    def chat(provider, messages, db=None, **kw):
+        seen["messages"] = messages
+        return json.dumps(answer, ensure_ascii=False)
+
+    monkeypatch.setattr(skills.llm, "default_provider", lambda db, organization_id=None: object())
+    monkeypatch.setattr(skills.llm, "chat_completion", chat)
+    draft = [{"url": NOTICE, "screen": "공지(편집 중)", "conditions": [{"field": "등록일", "value": "@today-1m"}]}]
+    res = client.post(f"{API}/sources/{sid}/skills/chat", headers=ADMIN, json={
+        "messages": [{"role": "user", "content": "구분을 입력으로 해 줘"}], "screens": draft})
+    assert res.status_code == 200, res.text
+    out = res.json()
+    assert out["reply"] == "구분을 입력으로 두었습니다."
+    assert "공지(편집 중)" in seen["messages"][0]["content"] and seen["messages"][-1]["role"] == "user"
+    first = out["changes"][0]
+    assert first["skill"]["name"] == "notice" and first["conditions"][-1] == {"field": "구분", "value": "{kind}"}
+    assert len(out["changes"]) == 1 and any("모르는 화면" in n for n in out["notes"])
+    # 저장하지 않는다
+    assert "skill" not in client.get(f"{API}/sources/{sid}/queries", headers=ADMIN).json()["screens"][0]
+    # 정의 안 된 자리를 쓰는 스킬은 거르고, 화면에 없는 칸이면 조건을 그대로 둔다
+    answer["changes"] = [{"url": NOTICE, "conditions": [{"field": "구분", "value": "{nope}"}], "skill": {"name": "x"}}]
+    out = client.post(f"{API}/sources/{sid}/skills/chat", headers=ADMIN, json={
+        "messages": [{"role": "user", "content": "다시"}]}).json()
+    assert out["changes"] == [] and any("nope" in n for n in out["notes"])
+    answer["changes"] = [{"url": NOTICE, "conditions": [{"field": "없는 칸", "value": "1"}]}]
+    out = client.post(f"{API}/sources/{sid}/skills/chat", headers=ADMIN, json={
+        "messages": [{"role": "user", "content": "또"}]}).json()
+    assert out["changes"][0]["conditions"] == [{"field": "등록일", "value": "@today-1m"}]
+    assert any("없는 칸" in n for n in out["notes"])
+    assert client.post(f"{API}/sources/{sid}/skills/chat", headers=ADMIN,
+                       json={"messages": []}).status_code == 400

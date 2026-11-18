@@ -372,3 +372,111 @@ def run(db: Session, key: ApiKey, ident: str, params: dict | None = None, *, row
                  {"ok": True, "params": sorted(values), "rows": sum(x["got"] for x in out["lists"]),
                   "files": len(out["files"]), "pages": len(out["pages"]), "seconds": out["seconds"]})
     return out
+
+
+# ---------------------------------------------------------------- 대화로 정리
+
+MAX_CHAT_TURNS = 20
+MAX_CHAT_CHARS = 4000
+CHAT_SYSTEM = """너는 사내 업무 사이트의 크롤링 결과를 **수집 스킬**로 정리하는 관리자를 돕는다. 스킬은 조회 화면 하나를
+에이전트가 골라 부르는 일로 묶은 것이다 — 이름·용도(description)·쓸 때(when)·입력(params)·결과 열(outputs).
+입력은 조건 값의 {이름} 자리다(부를 때 값을 받고, 수집은 기본값으로 돈다). 날짜 기간은 입력으로 두지 않고 조건에
+@last|@today-3y · @today 같은 상대 날짜로 둔다.
+
+아래 '사실'(지금 편집 중인 화면과 스킬, 더할 수 있는 화면)에 있는 것만 쓴다 — 칸(fields)·결과 열(columns)을
+지어내지 마라. 무엇을 원하는지 모호하면 바꾸지 말고 reply로 묻는다. 관리자가 바꾸라고 하거나 동의한 것만 changes에
+넣는다(바꾸지 않을 화면은 넣지 않는다). 출력은 JSON 객체 하나다(설명·코드펜스 없이).
+
+{"reply": "관리자에게 하는 말(한국어, 짧게 — 무엇을 왜 바꿨는지 또는 묻는 것)",
+ "changes": [{"url": "화면 url 그대로",
+              "conditions": [{"field": "칸", "value": "값 또는 {입력이름}"}],
+              "skill": {"name": "", "description": "", "when": "",
+                        "params": [{"name": "", "description": "", "default": "", "required": false}],
+                        "outputs": [{"name": "", "description": ""}]}}]}
+
+- conditions는 바꿀 때만 넣는다(빼면 그대로). skill을 null로 주면 그 화면의 스킬을 뺀다.
+- 공개 범위(누가 부르나)는 관리자가 화면에서 고른다 — 정하지 않는다.
+"""
+
+
+def _facts_for_chat(row: InfoSource, screens: list[dict]) -> dict:
+    cands = {c["url"]: c for c in infosource.query_candidates(row)}
+    collected = {c.get("url"): c for c in (row.scan or {}).get("collected") or []}
+    out = []
+    for s in screens:
+        page = cands.get(s["url"]) or cands.get(s["url"].split("#")[0]) or {}
+        last = collected.get(s["url"]) or {}
+        out.append({"url": s["url"], "screen": s["screen"], "conditions": s["conditions"],
+                    "skill": {k: v for k, v in (s.get("skill") or {}).items() if k != "audience"} or None,
+                    "fields": list(dict.fromkeys([c["field"] for c in s["conditions"]] + list(page.get("fields") or []))),
+                    "columns": _columns(row, s["url"]) or [h for t in (page.get("tables") or [])[:1] for h in t],
+                    "info": page.get("info") or "",
+                    "last_collect": {k: last[k] for k in ("rows", "details", "files", "notes") if k in last} or None})
+    used = {s["url"] for s in screens}
+    more = [{"url": c["url"], "title": c["title"], "fields": c["fields"], "tables": c.get("tables") or []}
+            for c in cands.values() if c["url"] not in used][:30]
+    return {"source": row.name, "note": row.note[:300], "screens": out, "can_add": more}
+
+
+def chat(db: Session, row: InfoSource, messages: list[dict], screens) -> dict:
+    """스킬을 대화로 정리한다 — {"reply", "changes", "notes"}. **저장하지 않는다**: 화면이 고칠 것(changes)을 편집
+    중인 수집 조건에 적용하고, 사람이 저장한다. 받은 것은 사실에 맞는지 다시 본다(칸·자리·이름 — clean)."""
+    provider = llm.default_provider(db)
+    if provider is None:
+        raise SourceError("기본 LLM 프로바이더가 없어 대화로 정리할 수 없습니다 — 스킬은 직접 고쳐 쓸 수 있습니다.")
+    draft = infosource.clean_screens(row, screens) if screens else infosource.query_screens(row)
+    turns = [{"role": m["role"], "content": str(m.get("content") or "")[:MAX_CHAT_CHARS]}
+             for m in (messages if isinstance(messages, list) else [])[-MAX_CHAT_TURNS:]
+             if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    if not turns or turns[-1]["role"] != "user":
+        raise SourceError("보낼 말이 없습니다.")
+    facts = json.dumps(_facts_for_chat(row, draft), ensure_ascii=False)[:40000]
+    text = llm.chat_completion(provider, [{"role": "system", "content": CHAT_SYSTEM + "\n사실:\n" + facts}, *turns], db)
+    data = infosource._parse(text)
+    if not data:
+        return {"reply": (text or "").strip()[:2000] or "답을 읽지 못했습니다 — 다시 말해 주세요.", "changes": [],
+                "notes": []}
+    changes, notes = _changes_in(row, draft, data.get("changes"))
+    return {"reply": _txt(data.get("reply"), 2000), "changes": changes, "notes": notes}
+
+
+def _changes_in(row: InfoSource, draft: list[dict], raw) -> tuple[list[dict], list[str]]:
+    """LLM이 낸 고칠 것 — 편집 중인 화면이거나 더할 수 있는 화면만, 칸은 그 화면의 칸만, 스킬은 clean을 거친 것만."""
+    by_url = {s["url"]: s for s in draft}
+    cands = {c["url"]: c for c in infosource.query_candidates(row)}
+    out, notes = [], []
+    for ch in (raw if isinstance(raw, list) else [])[:infosource.MAX_QUERY_SCREENS]:
+        url = _txt((ch or {}).get("url"), 1024) if isinstance(ch, dict) else ""
+        base = by_url.get(url)
+        cand = cands.get(url)
+        if base is None and cand is None:
+            notes.append(f"모르는 화면이라 뺐습니다: {url[:100]}")
+            continue
+        fields = set((cand or {}).get("fields") or []) | {c["field"] for c in (base or {}).get("conditions") or []}
+        conditions = (base or {}).get("conditions") or []
+        if isinstance(ch.get("conditions"), list):
+            asked = [{"field": _txt(c.get("field"), 80), "value": _txt(c.get("value"), 200)}
+                     for c in ch["conditions"][:infosource.MAX_CONDITIONS] if isinstance(c, dict)]
+            bad = sorted({c["field"] for c in asked if c["field"] not in fields})
+            if bad:
+                notes.append(f"{(base or cand).get('screen') or (cand or {}).get('title') or url}: 화면에 없는 칸이라 조건을 "
+                             f"바꾸지 않았습니다 — {', '.join(bad)}")
+            else:
+                conditions = [c for c in asked if c["field"]]
+        change = {"url": url, "conditions": conditions, "new": base is None}
+        if base is None:
+            change.update({"screen": cand.get("title") or url,
+                           **{k: cand[k] for k in ("path", "start", "frame") if cand.get(k)}})
+        if "skill" in ch and ch["skill"] is None:
+            change["skill"] = None
+        elif isinstance(ch.get("skill"), dict):
+            try:
+                skill = clean({**ch["skill"], "audience": ((base or {}).get("skill") or {}).get("audience") or []},
+                              conditions)
+            except SourceError as e:
+                notes.append(str(e))
+                continue
+            if skill:
+                change["skill"] = skill
+        out.append(change)
+    return out, notes

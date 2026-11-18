@@ -12,7 +12,7 @@ import type {
   OrgOut, SourceQueryMethod, SourceQueryScreen, SourceSaveResult, SourceSaveTarget, SourceTarget, StorageStore,
 } from '../lib/types';
 import { kindLabel, SourceStatus } from './Sources';
-import { SkillEditor } from './SourceSkills';
+import { SkillWorkspace } from './SourceSkills';
 
 const PAGE_KIND: Record<string, string> = {
   list: '목록', detail: '상세', form: '입력·검색', dashboard: '대시보드', doc: '문서',
@@ -51,6 +51,7 @@ export default function SourceDetail() {
   const first = useApi(() => api.getSource(id), [id]);
 
   const live = useLive(row, setRow);
+  const q = useQueryDraft(id, row, setRow);
 
   useEffect(() => { if (first.data) setRow(first.data); }, [first.data]);
   usePolling(async () => setRow(await api.getSource(id)), 2000, row?.status === 'scanning');
@@ -114,7 +115,7 @@ export default function SourceDetail() {
       {row.kind === 'web' && <BookmarkPanel />}
       {row.kind === 'web' && <ScanPanel row={row} live={live} onServerScan={rescan} />}
       {row.kind === 'web' && <RecordPanel row={row} live={live} bot={!!caps.data?.bot} onServerBot={serverBot} />}
-      {row.kind === 'web' && <QueryPanel row={row} onChange={setRow} />}
+      {row.kind === 'web' && <QueryPanel row={row} q={q} />}
       <StoredHeaders row={row} onChange={setRow} />
       {/* 유형별 제안 전에 스캔한 출처(proposal에 targets가 없다)는 다시 스캔해야 저장할 수 있다. */}
       {row.scan && row.proposal?.targets && row.status !== 'scanning' && (
@@ -124,7 +125,14 @@ export default function SourceDetail() {
     </>
   );
 
-  return <Split left={left} right={<ScanView row={row} />} leftLabel="작업" />;
+  // 웹사이트는 오른쪽이 둘 — 스캔이 읽은 것과, 스킬 작업(LLM과 대화로 스킬을 정리 — 왼쪽은 폭이 좁다)
+  const right = row.kind !== 'web' ? <ScanView row={row} /> : (
+    <Tabs initial={row.queries?.length ? 1 : 0} tabs={[
+      { key: 'scan', label: '스캔 결과', content: <ScanView row={row} /> },
+      { key: 'skills', label: '🧩 스킬 작업', content: <SkillWorkspace row={row} q={q} /> },
+    ]} />
+  );
+  return <Split left={left} right={right} leftLabel="작업" />;
 }
 
 function Means({ caps, kind }: { caps: SourceCapabilities | null; kind: SourceOut['kind'] }) {
@@ -189,9 +197,13 @@ function ScanProgress({ id, running }: { id: number; running: boolean }) {
  * 상세의 첨부를 받는다. 조건은 LLM이 스캔한 조회 칸을 보고 제안하고, 사람이 고쳐 저장한다 —
  * 저장한 조건이 북마크에 실린다.
  */
-function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut) => void }) {
-  const state = useApi(() => api.sourceQueries(row.id), [row.id, row.scanned_at, row.queries_version]);
-  const orgs = useApi(() => api.listOrgs(), []);
+/**
+ * 수집 조건 편집본 — 왼쪽 「수집 조건 · 스킬」과 오른쪽 「스킬 작업」(대화·스킬 편집)이 같은 것을 고치고 함께 저장한다.
+ */
+function useQueryDraft(id: number, row: SourceOut | null, onChange: (r: SourceOut) => void) {
+  const web = row?.kind === 'web';
+  const state = useApi(() => (web ? api.sourceQueries(id) : Promise.resolve(null)),
+    [id, web, row?.scanned_at, row?.queries_version]);
   const [screens, setScreens] = useState<SourceQueryScreen[] | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -201,7 +213,6 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
   useEffect(() => { if (state.data) setScreens(state.data.screens); }, [state.data]);
 
   const candidates = state.data?.candidates ?? [];
-  const fieldsOf = (url: string) => candidates.find((c) => c.url === url)?.fields ?? [];
   const edit = (next: SourceQueryScreen[]) => { setScreens(next); setSaved(false); };
   const setScreen = (i: number, s: SourceQueryScreen) => edit((screens ?? []).map((x, j) => (j === i ? s : x)));
 
@@ -209,7 +220,7 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
     setBusy(true);
     setError('');
     try {
-      const out = await api.suggestSourceQueries(row.id);
+      const out = await api.suggestSourceQueries(id);
       edit(out.screens);
       setNotes(out.notes);
     } catch (e) {
@@ -224,18 +235,27 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
     setBusy(true);
     setError('');
     try {
-      const out = await api.saveSourceQueries(row.id, screens.map(({ why: _why, ...s }) => s));
+      const out = await api.saveSourceQueries(id, screens.map(({ why: _why, ...s }) => s));
       setScreens(out.screens);
       setSaved(true);
       // 북마크 코드가 조건을 싣는다 — 출처를 다시 읽어 북마크를 새로 만든다.
-      onChange(await api.getSource(row.id));
+      onChange(await api.getSource(id));
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
+  const savedUrls = new Set((state.data?.screens ?? []).map((x) => x.url));
+  return { state, screens, candidates, notes, busy, setBusy, error, setError, saved, edit, setScreen, suggest, save,
+           savedUrls };
+}
 
+type Draft = ReturnType<typeof useQueryDraft>;
+
+function QueryPanel({ row, q }: { row: SourceOut; q: Draft }) {
+  const { state, screens, candidates, notes, busy, setBusy, error, setError, saved, edit, setScreen, suggest, save } = q;
+  const fieldsOf = (url: string) => candidates.find((c) => c.url === url)?.fields ?? [];
   const unused = candidates.filter((c) => !(screens ?? []).some((s) => s.url === c.url));
   // 지난 수집에서 막힌 화면 — 고칠 길을 물을 수 있다(그 자리에 실제로 있던 것 중에서 고른다)
   const blocked = (row.scan?.collected ?? []).filter((c) => c.repair);
@@ -273,9 +293,9 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
       </p>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         <b>스킬</b>: 화면마다 이름·용도·입력·결과 열·공개 범위를 붙이면 에이전트가 고르는 일이 됩니다 — 스마트워크 대화와
-        MCP가 입력을 넣어 그 화면을 서버 브라우저로 지금 조회합니다(데이터 수집 → 스킬 탭에서 돌려 볼 수 있다). 입력은 조건
-        값에 <span className="mono">{'{이름}'}</span>으로 쓴 자리이고, 수집(북마크·봇)은 기본값으로 돕니다. 「스킬 초안
-        만들기」는 바뀌는 칸을 입력으로, 지난 수집의 열을 결과로 채웁니다(저장 전에 고칠 수 있다).
+        MCP가 입력을 넣어 그 화면을 서버 브라우저로 지금 조회합니다. 스킬은 오른쪽 「스킬 작업」에서 LLM과 대화로
+        정리합니다(여기와 같은 편집본 — 저장은 어느 쪽에서 해도 함께). 입력은 조건 값에 <span className="mono">{'{이름}'}</span>
+        으로 쓴 자리이고, 수집(북마크·봇)은 기본값으로 돕니다.
       </p>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         화면을 여는 길: ① 그 화면을 열어 둔 채 북마크를 누르면 그 자리에서, ② 「녹화」나 메뉴 탐색이 찾은 길이
@@ -381,12 +401,10 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
                     onClick={() => setScreen(i, { ...s, conditions: [...s.conditions, { field: fields[0] ?? '', value: '' }] })}>
                     조건 더하기
                   </button>
-                  <SkillEditor sourceId={row.id} url={s.url} skill={s.skill} conditions={s.conditions}
-                    saved={!!state.data?.screens.some((x) => x.url === s.url)} orgs={orgs.data ?? []}
-                    onChange={(skill, conditions) => {
-                      const { skill: _old, ...rest } = s;
-                      setScreen(i, { ...rest, ...(skill ? { skill } : {}), ...(conditions ? { conditions } : {}) });
-                    }} />
+                  <div className="mutedtext" style={{ fontSize: 11, marginTop: 4 }}>
+                    {s.skill ? <>🧩 스킬 <b className="mono">{s.skill.name}</b> — </> : '🧩 스킬 없음 — '}
+                    오른쪽 「스킬 작업」에서 LLM과 대화로 만들고 고칩니다
+                  </div>
                 </div>
               );
             })}
@@ -668,7 +686,8 @@ function ScanPanel({ row, live, onServerScan }: { row: SourceOut; live: Live; on
       </div>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         새 탭에서 로그인하고 북마크를 누르면 바로 시작합니다. 메뉴와 열린 화면을 읽고(메뉴 탐색을 켜면 스크립트로
-        여는 메뉴를 숨긴 틀에서 눌러 조회 화면과 가는 길을 찾는다), 아래 수집 조건이 있으면 화면마다 조회해 결과
+        여는 메뉴를 숨긴 틀에서 100개까지 눌러 조회 화면과 가는 길을 찾는다 — 하나에 1~3초라 몇 분 걸릴 수 있고 탭의
+        창에서 멈출 수 있다), 아래 수집 조건이 있으면 화면마다 조회해 결과
         파일과 행마다 상세의 첨부를 받습니다. 진행은 여기와 탭 오른쪽 위 창(머리글을 끌어 옮길 수 있다)에 실시간으로
         보이고, 결과는 바로 올라갑니다. 「서버에서 스캔」은 로그인 없이 열리는 사이트만 — 서버가 읽은 것으로 결과를
         바꿉니다.

@@ -1362,6 +1362,18 @@ export interface SourceSkill {
   audience: number[];
 }
 
+/** 스킬 대화(POST /sources/{id}/skills/chat)가 낸 고칠 것 — 화면 하나. skill이 null이면 스킬을 빼고, new면 더할 화면. */
+export interface SkillChange {
+  url: string;
+  conditions: SourceQueryCondition[];
+  skill?: SourceSkill | null;
+  new: boolean;
+  screen?: string;
+  path?: SourceQueryScreen['path'];
+  start?: string;
+  frame?: unknown[];
+}
+
 /** GET /skills — 부를 수 있는 스킬. id는 「출처/스킬」. */
 export interface SkillOut extends SourceSkill {
   id: string;

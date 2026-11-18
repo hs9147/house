@@ -70,6 +70,7 @@ import type {
   SourceCapabilities,
   SourceSkill,
   SkillOut,
+  SkillChange,
   SkillRunResult,
   SourceQueryCondition,
   SourceCategory,
@@ -800,6 +801,10 @@ export const api = {
   draftSourceSkill: (id: number, url: string) =>
     request<{ skill: SourceSkill; conditions: SourceQueryCondition[]; via: 'llm' | 'rule' }>(
       'POST', `/sources/${id}/skills/draft`, { url }),
+  chatSourceSkill: (id: number, messages: { role: 'user' | 'assistant'; content: string }[],
+                    screens: SourceQueryScreen[]) =>
+    request<{ reply: string; changes: SkillChange[]; notes: string[] }>(
+      'POST', `/sources/${id}/skills/chat`, { messages, screens }),
   listSkills: () => request<{ skills: SkillOut[]; runnable: boolean; reason: string }>('GET', '/skills'),
   runSkill: (skill: string, params: Record<string, string>) =>
     request<SkillRunResult>('POST', '/skills/run', { skill, params }),

@@ -88,6 +88,11 @@ class RepairRequest(BaseModel):
     url: str
 
 
+class SkillChat(BaseModel):
+    messages: list[dict]               # [{role: user|assistant, content}] — 대화는 화면이 들고 있다
+    screens: list[QueryScreen] = []    # 편집 중인 수집 조건(저장 전 것) — 비우면 저장한 것
+
+
 class SkillRun(BaseModel):
     skill: str                      # 「출처/스킬」 — GET /skills의 id
     params: dict[str, str] = {}
@@ -371,6 +376,18 @@ def draft_skill(source_id: int, body: RepairRequest, db: Session = Depends(get_d
     row = _row_or_404(db, source_id)
     try:
         return skills.draft(db, row, body.url)
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/sources/{source_id}/skills/chat")
+def chat_skill(source_id: int, body: SkillChat, db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """스킬을 LLM과 대화로 정리한다 — 답과 고칠 것(changes)을 준다. 저장하지 않는다(화면이 적용하고 사람이 저장)."""
+    row = _row_or_404(db, source_id)
+    if row.kind != "web":
+        raise HTTPException(status_code=400, detail="스킬은 웹사이트 출처에만 둡니다.")
+    try:
+        return skills.chat(db, row, body.messages, [s.model_dump() for s in body.screens])
     except infosource.SourceError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
