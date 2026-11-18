@@ -17,6 +17,7 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
   POST /mcp/web                  웹 검색 — 지역마다 강한 출처(전 세계·한국·일본·중국) 중 LLM이 고른다
   POST /mcp/browser              웹 페이지 읽기 — 서버 브라우저로 그린 화면을 마크다운으로(허용한 호스트만, 읽기만)
   POST /mcp/skills               수집 스킬 — 데이터 수집의 화면을 입력을 넣어 지금 조회한다(공개 범위의 조직만, 읽기만)
+  POST /mcp/ml                   ML 로직 — 표 데이터에 예측·분류·클러스터링·시계열·최적화(서버에서 계산, 밖으로 나가지 않음)
 
 저장소 목록은 모듈 레지스트리가 아니라 환경변수가 정한다(PAAS_STORAGE_ROOT ·
 PAAS_DOC_ROOTS, services/storage.py) — 디스크 경로는 서버를 설치한 사람이 아는
@@ -1594,6 +1595,160 @@ def _browser_call(db: Session, actor: str, name: str, args: dict) -> str:
     return _dump(page)
 
 
+# --- ML 로직 서버 (/mcp/ml) ---
+#
+# LLM이 숫자를 어림하지 않고 **계산하게** 한다(services/mllogic) — 예측(회귀)·분류·클러스터링·시계열 예측·선형/정수
+# 계획. 학습과 예측을 한 번에 하고 모델을 남기지 않는다. 데이터는 rows로 받거나 문서 저장소의 파일을 읽는다(권한은
+# 그 저장소의 것 — _doc_source). 계산은 이 서버 안에서만 한다(밖으로 나가지 않는다). 감사에는 행·열 수만 남긴다.
+
+_ML_DATA = {
+    "rows": {"type": "array", "items": {"type": "object"},
+             "description": "데이터 — 열 이름 → 값의 목록(스킬·DB 조회 결과를 그대로). 없으면 source+path"},
+    "source": {"type": "string", "description": "문서 저장소 이름(docs__list_sources) — rows 대신 파일로"},
+    "path": {"type": "string", "description": "그 저장소 안의 CSV·엑셀 파일 경로(첫 번째 표를 읽는다)"},
+}
+
+_ML_TOOLS = [
+    {
+        "name": "describe_data",
+        "description": (
+            "데이터의 열마다 종류(numeric 수·date 날짜·category 범주·id 행마다 다른 값·text 긴 글)·빈 값·통계를 본다."
+            " 모델을 고르기 전에 먼저 부른다 — target·features를 정하는 근거다."
+        ),
+        "inputSchema": {"type": "object", "properties": dict(_ML_DATA)},
+    },
+    {
+        "name": "predict",
+        "description": (
+            "수 값(target, 예: 매출·단가·납기일수)을 다른 열로 예측하는 회귀 모델. model=auto면 linear·forest·boosting을"
+            " 교차 검증(MAE·R²)으로 견줘 가장 나은 것을 쓴다. 중요한 열(permutation importance)을 함께 준다."
+            " predict_rows를 주면 그 행들의 예측값. 답에는 점수(mae·r2)를 함께 밝힌다."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            **_ML_DATA, "target": {"type": "string"},
+            "features": {"type": "array", "items": {"type": "string"}, "description": "비우면 자동(식별자·긴 글 제외)"},
+            "model": {"type": "string", "enum": ["auto", "linear", "forest", "boosting"]},
+            "predict_rows": {"type": "array", "items": {"type": "object"}, "description": "예측할 행(최대 500)"},
+        }, "required": ["target"]},
+    },
+    {
+        "name": "classify",
+        "description": (
+            "범주(target, 예: 위험 등급·합격 여부·불량 유형)를 다른 열로 맞히는 분류 모델. model=auto면 logistic·forest·"
+            "boosting을 교차 검증(macro F1)으로 견준다. 혼동 행렬·가장 많은 범주만 찍을 때의 정확도(baseline)·중요한 열을"
+            " 함께 준다 — 점수가 baseline보다 낫지 않으면 그렇게 밝힌다. predict_rows를 주면 범주와 확률."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            **_ML_DATA, "target": {"type": "string"},
+            "features": {"type": "array", "items": {"type": "string"}},
+            "model": {"type": "string", "enum": ["auto", "logistic", "forest", "boosting"]},
+            "predict_rows": {"type": "array", "items": {"type": "object"}},
+        }, "required": ["target"]},
+    },
+    {
+        "name": "cluster",
+        "description": (
+            "비슷한 행끼리 묶는다(예: 협력사 군집·품목 군집). k를 비우면 2~10에서 실루엣 점수가 가장 높은 수."
+            " 묶음마다 크기와 특징(수 열의 평균·흔한 범주), 행마다 배정(앞 500행)."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            **_ML_DATA, "features": {"type": "array", "items": {"type": "string"}},
+            "k": {"type": "integer"}, "method": {"type": "string", "enum": ["kmeans", "agglomerative"]},
+        }},
+    },
+    {
+        "name": "forecast",
+        "description": (
+            "날짜 열(date)과 수 열(value)로 앞으로 horizon 개 시점을 예측한다(일·주·월은 간격으로 정한다). 추세 + 계절."
+            " 마지막 시점들을 떼어 놓고 뒤로 시험한 오차(MAE·MAPE)와 예측 구간(low~high)을 함께 준다. 같은 날짜는 agg로"
+            " 합친다(sum 합·mean 평균)."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            **_ML_DATA, "date": {"type": "string"}, "value": {"type": "string"},
+            "horizon": {"type": "integer", "description": "기본 6, 최대 60"},
+            "agg": {"type": "string", "enum": ["sum", "mean"]},
+        }, "required": ["date", "value"]},
+    },
+    {
+        "name": "optimize",
+        "description": (
+            "선형·정수 계획 — 목적식을 조건 안에서 최소(min)·최대(max)로(예: 예산 안에서 발주량 배분, 원가 최소 조합)."
+            " objective {변수: 계수}, constraints [{name, coefs {변수: 계수}, op <=|>=|=, rhs}], 변수는 기본 0 이상"
+            "(bounds {변수: [하한, 상한]}, null은 제한 없음), integers는 정수 변수(0/1 선택은 bounds [0,1]). 상태·해·목적값과"
+            " 빠듯한 조건(binding)을 준다. 데이터가 아니라 식을 받는다 — 계수는 다른 도구로 먼저 구한다."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "objective": {"type": "object"}, "constraints": {"type": "array", "items": {"type": "object"}},
+            "sense": {"type": "string", "enum": ["min", "max"]}, "bounds": {"type": "object"},
+            "integers": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["objective", "constraints"]},
+    },
+]
+
+
+def _ml_rows(db: Session, key: ApiKey | None, args: dict) -> list:
+    rows = args.get("rows")
+    if isinstance(rows, list) and rows:
+        return rows
+    source, path = _str_arg(args, "source", required=False), _str_arg(args, "path", required=False)
+    if not (source and path):
+        raise mcp_server.McpToolError("데이터를 주세요 — rows(열 이름 → 값의 목록) 또는 source+path(저장소의 CSV·엑셀).")
+    store = _doc_source(source, db, key)
+    try:
+        target = storage_service.resolve(store.root, path)
+    except storage_service.StorageError as e:
+        raise mcp_server.McpToolError(str(e))
+    from ..services import mllogic  # noqa: PLC0415
+
+    return mllogic.rows_from_file(target)
+
+
+def _ml_call(db: Session, key: ApiKey | None, name: str, args: dict) -> str:
+    from ..services import mllogic  # noqa: PLC0415
+
+    actor = key.name if key else "ml"
+    try:
+        if name == "optimize":
+            out = mllogic.optimize(args.get("objective"), args.get("constraints"), str(args.get("sense") or "min"),
+                                   args.get("bounds"), args.get("integers"))
+            audit.record(db, actor, "mcp.ml.optimize", "", {"variables": out["variables"], "success": out["success"]})
+            return _dump(out)
+        rows = _ml_rows(db, key, args)
+        features = args.get("features") if isinstance(args.get("features"), list) else None
+        if name == "describe_data":
+            out = mllogic.describe(rows)
+        elif name == "predict":
+            out = mllogic.regress(rows, _str_arg(args, "target"), features, str(args.get("model") or "auto"),
+                                  args.get("predict_rows"))
+        elif name == "classify":
+            out = mllogic.classify(rows, _str_arg(args, "target"), features, str(args.get("model") or "auto"),
+                                   args.get("predict_rows"))
+        elif name == "cluster":
+            out = mllogic.cluster(rows, features, args.get("k"), str(args.get("method") or "kmeans"))
+        else:
+            out = mllogic.forecast(rows, _str_arg(args, "date"), _str_arg(args, "value"),
+                                   _int_arg(args, "horizon", 6, 60), str(args.get("agg") or "sum"))
+    except mllogic.MlError as e:
+        raise mcp_server.McpToolError(str(e))
+    # 값은 남기지 않는다 — 행·열 수와 고른 모델만
+    audit.record(db, actor, f"mcp.ml.{name}", _str_arg(args, "source", required=False),
+                 {"rows": out.get("rows"), "model": out.get("model") or out.get("method") or "",
+                  "features": len(out.get("features") or [])})
+    return _dump(out)
+
+
+@router.post("/mcp/ml")
+async def ml_mcp_server(
+    request: Request,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_agent_key),
+):
+    """ML 로직 MCP 서버(JSON-RPC 2.0) — 예측·분류·클러스터링·시계열·최적화. 계산이 수 초~수십 초라 스레드로."""
+    payload = await mcp_server.read_payload(request)
+    return await anyio.to_thread.run_sync(lambda: mcp_server.dispatch(
+        payload, server_name="paas-ml", tools=_ML_TOOLS, call=lambda name, args: _ml_call(db, key, name, args)))
+
+
 # --- 수집 스킬 서버 (/mcp/skills) ---
 #
 # 데이터 수집에서 만든 스킬(services/skills) — 사내 업무 사이트의 조회 화면 하나를 입력을 넣어 **지금** 조회한다.
@@ -1974,6 +2129,8 @@ def agent_toolsets(db: Session, key: ApiKey) -> list[tuple[str, list[dict], Call
         ("apis", _read_only(_APIS_TOOLS), lambda n, a: _apis_call(db, actor, n, a)),
         # 수집 스킬 — 공개 범위에 든 것만 목록에 나온다(services/skills.can_use)
         ("skills", _SKILL_TOOLS, lambda n, a: _skills_call(db, key, n, a)),
+        # ML 로직 — 서버 안에서 계산한다(밖으로 나가지 않는다). 파일은 그 사람이 열 수 있는 저장소에서만
+        ("ml", _ML_TOOLS, lambda n, a: _ml_call(db, key, n, a)),
     ]
     if is_enabled("workspace"):
         # 프로젝트별 접근 검사는 코드 서버의 것을 그대로 탄다(남의 조직 코드는 안 읽힌다).

@@ -141,6 +141,12 @@ def list_internal_servers(db: Session, key: ApiKey | None = None) -> list[dict]:
         "사내 문서 온톨로지 — 용어 정의·문서 인용·표 스키마를 그래프로 묻는다(읽기 전용)",
         "docs", "/mcp/graph",
     ))
+    # 계산만 한다 — 서버 안에서 돌고 밖으로 나가지 않는다(services/mllogic).
+    entries.append(_entry(
+        "paas-ml", "paas-ml",
+        "ML 로직 — 표 데이터에 예측(회귀)·분류·클러스터링·시계열 예측·선형/정수 최적화(서버에서 계산)",
+        "ml", "/mcp/ml",
+    ))
     # 수집해 둔 카탈로그를 읽기만 한다 — 밖으로 나가지 않으므로 여기 올려도 된다.
     entries.append(_entry(
         "paas-apis", "paas-apis",

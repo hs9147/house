@@ -36,6 +36,10 @@ psycopg[binary]>=3.2
 playwright>=1.45
 # 「페이지」로 받는 화면의 HTML → 마크다운(서버 스캔, infosource._markdown). 표·제목을 그대로 둔다. MIT.
 markdownify>=0.13
+# ML 로직 MCP(/mcp/ml, services/mllogic) — 예측·분류·클러스터링·시계열·선형/정수 최적화. BSD-3(scikit-learn·SciPy).
+# 없으면 그 도구들만 이유를 말하고 꺼진다. 계산은 서버 안에서만 한다.
+scikit-learn>=1.5
+scipy>=1.11
 
 # 선택 의존성 — 없는 환경에서도 서버는 기동되며 해당 기능만 비활성화됩니다.
 # docker>=7.0          # 1차(small) 런타임
