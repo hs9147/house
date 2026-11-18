@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import Modal from '../../components/Modal';
 import { api } from '../../lib/api';
 import { useApi, usePolling } from '../../lib/hooks';
 import { runTask } from '../../lib/tasks';
@@ -269,7 +270,7 @@ function FormsStep({ forms, schemaVersion, busy, onPropose, onConfirm }: {
                 <td>{f.confirmed ? (stale ? '⚠️ 옛 스키마의 대응표' : '✅ 확정') : f.draft ? '검토된 안 있음' : '—'}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>
                   <button className="small secondary" disabled={busy} onClick={() => onPropose(f.name)}>제안·검토(LLM)</button>{' '}
-                  {f.draft && <button className="small secondary" onClick={() => setOpen(open === f.name ? '' : f.name)}>보기</button>}
+                  {f.draft && <button className="small secondary" onClick={() => setOpen(f.name)}>보기</button>}
                 </td>
               </tr>
             );
@@ -277,8 +278,8 @@ function FormsStep({ forms, schemaVersion, busy, onPropose, onConfirm }: {
         </tbody>
       </table>
       {forms.filter((f) => f.name === open && f.draft).map((f) => (
-        <div key={f.name} style={{ marginTop: 8 }}>
-          <div className="mutedtext" style={{ fontSize: 12 }}>실제 값 표본</div>
+        <Modal key={f.name} title={`양식 대응표 — ${f.name}`} onClose={() => setOpen('')} wide>
+          <div className="mutedtext" style={{ fontSize: 12 }}>{f.documents.toLocaleString()}건 · 실제 값 표본</div>
           <table style={{ fontSize: 11 }}>
             <thead><tr>{f.columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
             <tbody>{f.draft!.sample_rows.slice(0, 4).map((r, i) => (
@@ -286,8 +287,8 @@ function FormsStep({ forms, schemaVersion, busy, onPropose, onConfirm }: {
           </table>
           <Issues review={f.draft!.review} />
           {f.draft!.problems.length > 0 && <p className="error" style={{ fontSize: 12 }}>기계 검사: {f.draft!.problems.join(' / ')}</p>}
-          <JsonEditor value={f.draft!.revised} onConfirm={(m) => onConfirm(f.name, m)} label="대응표 확정" />
-        </div>
+          <JsonEditor value={f.draft!.revised} onConfirm={(m) => { onConfirm(f.name, m); setOpen(''); }} label="대응표 확정" />
+        </Modal>
       ))}
     </section>
   );
@@ -343,7 +344,7 @@ function TemplatesStep({ templates, schemaVersion, busy, onPropose, onConfirm }:
                   : t.suspended ? `⏸ 멈춤 — ${t.suspended.reason}` : t.draft ? '검증된 안 있음' : '—'}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>
                   <button className="small secondary" disabled={busy} onClick={() => onPropose(t.id)}>규칙 제안·검증(LLM)</button>{' '}
-                  {t.draft && <button className="small secondary" onClick={() => setOpen(open === t.id ? '' : t.id)}>보기</button>}
+                  {t.draft && <button className="small secondary" onClick={() => setOpen(t.id)}>보기</button>}
                 </td>
               </tr>
             );
@@ -354,15 +355,23 @@ function TemplatesStep({ templates, schemaVersion, busy, onPropose, onConfirm }:
         const d = t.draft!;
         const fixed = JSON.stringify(d.proposal) !== JSON.stringify(d.revised);
         return (
-          <div key={t.id} style={{ marginTop: 8 }}>
+          <Modal key={t.id} title={`템플릿 규칙 — ${t.label}`} onClose={() => setOpen('')} wide>
+            <div className="mutedtext" style={{ fontSize: 12 }}>
+              {t.documents.toLocaleString()}건 · 예: <span className="mono">{t.example}</span>
+            </div>
+            <details style={{ fontSize: 12, margin: '4px 0' }}>
+              <summary style={{ cursor: 'pointer' }}>뼈대(되풀이되는 줄) {t.skeleton.length}</summary>
+              <pre className="mono" style={{ fontSize: 11, whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto' }}>{t.skeleton.join('\n')}</pre>
+            </details>
             <div className="mutedtext" style={{ fontSize: 12 }}>
               규칙을 짠 문서: {d.train.join(', ')} · 검증 문서: {d.check.map((c) => c.path).join(', ')}
             </div>
             {fixed && d.first && <EvalView title="처음 규칙" ev={d.first} need={d.precision_needed} />}
             {d.evaluation && <EvalView title={fixed ? '검증 결과로 고친 규칙' : '검증'} ev={d.evaluation} need={d.precision_needed} />}
             {d.problems.length > 0 && <p className="error" style={{ fontSize: 12 }}>기계 검사: {d.problems.join(' / ')}</p>}
-            <JsonEditor value={d.revised} onConfirm={(r) => onConfirm(t.id, r)} label="규칙 확정(검증 문서로 다시 잽니다)" />
-          </div>
+            <JsonEditor value={d.revised} onConfirm={(r) => { onConfirm(t.id, r); setOpen(''); }}
+              label="규칙 확정(검증 문서로 다시 잽니다)" />
+          </Modal>
         );
       })}
     </section>
