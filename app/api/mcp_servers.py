@@ -258,6 +258,15 @@ _OPS_TOOLS = [
         "inputSchema": {"type": "object", "properties": {"source": {"type": "string"}}, "required": ["source"]},
     },
     {
+        "name": "ontology_propose_forms",
+        "description": "온톨로지 재구성 ③′ — 확정하지 않은 양식 대응표·템플릿 규칙을 문서가 많은 것부터 LLM이 제안·검토한다"
+                       "(뒤에서, 각 limit개). 확정은 사람이 콘솔 내용 분석 ②·②′에서 — 확정한 양식·템플릿의 문서는 분석에서"
+                       " LLM 대신 규칙으로 뽑힌다. 진행은 ontology_semantic_status로.",
+        "inputSchema": {"type": "object", "properties": {
+            "source": {"type": "string"}, "limit": {"type": "integer", "description": "양식·템플릿 각각(기본 15)"}},
+            "required": ["source"]},
+    },
+    {
         "name": "ontology_semantic_status",
         "description": "내용 분석 상태 — 제안 작업(task)·스키마 초안(개념·층위·관계)·확정 판·분석 진행·멈춤·표본 검토.",
         "inputSchema": {"type": "object", "properties": {"source": {"type": "string"}}, "required": ["source"]},
@@ -326,7 +335,7 @@ def _project_by_name(db: Session, args: dict, discover: str = "list_routes") -> 
 
 def _ops_call(db: Session, actor: str, name: str, args: dict, *, key: ApiKey | None = None) -> str:
     if name in ("ontology_rebuild", "ontology_regraph", "ontology_propose_schema", "ontology_semantic_status",
-                "ontology_analyze"):
+                "ontology_analyze", "ontology_propose_forms"):
         # 운영 서버의 다른 도구는 읽기라 키를 가리지 않지만, 재구성은 지우고 바꾼다 — 관리자만
         if name != "ontology_semantic_status" and not (key is not None and key.is_admin):
             raise mcp_server.McpToolError("온톨로지 재구성은 관리자만 합니다.")
@@ -1711,6 +1720,16 @@ def _ontology_ops_call(db: Session, actor: str, name: str, args: dict) -> str:
                 raise mcp_server.McpToolError("이 저장소에서 이미 돌고 있는 제안이 있습니다.")
             audit.record(db, actor, "ontology.semantic.schema.propose", store.name, {"via": "mcp"})
             return _dump({"started": True, "next": "ontology_semantic_status로 진행을 보고, 초안을 콘솔 ①에서 확정하세요"})
+        if name == "ontology_propose_forms":
+            if not semantic.status(store.name)["schema"]:
+                raise mcp_server.McpToolError("확정한 스키마가 없습니다 — 콘솔 내용 분석 ①에서 확정한 뒤에 하세요.")
+            semantic.provider_for(db, store.name)
+            limit = _int_arg(args, "limit", semantic.PROPOSE_LIMIT, 50)
+            if not semantic.submit(store.name, "양식·템플릿 제안",
+                                   lambda s, report: semantic.propose_all(s, store.name, report, limit)):
+                raise mcp_server.McpToolError("이 저장소에서 이미 돌고 있는 제안이 있습니다.")
+            audit.record(db, actor, "ontology.semantic.propose_all", store.name, {"via": "mcp", "limit": limit})
+            return _dump({"started": True, "next": "ontology_semantic_status로 진행을 보고, 콘솔 ②·②′에서 확정하세요"})
         if name == "ontology_semantic_status":
             st = semantic.status(store.name)
             draft = st.get("schema_draft") or {}
@@ -1726,7 +1745,14 @@ def _ontology_ops_call(db: Session, actor: str, name: str, args: dict) -> str:
                               **summary(st["schema"]), "version": st["schema"].get("version"),
                               "confirmed_by": st["schema"].get("confirmed_by"),
                               "confirmed_at": st["schema"].get("confirmed_at")},
-                          "review": {k: st["review"][k] for k in ("items", "wrong", "error_rate")}})
+                          "review": {k: st["review"][k] for k in ("items", "wrong", "error_rate")},
+                          # 양식·템플릿 — 몇 개가 제안돼 있고 몇 개를 확정했나(지금 스키마의 판으로)
+                          **{kind: {"total": len(rows),
+                                    "drafted": sum(1 for r in rows if r.get("draft")),
+                                    "confirmed": sum(1 for r in rows if (r.get("confirmed") or {}).get("schema_version")
+                                                     == (st.get("schema") or {}).get("version"))}
+                             for kind, rows in (("forms", semantic.forms(store.name)),
+                                                ("templates", semantic.templates(store.name)))}})
         action = _str_arg(args, "action")
         if action == "stop":
             semantic.stop(store.name)
@@ -2227,7 +2253,8 @@ def _concept_call(name: str, args: dict, sources) -> str:
 # 대화 한 줄로 일어날 일이 아니다 — 그건 각 메뉴(또는 개별 서버)에서 사람이 한다.
 _EXCLUDED = {"reindex_docs", "sync_catalog", "run_scheduled_job",
              # 온톨로지 재구성 — 지우고 다시 만드는 일은 운영 서버(/mcp/ops)에서만, 관리자가
-             "ontology_rebuild", "ontology_regraph", "ontology_propose_schema", "ontology_analyze"}
+             "ontology_rebuild", "ontology_regraph", "ontology_propose_schema", "ontology_analyze",
+             "ontology_propose_forms"}
 
 # 저장소 서버(/mcp/storage/{저장소})는 저장소마다 따로라, 묶음에는 목록 보기 하나만 source 인자를
 # 붙여 얹는다. 검색·읽기는 docs 도구가 저장소를 가로질러 이미 한다.

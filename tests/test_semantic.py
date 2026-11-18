@@ -1012,3 +1012,27 @@ def test_ops_rebuild_tools_are_admin_only_need_confirmation_and_stay_out_of_chat
     names = {t["name"] for t in mcp_servers._read_only(mcp_servers._OPS_TOOLS)}
     assert "ontology_semantic_status" in names and not names & {"ontology_rebuild", "ontology_regraph",
                                                                  "ontology_propose_schema", "ontology_analyze"}
+
+
+def test_forms_and_templates_are_proposed_in_one_go_for_the_admin_to_confirm(store, tmp_path, monkeypatch):
+    """재구성 뒤 — 확정하지 않은 양식·템플릿을 한꺼번에 제안·검토한다(확정은 사람이). MCP 운영 도구로도."""
+    from app.api import mcp_servers
+    from app.db import SessionLocal
+
+    _registration_docs(tmp_path / "docs")
+    docsearch.reindex("docs", tmp_path / "docs")
+    with _db() as db:
+        draft = semantic.propose_schema(db, "docs")
+        semantic.confirm_schema("docs", draft["revised"], "admin")
+        out = semantic.propose_all(db, "docs")
+    kinds = {p["kind"] for p in out["proposed"]}
+    assert "양식" in kinds and not out["failed"]
+    form = next(f for f in semantic.forms("docs") if f["name"] == " | ".join(FORM))
+    assert form["draft"] and not form.get("confirmed")              # 제안만 — 확정은 사람이
+    with _db() as db:
+        again = semantic.propose_all(db, "docs")
+    assert not [p for p in again["proposed"] if p["kind"] == "양식"]  # 이미 제안한 것은 다시 묻지 않는다
+    admin = type("K", (), {"name": "admin", "is_admin": True})()
+    with SessionLocal() as db:
+        st = json.loads(mcp_servers._ops_call(db, "admin", "ontology_semantic_status", {"source": "docs"}, key=admin))
+    assert st["forms"]["drafted"] >= 1 and st["forms"]["confirmed"] == 0

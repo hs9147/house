@@ -1911,3 +1911,49 @@ def reset(store_name: str, scope: str, actor: str = "") -> dict:
         return {"scope": scope, "removed": removed, "by": actor, "at": _now()}
     finally:
         conn.close()
+
+
+# --- 양식·템플릿을 한꺼번에 제안(사람은 확정만) ---
+
+PROPOSE_LIMIT = 15
+
+
+def propose_all(db: Session, store_name: str, report=_quiet, limit: int = PROPOSE_LIMIT) -> dict:
+    """확정하지 않은(또는 옛 스키마의) 양식 대응표와 템플릿 규칙을 문서가 많은 것부터 limit개씩 제안·검토한다 — 확정은
+    사람이 한다(② 양식·②′ 템플릿). 하나가 실패해도 나머지는 간다(사유를 남긴다). 재구성 뒤 분석 전에 쓴다: 확정하면 그
+    문서들은 LLM 대신 규칙으로 뽑힌다."""
+    conn = _conn(store_name)
+    try:
+        version = _schema(conn)["version"]
+    finally:
+        conn.close()
+
+    def todo(items: list[dict], min_docs: int) -> list[dict]:
+        return [i for i in items if i["documents"] >= min_docs and not i.get("draft")
+                and not (i.get("confirmed") and i["confirmed"].get("schema_version") == version)][:limit]
+
+    forms_todo = todo(forms(store_name), 1)
+    templates_todo = todo(templates(store_name), TEMPLATE_MIN_DOCS)
+    steps = len(forms_todo) + len(templates_todo)
+    done, failed = [], []
+    for k, f in enumerate(forms_todo):
+        report(f"양식 대응 제안·검토 {k + 1}/{len(forms_todo)} · {f['name'][:60]}", k + 1, steps)
+        try:
+            propose_mapping(db, store_name, f["name"])
+            done.append({"kind": "양식", "name": f["name"], "documents": f["documents"]})
+        except Exception as e:  # noqa: BLE001
+            failed.append({"kind": "양식", "name": f["name"], "error": str(e)[:200]})
+    for k, t in enumerate(templates_todo):
+        report(f"템플릿 규칙 제안·검증 {k + 1}/{len(templates_todo)} · {t['label'][:60]}", len(forms_todo) + k + 1, steps)
+        try:
+            propose_template(db, store_name, t["id"])
+            done.append({"kind": "템플릿", "name": t["label"], "documents": t["documents"]})
+        except Exception as e:  # noqa: BLE001
+            failed.append({"kind": "템플릿", "name": t["label"], "error": str(e)[:200]})
+    out = {"proposed": done, "failed": failed, "at": _now()}
+    conn = _conn(store_name)
+    try:
+        _put(conn, "batch_proposals", out)
+    finally:
+        conn.close()
+    return out
