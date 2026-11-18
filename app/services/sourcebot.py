@@ -17,7 +17,7 @@ import json
 import time
 from pathlib import Path
 
-from .infosource import SourceError, USER_AGENT, _launch, _origin
+from .infosource import SourceError, USER_AGENT, _launch, _origin, os_trusted
 
 RUNNER = "http://gpax-bot.invalid"   # 받는 창의 가짜 출처 — 네트워크로 나가지 않는다(가로채 답한다)
 ENGINE_DIR = Path(__file__).resolve().parents[2] / "console" / "src" / "lib"
@@ -69,8 +69,10 @@ def run(source: dict, screens: list[dict], headers: dict, *, start_url: str,
                         "queries": screens, "version": source.get("version", "")}}
     html = _RUNNER_HTML.replace("__START__", json.dumps(start, ensure_ascii=False).replace("</", "<\\/"))
     box: dict = {}
+    # 사내 루트 CA — OS가 검증한 인증서만 받는다(infosource.os_trusted)
+    trust = os_trusted([start_url, *(s.get("url", "") for s in screens), *(s.get("start", "") for s in screens)])
     with sync_playwright() as pw:
-        browser, _name = _launch(pw)
+        browser, _name = _launch(pw, trust)
         try:
             context = browser.new_context(viewport={"width": 1280, "height": 900}, user_agent=USER_AGENT,
                                           accept_downloads=False)

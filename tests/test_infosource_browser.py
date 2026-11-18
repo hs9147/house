@@ -140,3 +140,78 @@ def test_actor_asks_the_llm_once_then_replays_without_it(site, browser_ok, monke
     infosource._actions_file(9).unlink()
     page, _ = run()
     assert "LLM이 조건 칸" in page["error"]                         # 바꾸는 버튼은 누르지 않는다
+
+
+def _tls_site(tmp_path):
+    """사내 루트 CA를 흉내 낸다 — 이 시험만의 CA가 서명한 127.0.0.1 인증서로 HTTPS를 연다."""
+    import datetime
+    import ipaddress
+    import ssl
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ca_key, key = ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "GPAX test root")])
+    ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name).public_key(ca_key.public_key())
+          .serial_number(1).not_valid_before(now - datetime.timedelta(days=1))
+          .not_valid_after(now + datetime.timedelta(days=1))
+          .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+          .add_extension(x509.KeyUsage(digital_signature=True, key_cert_sign=True, crl_sign=True, content_commitment=False,
+                                       key_encipherment=False, data_encipherment=False, key_agreement=False,
+                                       encipher_only=False, decipher_only=False), critical=True)
+          .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
+          .sign(ca_key, hashes.SHA256()))
+    leaf = (x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")]))
+            .issuer_name(ca_name).public_key(key.public_key()).serial_number(2)
+            .not_valid_before(now - datetime.timedelta(days=1)).not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                           critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
+            .sign(ca_key, hashes.SHA256()))
+    (tmp_path / "ca.pem").write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    (tmp_path / "leaf.pem").write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+    (tmp_path / "key.pem").write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                                         serialization.PrivateFormat.PKCS8,
+                                                         serialization.NoEncryption()))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Site)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(tmp_path / "leaf.pem", tmp_path / "key.pem")
+    server.socket = ctx.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"https://127.0.0.1:{server.server_address[1]}"
+
+
+def test_browser_accepts_only_the_certificate_the_os_store_verified(browser_ok, monkeypatch, tmp_path):
+    """사내 루트 CA를 브라우저가 모를 때(ERR_CERT_AUTHORITY_INVALID) — OS 저장소가 검증한 서버 인증서의 공개키만
+    브라우저에 넘겨 받게 한다. OS도 모르는 인증서면 아무것도 넘기지 않는다(검증을 끄지 않는다)."""
+    import ssl
+
+    from playwright.sync_api import sync_playwright
+
+    server, url = _tls_site(tmp_path)
+    try:
+        assert infosource.os_trusted([f"{url}/"]) == []          # OS 저장소가 모르는 CA — 넘기지 않는다
+        assert infosource.os_trusted(["http://127.0.0.1:1/"]) == []
+        real = ssl.create_default_context
+        monkeypatch.setattr(infosource.ssl, "create_default_context",
+                            lambda *a, **kw: real(cafile=str(tmp_path / "ca.pem")))   # OS 저장소에 사내 CA가 있다
+        trust = infosource.os_trusted([f"{url}/", f"{url}/notice"])
+        assert len(trust) == 1
+        with sync_playwright() as pw:
+            for pins, ok in (([], False), (trust, True)):
+                browser, _ = infosource._launch(pw, pins)
+                try:
+                    page = browser.new_page()
+                    try:
+                        page.goto(f"{url}/notice", timeout=15000)
+                        assert ok and page.title() == "공지"
+                    except Exception as e:  # noqa: BLE001
+                        assert not ok and "ERR_CERT" in str(e), e
+                finally:
+                    browser.close()
+    finally:
+        server.shutdown()

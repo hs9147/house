@@ -45,6 +45,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import ssl
 import threading
 from datetime import date, datetime, timedelta, timezone
@@ -558,17 +559,46 @@ def browser_available() -> bool:
     return importlib.util.find_spec("playwright") is not None
 
 
-def _launch(pw):
+def _launch(pw, trust: list[str] = ()):
     """내장 Chromium → 서버에 설치된 Edge → Chrome. 사내망에서 내장 브라우저를 내려받지 못해도 깔린 Edge로
-    돈다(실측: 내장이 없는 PC에서 msedge·chrome 채널은 바로 떴다). → (브라우저, 무엇으로 띄웠나)."""
+    돈다(실측: 내장이 없는 PC에서 msedge·chrome 채널은 바로 떴다). → (브라우저, 무엇으로 띄웠나).
+    trust는 연 사이트 중 OS 저장소로 검증된 인증서(os_trusted)의 공개키 — 브라우저가 사내 루트 CA를 몰라도 받는다."""
     errors = []
+    args = [f"--ignore-certificate-errors-spki-list={','.join(trust)}"] if trust else []
     for channel in ("", "msedge", "chrome"):
         try:
-            return pw.chromium.launch(**({"channel": channel} if channel else {})), channel or "chromium"
+            return (pw.chromium.launch(**({"channel": channel} if channel else {}), **({"args": args} if args else {})),
+                    channel or "chromium")
         except Exception as e:  # noqa: BLE001 — 다음 것으로
             errors.append(f"{channel or 'chromium'}: {str(e).splitlines()[0][:120] if str(e) else type(e).__name__}")
     raise SourceError("브라우저를 띄우지 못했습니다 — " + "; ".join(errors)
                       + " (서버에서 python -m playwright install --only-shell chromium)")
+
+
+def os_trusted(urls) -> list[str]:
+    """https 주소의 서버 인증서를 **OS 저장소로** 검증하고(_http_get과 같은 기준 — 사내 루트 CA를 안다), 통과한
+    인증서의 공개키 해시(SPKI SHA-256, base64)를 돌려준다. 브라우저(내장 Chromium)는 사내 루트 CA를 몰라
+    ERR_CERT_AUTHORITY_INVALID로 멈추는데(실측 pu-gps4.lge.com), 검증을 통째로 끄면(ignore_https_errors) 아무
+    인증서나 받는다. 대신 **방금 OS가 검증한 그 서버 인증서만** 받게 한다 — Chromium의
+    --ignore-certificate-errors-spki-list는 제시된 사슬에 이 키가 있을 때만 오류를 넘긴다. 검증에 실패한 호스트는
+    넣지 않는다(브라우저도 그대로 멈춘다)."""
+    from cryptography import x509  # noqa: PLC0415
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat  # noqa: PLC0415
+
+    out = []
+    hosts = {(p.hostname, p.port or 443) for p in (urlsplit(u) for u in urls)
+             if p.scheme == "https" and p.hostname}
+    for host, port in sorted(hosts):
+        try:
+            with socket.create_connection((host, port), timeout=TIMEOUT) as raw, \
+                    ssl.create_default_context().wrap_socket(raw, server_hostname=host) as tls:
+                der = tls.getpeercert(binary_form=True)
+        except (OSError, ssl.SSLError, ValueError):
+            continue
+        spki = x509.load_der_x509_certificate(der).public_key().public_bytes(
+            Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+        out.append(base64.b64encode(hashlib.sha256(spki).digest()).decode())
+    return out
 
 
 def _markdown(html: str) -> str:
@@ -602,8 +632,9 @@ def _browse(source_id: int, urls: list[str], headers: dict, origin: str, extra: 
     out_dir.mkdir(parents=True, exist_ok=True)
     rendered: list[dict] = []
     failed = False
+    trust = os_trusted([*urls, *extra])
     with sync_playwright() as pw:
-        browser, name = _launch(pw)
+        browser, name = _launch(pw, trust)
         try:
             context = browser.new_context(viewport={"width": 1280, "height": 900},
                                           user_agent=USER_AGENT)
