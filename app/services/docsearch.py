@@ -667,28 +667,27 @@ def _snippets(body: str, term: str, count: int, width: int) -> list[str]:
 
 
 def regraph(store_name: str, root: Path, budget_seconds: float = _DEFAULT_BUDGET) -> dict:
-    """형식 그래프를 다시 만든다 — 판 정보(doc_meta)가 없는 문서만, .ready에서(다시 추출하지 않는다). 예산 안에서 돌고
-    남은 수를 돌려준다(done이 false면 다시 부른다). 판 정보가 생기기 전에 색인한 문서와, 재구성으로 비운 뒤에 쓴다 —
-    reindex(force)는 매번 처음부터 전부라 큰 저장소에서 끝나지 않는다."""
+    """판 정보(doc_meta — 시행일·개정 계열)를 다시 만든다 — 판 정보가 없는 문서만. 예산 안에서 돌고 남은 수를 돌려준다
+    (done이 false면 다시 부른다). 판 정보가 생기기 전에 색인한 문서와, 재구성으로 비운 뒤에 쓴다.
+
+    **색인 DB의 본문(docs.body)에서 읽는다** — 시행일은 본문의 글이고 개정 계열은 파일 이름이라 마크다운이 필요 없다.
+    예전에는 .ready에서 형식 그래프를 통째로 다시 썼는데, 캐시가 없는 PDF는 다시 추출해서 한 건에 수 초였다(실측 운영
+    credit: 1분에 10건 — contracts 6천 건이면 몇 시간). 형식 그래프(절·용어·표)는 재구성이 지우지 않으므로 다시 쓸 일이
+    없다 — 문서가 바뀌면 색인이 늘 그렇듯 다시 쓴다(_write_graph)."""
     started = time.monotonic()
     conn = _connect(store_name)
     rebuilt = remaining = 0
     try:
-        rows = [r["path"] for r in conn.execute(
-            "SELECT path FROM docs WHERE body IS NOT NULL AND path NOT IN (SELECT path FROM doc_meta) ORDER BY path")]
-        for rel in rows:
+        rows = conn.execute(
+            "SELECT path, body FROM docs WHERE body IS NOT NULL AND path NOT IN (SELECT path FROM doc_meta) ORDER BY path")
+        batch = []
+        for r in rows:
             if time.monotonic() - started > budget_seconds:
                 remaining += 1
                 continue
-            try:
-                markdown = docready.read(store_name, rel, root / rel)
-            except Exception:  # noqa: BLE001 — 지워졌거나 못 읽는 문서는 다음 색인이 정리한다
-                conn.execute("INSERT OR REPLACE INTO doc_meta (path) VALUES (?)", (rel,))
-                continue
-            _write_graph(conn, rel, markdown)
-            rebuilt += 1
-            if rebuilt % 50 == 0:
-                conn.commit()
+            batch.append((r["path"], ontology.effective_date(r["body"] or ""), ontology.family_of(r["path"])))
+        conn.executemany("INSERT OR REPLACE INTO doc_meta (path, effective, family) VALUES (?, ?, ?)", batch)
+        rebuilt = len(batch)
         conn.commit()
     finally:
         conn.close()
