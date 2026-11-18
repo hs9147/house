@@ -240,7 +240,8 @@ _OPS_TOOLS = [
             " 저장소에 있는데 출처를 모르는 유형(출처 미확인), 교정할 것(0건·막힘·열 다름·스킬 0건), 라운드 이력."
         ),
         "inputSchema": {"type": "object", "properties": {
-            "source": {"type": "string", "description": "출처 이름(비우면 전부 — 요약만)"}}},
+            "source": {"type": "string", "description": "출처 이름(비우면 전부 — 요약만)"},
+            "refresh": {"type": "boolean", "description": "라운드를 지금 돌린다(LLM 없이 — 라운드가 없으면 저절로 돈다)"}}},
     },
 ]
 
@@ -285,6 +286,8 @@ def _ops_call(db: Session, actor: str, name: str, args: dict) -> str:
         for row in db.execute(select(InfoSource).order_by(InfoSource.id)).scalars():
             if wanted and row.name != wanted:
                 continue
+            if row.scan and (args.get("refresh") is True or not coverage.harness(row.id).get("round")):
+                coverage.run_round(db, row, f"MCP · {actor}")
             h = coverage.harness(row.id)
             entry = {"source": row.name, "kind": row.kind, "round": h.get("round"), "rounds": h.get("rounds", []),
                      "gaps": h.get("gaps", [])[:10], "issues": h.get("issues", []),

@@ -233,6 +233,18 @@ document.getElementById('out').innerHTML='<tr><th>번호</th><th>제목</th></tr
 
 class _Site(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
+        if self.path == "/locked":      # 세션이 없을 때의 업무 사이트 — 같은 출처의 로그인 화면으로(실측 GPS4)
+            self.send_response(302)
+            self.send_header("Location", "/sys/auth/SY_LOGIN/UNAUTHORIZED")
+            self.end_headers()
+            return
+        if self.path.startswith("/sys/auth/"):
+            body = "<html><head><title>::::: GPS 4.0 :::::</title></head><body>권한이 없습니다</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+            return
         body = FORM if self.path.split("?")[0] in ("/", "/notice") else ""
         self.send_response(200 if body else 404)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -363,3 +375,12 @@ def test_list_columns_are_measured_fixed_or_changing(client, monkeypatch, fake_b
     [skill] = client.get(f"{API}/skills", headers=ADMIN).json()["skills"]
     marks = {o["name"]: o.get("volatility") for o in skill["outputs"]}
     assert marks == {"번호": "fixed", "협력사": "fixed", "상태": "changing"}
+
+
+def test_engine_stops_at_a_same_origin_login_page(site):
+    """세션이 없으면 사이트가 같은 출처의 로그인 화면을 낸다(비밀번호 칸이 없을 수도 있다) — 0건으로 돌지 않고 알린다."""
+    if not infosource.browser_available() or not sourcebot.engine_available():
+        pytest.skip("playwright·엔진 없음")
+    with pytest.raises(infosource.SourceError, match="로그인 화면"):
+        sourcebot.run({"id": 7, "name": "시험"}, [{"screen": "x", "url": f"{site}/notice", "conditions": []}], {},
+                      start_url=f"{site}/locked", timeout=60)

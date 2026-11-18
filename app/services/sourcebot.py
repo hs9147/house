@@ -14,10 +14,17 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+from urllib.parse import urlsplit
 from pathlib import Path
 
 from .infosource import SourceError, USER_AGENT, _launch, _origin, os_trusted
+
+# 로그인·인증 화면의 주소·제목 — 같은 출처 안의 로그인 화면(실측 GPS4: /sys/auth/SY_LOGIN/UNAUTHORIZED)은 다른 주소로
+# 넘어가지 않아서, 주소의 모양으로도 본다
+_LOGIN_URL = re.compile(r"log-?in|sign-?in|logon|/sso(?:[/._?-]|$)|unauthori[sz]ed|/auth/|session-?expired", re.I)
+_LOGIN_TITLE = re.compile(r"로그인|login|sign in|인증", re.I)
 
 RUNNER = "http://gpax-bot.invalid"   # 받는 창의 가짜 출처 — 네트워크로 나가지 않는다(가로채 답한다)
 ENGINE_DIR = Path(__file__).resolve().parents[2] / "console" / "src" / "lib"
@@ -102,6 +109,12 @@ def run(source: dict, screens: list[dict], headers: dict, *, start_url: str,
                                   "만료됐습니다(무인 수집 설정과 출처의 요청 헤더를 보세요).")
             landed_title, landed_url = page.title()[:80], page.url[:200]
             step(f"열린 화면: {landed_title} · {landed_url}")
+            parts = urlsplit(page.url)
+            if _LOGIN_URL.search(parts.path + "?" + parts.query) or (
+                    _LOGIN_TITLE.search(landed_title) and not _LOGIN_URL.search(urlsplit(start_url).path)):
+                raise SourceError(f"로그인 화면이 떴습니다({landed_title or '제목 없음'} · {parts.path}) — 서버에 이 사이트의 "
+                                  "세션이 없거나 만료됐습니다(무인 수집 설정과 출처의 요청 헤더를 보세요). 북마크로는 로그인한 "
+                                  "내 브라우저에서 돌릴 수 있습니다.")
             if page.locator("input[type=password]").count():
                 raise SourceError("로그인 화면이 떴습니다 — 서버에 맡긴 세션이 없거나 만료됐습니다(무인 수집 설정과 "
                                   "출처의 요청 헤더를 보세요). 북마크로는 로그인한 내 브라우저에서 돌릴 수 있습니다.")
