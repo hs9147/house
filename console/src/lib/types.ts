@@ -1446,6 +1446,7 @@ export interface SkillRunResult {
   notes: string[];
   seconds: number;
   cached: boolean;
+  via?: 'server' | 'browser';
 }
 
 // 화면을 여는 길 — 열어 둔 화면 · 메뉴 길(탐색·녹화가 찾은) · 주소 · 녹화 필요

@@ -11,9 +11,10 @@ import type {
 } from '../lib/types';
 
 /**
- * 수집 스킬 — 크롤링(스캔)이 읽은 화면을 수집 조건으로 정하고, 그 화면에 이름·용도·입력·출력·공개 범위를 붙이면
- * 에이전트가 골라 부르는 일이 된다(services/skills). 여기는 모든 출처의 스킬을 모아 보고 입력을 넣어 지금 돌려
- * 본다 — 스마트워크 대화와 MCP(/mcp/skills)가 부르는 것과 같은 실행이다(저장소에 쓰지 않는다).
+ * 수집 스킬 — 크롤링(스캔)이 읽은 화면을 수집 조건으로 정하고, 그 화면에 이름·용도·출력·공개 범위를 붙이면 에이전트가
+ * 골라 부르는 일이 된다(services/skills). 여기는 모든 출처의 스킬을 모아 보고 지금 돌려 본다 — 스마트워크 대화와
+ * MCP(/mcp/skills)가 부르는 것과 같은 실행이다(저장소에 쓰지 않는다). **입력(params)은 내부 정보다** — 사람은 넣지
+ * 않는다(화면에 보이지 않는다). 사람이 돌리면 기본값으로, 에이전트는 MCP로 값을 넘긴다.
  */
 export function SkillCatalog() {
   const navigate = useNavigate();
@@ -36,7 +37,7 @@ export function SkillCatalog() {
             ) : (
               <table style={{ fontSize: 12 }}>
                 <thead>
-                  <tr><th>스킬</th><th>용도 · 쓸 때</th><th>입력</th><th>결과 열</th><th>공개 범위</th><th /></tr>
+                  <tr><th>스킬</th><th>용도 · 쓸 때</th><th>결과 열</th><th>공개 범위</th><th /></tr>
                 </thead>
                 <tbody>
                   {data.skills.map((s) => (
@@ -53,11 +54,6 @@ export function SkillCatalog() {
                         )}
                       </td>
                       <td>{s.description}{s.when && <div className="mutedtext">쓸 때: {s.when}</div>}</td>
-                      <td className="mono">
-                        {s.params.length === 0 ? '—' : s.params.map((p) => (
-                          <div key={p.name}>{p.name}{p.required ? '*' : ''}{p.default ? ` = ${p.default}` : ''}</div>
-                        ))}
-                      </td>
                       <td style={{ maxWidth: 220 }} title="다시 받아 본 건에서 열마다 바뀐 비율 — 고정은 지식(신원·기준), 변경은 정보(상태)">
                         {s.outputs.length === 0 ? '—' : s.outputs.map((o, k) => (
                           <span key={o.name}>{k > 0 && ', '}{o.name}
@@ -89,7 +85,6 @@ export function SkillCatalog() {
 }
 
 function SkillRunModal({ skill, onClose }: { skill: SkillOut; onClose: () => void }) {
-  const [params, setParams] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [out, setOut] = useState<SkillRunResult | null>(null);
@@ -97,7 +92,7 @@ function SkillRunModal({ skill, onClose }: { skill: SkillOut; onClose: () => voi
     setBusy(true);
     setError('');
     try {
-      setOut(await api.runSkill(skill.id, Object.fromEntries(Object.entries(params).filter(([, v]) => v.trim()))));
+      setOut(await api.runSkill(skill.id, {}));   // 입력은 내부 정보 — 사람이 돌리면 기본값으로
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -107,16 +102,9 @@ function SkillRunModal({ skill, onClose }: { skill: SkillOut; onClose: () => voi
   return (
     <Modal title={`스킬 실행 — ${skill.id}`} onClose={onClose} closable={!busy} wide>
       <p style={{ fontSize: 12, marginTop: 0 }}>{skill.description}</p>
-      {skill.params.map((p) => (
-        <div key={p.name} className="row" style={{ gap: 6, alignItems: 'center', marginBottom: 4 }}>
-          <label className="mono" style={{ width: 120, fontSize: 12 }}>{p.name}{p.required ? ' *' : ''}</label>
-          <input style={{ flex: 1 }} value={params[p.name] ?? ''} placeholder={p.default ? `기본값: ${p.default}` : p.description}
-                 onChange={(e) => setParams({ ...params, [p.name]: e.target.value })} />
-        </div>
-      ))}
       <div className="row" style={{ gap: 8, alignItems: 'center', margin: '6px 0' }}>
         <button className="small" disabled={busy} onClick={() => void run()}>{busy ? '서버 브라우저가 조회하는 중…' : '실행'}</button>
-        <span className="mutedtext" style={{ fontSize: 11 }}>몇십 초에서 몇 분 걸립니다. 같은 입력은 5분 동안 지난 결과를 줍니다.</span>
+        <span className="mutedtext" style={{ fontSize: 11 }}>몇십 초에서 몇 분 걸립니다. 5분 안에 다시 돌리면 지난 결과를 줍니다.</span>
       </div>
       {error && <p className="error">{error}</p>}
       {/* 서버가 그 사이트에 로그인돼 있지 않다 — 내 브라우저에서(로그인 → 북마크) 돌리는 화면으로 */}
@@ -134,8 +122,7 @@ export function SkillResult({ out }: { out: SkillRunResult }) {
   return (
     <div style={{ fontSize: 12 }}>
       <p className="mutedtext" style={{ margin: '4px 0' }}>
-        {out.cached ? '지난 결과(5분 안 같은 입력)' : `${out.seconds}초`} · 입력{' '}
-        {Object.entries(out.params).map(([k, v]) => `${k}=${v || '(빈 값)'}`).join(', ') || '없음'}
+        {out.cached ? '지난 결과(5분 안)' : `${out.seconds}초`}{out.via === 'browser' && ' · 내 브라우저에서'}
       </p>
       {out.lists.map((l) => (
         <div key={l.screen} style={{ marginBottom: 8 }}>
@@ -171,11 +158,10 @@ export function SkillResult({ out }: { out: SkillRunResult }) {
 
 /**
  * 화면 하나의 스킬 — 수집 조건의 그 화면 카드 안에서 고친다(저장은 수집 조건과 함께). 스킬은 「🔎 정보 현황」의 제안이나
- * 「🧩 스킬 작업」 대화가 만든다 — 여기서는 확정 전에 손볼 것만 고친다. 입력은 조건 값의 {이름} 자리다.
+ * 「🧩 스킬 작업」 대화가 만든다 — 여기서는 확정 전에 손볼 것만 고친다. 입력(조건 값의 {이름} 자리)은 내부 정보라 보이지 않는다.
  */
-export function SkillEditor({ skill, conditions, orgs, onChange }: {
+export function SkillEditor({ skill, orgs, onChange }: {
   skill?: SourceSkill;
-  conditions: SourceQueryCondition[];
   orgs: OrgOut[];
   onChange: (skill: SourceSkill | undefined, conditions?: SourceQueryCondition[]) => void;
 }) {
@@ -187,8 +173,6 @@ export function SkillEditor({ skill, conditions, orgs, onChange }: {
     );
   }
   const set = (next: Partial<SourceSkill>) => onChange({ ...skill, ...next });
-  const used = new Set(conditions.flatMap((c) => [...(c.value || '').matchAll(/\{([^{}]{1,40})\}/g)].map((m) => m[1])));
-  const missing = [...used].filter((u) => !skill.params.some((p) => p.name === u));
   return (
     <div style={{ marginTop: 6, padding: 6, borderRadius: 4, background: 'rgba(56,189,248,0.06)', fontSize: 12 }}>
       <div className="row" style={{ gap: 6, alignItems: 'center' }}>
@@ -203,35 +187,6 @@ export function SkillEditor({ skill, conditions, orgs, onChange }: {
                 onChange={(e) => set({ description: e.target.value })} />
       <input value={skill.when} placeholder="쓸 때 — 에이전트가 이 스킬을 고를 질문" aria-label="쓸 때"
              style={{ width: '100%', marginTop: 4 }} onChange={(e) => set({ when: e.target.value })} />
-      <div style={{ marginTop: 4 }}>
-        입력 <span className="mutedtext">— 조건 값에 <span className="mono">{'{이름}'}</span>으로 쓴 자리. 부를 때 값을 받고, 수집은 기본값으로 돕니다</span>
-        {skill.params.map((p, k) => (
-          <div key={k} className="row" style={{ gap: 4, marginTop: 2, alignItems: 'center' }}>
-            <input className="mono" value={p.name} placeholder="이름" aria-label="입력 이름" style={{ width: 110 }}
-                   onChange={(e) => set({ params: skill.params.map((x, m) => (m === k ? { ...x, name: e.target.value } : x)) })} />
-            <input value={p.description} placeholder="설명" aria-label="입력 설명" style={{ flex: 1 }}
-                   onChange={(e) => set({ params: skill.params.map((x, m) => (m === k ? { ...x, description: e.target.value } : x)) })} />
-            <input value={p.default} placeholder="기본값" aria-label="기본값" style={{ width: 110 }}
-                   onChange={(e) => set({ params: skill.params.map((x, m) => (m === k ? { ...x, default: e.target.value } : x)) })} />
-            <label><input type="checkbox" checked={p.required}
-                          onChange={(e) => set({ params: skill.params.map((x, m) => (m === k ? { ...x, required: e.target.checked } : x)) })} /> 필수</label>
-            {!used.has(p.name) && <span className="status warn" title="조건 값에 이 자리가 없습니다">안 씀</span>}
-            <button className="small secondary" onClick={() => set({ params: skill.params.filter((_, m) => m !== k) })}>×</button>
-          </div>
-        ))}
-        <button className="small secondary" style={{ marginTop: 2 }}
-                onClick={() => set({ params: [...skill.params, { name: '', description: '', default: '', required: false }] })}>
-          입력 더하기
-        </button>
-        {missing.length > 0 && (
-          <div style={{ marginTop: 2 }}>
-            <span className="status warn">입력 없음</span> 조건에 쓴 자리가 입력에 없습니다: <span className="mono">{missing.join(', ')}</span>
-            {' '}<button className="small secondary" onClick={() => set({ params: [...skill.params, ...missing.map((name) => ({
-              name, description: `「${conditions.find((c) => c.value.includes(`{${name}}`))?.field ?? name}」 칸에 넣을 값`,
-              default: '', required: false }))] })}>입력으로 더하기</button>
-          </div>
-        )}
-      </div>
       <div style={{ marginTop: 4 }}>
         결과 열 <span className="mutedtext">(쉼표 — 비우면 지난 수집이 받은 열)</span>
         <input value={skill.outputs.map((o) => o.name).join(', ')} aria-label="결과 열" style={{ width: '100%' }}
@@ -270,16 +225,15 @@ type ChatTurn = { role: 'user' | 'assistant'; content: string; changes?: SkillCh
 
 const STARTERS = [
   '화면마다 스킬 초안을 만들어 줘',
-  '부를 때 바꿀 칸(입력)을 골라 줘 — 날짜는 수집 조건대로 두고',
   '에이전트가 언제 이 스킬을 써야 하는지(쓸 때)를 업무 말로 다듬어 줘',
 ];
 
-/** 바뀐 것 한 줄 — 화면 이름 · 스킬 이름 · 입력 · 조건 */
+/** 바뀐 것 한 줄 — 화면 이름 · 스킬 이름 · 조건 */
 function changeLine(c: SkillChange, screens: SourceQueryScreen[]): string {
   const name = c.screen ?? screens.find((s) => s.url === c.url)?.screen ?? c.url;
   if (c.skill === null) return `${name}: 스킬 빼기`;
   const skill = c.skill
-    ? ` → 🧩 ${c.skill.name}${c.skill.params.length ? ` (입력 ${c.skill.params.map((p) => p.name).join(', ')})` : ''}`
+    ? ` → 🧩 ${c.skill.name}`
     : '';
   return `${c.new ? '+ ' : ''}${name}${skill} · 조건 ${c.conditions.map((x) => `${x.field}=${x.value}`).join(', ') || '없음'}`;
 }
@@ -337,7 +291,7 @@ export function SkillWorkspace({ row, q }: { row: SourceOut; q: QueryDraft }) {
       <div className="panel">
         <h3 style={{ marginTop: 0 }}>🧩 스킬 작업 — LLM과 대화로 정리</h3>
         <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
-          크롤링이 읽은 화면(칸·결과 열·지난 수집)을 보고 LLM이 스킬(이름·용도·쓸 때·입력·결과 열)을 제안합니다. 고칠 것은
+          크롤링이 읽은 화면(칸·결과 열·지난 수집)을 보고 LLM이 스킬(이름·용도·쓸 때·결과 열)을 제안합니다. 고칠 것은
           「적용」해야 편집본에 들어가고 「저장」해야 남습니다 — 왼쪽 수집 조건과 같은 편집본입니다. 공개 범위는 아래 카드에서
           직접 고릅니다.
         </p>
@@ -377,7 +331,7 @@ export function SkillWorkspace({ row, q }: { row: SourceOut; q: QueryDraft }) {
         </div>
         <div className="row" style={{ gap: 6, alignItems: 'flex-end' }}>
           <textarea value={text} rows={2} style={{ flex: 1, fontFamily: 'inherit' }} aria-label="스킬 대화"
-                    placeholder="예: 공지 조회는 구분을 입력으로 받고, 쓸 때는 '최근 공지를 물을 때'로 해 줘 (Ctrl+Enter로 보내기)"
+                    placeholder="예: 공지 조회의 쓸 때를 '최근 공지를 물을 때'로 해 줘 (Ctrl+Enter로 보내기)"
                     onChange={(e) => setText(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void send(text); }} />
           <button className="small" disabled={busy || !text.trim()} onClick={() => void send(text)}>보내기</button>
@@ -402,7 +356,7 @@ export function SkillWorkspace({ row, q }: { row: SourceOut; q: QueryDraft }) {
             <span className="mutedtext mono" style={{ fontSize: 10, marginLeft: 6 }}>
               조건 {s.conditions.map((c) => `${c.field}=${c.value}`).join(', ') || '없음'}
             </span>
-            <SkillEditor skill={s.skill} conditions={s.conditions} orgs={orgs.data ?? []}
+            <SkillEditor skill={s.skill} orgs={orgs.data ?? []}
               onChange={(skill, conditions) => {
                 const { skill: _old, ...rest } = s;
                 q.setScreen(i, { ...rest, ...(skill ? { skill } : {}), ...(conditions ? { conditions } : {}) });

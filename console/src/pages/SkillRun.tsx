@@ -61,7 +61,7 @@ export default function SkillRun() {
         setState('uploading');
         const file = new File([JSON.stringify(m.payload)], 'gpax-skill.json', { type: 'application/json' });
         api.skillBrowserResult(prep.skill, prep.params, file).then(
-          (r) => { setOut(r); setState('done'); push('결과를 올렸습니다 — 에이전트가 같은 입력으로 다시 부르면 이 결과를 받습니다'); },
+          (r) => { setOut(r); setState('done'); push('결과를 올렸습니다 — 에이전트가 다시 부르면 이 결과를 받습니다(5분 안)'); },
           (err) => { setError((err as Error).message); setState('linked'); });
       }
     };
@@ -92,14 +92,9 @@ export default function SkillRun() {
       </p>
       <p className="mutedtext" style={{ fontSize: 12 }}>
         서버는 이 사이트에 로그인할 수 없어서(사내 SSO) 내 브라우저에서 돌립니다. ① 아래 버튼으로 업무 사이트를 열고 로그인 →
-        ② 그 탭에서 <GpaxBookmark /> 북마크를 한 번 누르면 → 북마크가 이 스킬 화면을 입력대로 조회해 결과를 여기로 보냅니다.
+        ② 그 탭에서 <GpaxBookmark /> 북마크를 한 번 누르면 → 북마크가 이 스킬 화면을 조회해 결과를 여기로 보냅니다.
         세션은 내 브라우저 밖으로 나가지 않습니다. 북마크가 없으면 그 버튼을 북마크바로 끌어다 놓으세요.
       </p>
-      {prep && Object.keys(prep.params).length > 0 && (
-        <p className="mono mutedtext" style={{ fontSize: 11 }}>
-          입력: {Object.entries(prep.params).map(([k, v]) => `${k}=${v || '(빈 값)'}`).join(', ')}
-        </p>
-      )}
       <button disabled={!prep || state === 'waiting' || state === 'linked' || state === 'uploading'} onClick={open}>
         {state === 'done' ? '다시 실행' : '① 업무 사이트 열기(로그인)'}
       </button>
