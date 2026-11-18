@@ -1508,6 +1508,51 @@ def start_scan(db: Session, row: InfoSource) -> None:
     _submit(row.id)
 
 
+def start_bot(db: Session, row: InfoSource) -> None:
+    """서버 봇 — 수집 조건 전부를 서버 브라우저에서 북마크와 같은 엔진으로 돈다(services/sourcebot). 결과는 북마크의
+    봇 실행과 같다(화면 목록은 지난 스캔 그대로, 받은 파일·수집 결과가 바뀐다). 저장은 사람이 한다."""
+    if row.kind != "web" or not row.scan:
+        raise SourceError("서버 봇은 한 번 스캔한 웹사이트 출처에서 돕니다.")
+    if not query_screens(row):
+        raise SourceError("수집 조건이 없습니다 — 봇이 돌 화면을 먼저 정하세요.")
+    _refuse_if_running(row)
+    row.status, row.error = "scanning", None
+    row.scanned_at = datetime.now(timezone.utc)
+    db.commit()
+    progress_start(row.id, "서버 봇 — 수집 조건대로 서버 브라우저에서 받습니다")
+    _submit_bot(row.id)
+
+
+def _submit_bot(source_id: int) -> None:
+    """테스트에서 인라인으로 바꾸는 큐 경계(서버 봇)."""
+    jobs.submit(_bot_job, source_id)
+
+
+def _run_bot(db: Session, row: InfoSource) -> None:
+    from . import skills, sourcebot  # noqa: PLC0415
+
+    payload = skills.bot(row, served_screens(row), timeout=sourcebot.DEFAULT_TIMEOUT,
+                         step=lambda t: progress_step(row.id, t))
+    result = _browser_result(row, payload)
+    _finish(db, row, result, ["서버 봇으로 받은 결과입니다(서버 브라우저 · 맡긴 세션 · 수집 조건대로).",
+                              *result.pop("stage_notes", [])])
+
+
+def _bot_job(source_id: int) -> None:
+    from ..db import SessionLocal  # noqa: PLC0415
+
+    with SessionLocal() as session:
+        row = session.get(InfoSource, source_id)
+        if row is None:
+            return
+        try:
+            _run_bot(session, row)
+        except Exception as e:  # noqa: BLE001 — 실패 이유는 화면에 그대로 보인다
+            _fail(session, source_id, e, "browser")
+        finally:
+            progress_end(source_id)
+
+
 # ---------------------------------------------------------------- 브라우저 스캔(북마크릿)
 #
 # SSO(EP·SiteMinder) 뒤의 사이트는 서버가 로그인할 수 없다(다중 인증). 사용자가 로그인한 탭에서
@@ -1971,8 +2016,12 @@ def dataset_marks(row: InfoSource) -> dict[str, str]:
 def served_screens(row: InfoSource) -> list[dict]:
     """북마크에 보내는 수집 조건 — 저장한 조건에 화면마다 지난 수집일(last)을 붙인다. last는 판(queries_version)에
     넣지 않는다: 수집할 때마다 바뀌는 값이라, 넣으면 늘 "옛 북마크"가 된다."""
+    from . import skills  # noqa: PLC0415 — skills가 이 모듈을 쓴다
+
     marks = dataset_marks(row)
-    return [{**s, **({"last": marks[s["url"]]} if s["url"] in marks else {})} for s in query_screens(row)]
+    # 스킬의 입력 자리({이름})는 기본값으로 — 북마크·봇이 글자 그대로 넣지 않게(스킬 실행은 부를 때의 값으로, skills.run)
+    return [{**skills.with_defaults(s), **({"last": marks[s["url"]]} if s["url"] in marks else {})}
+            for s in query_screens(row)]
 
 
 def _submit_result(source_id: int, result: dict) -> None:
@@ -1997,9 +2046,8 @@ def _result_job(source_id: int, result: dict) -> None:
             progress_end(source_id)
 
 
-def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
-    """검사는 지금(틀리면 바로 400), 정리(LLM)는 큐에서 — 정리는 수십 초 걸린다."""
-    _refuse_if_running(row)
+def _browser_result(row: InfoSource, payload) -> dict:
+    """북마크(또는 서버 봇)의 결과 → _finish가 받는 모양. 목록은 누적본에 합치고, 받은 파일·담은 페이지는 둔다."""
     result = from_browser(row, payload)
     # 목록은 누적본에 합치고 누적 전체를 CSV로 — 우리가 만든 파일이라 받은 파일의 수·크기 상한을 거치지 않는다.
     sheets, result["datasets"], data_notes = _merge_datasets(row, result.pop("datasets"))
@@ -2019,6 +2067,13 @@ def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
             "끌어다 놓고 다시 하세요." if current else
             "북마크에 지금은 없는 수집 조건이 실려 있었습니다(조건을 지운 뒤 북마크를 바꾸지 않았습니다)."))
     result["skipped"] += missed
+    return result
+
+
+def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
+    """검사는 지금(틀리면 바로 400), 정리(LLM)는 큐에서 — 정리는 수십 초 걸린다."""
+    _refuse_if_running(row)
+    result = _browser_result(row, payload)
     row.status, row.error = "scanning", None
     row.scanned_at = datetime.now(timezone.utc)
     db.commit()
@@ -2116,6 +2171,7 @@ def queries_version(row: InfoSource) -> str:
 
 def clean_screens(row: InfoSource, screens) -> list[dict]:
     """사람이 보낸 조건 — 이 출처의 화면 주소만, 칸·값은 길이만 자른다(값은 사람이 정한다)."""
+    from . import skills  # noqa: PLC0415 — skills가 이 모듈을 쓴다
     if not isinstance(screens, list):
         raise SourceError("수집 조건은 화면 목록입니다.")
     if len(screens) > MAX_QUERY_SCREENS:
@@ -2153,8 +2209,13 @@ def clean_screens(row: InfoSource, screens) -> list[dict]:
         if plan.get("method") in METHODS:
             extra["plan"] = {"method": plan["method"], "reason": _s(plan.get("reason"), 300),
                              "risks": _strs(plan.get("risks"), 4, 120)}
+        # 스킬 — 이 화면을 에이전트가 골라 부르는 일로(이름·용도·입력·출력·공개 범위, services/skills)
+        skill = skills.clean(s.get("skill"), conditions)
+        if skill:
+            extra["skill"] = skill
         out.append({"screen": _s(s.get("screen"), 200) or (known.get(url) or {}).get("title") or url, "url": url,
                     "conditions": conditions, **route, **extra})
+    skills.check_unique(out)
     return out
 
 
@@ -2279,7 +2340,7 @@ def accept_recording(db: Session, row: InfoSource, payload, actor: str) -> dict:
         url = f"{url}#{quote(name)}"
     cleaned = clean_screens(row, [{**recipe, "screen": name, "url": url,
                                    "conditions": recipe.get("conditions") or [],
-                                   **{k: replaced[k] for k in ("collect", "page_format") if k in replaced}}])[0]
+                                   **{k: replaced[k] for k in ("collect", "page_format", "skill") if k in replaced}}])[0]
     screens = [s for s in kept if s["url"] != cleaned["url"]] + [cleaned]
     if len(screens) > MAX_QUERY_SCREENS:
         raise SourceError(f"수집할 화면은 {MAX_QUERY_SCREENS}개까지입니다 — 쓰지 않는 화면을 빼고 다시 올리세요.")
@@ -2413,7 +2474,7 @@ def suggest_queries(db: Session, row: InfoSource) -> dict:
     # 받을 것(파일·페이지)은 사람이 정한다 — 분석이 다시 제안해도 지금 조건의 것을 그대로 잇는다
     current = {s["url"]: s for s in query_screens(row)}
     for s in screens:
-        s.update({k: current[s["url"]][k] for k in ("collect", "page_format") if k in current.get(s["url"], {})})
+        s.update({k: current[s["url"]][k] for k in ("collect", "page_format", "skill") if k in current.get(s["url"], {})})
     return {"screens": screens[:MAX_QUERY_SCREENS], "notes": notes}
 
 
@@ -2680,18 +2741,28 @@ def save(db: Session, row: InfoSource, targets: dict) -> dict:
 
 # ---------------------------------------------------------------- 무인 수집(PAAS_SOURCE_UNATTENDED)
 
+def by_bot(row: InfoSource) -> bool:
+    """무인 수집을 서버 봇으로 하는가 — 수집 조건이 있고, 서버 스캔이 받지 못하는 화면(메뉴 길로 여는 화면·
+    「파일」로 받는 화면)이 있거나 브라우저(북마크)로 읽은 출처면. 봇은 화면 목록을 다시 읽지 않으므로 북마크가
+    찾은 길·조건을 고를 화면을 덮지 않는다."""
+    screens = query_screens(row)
+    return bool(screens) and ((row.scan or {}).get("via", "server") == "browser"
+                              or any(s.get("path") or s.get("collect") != "page" for s in screens))
+
+
 def collectable(db: Session) -> list[InfoSource]:
-    """스케줄러가 도는 출처 — 웹사이트이고, 한 번 저장했고, 마지막 스캔이 서버 스캔인 것. 브라우저(북마크)로 읽은
-    출처는 넣지 않는다: 서버 스캔이 그 결과(메뉴 탐색이 찾은 길·조건을 고를 화면)를 덮는다. 세션을 맡긴 뒤 서버로
-    한 번 스캔·저장하면 들어온다."""
+    """스케줄러가 도는 출처 — 웹사이트이고, 한 번 저장했고, 서버 스캔으로 읽었거나 서버 봇으로 받을 수 있는 것.
+    브라우저(북마크)로 읽은 출처는 수집 조건이 있을 때만 — 서버 스캔은 그 결과(메뉴 탐색이 찾은 길·조건을 고를
+    화면)를 덮지만, 서버 봇은 덮지 않는다."""
     if not get_settings().source_unattended:
         return []
     rows = db.execute(select(InfoSource).where(InfoSource.kind == "web").order_by(InfoSource.id)).scalars()
-    return [r for r in rows if r.saved_files and (r.scan or {}).get("via", "server") == "server"]
+    return [r for r in rows if r.saved_files and ((r.scan or {}).get("via", "server") == "server" or by_bot(r))]
 
 
 def collect(db: Session, row: InfoSource, actor: str = "scheduler") -> dict:
-    """무인 수집 한 번 — 서버 스캔 뒤 지난번 저장한 자리에 그대로 저장한다(사람이 고르던 저장 위치를 다시 묻지 않는다).
+    """무인 수집 한 번 — 서버 스캔(또는 서버 봇, by_bot) 뒤 지난번 저장한 자리에 그대로 저장한다(사람이 고르던 저장
+    위치를 다시 묻지 않는다). 서버 봇은 사이트가 로그인 화면을 내면 돌지 않는다(services/sourcebot).
 
     받은 화면이 모두 로그인 화면이면 저장하지 않는다 — 맡긴 세션이 만료된 것이고, 저장하면 로그인 화면이 저장해 둔
     정리를 덮고 지난번 파일은 「이번에 없는 것」으로 휴지통에 간다. 실패로 남겨 대시보드에 보이게 한다.
@@ -2705,16 +2776,20 @@ def collect(db: Session, row: InfoSource, actor: str = "scheduler") -> dict:
     row.status, row.error = "scanning", None
     row.scanned_at = datetime.now(timezone.utc)
     db.commit()
-    progress_start(row.id, "무인 수집 — 서버 스캔을 시작합니다")
+    bot = by_bot(row)
+    progress_start(row.id, "무인 수집 — " + ("서버 봇으로 수집 조건대로 받습니다" if bot else "서버 스캔을 시작합니다"))
     try:
-        scan(db, row)
+        if bot:
+            _run_bot(db, row)
+        else:
+            scan(db, row)
     except Exception as e:  # noqa: BLE001
-        _fail(db, row.id, e, "server")
-        raise SourceError(f"스캔하지 못했습니다: {str(e)[:300]}")
+        _fail(db, row.id, e, "browser" if bot else "server")
+        raise SourceError(f"{'수집' if bot else '스캔'}하지 못했습니다: {str(e)[:300]}")
     finally:
         progress_end(row.id)
     pages = (row.scan or {}).get("pages") or []
-    if not pages or all(p.get("requires_login") for p in pages):
+    if not bot and (not pages or all(p.get("requires_login") for p in pages)):
         row.status = "failed"
         row.error = ("로그인 화면만 받았습니다 — 맡긴 세션(쿠키)이 만료됐습니다. 사이트에 다시 로그인해 쿠키를 새로 "
                      "맡기세요. 저장해 둔 것은 그대로입니다.")

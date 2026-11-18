@@ -16,6 +16,7 @@ stdio 전용이다. 앞은 소스·운영 데이터를 사외로 내보내고(�
   POST /mcp/mail                 메일 발송 — 사내 SMTP 중계로, 시스템 주소(noreply)에서 사내 수신자에게만
   POST /mcp/web                  웹 검색 — 지역마다 강한 출처(전 세계·한국·일본·중국) 중 LLM이 고른다
   POST /mcp/browser              웹 페이지 읽기 — 서버 브라우저로 그린 화면을 마크다운으로(허용한 호스트만, 읽기만)
+  POST /mcp/skills               수집 스킬 — 데이터 수집의 화면을 입력을 넣어 지금 조회한다(공개 범위의 조직만, 읽기만)
 
 저장소 목록은 모듈 레지스트리가 아니라 환경변수가 정한다(PAAS_STORAGE_ROOT ·
 PAAS_DOC_ROOTS, services/storage.py) — 디스크 경로는 서버를 설치한 사람이 아는
@@ -1592,6 +1593,76 @@ def _browser_call(db: Session, actor: str, name: str, args: dict) -> str:
     return _dump(page)
 
 
+# --- 수집 스킬 서버 (/mcp/skills) ---
+#
+# 데이터 수집에서 만든 스킬(services/skills) — 사내 업무 사이트의 조회 화면 하나를 입력을 넣어 **지금** 조회한다.
+# 도구를 스킬마다 펼치지 않고 둘로 연다(목록·실행) — 모듈 도구와 같은 판단이다(스킬 수만큼 정의가 턴마다 실리지
+# 않게). 권한은 스킬의 공개 범위다. 서버 브라우저가 도는 동안(수십 초~몇 분) 기다린다 — 스레드로 돈다.
+
+_SKILL_TOOLS = [
+    {
+        "name": "list",
+        "description": (
+            "내가 부를 수 있는 수집 스킬 목록 — 사내 업무 사이트의 조회 화면을 하나씩 일로 묶은 것. 스킬마다 id·용도"
+            "(description)·쓸 때(when)·입력(params: 이름·설명·기본값·필수)·결과 열(outputs)을 준다. 문서 검색에 없는"
+            " 최신 목록(지금 사이트에 있는 것)이 필요할 때 여기서 고른다."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "이름·용도·출처에 걸리는 낱말(비우면 전부)"}}},
+    },
+    {
+        "name": "run",
+        "description": (
+            "수집 스킬 하나를 지금 돌린다 — 서버 브라우저가 그 화면을 입력대로 조회해 결과 목록(열·행·전체 건수)·"
+            "담은 페이지·받은 파일의 본문을 돌려준다. 읽기만 한다. 몇십 초에서 몇 분 걸린다. 같은 입력으로 5분 안에"
+            " 다시 부르면 지난 결과를 준다(cached)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "skill": {"type": "string", "description": "skills__list의 id(출처/스킬)"},
+                "params": {"type": "object", "description": "입력 이름 → 값(문자열). 빼면 기본값",
+                           "additionalProperties": {"type": "string"}},
+                "rows": {"type": "integer", "description": "돌려받을 행 수(기본·최대 100 — 전체 건수는 따로 온다)"},
+            },
+            "required": ["skill"],
+        },
+    },
+]
+
+
+def _skills_call(db: Session, key: ApiKey, name: str, args: dict) -> str:
+    from ..services import infosource, skills  # noqa: PLC0415
+
+    if name == "list":
+        q = str(args.get("query") or "").strip().lower()
+        rows = [s for s in skills.listing(db, key)
+                if not q or q in f"{s['id']} {s['description']} {s['when']} {s['source']}".lower()]
+        ok, why = skills.runnable()
+        return _dump({"skills": [{k: s[k] for k in ("id", "description", "when", "params", "outputs", "screen")}
+                                 for s in rows],
+                      **({} if ok else {"note": f"지금 서버에서 돌릴 수 없습니다 — {why}"})})
+    params = args.get("params") if isinstance(args.get("params"), dict) else {}
+    try:
+        return _dump(skills.run(db, key, _str_arg(args, "skill"), params,
+                                rows=_int_arg(args, "rows", skills.MAX_ROWS, skills.MAX_ROWS)))
+    except infosource.SourceError as e:
+        raise mcp_server.McpToolError(str(e))
+
+
+@router.post("/mcp/skills")
+async def skills_mcp_server(
+    request: Request,
+    db: Session = Depends(get_db),
+    key: ApiKey = Depends(require_agent_key),
+):
+    """수집 스킬 MCP 서버(JSON-RPC 2.0) — 목록·실행. Playwright 동기 API는 이벤트 루프 안에서 돌지 않는다 — 스레드로."""
+    payload = await mcp_server.read_payload(request)
+    return await anyio.to_thread.run_sync(lambda: mcp_server.dispatch(
+        payload, server_name="paas-skills", tools=_SKILL_TOOLS,
+        call=lambda name, args: _skills_call(db, key, name, args)))
+
+
 # --- 문서 온톨로지 서버 (/mcp/graph) ---
 #
 # /mcp/docs가 "본문에서 찾아라"라면 여기는 "무엇이 있고 어떻게 이어져 있나"다. 검색은
@@ -1887,6 +1958,8 @@ def agent_toolsets(db: Session, key: ApiKey) -> list[tuple[str, list[dict], Call
         ("storage", [_STORAGE_LIST_TOOL], lambda n, a: _storage_call(
             db, actor, _doc_source(str(a.get("source", "")), db, key), n, a)),
         ("apis", _read_only(_APIS_TOOLS), lambda n, a: _apis_call(db, actor, n, a)),
+        # 수집 스킬 — 공개 범위에 든 것만 목록에 나온다(services/skills.can_use)
+        ("skills", _SKILL_TOOLS, lambda n, a: _skills_call(db, key, n, a)),
     ]
     if is_enabled("workspace"):
         # 프로젝트별 접근 검사는 코드 서버의 것을 그대로 탄다(남의 조직 코드는 안 읽힌다).
@@ -2046,5 +2119,7 @@ async def hub_mcp_server(
         fn, tool = route[name]  # dispatch가 목록에 없는 이름은 먼저 거른다
         return fn(tool, args)
 
-    return mcp_server.dispatch(
-        await mcp_server.read_payload(request), server_name="paas", tools=tools, call=call)
+    # 스레드로 — 수집 스킬(skills__run)은 Playwright 동기 API를 쓰고 몇 분 걸릴 수 있다(이벤트 루프를 붙들지 않게)
+    payload = await mcp_server.read_payload(request)
+    return await anyio.to_thread.run_sync(lambda: mcp_server.dispatch(
+        payload, server_name="paas", tools=tools, call=call))

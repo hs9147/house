@@ -1346,9 +1346,47 @@ export interface SourceQueryScreen {
   // 받을 것 — 파일(엑셀·결과 표·상세의 첨부, 기본)·페이지(결과 목록과 상세의 본문 자체), 페이지의 저장 형태
   collect?: SourceCollect;
   page_format?: 'md' | 'md_html';
+  // 스킬 — 이 화면을 에이전트가 골라 부르는 일로(services/skills)
+  skill?: SourceSkill;
 }
 
 export type SourceCollect = 'files' | 'page';
+
+/** 수집 스킬 — 화면 하나에 붙는 이름·용도·입력(조건 값의 {이름} 자리)·결과 열·공개 범위(조직 id, 비면 관리자만). */
+export interface SourceSkill {
+  name: string;
+  description: string;
+  when: string;
+  params: { name: string; description: string; default: string; required: boolean }[];
+  outputs: { name: string; description: string }[];
+  audience: number[];
+}
+
+/** GET /skills — 부를 수 있는 스킬. id는 「출처/스킬」. */
+export interface SkillOut extends SourceSkill {
+  id: string;
+  source_id: number;
+  source: string;
+  screen: string;
+  url: string;
+  collect: SourceCollect;
+  has_path: boolean;
+  session: boolean;   // 출처에 맡긴 세션(요청 헤더)이 있는가 — 없으면 로그인 없이 열리는 화면만
+}
+
+/** POST /skills/run — 결과 목록(열·행·전체 건수)·담은 페이지·받은 파일의 본문. */
+export interface SkillRunResult {
+  skill: string;
+  screen: string;
+  params: Record<string, string>;
+  lists: { screen: string; columns: string[]; rows: Record<string, unknown>[]; got: number; total: number | null;
+           complete: boolean }[];
+  pages: { title: string; url: string; markdown: string }[];
+  files: { name: string; size: number; text: string }[];
+  notes: string[];
+  seconds: number;
+  cached: boolean;
+}
 
 // 화면을 여는 길 — 열어 둔 화면 · 메뉴 길(탐색·녹화가 찾은) · 주소 · 녹화 필요
 export type SourceQueryMethod = 'open' | 'path' | 'url' | 'record';
@@ -1373,6 +1411,8 @@ export interface SourceProgress {
 export interface SourceCapabilities {
   browser: boolean;
   llm: boolean;
+  unattended?: boolean;
+  bot?: boolean;   // 서버 봇·스킬 실행(서버 브라우저에서 북마크와 같은 엔진)
   limits: { pages: number; depth: number; shots: number };
 }
 

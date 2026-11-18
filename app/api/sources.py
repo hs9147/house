@@ -17,10 +17,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import audit
+from ..config import get_settings
 from ..db import get_db
 from ..models import ApiKey, InfoSource
-from ..security import require_admin
-from ..services import infosource, llm, storage
+from ..security import require_admin, require_api_key
+from ..services import infosource, llm, skills, storage
 
 router = APIRouter(tags=["sources"])
 
@@ -75,6 +76,8 @@ class QueryScreen(BaseModel):
     # 받을 것 — files(엑셀·결과 표·상세의 첨부, 기본) | page(결과 목록과 상세의 본문 자체), page면 저장 형태 md | md_html
     collect: str = "files"
     page_format: str = "md"
+    # 스킬 — 이 화면을 에이전트가 골라 부르는 일로(이름·용도·입력·출력·공개 범위, services/skills)
+    skill: dict | None = None
 
 
 class SourceQueries(BaseModel):
@@ -83,6 +86,12 @@ class SourceQueries(BaseModel):
 
 class RepairRequest(BaseModel):
     url: str
+
+
+class SkillRun(BaseModel):
+    skill: str                      # 「출처/스킬」 — GET /skills의 id
+    params: dict[str, str] = {}
+    rows: int = skills.MAX_ROWS
 
 
 def _host(url: str) -> str:
@@ -135,8 +144,26 @@ def capabilities(db: Session = Depends(get_db), _: ApiKey = Depends(require_admi
             "llm": llm.default_provider(db) is not None,
             # 무인 수집을 켠 설치본 — SSO 세션을 맡길 수 있고, 저장한 출처를 스케줄러가 하루마다 다시 받는다
             "unattended": get_settings().source_unattended,
+            # 서버 봇·스킬 실행 — 서버 브라우저에서 북마크와 같은 엔진으로(services/sourcebot)
+            "bot": skills.runnable()[0],
             "limits": {"pages": infosource.MAX_PAGES, "depth": infosource.MAX_DEPTH,
                        "shots": infosource.MAX_SHOTS}}
+
+
+@router.get("/skills")
+def list_skills(db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """수집 스킬 — 부를 수 있는 것만(관리자는 전부, 그 밖은 공개 범위에 내 조직이 있는 것)."""
+    ok, why = skills.runnable()
+    return {"skills": skills.listing(db, key), "runnable": ok, "reason": why}
+
+
+@router.post("/skills/run")
+def run_skill(body: SkillRun, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """스킬 하나를 지금 돌린다 — 서버 브라우저가 수집 조건대로 조회해 결과를 돌려준다(저장소에 쓰지 않는다)."""
+    try:
+        return skills.run(db, key, body.skill, body.params, rows=body.rows)
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/sources")
@@ -335,6 +362,34 @@ def repair_query(source_id: int, body: RepairRequest, db: Session = Depends(get_
         return infosource.suggest_repair(db, row, body.url)
     except infosource.SourceError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/sources/{source_id}/skills/draft")
+def draft_skill(source_id: int, body: RepairRequest, db: Session = Depends(get_db),
+                _: ApiKey = Depends(require_admin)):
+    """화면 하나의 스킬 초안(이름·용도·입력·출력) — 저장하지 않는다. 화면이 보여 주고 사람이 고쳐 저장한다."""
+    row = _row_or_404(db, source_id)
+    try:
+        return skills.draft(db, row, body.url)
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/sources/{source_id}/bot", status_code=202)
+def run_bot(source_id: int, db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    """서버 봇 — 수집 조건 전부를 서버 브라우저에서(북마크와 같은 엔진). 결과는 스캔 결과로 올라온다."""
+    row = _row_or_404(db, source_id)
+    ok, why = skills.runnable()
+    if not ok:
+        raise HTTPException(status_code=409, detail=f"서버에서 돌릴 수 없습니다 — {why}")
+    try:
+        infosource.start_bot(db, row)
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    audit.record(db, admin.name, "source.bot", row.name, {"origin": _host(row.url),
+                                                          "screens": len(infosource.query_screens(row))})
+    db.refresh(row)
+    return _out(row, full=True)
 
 
 @router.post("/sources/{source_id}/queries/suggest")

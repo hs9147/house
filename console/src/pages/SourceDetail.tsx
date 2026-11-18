@@ -12,6 +12,7 @@ import type {
   OrgOut, SourceQueryMethod, SourceQueryScreen, SourceSaveResult, SourceSaveTarget, SourceTarget, StorageStore,
 } from '../lib/types';
 import { kindLabel, SourceStatus } from './Sources';
+import { SkillEditor } from './SourceSkills';
 
 const PAGE_KIND: Record<string, string> = {
   list: '목록', detail: '상세', form: '입력·검색', dashboard: '대시보드', doc: '문서',
@@ -53,6 +54,16 @@ export default function SourceDetail() {
 
   useEffect(() => { if (first.data) setRow(first.data); }, [first.data]);
   usePolling(async () => setRow(await api.getSource(id)), 2000, row?.status === 'scanning');
+
+  // 서버 봇 — 수집 조건 전부를 서버 브라우저에서(북마크와 같은 엔진). 결과는 스캔 결과로 올라온다(진행은 아래 기록에).
+  const serverBot = async () => {
+    setError('');
+    try {
+      setRow(await api.runSourceBot(id));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
 
   const rescan = async () => {
     // 서버 스캔은 결과를 통째로 바꾼다 — SSO 사이트면 로그인 화면만 읽은 결과가 브라우저 스캔(찾은 길·조회 화면)을 덮는다.
@@ -102,7 +113,7 @@ export default function SourceDetail() {
       </div>
       {row.kind === 'web' && <BookmarkPanel />}
       {row.kind === 'web' && <ScanPanel row={row} live={live} onServerScan={rescan} />}
-      {row.kind === 'web' && <RecordPanel row={row} live={live} />}
+      {row.kind === 'web' && <RecordPanel row={row} live={live} bot={!!caps.data?.bot} onServerBot={serverBot} />}
       {row.kind === 'web' && <QueryPanel row={row} onChange={setRow} />}
       <StoredHeaders row={row} onChange={setRow} />
       {/* 유형별 제안 전에 스캔한 출처(proposal에 targets가 없다)는 다시 스캔해야 저장할 수 있다. */}
@@ -180,6 +191,7 @@ function ScanProgress({ id, running }: { id: number; running: boolean }) {
  */
 function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut) => void }) {
   const state = useApi(() => api.sourceQueries(row.id), [row.id, row.scanned_at, row.queries_version]);
+  const orgs = useApi(() => api.listOrgs(), []);
   const [screens, setScreens] = useState<SourceQueryScreen[] | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -243,7 +255,7 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
 
   return (
     <div className="panel">
-      <h3 style={{ marginTop: 0 }}>수집 조건</h3>
+      <h3 style={{ marginTop: 0 }}>수집 조건 · 스킬</h3>
       <p style={{ fontSize: 12, margin: '4px 0' }}>
         <b>무엇을 받을지</b> 정하는 곳입니다. 스캔은 사이트의 메뉴와 화면 구조만 읽습니다 — 실제 업무 자료(조회
         결과와 첨부파일)는 여기 적힌 화면만, 적힌 조건으로 조회해서 받습니다. ② 스캔·수집과 ③ 봇 실행이 이 목록대로
@@ -258,6 +270,12 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
         쓰면 북마크를 누른 날로 바뀝니다. 시작 날짜를 <span className="mono">@last|@today-3y</span>로 두면 처음에는 3년
         전부터 전체를, 다음부터는 지난번에 빠짐없이 받은 날부터 받습니다(증분). 기간처럼 칸이 둘이면 같은 칸 이름을
         두 번(시작, 끝 순서) 넣습니다.
+      </p>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        <b>스킬</b>: 화면마다 이름·용도·입력·결과 열·공개 범위를 붙이면 에이전트가 고르는 일이 됩니다 — 스마트워크 대화와
+        MCP가 입력을 넣어 그 화면을 서버 브라우저로 지금 조회합니다(데이터 수집 → 스킬 탭에서 돌려 볼 수 있다). 입력은 조건
+        값에 <span className="mono">{'{이름}'}</span>으로 쓴 자리이고, 수집(북마크·봇)은 기본값으로 돕니다. 「스킬 초안
+        만들기」는 바뀌는 칸을 입력으로, 지난 수집의 열을 결과로 채웁니다(저장 전에 고칠 수 있다).
       </p>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         화면을 여는 길: ① 그 화면을 열어 둔 채 북마크를 누르면 그 자리에서, ② 「녹화」나 메뉴 탐색이 찾은 길이
@@ -363,6 +381,12 @@ function QueryPanel({ row, onChange }: { row: SourceOut; onChange: (r: SourceOut
                     onClick={() => setScreen(i, { ...s, conditions: [...s.conditions, { field: fields[0] ?? '', value: '' }] })}>
                     조건 더하기
                   </button>
+                  <SkillEditor sourceId={row.id} url={s.url} skill={s.skill} conditions={s.conditions}
+                    saved={!!state.data?.screens.some((x) => x.url === s.url)} orgs={orgs.data ?? []}
+                    onChange={(skill, conditions) => {
+                      const { skill: _old, ...rest } = s;
+                      setScreen(i, { ...rest, ...(skill ? { skill } : {}), ...(conditions ? { conditions } : {}) });
+                    }} />
                 </div>
               );
             })}
@@ -665,7 +689,9 @@ function ScanPanel({ row, live, onServerScan }: { row: SourceOut; live: Live; on
  * 해 본다. 봇은 화면을 다시 읽지 않고 녹화한 길로 처음부터 열어 조건 → 조회 → 상세 → 첨부를 받는다 — 결과는
  * 스캔 결과의 받은 파일·수집 결과로 바뀌고 화면 목록은 그대로다.
  */
-function RecordPanel({ row, live }: { row: SourceOut; live: Live }) {
+function RecordPanel({ row, live, bot, onServerBot }: {
+  row: SourceOut; live: Live; bot: boolean; onServerBot: () => void;
+}) {
   const target = live.recorded ? `녹화대로 봇 실행 — ${live.recorded.screen}` : '봇 실행(수집 조건 전부)';
   const ready = !!live.recorded || !!row.queries?.length;
   return (
@@ -674,6 +700,10 @@ function RecordPanel({ row, live }: { row: SourceOut; live: Live }) {
       <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="small secondary" disabled={live.busy} onClick={() => live.open('record')}>녹화 시작(새 탭)</button>
         <button className="small secondary" disabled={live.busy || !ready || !row.scan} onClick={live.runBot}>{target}</button>
+        <button className="small secondary" disabled={!bot || !row.queries?.length || !row.scan || row.status === 'scanning'}
+          title={bot ? '' : '서버에 Playwright나 수집 엔진이 없습니다'} onClick={onServerBot}>
+          {row.status === 'scanning' ? '도는 중…' : '서버에서 봇 실행'}
+        </button>
       </div>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         녹화: 메뉴로만 열리는 화면(주소로 열면 다른 화면이 뜬다)을 메뉴 → 조건 → 조회 → 첫 행의 상세 → 첨부 순서로
@@ -681,6 +711,11 @@ function RecordPanel({ row, live }: { row: SourceOut; live: Live }) {
         합니다 — 녹화 직후에는 방금 녹화한 화면만, 아니면 수집 조건 전부. 녹화를 끝낸 탭이 열려 있으면 그 탭에서
         바로 돌고, 닫혔으면 새 탭에서 북마크를 누르면 됩니다. 받은 파일은 스캔 결과로 올라가고 화면 목록은 그대로입니다.
         {!row.scan && ' (스캔·수집을 한 번 한 뒤에 돌릴 수 있습니다.)'}
+      </p>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+        서버에서 봇 실행: 같은 일을 서버 브라우저가 북마크와 같은 엔진으로 합니다(내 브라우저 없이). 출처에 맡긴 세션으로
+        들어가므로 로그인이 필요한 사이트는 무인 수집 설정에서 세션을 맡겨야 합니다 — 로그인 화면이 뜨면 돌지 않고
+        알립니다. 무인 수집(하루마다)도 메뉴 길·「파일」로 받는 화면이 있으면 이 봇으로 받습니다.
       </p>
       <LiveStatus live={live} modes={['record', 'replay']} />
     </div>

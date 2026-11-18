@@ -68,6 +68,10 @@ import type {
   StartScriptUnitsOut,
   StatusSnapshot, TempJob,
   SourceCapabilities,
+  SourceSkill,
+  SkillOut,
+  SkillRunResult,
+  SourceQueryCondition,
   SourceCategory,
   SourceKind,
   SourceOut,
@@ -791,6 +795,14 @@ export const api = {
   // LLM 제안 — 저장하지 않는다
   suggestSourceQueries: (id: number) =>
     request<{ screens: SourceQueryScreen[]; notes: string[] }>('POST', `/sources/${id}/queries/suggest`),
+  // 서버 봇 — 수집 조건 전부를 서버 브라우저에서(결과는 스캔 결과로)
+  runSourceBot: (id: number) => request<SourceOut>('POST', `/sources/${id}/bot`),
+  draftSourceSkill: (id: number, url: string) =>
+    request<{ skill: SourceSkill; conditions: SourceQueryCondition[]; via: 'llm' | 'rule' }>(
+      'POST', `/sources/${id}/skills/draft`, { url }),
+  listSkills: () => request<{ skills: SkillOut[]; runnable: boolean; reason: string }>('GET', '/skills'),
+  runSkill: (skill: string, params: Record<string, string>) =>
+    request<SkillRunResult>('POST', '/skills/run', { skill, params }),
   // 북마크릿이 사용자 브라우저에서 내려받은 JSON 파일
   uploadBrowserScan: (id: number, file: File) => {
     const fd = new FormData();

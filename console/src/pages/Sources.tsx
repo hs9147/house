@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
+import Tabs from '../components/Tabs';
 import { api } from '../lib/api';
-import { useApi } from '../lib/hooks';
+import { useApi, type AsyncState } from '../lib/hooks';
 import type { SourceKind, SourceOut } from '../lib/types';
+import { SkillCatalog } from './SourceSkills';
 
 export const SOURCE_KINDS: { key: SourceKind; label: string; hint: string }[] = [
   { key: 'web', label: '웹사이트', hint: 'https://intra.example.com/ — 시작 페이지' },
@@ -29,8 +31,9 @@ export function kindLabel(kind: SourceKind): string {
 }
 
 /**
- * 데이터 수집 — 출처(웹사이트·API·MCP)를 등록하고, 상세 화면에서 스캔하면 구조를 읽어 어느
- * 저장소에 넣을지 제안한다. 저장은 상세 화면에서 사람이 결정한다.
+ * 데이터 수집 — ① 출처(웹사이트·API·MCP)를 등록하고 크롤링(스캔)해 구조를 읽고, ② 조회 화면마다 수집 조건과
+ * 스킬(이름·용도·입력·출력)을 정해 에이전트가 부르는 일로 만들고, ③ 저장소로 수집한다(저장 위치는 사람이 정하고,
+ * 그다음부터는 서버 봇·스케줄러가 같은 자리에). 「스킬」 탭은 모든 출처의 스킬을 모아 보고 지금 돌려 본다.
  */
 export default function Sources() {
   const navigate = useNavigate();
@@ -74,10 +77,17 @@ export default function Sources() {
     <>
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>데이터 수집</h2>
+        <div className="row" style={{ gap: 6, flexWrap: 'wrap', fontSize: 12, margin: '4px 0 8px' }}>
+          <span className="status info">① 출처 등록 · 크롤링</span>→
+          <span className="status info">② 수집 조건 · 스킬 만들기</span>→
+          <span className="status info">③ 저장소 수집</span>
+        </div>
         <p className="mutedtext" style={{ fontSize: 12 }}>
-          정보 출처를 등록하고 상세 화면에서 스캔합니다 — 웹사이트는 메뉴 구성과 화면마다 조회할 수 있는
-          정보를, API는 엔드포인트를, MCP 서버는 도구 목록을 읽습니다. 스캔이 끝나면 기존 저장소에 넣을지
-          새 저장소를 만들지 제안하고, 저장은 상세 화면에서 결정합니다.
+          ① 정보 출처를 등록하고 상세 화면에서 크롤링(스캔)합니다 — 웹사이트는 메뉴 구성과 화면마다 조회할 수 있는
+          정보를, API는 엔드포인트를, MCP 서버는 도구 목록을 읽습니다. ② 조회 화면마다 수집 조건(여는 길·조건·받을 것)을
+          정하고 <b>스킬</b>(이름·용도·입력·결과 열·공개 범위)을 붙이면, 에이전트가 입력을 넣어 그 화면을 지금 조회하는
+          일이 됩니다(스마트워크 · MCP <span className="mono">/mcp/skills</span>). ③ 저장 위치를 정해 저장소로 수집하면,
+          그다음부터는 서버 봇·무인 수집이 같은 자리에 받습니다.
         </p>
         <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <select value={kind} onChange={(e) => setKind(e.target.value as SourceKind)}>
@@ -100,6 +110,21 @@ export default function Sources() {
         {error && <p className="error">{error}</p>}
       </div>
 
+      <Tabs tabs={[
+        { key: 'sources', label: '출처', content: <SourceList list={list} navigate={navigate} remove={remove} /> },
+        { key: 'skills', label: '스킬', content: <SkillCatalog /> },
+      ]} />
+    </>
+  );
+}
+
+function SourceList({ list, navigate, remove }: {
+  list: AsyncState<SourceOut[]>;
+  navigate: ReturnType<typeof useNavigate>;
+  remove: (row: SourceOut) => void;
+}) {
+  return (
+    <>
       <Async state={list}>
         {(rows: SourceOut[]) => (
           <div className="panel">
