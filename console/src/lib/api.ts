@@ -98,6 +98,7 @@ import type {
   StorageStore,
   UserAccountOut,
   UserOrgOut, OntologyCleanse, SemanticForm, SemanticHit, SemanticMapping, SemanticMergeRules, SemanticTemplate, SemanticTemplateRules, SemanticNeighbors, SemanticGoldItem,
+  OntologyQuality,
   SemanticGoldKind, SemanticGoldMetrics, SemanticTuneEntry, SemanticSchema, SemanticStatus,
 } from './types';
 
@@ -632,8 +633,18 @@ export const api = {
     request<void>('DELETE', `/ontology/stores/${encodeURIComponent(store)}/semantic/aliases`, undefined, { cls, alias }),
   semanticSearch: (store: string, cls: string, q: string) =>
     request<{ nodes: SemanticHit[] }>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/search`, undefined, { cls, q }),
-  semanticNeighbors: (store: string, cls: string, name: string) =>
-    request<SemanticNeighbors>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/neighbors`, undefined, { cls, name }),
+  semanticNeighbors: (store: string, cls: string, name: string, asOf = '') =>
+    request<SemanticNeighbors>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/neighbors`, undefined,
+      { cls, name, as_of: asOf || undefined }),
+  ontologyQuality: (store: string) =>
+    request<OntologyQuality>('GET', `/ontology/stores/${encodeURIComponent(store)}/quality`),
+  // 재구성 — 내용 그래프 지우기(facts: 추출 결과만 · all: 확정한 것까지), 형식 그래프의 판 정보 다시 만들기
+  ontologyRebuild: (store: string, scope: 'facts' | 'all') =>
+    request<{ scope: string; removed: Record<string, number> }>(
+      'POST', `/ontology/stores/${encodeURIComponent(store)}/rebuild`, { scope }),
+  ontologyRegraph: (store: string) =>
+    request<{ rebuilt: number; remaining: number; done: boolean }>(
+      'POST', `/ontology/stores/${encodeURIComponent(store)}/regraph`),
   ontologyNeighbors: (store: string, kind: string, name: string, limit = 40) =>
     request<OntologyNeighborhood>(
       'GET', `/ontology/stores/${encodeURIComponent(store)}/graph/neighbors`, undefined,

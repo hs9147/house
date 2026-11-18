@@ -198,3 +198,68 @@ def index_file_size(store_name: str) -> int:
     """색인 파일 크기 — 화면이 "색인이 얼마나 커졌나"를 말할 때 쓴다."""
     path: Path = docsearch.index_path(store_name)
     return path.stat().st_size if path.exists() else 0
+
+
+# --- 기준 지식의 판과 정의 충돌(E·F) — SQL로 세는 사실, LLM 없음 ---
+
+MAX_FAMILIES = 50
+MAX_CONFLICTS = 30
+
+
+def revisions(store_name: str) -> list[dict]:
+    """개정 계열 — 같은 이름(ontology.family_of)의 문서가 둘 이상이면 한 계열이다. 시행일이 가장 늦은 것(없으면 파일이
+    가장 늦게 바뀐 것)이 지금 판(current)이고 나머지는 대체된 판(superseded)이다. 그래프는 둘을 다 지우지 않는다 —
+    옛 판도 그때의 기준으로 답할 때 근거다. 다만 지금 기준을 물으면 지금 판의 것을 앞에 둔다."""
+    conn = docsearch._connect(store_name)
+    try:
+        rows = list(conn.execute(
+            "SELECT m.path, m.effective, m.family, d.mtime FROM doc_meta m JOIN docs d ON d.path = m.path"
+            " WHERE m.family != '' AND m.family IN (SELECT family FROM doc_meta WHERE family != ''"
+            " GROUP BY family HAVING COUNT(*) > 1) ORDER BY m.family"))
+    finally:
+        conn.close()
+    groups: dict[str, list] = {}
+    for r in rows:
+        groups.setdefault(r["family"], []).append(r)
+    out = []
+    for family, docs in groups.items():
+        docs.sort(key=lambda r: (r["effective"] or "", r["mtime"] or 0))
+        out.append({"family": family, "docs": [
+            {"path": r["path"], "effective": r["effective"], "current": i == len(docs) - 1}
+            for i, r in enumerate(docs)]})
+    return out[:MAX_FAMILIES]
+
+
+def superseded_paths(store_name: str) -> set[str]:
+    return {d["path"] for f in revisions(store_name) for d in f["docs"] if not d["current"]}
+
+
+def _definition_key(text: str) -> str:
+    import re  # noqa: PLC0415
+
+    return re.sub(r"[\s\W_]+", "", text or "")[:80]
+
+
+def definition_conflicts(store_name: str) -> list[dict]:
+    """정의가 갈리는 용어 — 같은 낱말을 지금 판의 문서들이 서로 다르게 정의한다(표준 용어 후보). 대체된 판의 정의와
+    다른 것은 충돌이 아니라 개정이다(뺀다). 줄임말(이하 …라 한다)은 정의가 아니라 뺀다."""
+    old = superseded_paths(store_name)
+    conn = docsearch._connect(store_name)
+    try:
+        rows = [r for r in conn.execute(
+            "SELECT name, path, detail FROM nodes WHERE kind = 'term' AND detail != '' AND detail NOT LIKE '줄임말%'"
+            " ORDER BY name, path") if r["path"] not in old]
+    finally:
+        conn.close()
+    by_term: dict[str, dict[str, list]] = {}
+    for r in rows:
+        by_term.setdefault(r["name"], {}).setdefault(_definition_key(r["detail"]), []).append(
+            {"path": r["path"], "definition": r["detail"]})
+    out = [{"term": term, "variants": len(defs), "definitions": [d[0] | {"documents": len(d)} for d in defs.values()]}
+           for term, defs in by_term.items() if len(defs) > 1]
+    return sorted(out, key=lambda c: (-c["variants"], c["term"]))[:MAX_CONFLICTS]
+
+
+def quality(store_name: str) -> dict:
+    """품질 점검 — 개정 계열과 정의 충돌. 화면(전환 현황)과 MCP가 함께 쓴다."""
+    return {"revisions": revisions(store_name), "conflicts": definition_conflicts(store_name)}

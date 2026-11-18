@@ -808,3 +808,150 @@ def test_the_stop_rate_counts_only_the_random_sample(store, monkeypatch):
     status = semantic.status("docs")
     assert result["paused"] is None and status["review"]["items"] == 0     # 표본 검토는 없었다 — 멈추지 않는다
     assert status["review"]["check_items"] == 1 and status["review"]["check_wrong"] == 1
+
+
+LAYERED = {
+    "classes": [{"name": "협력사", "description": "", "layer": "entity"},
+                {"name": "신용등급", "description": "", "layer": "state"},
+                {"name": "규정", "description": "", "layer": "reference"},
+                {"name": "품목", "description": ""}],
+    "relations": [{"name": "등급이다", "from": "협력사", "to": "신용등급"},
+                  {"name": "공급한다", "from": "협력사", "to": "품목"},
+                  {"name": "따른다", "from": "협력사", "to": "규정", "temporal": True}],
+}
+
+
+def test_classes_carry_a_layer_and_relations_to_states_are_temporal(store):
+    """층위 — 개념은 기준 지식·대상·상태·사건, 적지 않으면 대상. 상태·사건에 닿는 관계는 시점에 매인다(적으면 그 값)."""
+    confirmed = semantic.confirm_schema("docs", LAYERED, "admin")
+    assert {c["name"]: c["layer"] for c in confirmed["classes"]} == {
+        "협력사": "entity", "신용등급": "state", "규정": "reference", "품목": "entity"}
+    assert {r["name"]: r["temporal"] for r in confirmed["relations"]} == {
+        "등급이다": True, "공급한다": False, "따른다": True}
+    assert semantic.temporal_rels(confirmed) == {"등급이다", "따른다"}
+    assert semantic.status("docs")["layers"]["state"] == "상태"
+
+
+def test_temporal_relations_keep_their_history_and_mark_the_latest(store):
+    """변경부는 관측으로 쌓인다 — 문서마다 그날 본 등급이 남고, 가장 늦게 본 것이 current. as_of로 그때 기준."""
+    semantic.confirm_schema("docs", LAYERED, "admin")
+    conn = semantic._conn("docs")
+    try:
+        for path, day, grade in (("평가_20250101.md", "2025-01-01", "A"), ("평가_20250601.md", "2025-06-01", "BBB")):
+            semantic._write(conn, path, [], [{"src_cls": "협력사", "src": "에이전자", "rel": "등급이다",
+                                              "dst_cls": "신용등급", "dst": grade, "evidence": f"등급 {grade}"}],
+                            "llm", semantic.doc_date(path, None))
+        semantic._write(conn, "계약.md", [], [{"src_cls": "협력사", "src": "에이전자", "rel": "공급한다",
+                                              "dst_cls": "품목", "dst": "배터리", "evidence": "공급"}], "llm", day)
+        conn.commit()
+    finally:
+        conn.close()
+    now = {(r["rel"], r["name"]): r for r in semantic.neighbors("docs", "협력사", "에이전자")["relations"]}
+    assert now[("등급이다", "BBB")]["current"] is True and now[("등급이다", "A")]["current"] is False
+    assert now[("등급이다", "BBB")]["evidence"][0]["observed_at"] == "2025-06-01"
+    assert "current" not in now[("공급한다", "배터리")]          # 늘 같은 관계 — 최신을 가리지 않는다
+    then = {r["name"]: r for r in semantic.neighbors("docs", "협력사", "에이전자", as_of="2025-03-01")["relations"]}
+    assert then["A"]["current"] is True and "BBB" not in then
+
+
+def test_extraction_keeps_stated_periods_and_drops_reversed_ones():
+    schema = semantic._clean_schema(LAYERED)
+    text = "에이전자는 2024.1.1부터 2024.12.31까지 A 등급이다. 에이전자 등급 BBB."
+    data = {"relations": [
+        {"from": {"class": "협력사", "name": "에이전자"}, "rel": "등급이다", "to": {"class": "신용등급", "name": "A"},
+         "evidence": "에이전자는 2024.1.1부터 2024.12.31까지 A 등급이다.", "valid_from": "2024.1.1", "valid_to": "2024.12.31"},
+        {"from": {"class": "협력사", "name": "에이전자"}, "rel": "등급이다", "to": {"class": "신용등급", "name": "BBB"},
+         "evidence": "에이전자 등급 BBB.", "valid_from": "2025-01-01", "valid_to": "2024-01-01"}]}
+    _nodes, edges, _dropped, _un = semantic.check_extraction(data, schema, text)
+    assert (edges[0]["valid_from"], edges[0]["valid_to"]) == ("2024-01-01", "2024-12-31")
+    assert edges[1]["bad_range"] and (edges[1]["valid_from"], edges[1]["valid_to"]) == ("", "")
+
+
+def test_collected_lists_become_forms_whose_rows_carry_their_own_dates(store, tmp_path):
+    """데이터 수집이 저장한 목록(… 목록.csv)은 문서 하나여도 양식이다 — 대응표를 확정하면 행마다 규칙으로 뽑고,
+    「수집 바뀜」이 그 건의 관측 시점이 된다. 확정 전에는 LLM에 보내지 않는다."""
+    root = tmp_path / "docs"
+    (root / "협력사 목록.csv").write_text(
+        "협력사,품목,수집 처음,수집 바뀜\r\n에이전자,배터리,2025-01-01,2025-03-02\r\n비상사,케이블,2025-01-01,2025-01-01\r\n",
+        encoding="utf-8-sig")
+    docsearch.reindex("docs", root)
+    with _db() as db:
+        semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+        listed = next(f for f in semantic.forms("docs") if f["kind"] == "list")
+        assert listed["name"] == "목록 · 협력사 목록.csv" and listed["columns"][-1] == "수집 바뀜"
+        semantic.analyze(db, "docs")
+        conn = semantic._conn("docs")
+        try:
+            row = conn.execute("SELECT status, error FROM sem_docs WHERE path = '협력사 목록.csv'").fetchone()
+            assert row["status"] == "skipped" and "열 대응" in row["error"]
+        finally:
+            conn.close()
+        semantic.confirm_mapping("docs", listed["name"], {
+            "columns": {"협력사": "협력사", "품목": "품목"},
+            "relations": [{"from": "협력사", "rel": "공급한다", "to": "품목"}], "date": "수집 바뀜"}, "admin")
+        semantic.analyze(db, "docs")
+    rel = {r["name"]: r for r in semantic.neighbors("docs", "협력사", "에이전자")["relations"]}
+    listed_ev = next(e for e in rel["배터리"]["evidence"] if e["origin"] == "list")
+    assert listed_ev["observed_at"] == "2025-03-02"
+    with pytest.raises(semantic.SemanticError, match="시점 열"):
+        semantic.confirm_mapping("docs", listed["name"], {"columns": {}, "relations": [], "date": "없는 열"}, "admin")
+
+
+def test_reference_knowledge_is_always_reviewed(store, monkeypatch):
+    """기준 지식(규정·용어)은 한 번 정해 많은 답에 퍼진다 — 표본이 아닌 문서여도 그 항목은 검토한다."""
+    schema = {"classes": [{"name": "협력사", "description": "", "layer": "entity"},
+                          {"name": "품목", "description": "", "layer": "reference"},
+                          {"name": "부서", "description": ""}],
+              "relations": GOOD_SCHEMA["relations"]}
+    monkeypatch.setattr(semantic, "_sampled", lambda path: False)
+    with _db() as db:
+        semantic.confirm_schema("docs", schema, "admin")
+        store.calls.clear()
+        semantic.analyze(db, "docs")
+    assert "doc_review" in store.calls       # 품목(기준 지식)에 닿는 관계가 있는 문서는 표본이 아니어도 검토했다
+
+
+def test_rebuild_clears_facts_or_everything_and_regraph_restores_versions(store, tmp_path):
+    """재구성 — facts는 추출 결과만 지우고(확정한 스키마·양식은 둔다), all은 확정한 것까지. 둘 다 형식 그래프의 판 정보를
+    비우고, regraph가 .ready에서 다시 만든다(다시 추출하지 않는다). 그다음 분석이 새 규칙으로 다시 돈다."""
+    _confirm_schema_and_form()
+    with _db() as db:
+        semantic.analyze(db, "docs")
+    assert semantic.status("docs")["counts"]["edges"]
+    out = semantic.reset("docs", "facts", "admin")
+    assert out["removed"]["sem_edges"] > 0 and out["removed"]["doc_meta"] > 0
+    st_ = semantic.status("docs")
+    assert st_["schema"] and not st_["counts"]["edges"] and not st_["analyzed"]
+    again = docsearch.regraph("docs", tmp_path / "docs")
+    assert again["done"] and again["rebuilt"] > 0 and docsearch.regraph("docs", tmp_path / "docs")["rebuilt"] == 0
+    with _db() as db:
+        semantic.analyze(db, "docs")
+    assert semantic.status("docs")["counts"]["edges"]
+    semantic.reset("docs", "all", "admin")
+    assert semantic.status("docs")["schema"] is None
+    with pytest.raises(semantic.SemanticError, match="scope"):
+        semantic.reset("docs", "half")
+
+    from fastapi.testclient import TestClient
+    c = TestClient(create_app())
+    res = c.post("/paas/api/v1/ontology/stores/docs/rebuild", json={"scope": "facts"},
+                 headers={"x-api-key": "test-admin-key"})
+    assert res.status_code == 200, res.text
+    assert c.post("/paas/api/v1/ontology/stores/docs/regraph", headers={"x-api-key": "test-admin-key"}).json()["done"]
+
+
+def test_mcp_relations_take_as_of_and_flag_superseded_evidence(store):
+    from app.api import mcp_servers
+    semantic.confirm_schema("docs", LAYERED, "admin")
+    conn = semantic._conn("docs")
+    try:
+        for path, grade in (("평가_20250101.md", "A"), ("평가_20250601.md", "BBB")):
+            semantic._write(conn, path, [], [{"src_cls": "협력사", "src": "에이전자", "rel": "등급이다",
+                                              "dst_cls": "신용등급", "dst": grade, "evidence": grade}],
+                            "llm", semantic.doc_date(path, None))
+        conn.commit()
+    finally:
+        conn.close()
+    rel = json.loads(mcp_servers._graph_call("concept_relations", {
+        "source": "docs", "cls": "협력사", "name": "에이전자", "as_of": "2025-02-01"}))
+    assert [r["name"] for r in rel[0]["relations"]] == ["A"] and rel[0]["as_of"] == "2025-02-01"

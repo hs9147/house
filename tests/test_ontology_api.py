@@ -217,3 +217,26 @@ def test_cleanse_previews_then_removes_only_derived_leftovers(monkeypatch, tmp_p
     assert c.get(f"{API}/ontology/cleanse", headers=ADMIN).json()["total"] == 0
     assert (root / "a.md").exists() and (root / "b.md").exists()          # 원본은 건드리지 않는다
     assert docsearch.status("docs")["total"] == 1
+
+
+def test_revisions_pick_the_current_version_and_conflicts_skip_superseded(monkeypatch, tmp_path, fresh_settings):
+    """기준 지식의 판 — 같은 규정의 신·구 판은 시행일(부칙)로 지금 판을 가른다. 정의가 갈리는 용어는 지금 판끼리만
+    충돌이다(옛 판과 다른 것은 개정)."""
+    root = _store(monkeypatch, tmp_path)
+    (root / "구매규정_v1.md").write_text(
+        "# 구매규정\n'협력사'란 물품을 공급하는 업체를 말한다.\n\n부칙\n이 규정은 2023년 3월 1일부터 시행한다.\n",
+        encoding="utf-8")
+    (root / "구매규정_v2.md").write_text(
+        "# 구매규정\n'협력사'란 등록 심사를 거쳐 물품·용역을 공급하는 업체를 말한다.\n\n"
+        "부칙\n1. 이 규정은 2023.3.1부터 시행한다.\n2. 이 규정은 2024년 1월 1일부터 시행한다.\n", encoding="utf-8")
+    (root / "품질지침.md").write_text("# 품질\n'협력사'란 우리 회사와 거래하는 모든 회사를 말한다.\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    [fam] = ontology_status.revisions("docs")
+    assert fam["family"] == "구매규정"
+    assert [(d["path"], d["effective"], d["current"]) for d in fam["docs"]] == [
+        ("구매규정_v1.md", "2023-03-01", False), ("구매규정_v2.md", "2024-01-01", True)]
+    [conflict] = ontology_status.definition_conflicts("docs")
+    assert conflict["term"] == "협력사" and conflict["variants"] == 2
+    assert {d["path"] for d in conflict["definitions"]} == {"구매규정_v2.md", "품질지침.md"}   # 옛 판은 뺀다
+    c = TestClient(create_app())
+    assert c.get(f"{API}/ontology/stores/docs/quality", headers=ADMIN).json()["revisions"][0]["family"] == "구매규정"

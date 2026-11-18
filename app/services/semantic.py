@@ -19,12 +19,14 @@
 제안과 검토를 같은 기본 LLM이 한다 — 같은 모델은 같은 실수를 놓칠 수 있어서, 원문·실제 값과 기계로
 대조하는 검사를 함께 둔다(검토가 놓쳐도 그것은 걸린다).
 """
+import csv
 import hashlib
+import io
 import json
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from html import unescape
 
 from sqlalchemy.orm import Session
@@ -70,6 +72,14 @@ STOP_ERROR_RATE = 0.2
 # 상한을 두지 않는다: 업무가 넓은 저장소는 관계가 많고, 한 번에 다 내게 하면 상한에 걸리거나(실측: 40개 초과로
 # 확정 불가) 뒤쪽이 대충 채워진다.
 RELATION_BATCH = 4
+# 층위 — 고정부(지식)와 변경부(정보)를 **뜻의 역할 × 변화 속도**로 가른다(docs/ontology-layers.md).
+#   reference  기준 지식 — 규정·용어·업무절차·코드·기준값. 느리게, 시행일과 개정으로 바뀐다
+#   entity     대상(마스터) — 협력사·품목·부서·사람. 신원은 거의 바뀌지 않는다(묶기의 근거)
+#   state      상태 — 신용등급·계약상태·재무위험. 관측 시점이 있어야 뜻이 있다
+#   event      사건 — 계약·견적·발주·평가. 일어난 때가 있다
+# 구조(TBox)는 이 스키마 자신이다(판 번호). 상태·사건과 그것에 닿는 관계는 시간에 매인다(temporal).
+LAYERS = {"reference": "기준 지식", "entity": "대상", "state": "상태", "event": "사건"}
+TEMPORAL_LAYERS = {"state", "event"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sem_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -80,12 +90,15 @@ CREATE TABLE IF NOT EXISTS sem_docs (
 );
 CREATE TABLE IF NOT EXISTS sem_nodes (
   path TEXT NOT NULL, cls TEXT NOT NULL, name TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '',
-  origin TEXT NOT NULL DEFAULT 'llm'
+  origin TEXT NOT NULL DEFAULT 'llm', observed_at TEXT NOT NULL DEFAULT ''
 );
+-- observed_at: 그 사실을 본 날(문서의 날짜·목록의 수집일) · valid_from/valid_to: 문서가 말한 효력 기간.
+-- 상태·사건 관계(temporal)는 문서마다 하나의 **관측**이다 — 갈아 끼워도 다른 문서의 관측은 남아 이력이 된다.
 CREATE TABLE IF NOT EXISTS sem_edges (
   path TEXT NOT NULL, src_cls TEXT NOT NULL, src TEXT NOT NULL, rel TEXT NOT NULL,
   dst_cls TEXT NOT NULL, dst TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '',
-  origin TEXT NOT NULL DEFAULT 'llm'
+  origin TEXT NOT NULL DEFAULT 'llm', observed_at TEXT NOT NULL DEFAULT '',
+  valid_from TEXT NOT NULL DEFAULT '', valid_to TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS sem_aliases (
   cls TEXT NOT NULL, alias TEXT NOT NULL, canonical TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
@@ -115,10 +128,45 @@ class SemanticError(RuntimeError):
     """사람이 읽을 사유 — 화면에 그대로 뜬다."""
 
 
+# 옛 색인 파일의 표에는 없던 열 — CREATE TABLE IF NOT EXISTS는 열을 더하지 않는다(docsearch._add_missing_columns와 같다)
+_ADDED = (("sem_nodes", "observed_at"), ("sem_edges", "observed_at"), ("sem_edges", "valid_from"),
+          ("sem_edges", "valid_to"))
+
+
 def _conn(store_name: str):
     conn = docsearch._connect(store_name)
     conn.executescript(_SCHEMA)
+    for table, column in _ADDED:
+        if column not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            conn.commit()
     return conn
+
+
+_DATE = re.compile(r"(20\d{2}|19\d{2})\s*[-./년]?\s*(\d{1,2})\s*[-./월]?\s*(\d{1,2})\s*일?")
+_NAME_DATE = re.compile(r"(?<!\d)(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})(?!\d)")
+
+
+def iso_date(value) -> str:
+    """2024-01-05 · 2024.1.5 · 2024년 1월 5일 → 2024-01-05. 날짜가 아니면 ""."""
+    m = _DATE.search(str(value or ""))
+    if not m:
+        return ""
+    try:
+        return date(int(m[1]), int(m[2]), int(m[3])).isoformat()
+    except ValueError:
+        return ""
+
+
+def doc_date(path: str, mtime: float | None) -> str:
+    """문서의 날 — 관측 시점. 파일 이름의 날짜(메일·수집 파일은 이름에 날짜가 있다)가 먼저, 없으면 파일의 수정일."""
+    m = _NAME_DATE.search(path.rsplit("/", 1)[-1])
+    if m:
+        try:
+            return date(int(m[1]), int(m[2]), int(m[3])).isoformat()
+        except ValueError:
+            pass
+    return datetime.fromtimestamp(mtime, timezone.utc).date().isoformat() if mtime else ""
 
 
 def _now() -> str:
@@ -196,6 +244,17 @@ def _markdown(store_name: str, rel: str, root=None) -> str:
     return docready.read(store_name, rel, (root or _root(store_name)) / rel)
 
 
+def _list_body(store_name: str, rel: str, root=None) -> str:
+    """목록 CSV는 원본 파일에서 읽는다 — 색인 본문은 길이 상한에서 잘린다(목록은 수만 행일 수 있다)."""
+    raw = ((root or _root(store_name)) / rel).read_bytes()
+    for enc in ("utf-8-sig", "cp949"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
 def _space(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
@@ -203,11 +262,38 @@ def _space(text: str) -> str:
 # --- ① 스키마 ---
 
 def _form_tables(conn) -> list[dict]:
-    """되풀이되는 표(양식) — 표 머리글이 같은 문서가 FORM_MIN_DOCS 이상."""
-    return [{"name": r["name"], "columns": r["name"].split(" | "), "documents": r["n"]}
-            for r in conn.execute(
-                "SELECT name, COUNT(DISTINCT path) AS n FROM nodes WHERE kind = 'table'"
-                " GROUP BY name HAVING n >= ? ORDER BY n DESC, name", (FORM_MIN_DOCS,))]
+    """되풀이되는 표(양식) — 표 머리글이 같은 문서가 FORM_MIN_DOCS 이상. 데이터 수집이 저장한 목록(… 목록.csv)도
+    양식이다(문서는 하나지만 행마다 같은 모양의 건이다) — kind=list, 이름은 「목록 · 경로」."""
+    tables = [{"name": r["name"], "columns": r["name"].split(" | "), "documents": r["n"], "kind": "table"}
+              for r in conn.execute(
+                  "SELECT name, COUNT(DISTINCT path) AS n FROM nodes WHERE kind = 'table'"
+                  " GROUP BY name HAVING n >= ? ORDER BY n DESC, name", (FORM_MIN_DOCS,))]
+    return tables + [{"name": LIST_PREFIX + r["path"], "columns": r["columns"], "documents": 1, "kind": "list",
+                      "path": r["path"]} for r in _list_docs(conn)]
+
+
+LIST_SUFFIX = " 목록.csv"     # infosource.merge_dataset이 저장하는 이름
+LIST_PREFIX = "목록 · "
+SEEN_DATE = "수집 바뀜"        # infosource.SEEN_COLUMNS[1] — 그 건이 마지막으로 바뀐 날
+LIST_MAX_ROWS = 20_000
+
+
+def _list_rows(body: str) -> tuple[list[str], list[dict]]:
+    """목록 CSV 본문 → (머리글, 행들)."""
+    reader = csv.reader(io.StringIO(body.lstrip("\ufeff")))
+    header = next(reader, [])
+    rows = [{h: (cells[k] if k < len(cells) else "") for k, h in enumerate(header)}
+            for cells, _ in zip(reader, range(LIST_MAX_ROWS))]
+    return header, rows
+
+
+def _list_docs(conn) -> list[dict]:
+    out = []
+    for r in conn.execute("SELECT path, body FROM docs WHERE body IS NOT NULL AND path LIKE ?", (f"%{LIST_SUFFIX}",)):
+        header = _list_rows((r["body"] or "").split("\n", 1)[0])[0]
+        if header:
+            out.append({"path": r["path"], "columns": header})
+    return out
 
 
 def _sample(store_name: str, conn, n: int = SAMPLE_DOCS) -> list[dict]:
@@ -219,7 +305,9 @@ def _sample(store_name: str, conn, n: int = SAMPLE_DOCS) -> list[dict]:
             form_docs.setdefault(r["path"], r["name"])
     seen_forms: set[str] = set()
     picked: list[str] = []
-    rows = list(conn.execute("SELECT path FROM docs WHERE body IS NOT NULL ORDER BY length(body) DESC"))
+    # 데이터 수집 목록(… 목록.csv)은 표본에서 뺀다 — 길어서 큰 것부터 고르면 표본을 먹고, 그 행은 ② 대응표로 뽑는다
+    rows = list(conn.execute("SELECT path FROM docs WHERE body IS NOT NULL AND path NOT LIKE ?"
+                             " ORDER BY length(body) DESC", (f"%{LIST_SUFFIX}",)))
     step = max(1, len(rows) // max(1, n * 2))
     for r in rows[::step] + rows:
         path = r["path"]
@@ -253,13 +341,16 @@ def _format_hints(conn) -> dict:
 _CLASS_RULES = (
     "개념 종류(classes) — 이 저장소의 업무에 실제로 등장하는 대상만(예: 협력사·품목·계약·부서·규정·업무절차)."
     " 문서 형식(절·표·문단)은 개념이 아니다. 같은 것을 두 이름으로 나누지 말 것.\n"
-    'JSON: {"classes":[{"name":"","description":"","examples":[""]}]}'
+    "개념마다 층위(layer)를 정한다 — reference(기준 지식: 규정·용어·절차·코드·기준값처럼 드물게 개정되는 것),"
+    " entity(대상: 협력사·품목·부서·사람처럼 신원이 있는 것), state(상태: 등급·상태·위험처럼 시점마다 값이 바뀌는 것),"
+    " event(사건: 계약·견적·발주·평가처럼 일어난 때가 있는 것).\n"
+    'JSON: {"classes":[{"name":"","description":"","layer":"reference|entity|state|event","examples":[""]}]}'
 )
 _RELATION_RULES = (
     "관계 종류 — from·to는 개념 목록의 이름이고 방향이 뜻이다(협력사 —공급한다→ 품목). 표본에 근거가 있는 것만."
     " 이미 정한 관계와 뜻이 같으면 새 이름을 만들지 말고 **그 이름을 그대로** 쓴다(승인받는다·결재받는다를 둘로"
-    " 두지 않는다).\n"
-    'JSON: {"relations":[{"name":"","from":"","to":"","description":""}]}'
+    " 두지 않는다). temporal은 그 관계가 시점에 매이면 true(등급이 바뀐다·계약 기간이 있다), 늘 같으면 false.\n"
+    'JSON: {"relations":[{"name":"","from":"","to":"","description":"","temporal":false}]}'
 )
 
 
@@ -282,19 +373,43 @@ def check_schema(schema: dict) -> list[str]:
 
 
 def _clean_classes(classes) -> list[dict]:
+    """층위가 없거나 모르는 값이면 entity(대상) — 옛 스키마도 그대로 읽힌다."""
     return [{"name": str(c["name"]).strip(), "description": str(c.get("description", ""))[:300],
+             "layer": c.get("layer") if c.get("layer") in LAYERS else "entity",
              "examples": [str(x)[:60] for x in (c.get("examples") or [])][:5]}
             for c in (classes or []) if isinstance(c, dict) and c.get("name")]
 
 
-def _clean_relations(relations) -> list[dict]:
-    return [{"name": str(r["name"]).strip(), "from": str(r.get("from", "")).strip(), "to": str(r.get("to", "")).strip(),
-             "description": str(r.get("description", ""))[:300]}
-            for r in (relations or []) if isinstance(r, dict) and r.get("name")]
+def _clean_relations(relations, classes: list[dict] | None = None) -> list[dict]:
+    """temporal을 적지 않았으면 끝의 개념 층위로 — 상태·사건에 닿는 관계는 시점에 매인다."""
+    layer = {c["name"]: c["layer"] for c in classes or []}
+    out = []
+    for r in relations or []:
+        if not isinstance(r, dict) or not r.get("name"):
+            continue
+        a, b = str(r.get("from", "")).strip(), str(r.get("to", "")).strip()
+        temporal = r["temporal"] if isinstance(r.get("temporal"), bool) else bool(
+            {layer.get(a), layer.get(b)} & TEMPORAL_LAYERS)
+        out.append({"name": str(r["name"]).strip(), "from": a, "to": b,
+                    "description": str(r.get("description", ""))[:300], "temporal": temporal})
+    return out
 
 
 def _clean_schema(schema: dict) -> dict:
-    return {"classes": _clean_classes(schema.get("classes")), "relations": _clean_relations(schema.get("relations"))}
+    classes = _clean_classes(schema.get("classes"))
+    return {"classes": classes, "relations": _clean_relations(schema.get("relations"), classes)}
+
+
+def layer_of(schema: dict) -> dict[str, str]:
+    """개념 → 층위(옛 스키마의 개념은 entity)."""
+    return {c["name"]: c.get("layer") if c.get("layer") in LAYERS else "entity" for c in schema.get("classes") or []}
+
+
+def temporal_rels(schema: dict) -> set[str]:
+    """시점에 매인 관계 이름 — 조회가 최신(current)을 가리고 기준 시점(as_of)으로 거른다."""
+    layers = layer_of(schema)
+    return {r["name"] for r in _clean_relations(schema.get("relations"), [
+        {"name": k, "layer": v} for k, v in layers.items()]) if r["temporal"]}
 
 
 def propose_schema(db: Session, store_name: str, report=_quiet) -> dict:
@@ -357,7 +472,7 @@ def propose_schema(db: Session, store_name: str, report=_quiet) -> dict:
                 f"{material}\n\n개념 목록: {json.dumps(classes, ensure_ascii=False)}\n\n"
                 f"아래 **기준 개념에서 나가는** 관계 종류를 찾는다(to는 개념 목록 어디든). {_RELATION_RULES}\n{_KO}",
                 f"기준 개념: {json.dumps(anchors, ensure_ascii=False)}\n"
-                f"이미 정한 관계: {json.dumps(relations, ensure_ascii=False)}").get("relations"))
+                f"이미 정한 관계: {json.dumps(relations, ensure_ascii=False)}").get("relations"), classes)
             found = [r for r in found if r["from"] in anchors and r["to"] in names]
             proposed += found
             if not found:
@@ -368,11 +483,11 @@ def propose_schema(db: Session, store_name: str, report=_quiet) -> dict:
                 "다른 사람이 찾은 관계 종류를 검토한다. 표본에 근거가 없는 것, 방향이 틀린 것, 이미 정한 관계와 뜻이 같은데"
                 " 이름만 다른 것을 찾아 고친다. 고친 **목록 전체**를 relations에 낸다(문제가 없으면 그대로).\n"
                 'JSON: {"issues":[{"target":"관계 이름","problem":"","suggestion":""}],'
-                ' "relations":[{"name":"","from":"","to":"","description":""}]}\n' + _KO,
+                ' "relations":[{"name":"","from":"","to":"","description":"","temporal":false}]}\n' + _KO,
                 f"이미 정한 관계: {json.dumps(relations, ensure_ascii=False)}\n"
                 f"검토할 관계(기준 개념 {anchors}):\n{json.dumps(found, ensure_ascii=False)}")
             issues += [i for i in checked.get("issues") or [] if isinstance(i, dict)]
-            reviewed = (_clean_relations(checked["relations"]) if isinstance(checked.get("relations"), list)
+            reviewed = (_clean_relations(checked["relations"], classes) if isinstance(checked.get("relations"), list)
                         else found)
             relations += keep(reviewed, anchors)
 
@@ -456,10 +571,14 @@ def check_mapping(mapping: dict, columns: list[str], schema: dict) -> list[str]:
         a, b = cols.get(r.get("from")), cols.get(r.get("to"))
         if not a or not b or (r.get("rel"), a, b) not in rels:
             problems.append(f"관계 {r.get('from')} —{r.get('rel')}→ {r.get('to')}가 스키마의 관계와 맞지 않습니다.")
+    if mapping.get("date") and mapping["date"] not in columns:
+        problems.append(f"시점 열 '{mapping['date']}'가 표에 없습니다.")
     return problems
 
 
 def _form_samples(store_name: str, conn, form: dict) -> list[dict]:
+    if form.get("kind") == "list":
+        return _list_rows(_list_body(store_name, form["path"]))[1][:FORM_SAMPLE_ROWS * FORM_SAMPLE_DOCS]
     paths = [r["path"] for r in conn.execute(
         "SELECT DISTINCT path FROM nodes WHERE kind = 'table' AND name = ? ORDER BY path LIMIT ?",
         (form["name"], FORM_SAMPLE_DOCS))]
@@ -487,9 +606,10 @@ def propose_mapping(db: Session, store_name: str, form_name: str, report=_quiet)
                     f"양식 열: {form['columns']} ({form['documents']}개 문서)\n"
                     f"실제 값 표본: {json.dumps(rows[:FORM_SAMPLE_ROWS * FORM_SAMPLE_DOCS], ensure_ascii=False)}")
         rule = ("열마다 그 열의 값이 어떤 개념의 이름인지(값이 개념의 이름이 아니면 null — 금액·날짜·수량은 대개 null),"
-                " 같은 행의 두 열 사이에 스키마의 어떤 관계가 있는지.\n"
-                'JSON: {"columns":{"열 이름":"개념 이름 또는 null"},"relations":[{"from":"열","rel":"관계","to":"열"}]}\n'
-                + _KO)
+                " 같은 행의 두 열 사이에 스키마의 어떤 관계가 있는지, 그 행의 시점이 든 열(date — 작성일·계약일처럼 그 행이"
+                " 말하는 때, 없으면 null).\n"
+                'JSON: {"columns":{"열 이름":"개념 이름 또는 null"},"relations":[{"from":"열","rel":"관계","to":"열"}],'
+                '"date":"열 이름 또는 null"}\n' + _KO)
         report("LLM이 열 대응표를 제안하는 중", 2, 4)
         proposal = _ask(db, provider, "되풀이되는 사내 양식 표의 열을 온톨로지에 대응시킨다. " + rule, material)
         report("LLM이 실제 값 표본과 대조해 검토하는 중", 3, 4)
@@ -499,6 +619,8 @@ def propose_mapping(db: Session, store_name: str, form_name: str, report=_quiet)
             'JSON: {"verdict":"ok|revise","issues":[{"column":"","problem":"","suggestion":""}]}\n' + _KO,
             f"{material}\n\n검토할 대응표:\n{json.dumps(proposal, ensure_ascii=False)}")
         revised = proposal
+        if form.get("kind") == "list" and isinstance(proposal, dict) and not proposal.get("date"):
+            proposal["date"] = SEEN_DATE     # 데이터 수집 목록 — 그 건이 마지막으로 바뀐 날이 관측 시점이다
         if review.get("verdict") == "revise" or check_mapping(proposal, form["columns"], schema):
             report("검토 의견으로 고치는 중", 4, 4)
             revised = _ask(db, provider, "검토 의견으로 대응표를 고친다. " + rule,
@@ -524,7 +646,8 @@ def confirm_mapping(store_name: str, form_name: str, mapping: dict, actor: str) 
         if form is None:
             raise SemanticError(f"양식이 없습니다: {form_name}")
         mapping = {"columns": {c: (k or None) for c, k in (mapping.get("columns") or {}).items()},
-                   "relations": [r for r in (mapping.get("relations") or []) if isinstance(r, dict)]}
+                   "relations": [r for r in (mapping.get("relations") or []) if isinstance(r, dict)],
+                   "date": mapping.get("date") or None}
         problems = check_mapping(mapping, form["columns"], schema)
         if problems:
             raise SemanticError("대응표를 확정할 수 없습니다: " + " / ".join(problems))
@@ -563,19 +686,26 @@ def strip_forms(markdown: str, forms: list[list[str]]) -> str:
 
 def extract_form(markdown: str, columns: list[str], mapping: dict) -> tuple[list[dict], list[dict]]:
     """확정한 대응표로 한 문서의 양식 표에서 개체·관계를 규칙으로 뽑는다(LLM 없음)."""
+    return extract_rows(_rows_of(markdown, columns), mapping)
+
+
+def extract_rows(rows: list[dict], mapping: dict) -> tuple[list[dict], list[dict]]:
+    """행들 → 개체·관계(대응표대로). 시점 열(date)이 있으면 그 행의 항목에 관측한 날로 붙인다."""
     cols = mapping["columns"]
+    when = mapping.get("date")
     nodes, edges = [], []
-    for row in _rows_of(markdown, columns):
+    for row in rows:
         evidence = " | ".join(f"{c}: {v}" for c, v in row.items() if v)[:400]
+        seen = {"observed_at": iso_date(row.get(when))} if when and iso_date(row.get(when)) else {}
         for col, cls in cols.items():
             value = _space(row.get(col, ""))
             if cls and value:
-                nodes.append({"cls": cls, "name": value[:200], "evidence": evidence})
+                nodes.append({"cls": cls, "name": value[:200], "evidence": evidence, **seen})
         for r in mapping.get("relations") or []:
             a, b = _space(row.get(r["from"], "")), _space(row.get(r["to"], ""))
             if a and b:
                 edges.append({"src_cls": cols[r["from"]], "src": a[:200], "rel": r["rel"],
-                              "dst_cls": cols[r["to"]], "dst": b[:200], "evidence": evidence})
+                              "dst_cls": cols[r["to"]], "dst": b[:200], "evidence": evidence, **seen})
     return nodes, edges
 
 
@@ -797,9 +927,13 @@ def check_extraction(data: dict, schema: dict, text: str) -> tuple[list[dict], l
             dropped += 1
             continue
         unanchored += not anchored
+        start, end = iso_date(r.get("valid_from")), iso_date(r.get("valid_to"))
+        bad_range = bool(start and end and start > end)
+        if bad_range:      # 기간이 거꾸로다 — 관계는 남기고 기간만 버린다(문서가 말한 것은 관계다)
+            start = end = ""
         edges.append({"src_cls": key[1], "src": _space(names[0])[:200], "rel": key[0],
                       "dst_cls": key[2], "dst": _space(names[1])[:200], "evidence": _space(ev)[:400],
-                      "anchored": anchored})
+                      "valid_from": start, "valid_to": end, "anchored": anchored, "bad_range": bad_range})
     return nodes, edges, dropped, unanchored
 
 
@@ -818,8 +952,11 @@ _EXTRACT_RULES = (
     "사내 문서의 **내용**에서 개념과 관계를 뽑는다. 확정한 스키마의 개념·관계 종류만 쓴다. evidence는 문서의"
     " 문장을 **글자 그대로** 옮긴다(요약·번역 금지) — 되도록 개체 이름이 들어 있는 문장으로. outside에는 스키마에"
     " 없는 **개념 종류**(예: 인증·공장)만 적는다 — 개별 회사명·등급 값 같은 개체는 적지 않는다.\n"
+    " 시점에 매인 관계(스키마의 temporal)는 문서에 기간·날짜가 적혀 있으면 valid_from·valid_to(YYYY-MM-DD)로"
+    " 옮긴다 — 적혀 있지 않으면 비운다(지어내지 않는다).\n"
     'JSON: {"entities":[{"class":"","name":"","evidence":""}],'
-    ' "relations":[{"from":{"class":"","name":""},"rel":"","to":{"class":"","name":""},"evidence":""}],'
+    ' "relations":[{"from":{"class":"","name":""},"rel":"","to":{"class":"","name":""},"evidence":"",'
+    '"valid_from":"","valid_to":""}],'
     ' "outside":[{"name":"","note":""}]}\n' + _KO)
 _REVIEW_RULES = (
     "다른 사람이 문서에서 뽑은 개념·관계를 검토한다. 항목마다 **그 근거 문장이** 그것을 실제로 말하는지, 개념 종류가"
@@ -861,8 +998,8 @@ def _tally_review(state: dict, path: str, items: list[dict], wrong: dict[int, st
 
 
 def _public(item: dict) -> dict:
-    """저장·검토에 보내는 모양 — 기계 검사가 붙인 표시(anchored)는 뺀다."""
-    return {k: v for k, v in item.items() if k != "anchored"}
+    """저장·검토에 보내는 모양 — 기계 검사가 붙인 표시(anchored·bad_range)는 뺀다."""
+    return {k: v for k, v in item.items() if k not in ("anchored", "bad_range")}
 
 
 def _skip_reason(path: str, body: str) -> str:
@@ -880,27 +1017,33 @@ def _record(conn, path: str, fp: str, status: str, *, error: str | None = None, 
                  " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (path, fp, status, error, truncated, dropped, reviewed, time.time()))
 
 
-def _copy(conn, source: str, target: str) -> None:
-    """본문이 같은 문서의 결과를 옮긴다(LLM 없이). 근거 문장도 같은 본문의 것이라 그대로 맞다."""
+def _copy(conn, source: str, target: str, observed: str = "") -> None:
+    """본문이 같은 문서의 결과를 옮긴다(LLM 없이). 근거 문장도 같은 본문의 것이라 그대로 맞다. 관측한 날은 옮긴
+    문서의 날이다(같은 본문을 다른 날 다시 받았다 — 그날에도 그렇다는 관측이다). 행마다 날이 있던 것(목록)은 그대로."""
     conn.execute("DELETE FROM sem_nodes WHERE path = ?", (target,))
     conn.execute("DELETE FROM sem_edges WHERE path = ?", (target,))
-    conn.execute("INSERT INTO sem_nodes (path, cls, name, evidence, origin)"
-                 " SELECT ?, cls, name, evidence, origin FROM sem_nodes WHERE path = ?", (target, source))
-    conn.execute("INSERT INTO sem_edges (path, src_cls, src, rel, dst_cls, dst, evidence, origin)"
-                 " SELECT ?, src_cls, src, rel, dst_cls, dst, evidence, origin FROM sem_edges WHERE path = ?",
-                 (target, source))
+    conn.execute("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at)"
+                 " SELECT ?, cls, name, evidence, origin, CASE WHEN origin = 'list' THEN observed_at ELSE ? END"
+                 " FROM sem_nodes WHERE path = ?", (target, observed, source))
+    conn.execute("INSERT INTO sem_edges (path, src_cls, src, rel, dst_cls, dst, evidence, origin, observed_at,"
+                 " valid_from, valid_to) SELECT ?, src_cls, src, rel, dst_cls, dst, evidence, origin,"
+                 " CASE WHEN origin = 'list' THEN observed_at ELSE ? END, valid_from, valid_to"
+                 " FROM sem_edges WHERE path = ?", (target, observed, source))
 
 
-def _write(conn, path: str, nodes: list[dict], edges: list[dict], origin: str) -> None:
-    """한 문서의 내용 그래프를 갈아 끼운다. 항목에 origin이 있으면 그것(양식 규칙과 LLM이 한 문서에 섞인다)."""
+def _write(conn, path: str, nodes: list[dict], edges: list[dict], origin: str, observed: str = "") -> None:
+    """한 문서의 내용 그래프를 갈아 끼운다. 항목에 origin이 있으면 그것(양식 규칙과 LLM이 한 문서에 섞인다).
+    관측한 날(observed)은 그 문서의 날 — 항목에 제 날이 있으면(목록의 행) 그것."""
     conn.execute("DELETE FROM sem_nodes WHERE path = ?", (path,))
     conn.execute("DELETE FROM sem_edges WHERE path = ?", (path,))
-    conn.executemany("INSERT INTO sem_nodes (path, cls, name, evidence, origin) VALUES (?, ?, ?, ?, ?)",
-                     [(path, n["cls"], n["name"], n["evidence"], n.get("origin", origin)) for n in nodes])
+    conn.executemany("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                     [(path, n["cls"], n["name"], n["evidence"], n.get("origin", origin),
+                       n.get("observed_at") or observed) for n in nodes])
     conn.executemany(
-        "INSERT INTO sem_edges (path, src_cls, src, rel, dst_cls, dst, evidence, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [(path, e["src_cls"], e["src"], e["rel"], e["dst_cls"], e["dst"], e["evidence"], e.get("origin", origin))
-         for e in edges])
+        "INSERT INTO sem_edges (path, src_cls, src, rel, dst_cls, dst, evidence, origin, observed_at, valid_from,"
+        " valid_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [(path, e["src_cls"], e["src"], e["rel"], e["dst_cls"], e["dst"], e["evidence"], e.get("origin", origin),
+          e.get("observed_at") or observed, e.get("valid_from") or "", e.get("valid_to") or "") for e in edges])
 
 
 def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_stop=lambda: False) -> dict:
@@ -926,6 +1069,10 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
         for r in conn.execute("SELECT DISTINCT path, name FROM nodes WHERE kind = 'table'"):
             if r["name"] in confirmed_forms:
                 form_of.setdefault(r["path"], []).append(r["name"])
+        lists = {d["path"] for d in _list_docs(conn)}
+        # H. 층위별 검토 — 기준 지식(규정·용어·절차)은 한 번 정해 많은 답에 퍼진다: 그 항목은 표본이 아니어도 검토한다
+        layers = layer_of(schema)
+        reference = {c for c, v in layers.items() if v == "reference"}
         rows = list(conn.execute("SELECT path, fp, status FROM sem_docs"))
         known = {r["path"]: r["fp"] for r in rows}
         # ② 같은 본문은 한 번만 — 경로만 다르고 본문·스키마 판·대응표 판이 같으면(지문이 같으면) 앞의 결과를 옮긴다.
@@ -943,7 +1090,12 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
         remaining = 0
         for path in paths:
             fms = sorted(form_of.get(path, []))
-            body = conn.execute("SELECT body FROM docs WHERE path = ?", (path,)).fetchone()["body"] or ""
+            doc = conn.execute("SELECT body, mtime FROM docs WHERE path = ?", (path,)).fetchone()
+            body = doc["body"] or ""
+            observed = doc_date(path, doc["mtime"])
+            listed = LIST_PREFIX + path if path in lists else ""
+            if listed in confirmed_forms:
+                fms = [listed]
             tid = st.member_of(st.lines_of(body), skeletons) if skeletons else None
             parts = [hashlib.sha1(body.encode()).hexdigest(), schema["version"], [confirmed_forms[f]["version"] for f in fms]]
             fp = _digest(parts + [template_rules[tid]["version"]] if tid else parts)   # 템플릿 밖 문서의 지문은 그대로
@@ -955,10 +1107,28 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
             try:
                 twin = done_fp.get(fp)
                 if twin and twin != path:
-                    _copy(conn, twin, path)
+                    _copy(conn, twin, path, observed)
                     _record(conn, path, fp, "copy")
                     stats["copied"] += 1
                     stats["analyzed"] += 1
+                    conn.commit()
+                    continue
+                # D. 데이터 수집 목록 — 행마다 건이고 「수집 바뀜」이 그 건의 관측 시점. 대응표로만(LLM 없음)
+                if listed:
+                    if listed in confirmed_forms:
+                        nodes, edges = extract_rows(_list_rows(_list_body(store_name, path, root))[1],
+                                                    confirmed_forms[listed])
+                        _write(conn, path, [{**n, "origin": "list"} for n in nodes],
+                               [{**e, "origin": "list"} for e in edges], "list", observed)
+                        _record(conn, path, fp, "form")
+                        stats["form_docs"] += 1
+                    else:
+                        _write(conn, path, [], [], "list")
+                        _record(conn, path, fp, "skipped",
+                                error="데이터 수집 목록 — ② 양식에서 열 대응을 확정하면 행마다 규칙으로 뽑습니다")
+                        stats["skipped"] += 1
+                    stats["analyzed"] += 1
+                    done_fp.setdefault(fp, path)
                     conn.commit()
                     continue
                 # ③ 분석할 것이 없는 문서 — 작업 파일(확장자)이나 읽을 글이 거의 없는 것
@@ -979,7 +1149,7 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                 rest = strip_forms(markdown, [f.split(" | ") for f in fms]) if fms else markdown
                 if fms and len(_compact(rest)) < FORM_REST_CHARS:
                     # 양식 문서(견적서) — 표 밖에 읽을 글이 거의 없다. 규칙으로만.
-                    _write(conn, path, form_nodes, form_edges, "form")
+                    _write(conn, path, form_nodes, form_edges, "form", observed)
                     status, dropped, reviewed = "form", 0, 0
                     stats["form_docs"] += 1
                 elif tid and not (by_rule := st.apply_rules(template_rules[tid]["rules"], rest[:DOC_CHARS]))[2] \
@@ -996,7 +1166,7 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                         edges = [e for i, e in enumerate(edges) if len(by_rule[0]) + i not in wrong]
                         reviewed = 1
                         stats["reviewed"] += 1
-                    _write(conn, path, form_nodes + nodes, form_edges + edges, "template")
+                    _write(conn, path, form_nodes + nodes, form_edges + edges, "template", observed)
                     stats["template_docs"] += 1
                 else:
                     stats["escalated"] += bool(tid)      # 템플릿인데 필수 필드가 없다 — 틀이 다르다
@@ -1008,8 +1178,11 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                     # 이름이 근거에 없는 항목만(남겨 둔 대신 판정을 받는다). 버린 것이 더 많으면 전부.
                     sampled = _sampled(path)
                     every = sampled or (dropped and dropped >= (len(nodes) + len(edges)))
-                    targets = [("n", i) for i, n in enumerate(nodes) if every or not n["anchored"]] + \
-                              [("e", i) for i, e in enumerate(edges) if every or not e["anchored"]]
+                    targets = [("n", i) for i, n in enumerate(nodes)
+                               if every or not n["anchored"] or n["cls"] in reference] + \
+                              [("e", i) for i, e in enumerate(edges)
+                               if every or not e["anchored"] or {e["src_cls"], e["dst_cls"]} & reference]
+                    stats["range_errors"] = stats.get("range_errors", 0) + sum(e["bad_range"] for e in edges)
                     if targets:
                         items = [{"entity": _public(nodes[i])} if k == "n" else {"relation": _public(edges[i])}
                                  for k, i in targets]
@@ -1025,7 +1198,7 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                             name = str(o["name"])[:60]
                             outside[name] = outside.get(name, 0) + 1
                     _write(conn, path, form_nodes + [_public(n) for n in nodes], form_edges + [_public(e) for e in edges],
-                           "llm")
+                           "llm", observed)
                     status = "ok"
                     stats["dropped"] += dropped
                 _record(conn, path, fp, status, truncated=int(status == "ok" and len(rest) > DOC_CHARS),
@@ -1612,6 +1785,7 @@ def status(store_name: str) -> dict:
             "aliases": [dict(r) for r in conn.execute("SELECT cls, alias, canonical, reason FROM sem_aliases ORDER BY cls, canonical")],
             "failed": [dict(r) for r in conn.execute(
                 "SELECT path, error FROM sem_docs WHERE status = 'failed' ORDER BY path LIMIT 20")],
+            "layers": LAYERS,
             "counts": {
                 "nodes": {r["cls"]: r["n"] for r in conn.execute("SELECT cls, COUNT(*) AS n FROM sem_nodes GROUP BY cls")},
                 "edges": {r["rel"]: r["n"] for r in conn.execute("SELECT rel, COUNT(*) AS n FROM sem_edges GROUP BY rel")},
@@ -1644,16 +1818,31 @@ def search(store_name: str, cls: str = "", q: str = "", limit: int = 40) -> list
         conn.close()
 
 
-def neighbors(store_name: str, cls: str, name: str, limit: int = 60) -> dict:
-    """한 개체의 관계 — 관계·상대마다 묶고, 근거 문장과 문서를 함께(원문으로 되짚을 수 있게)."""
+def _in_force(r, as_of: str) -> bool:
+    """as_of 기준으로 참이었나 — 그날까지 본 것이고, 효력 기간이 있으면 그 안."""
+    return ((not r["observed_at"] or r["observed_at"] <= as_of) and (not r["valid_from"] or r["valid_from"] <= as_of)
+            and (not r["valid_to"] or r["valid_to"] >= as_of))
+
+
+def neighbors(store_name: str, cls: str, name: str, limit: int = 60, as_of: str = "") -> dict:
+    """한 개체의 관계 — 관계·상대마다 묶고, 근거 문장과 문서를 함께(원문으로 되짚을 수 있게).
+
+    시점에 매인 관계(스키마 temporal — 상태·사건)는 같은 관계·방향의 상대가 여럿이면 **가장 늦게 본 것**이 current다
+    (신용등급 A → BBB면 BBB). as_of(YYYY-MM-DD)를 주면 그날 기준으로 참이던 것만 — 그날까지 본 것, 효력 기간 안."""
     conn = _conn(store_name)
     try:
+        schema = _get(conn, "schema") or {}
+        temporal = temporal_rels(schema) if schema else set()
+        layers = layer_of(schema) if schema else {}
+        as_of = iso_date(as_of) if as_of else ""
         aliases = canonical_map(conn)
         names = {name} | {a for (c, a), canon in aliases.items() if c == cls and canon == name}
         marks = ",".join("?" * len(names))
         rows = list(conn.execute(
-            f"SELECT * FROM sem_edges WHERE (src_cls = ? AND src IN ({marks})) OR (dst_cls = ? AND dst IN ({marks}))",
-            (cls, *names, cls, *names)))
+            f"SELECT * FROM sem_edges WHERE (src_cls = ? AND src IN ({marks})) OR (dst_cls = ? AND dst IN ({marks}))"
+            " ORDER BY observed_at DESC", (cls, *names, cls, *names)))
+        if as_of:
+            rows = [r for r in rows if _in_force(r, as_of)]
         grouped: dict[tuple, dict] = {}
         for r in rows:
             outgoing = r["src_cls"] == cls and r["src"] in names
@@ -1661,12 +1850,64 @@ def neighbors(store_name: str, cls: str, name: str, limit: int = 60) -> dict:
             other = _canon(aliases, other_cls, other)
             key = (r["rel"], "out" if outgoing else "in", other_cls, other)
             g = grouped.setdefault(key, {"rel": r["rel"], "direction": key[1], "cls": other_cls, "name": other,
-                                         "evidence": []})
+                                         "layer": layers.get(other_cls, ""), "temporal": r["rel"] in temporal,
+                                         "latest": "", "evidence": []})
+            g["latest"] = max(g["latest"], r["observed_at"] or "")
             if len(g["evidence"]) < 5:
-                g["evidence"].append({"path": r["path"], "text": r["evidence"], "origin": r["origin"]})
+                g["evidence"].append({"path": r["path"], "text": r["evidence"], "origin": r["origin"],
+                                      "observed_at": r["observed_at"], "valid_from": r["valid_from"],
+                                      "valid_to": r["valid_to"]})
+        # 시점에 매인 관계 — 같은 관계·방향에서 가장 늦게 본 상대가 지금(current) 값이다
+        newest: dict[tuple, str] = {}
+        for g in grouped.values():
+            if g["temporal"]:
+                k = (g["rel"], g["direction"])
+                newest[k] = max(newest.get(k, ""), g["latest"])
+        for g in grouped.values():
+            if g["temporal"]:
+                g["current"] = g["latest"] == newest[(g["rel"], g["direction"])]
         mentions = [dict(r) for r in conn.execute(
-            f"SELECT path, evidence, origin FROM sem_nodes WHERE cls = ? AND name IN ({marks}) LIMIT 10", (cls, *names))]
-        relations = sorted(grouped.values(), key=lambda g: -len(g["evidence"]))[:limit]
-        return {"cls": cls, "name": name, "relations": relations, "mentions": mentions}
+            f"SELECT path, evidence, origin, observed_at FROM sem_nodes WHERE cls = ? AND name IN ({marks})"
+            " ORDER BY observed_at DESC LIMIT 10", (cls, *names))]
+        relations = sorted(grouped.values(), key=lambda g: (-int(bool(g.get("current"))), -len(g["evidence"])))[:limit]
+        return {"cls": cls, "name": name, "layer": layers.get(cls, ""), "as_of": as_of, "relations": relations,
+                "mentions": mentions}
+    finally:
+        conn.close()
+
+
+# --- 재구성 ---
+
+RESET_SCOPES = ("facts", "all")
+_FACT_TABLES = ("sem_docs", "sem_nodes", "sem_edges")
+_ALL_TABLES = (*_FACT_TABLES, "sem_aliases", "sem_pairs", "sem_gold", "sem_meta")
+_FACT_KEYS = ("state", "last_run", "outside", "last_merge", "task")
+
+
+def reset(store_name: str, scope: str, actor: str = "") -> dict:
+    """내용 그래프를 지운다 — 층위·시점이 없던 옛 추출을 새 규칙으로 다시 만들 때.
+
+      facts  추출 결과만(문서 분석·개체·관계·분석 상태). 확정한 스키마·양식·템플릿·묶기 기준·사람 정답은 둔다 —
+             ③ 분석부터 다시 돈다(스키마에 층위가 없으면 ① 다시 확정하는 편이 낫다)
+      all    확정한 것까지 전부(스키마·양식·템플릿·묶기·정답). ① 스키마 제안부터 다시
+
+    형식 그래프의 판 정보(doc_meta — 시행일·개정 계열)도 비운다: docsearch.regraph가 .ready에서 다시 만든다.
+    분석·제안이 돌고 있으면 지우지 않는다."""
+    if scope not in RESET_SCOPES:
+        raise SemanticError(f"scope는 {', '.join(RESET_SCOPES)} 중 하나입니다.")
+    if running(store_name) or task_running(store_name):
+        raise SemanticError("분석이나 제안이 돌고 있습니다 — 멈추고 끝난 뒤에 재구성하세요.")
+    conn = _conn(store_name)
+    try:
+        tables = _FACT_TABLES if scope == "facts" else _ALL_TABLES
+        removed = {t: conn.execute(f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"] for t in tables}
+        for t in tables:
+            conn.execute(f"DELETE FROM {t}")
+        if scope == "facts":
+            conn.execute(f"DELETE FROM sem_meta WHERE key IN ({','.join('?' * len(_FACT_KEYS))})", _FACT_KEYS)
+        removed["doc_meta"] = conn.execute("SELECT COUNT(*) AS n FROM doc_meta").fetchone()["n"]
+        conn.execute("DELETE FROM doc_meta")
+        conn.commit()
+        return {"scope": scope, "removed": removed, "by": actor, "at": _now()}
     finally:
         conn.close()

@@ -302,11 +302,11 @@ def test_chat_proposes_changes_that_stay_within_the_facts(client, monkeypatch):
     assert len(out["changes"]) == 1 and any("모르는 화면" in n for n in out["notes"])
     # 저장하지 않는다
     assert "skill" not in client.get(f"{API}/sources/{sid}/queries", headers=ADMIN).json()["screens"][0]
-    # 정의 안 된 자리를 쓰는 스킬은 거르고, 화면에 없는 칸이면 조건을 그대로 둔다
+    # 정의 안 된 자리는 입력으로 더하고, 화면에 없는 칸이면 조건을 그대로 둔다
     answer["changes"] = [{"url": NOTICE, "conditions": [{"field": "구분", "value": "{nope}"}], "skill": {"name": "x"}}]
     out = client.post(f"{API}/sources/{sid}/skills/chat", headers=ADMIN, json={
         "messages": [{"role": "user", "content": "다시"}]}).json()
-    assert out["changes"] == [] and any("nope" in n for n in out["notes"])
+    assert [p["name"] for p in out["changes"][0]["skill"]["params"]] == ["nope"]
     answer["changes"] = [{"url": NOTICE, "conditions": [{"field": "없는 칸", "value": "1"}]}]
     out = client.post(f"{API}/sources/{sid}/skills/chat", headers=ADMIN, json={
         "messages": [{"role": "user", "content": "또"}]}).json()
@@ -314,3 +314,48 @@ def test_chat_proposes_changes_that_stay_within_the_facts(client, monkeypatch):
     assert any("없는 칸" in n for n in out["notes"])
     assert client.post(f"{API}/sources/{sid}/skills/chat", headers=ADMIN,
                        json={"messages": []}).status_code == 400
+
+
+def test_chat_declares_placeholders_the_llm_forgot_as_inputs(client, monkeypatch):
+    """LLM이 조건에 {자리}를 쓰고 입력으로 정의하지 않은 경우(실측 buyer-contract-status: CODE_ITEM … KEYWORD_ITEM) —
+    자리를 입력으로 더해 받는다(거르지 않는다). 사람이 저장할 때는 고치는 방법을 알린다."""
+    sid = _notice_scan(client, monkeypatch)
+    client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [{"url": NOTICE, "conditions": []}]})
+    names = ["CODE_ITEM", "CODE_ITEM2", "CODE_ITEM3", "CODE_ITEM4", "CODE_ITEM5", "CODE_ITEM6", "DATE_ITEM", "KEYWORD_ITEM"]
+    answer = {"reply": "입력으로 두었습니다.", "changes": [{
+        "url": NOTICE, "conditions": [{"field": "구분", "value": "{" + n + "}"} for n in names],
+        "skill": {"name": "buyer-contract-status", "description": "계약 현황",
+                  "params": [{"name": "keyword", "description": "검색어"}]}}]}
+    monkeypatch.setattr(skills.llm, "default_provider", lambda db, organization_id=None: object())
+    monkeypatch.setattr(skills.llm, "chat_completion", lambda *a, **kw: json.dumps(answer))
+    out = client.post(f"{API}/sources/{sid}/skills/chat", headers=ADMIN,
+                      json={"messages": [{"role": "user", "content": "입력을 정해 줘"}]}).json()
+    [change] = out["changes"]
+    assert [p["name"] for p in change["skill"]["params"]] == ["keyword", *names]
+    assert any("입력으로 더했습니다" in n for n in out["notes"])
+    saved = client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [
+        {"url": NOTICE, "conditions": change["conditions"], "skill": change["skill"]}]})
+    assert saved.status_code == 200, saved.text
+    bad = _with_skill(client, sid, conditions=[{"field": "구분", "value": "{CODE_ITEM}"}])
+    assert bad.status_code == 400 and "같은 이름의 입력을 더하거나" in bad.json()["detail"]
+
+
+def test_list_columns_are_measured_fixed_or_changing(client, monkeypatch, fake_bot):
+    """고정부·변경부를 재서 가른다 — 같은 건을 다시 받을 때 열마다 바뀐 비율. 거의 안 바뀌는 열은 고정(지식 후보),
+    자주 바뀌는 열은 변경(상태 후보). 다시 받아 본 수가 적으면 모름."""
+    from datetime import date
+
+    sid = _notice_scan(client, monkeypatch)
+    _with_skill(client, sid)
+    cols = [{"key": "no", "label": "번호"}, {"key": "vendor", "label": "협력사"}, {"key": "state", "label": "상태"}]
+    for run in range(25):
+        recs = [{"no": i, "vendor": f"협력사{i}", "state": f"단계{(run + i) % 3}"} for i in range(4)]
+        infosource.merge_dataset(sid, {"screen": "공지 조회", "url": NOTICE, "key": "no", "columns": cols,
+                                       "records": recs, "total": 4, "complete": True, "since": ""},
+                                 date.today().isoformat())
+    vol = {v["name"]: v for v in infosource.column_volatility(sid, NOTICE)}
+    assert vol["협력사"]["hint"] == "fixed" and vol["번호"]["hint"] == "fixed"
+    assert vol["상태"]["hint"] == "changing" and vol["상태"]["rate"] > 0.5
+    [skill] = client.get(f"{API}/skills", headers=ADMIN).json()["skills"]
+    marks = {o["name"]: o.get("volatility") for o in skill["outputs"]}
+    assert marks == {"번호": "fixed", "협력사": "fixed", "상태": "changing"}

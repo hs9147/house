@@ -70,7 +70,8 @@ from ..security import (accessible_document_stores, require_agent_key,
                         require_document_store, require_project_mcp_access, viewer_org_ids)
 from ..services import apisearch, mailer, webbrowse, websearch
 from ..services import codemap as codemap_service
-from ..services import deployer, docready, docsearch, doctext, mcp_server, monitor, ports, shareddb, workspace
+from ..services import (deployer, docready, docsearch, doctext, mcp_server, monitor, ontology_status, ports,
+                       shareddb, workspace)
 from ..services import modules as modules_service
 from ..services import structure
 from ..services import storage as storage_service
@@ -1768,7 +1769,10 @@ _GRAPH_TOOLS = [
         "name": "concept_relations",
         "description": (
             "개체 하나의 관계(예: 협력사 —공급한다→ 품목)와 **근거 문장·문서**. 답에 쓸 때는 근거 문장과 문서"
-            " 경로를 함께 밝힌다. cls와 name은 find_concepts 결과의 값을 그대로 쓴다."
+            " 경로를 함께 밝힌다. cls와 name은 find_concepts 결과의 값을 그대로 쓴다. 개념마다 층위(layer)가 있다 —"
+            " reference(기준 지식)·entity(대상)는 근거 문서로 답하고, state(상태)·event(사건)처럼 시점에 매인 관계"
+            "(temporal)는 관측한 날(observed_at)·효력 기간과 함께 답한다: current가 가장 늦게 본 값이고, 옛 값은 이력이다."
+            " 근거 문서가 대체된 판(superseded)이면 지금 판이 따로 있다는 뜻이다. 특정 날 기준이면 as_of를 준다."
         ),
         "inputSchema": {
             "type": "object",
@@ -1777,6 +1781,7 @@ _GRAPH_TOOLS = [
                 "name": {"type": "string"},
                 "source": {"type": "string"},
                 "limit": {"type": "integer", "description": f"기본 30, 최대 {_MAX_LIST}"},
+                "as_of": {"type": "string", "description": "YYYY-MM-DD — 그날 기준으로 참이던 관계만(비우면 전부·최신 표시)"},
             },
             "required": ["cls", "name"],
         },
@@ -1886,7 +1891,16 @@ def _concept_call(name: str, args: dict, sources) -> str:
 
     cls, node = _str_arg(args, "cls"), _str_arg(args, "name")
     limit = _int_arg(args, "limit", 30, _MAX_LIST)
-    found = [{"source": store.name, **semantic.neighbors(store.name, cls, node, limit)} for store in sources]
+    as_of = _str_arg(args, "as_of", required=False)
+    found = []
+    for store in sources:
+        got = semantic.neighbors(store.name, cls, node, limit, as_of)
+        old = ontology_status.superseded_paths(store.name) if got["relations"] else set()
+        for r in got["relations"]:
+            for e in r["evidence"]:
+                if e["path"] in old:
+                    e["superseded"] = True   # 근거가 옛 판의 문서다 — 지금 판이 따로 있다
+        found.append({"source": store.name, **got})
     found = [f for f in found if f["relations"] or f["mentions"]]
     if not found:
         raise mcp_server.McpToolError(

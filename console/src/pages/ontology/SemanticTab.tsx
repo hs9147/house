@@ -3,7 +3,7 @@ import { api } from '../../lib/api';
 import { useApi, usePolling } from '../../lib/hooks';
 import { runTask } from '../../lib/tasks';
 import type {
-  SemanticForm, SemanticHit, SemanticMapping, SemanticMergeRules, SemanticNeighbors, SemanticReview, SemanticSchema,
+  OntologyQuality, SemanticForm, SemanticHit, SemanticMapping, SemanticMergeRules, SemanticNeighbors, SemanticReview, SemanticSchema,
   SemanticStatus, SemanticTemplate, SemanticTemplateEval, SemanticTemplateRules, SemanticGoldItem, SemanticGoldKind,
 } from '../../lib/types';
 
@@ -162,8 +162,11 @@ export default function SemanticTab() {
                 onTune={() => act('기준을 다시 배웠습니다 — 아래 기록을 보세요.', () => api.semanticTune(store))}
                 onRollback={(r) => act('이전 묶기 기준으로 되돌렸습니다.', () => api.semanticMergeRules(store, r))} />
               <Explore store={store} schema={status.schema} />
+              <QualityStep store={store} />
             </>
           )}
+          <RebuildStep store={store} busy={busy || status.running}
+            onDone={(text) => { setNotice(text); void reload(); }} onError={setError} />
         </>
       )}
     </div>
@@ -214,9 +217,15 @@ function SchemaStep({ status, busy, onPropose, onConfirm }: {
       {confirmed && (
         <p style={{ fontSize: 12 }}>
           ✅ 확정 판 <span className="mono">{confirmed.version}</span> ({confirmed.confirmed_by}, {confirmed.confirmed_at}) — 개념{' '}
-          {confirmed.classes.map((c) => c.name).join('·')} / 관계 {confirmed.relations.map((r) => `${r.from}→${r.name}→${r.to}`).join(', ')}
+          {confirmed.classes.map((c) => `${c.name}[${LAYER[c.layer ?? 'entity']}]`).join(' · ')} / 관계{' '}
+          {confirmed.relations.map((r) => `${r.from}→${r.name}→${r.to}${r.temporal ? '⏱' : ''}`).join(', ')}
         </p>
       )}
+      <p className="mutedtext" style={{ fontSize: 11, margin: '2px 0' }}>
+        개념마다 층위(layer)를 정합니다 — <b>reference</b> 기준 지식(규정·용어·절차, 개정으로 바뀜) · <b>entity</b> 대상(협력사·품목,
+        신원) · <b>state</b> 상태(등급·상태, 시점마다 바뀜) · <b>event</b> 사건(계약·견적, 일어난 때). 상태·사건에 닿는 관계는
+        시점에 매이고(⏱ temporal) 문서마다 관측으로 쌓여 최신 값과 이력이 남습니다. 기준 지식의 항목은 표본이 아니어도 검토합니다.
+      </p>
       <button className="secondary" disabled={busy} onClick={onPropose}>
         {draft ? '다시 제안·검토(LLM)' : '스키마 제안·검토(LLM)'}
       </button>
@@ -591,9 +600,112 @@ function GoldStep({ store, status, busy, onLabeled, onTune, onRollback }: {
   );
 }
 
+const LAYER: Record<string, string> = { reference: '기준 지식', entity: '대상', state: '상태', event: '사건' };
+
+/** ⑦ 품질 점검 — 개정 계열(시행일로 지금 판을 가른다)과 지금 판끼리 정의가 갈리는 용어(표준 용어 후보). */
+function QualityStep({ store }: { store: string }) {
+  const [q, setQ] = useState<OntologyQuality | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    setQ(null);
+    api.ontologyQuality(store).then(setQ, (e) => setError((e as Error).message));
+  }, [store]);
+  return (
+    <section style={{ marginTop: 16 }}>
+      <h3 style={{ fontSize: 14 }}>⑦ 품질 점검 — 기준 지식의 판과 정의 충돌</h3>
+      <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+        같은 이름(날짜·판 표시를 뗀 제목)의 문서는 한 개정 계열이고, 부칙의 시행일이 가장 늦은 것이 지금 판입니다. 옛 판도
+        그래프에 남지만(그때의 기준) 에이전트는 지금 판을 앞에 둡니다. 지금 판끼리 같은 용어를 다르게 정의하면 표준 용어
+        후보로 올립니다.
+      </p>
+      {error && <p className="error">{error}</p>}
+      {q && (
+        <div style={{ fontSize: 12 }}>
+          <b>개정 계열 {q.revisions.length}</b>
+          {q.revisions.length === 0 ? <span className="mutedtext"> — 없습니다</span> : (
+            <ul style={{ paddingLeft: 18, margin: '2px 0' }}>
+              {q.revisions.map((f) => (
+                <li key={f.family}>
+                  <span className="mono">{f.family}</span>:{' '}
+                  {f.docs.map((d) => (
+                    <span key={d.path} style={{ marginRight: 8 }}>
+                      {d.current ? <b>✅ {d.path}</b> : <span className="mutedtext">{d.path}</span>}
+                      {d.effective && <span className="mutedtext"> (시행 {d.effective})</span>}
+                    </span>
+                  ))}
+                </li>
+              ))}
+            </ul>
+          )}
+          <div style={{ marginTop: 4 }}><b>정의가 갈리는 용어 {q.conflicts.length}</b></div>
+          {q.conflicts.length === 0 ? <span className="mutedtext">없습니다</span> : (
+            <ul style={{ paddingLeft: 18, margin: '2px 0' }}>
+              {q.conflicts.map((c) => (
+                <li key={c.term}>
+                  <b>{c.term}</b> — 정의 {c.variants}가지
+                  {c.definitions.map((d, i) => (
+                    <div key={i} className="mutedtext">“{d.definition}” — <span className="mono">{d.path}</span>
+                      {d.documents > 1 && ` 외 ${d.documents - 1}건`}</div>
+                  ))}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * ⑥ 재구성 — 층위·시점이 없던 옛 추출을 지우고 새 규칙으로 다시 만든다. 내용 그래프를 지운 뒤(추출 결과만 / 확정한
+ * 것까지) 형식 그래프의 판 정보(시행일·개정 계열)를 .ready에서 다시 만든다 — 작업 트레이에서 이어서 돈다.
+ */
+function RebuildStep({ store, busy, onDone, onError }: {
+  store: string; busy: boolean; onDone: (text: string) => void; onError: (text: string) => void;
+}) {
+  const rebuild = (scope: 'facts' | 'all') => {
+    const what = scope === 'facts'
+      ? '추출 결과(문서 분석·개체·관계)를 지웁니다. 확정한 스키마·양식·템플릿·묶기 기준·정답은 남습니다.'
+      : '확정한 스키마·양식·템플릿·묶기 기준·사람 정답까지 모두 지웁니다. ① 스키마 제안부터 다시 해야 합니다.';
+    if (!window.confirm(`${store}: ${what}
+
+되돌릴 수 없습니다. 계속할까요?`)) return;
+    runTask(`ontology-rebuild:${store}`, { label: `온톨로지 재구성 · ${store}`, to: '/ontology/semantic' }, async (h) => {
+      const out = await api.ontologyRebuild(store, scope);
+      const gone = Object.values(out.removed).reduce((n, v) => n + v, 0);
+      h.set({ progress: `지웠습니다(${gone.toLocaleString()}행) — 형식 그래프의 판 정보를 다시 만드는 중` });
+      let rebuilt = 0;
+      for (;;) {
+        const r = await api.ontologyRegraph(store);
+        rebuilt += r.rebuilt;
+        h.set({ progress: `형식 그래프 ${rebuilt.toLocaleString()}건 · 남음 ${r.remaining.toLocaleString()}` });
+        if (r.done) break;
+      }
+      onDone(scope === 'facts'
+        ? `재구성: 추출 결과를 지우고 형식 그래프 ${rebuilt.toLocaleString()}건을 다시 만들었습니다 — 스키마에 층위가 없으면 ①을 다시 확정한 뒤 ③ 분석을 시작하세요.`
+        : `재구성: 모두 지우고 형식 그래프 ${rebuilt.toLocaleString()}건을 다시 만들었습니다 — ① 스키마 제안부터 다시 하세요.`);
+    }).catch((e) => onError((e as Error).message));
+  };
+  return (
+    <section style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+      <h3 style={{ fontSize: 14 }}>⑥ 재구성 — 지우고 새 규칙으로 다시</h3>
+      <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+        층위(기준 지식·대상·상태·사건)와 시점(관측한 날·효력 기간)이 없던 때 만든 내용 그래프를 지우고 다시 만듭니다. 원본
+        문서와 문서 색인은 그대로입니다. 분석이 돌고 있으면 멈춘 뒤에 하세요.
+      </p>
+      <div className="row" style={{ gap: 8, marginTop: 4 }}>
+        <button className="secondary" disabled={busy || !store} onClick={() => rebuild('facts')}>추출 결과만 지우고 다시</button>
+        <button className="danger" disabled={busy || !store} onClick={() => rebuild('all')}>확정한 것까지 모두 지우고 다시</button>
+      </div>
+    </section>
+  );
+}
+
 function Explore({ store, schema }: { store: string; schema: SemanticSchema }) {
   const [cls, setCls] = useState('');
   const [q, setQ] = useState('');
+  const [asOf, setAsOf] = useState('');
   const [hits, setHits] = useState<SemanticHit[] | null>(null);
   const [picked, setPicked] = useState<SemanticNeighbors | null>(null);
   const [error, setError] = useState('');
@@ -603,7 +715,7 @@ function Explore({ store, schema }: { store: string; schema: SemanticSchema }) {
     try { setHits((await api.semanticSearch(store, cls, q)).nodes); setPicked(null); } catch (err) { setError((err as Error).message); }
   };
   const open = async (h: SemanticHit) => {
-    try { setPicked(await api.semanticNeighbors(store, h.cls, h.name)); } catch (err) { setError((err as Error).message); }
+    try { setPicked(await api.semanticNeighbors(store, h.cls, h.name, asOf)); } catch (err) { setError((err as Error).message); }
   };
   return (
     <section style={{ marginTop: 16 }}>
@@ -614,6 +726,9 @@ function Explore({ store, schema }: { store: string; schema: SemanticSchema }) {
           {schema.classes.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
         </select>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="이름 일부(별칭 포함)" />
+        <label className="mutedtext" style={{ fontSize: 12 }}>
+          기준일 <input type="date" value={asOf} onChange={(e) => setAsOf(e.target.value)} title="비우면 전부(최신 표시)" />
+        </label>
         <button type="submit" className="secondary">찾기</button>
       </form>
       {error && <p className="error">{error}</p>}
@@ -630,14 +745,21 @@ function Explore({ store, schema }: { store: string; schema: SemanticSchema }) {
       )}
       {picked && (
         <div style={{ marginTop: 8, fontSize: 12 }}>
-          <b>{picked.cls} · {picked.name}</b> — 관계 {picked.relations.length}
+          <b>{picked.cls} · {picked.name}</b>{picked.layer && ` [${LAYER[picked.layer] ?? picked.layer}]`} — 관계{' '}
+          {picked.relations.length}{picked.as_of && ` (${picked.as_of} 기준)`}
           <ul style={{ paddingLeft: 18 }}>
             {picked.relations.map((r) => (
-              <li key={`${r.rel}:${r.direction}:${r.cls}:${r.name}`} style={{ marginBottom: 4 }}>
+              <li key={`${r.rel}:${r.direction}:${r.cls}:${r.name}`} style={{ marginBottom: 4, opacity: r.temporal && !r.current ? 0.6 : 1 }}>
                 {r.direction === 'out' ? `—${r.rel}→ ${r.cls} · ${r.name}` : `← ${r.cls} · ${r.name} —${r.rel}`}
+                {r.temporal && (r.current
+                  ? <span className="status ok" style={{ marginLeft: 6 }}>최신{r.latest && ` ${r.latest}`}</span>
+                  : <span className="status dim" style={{ marginLeft: 6 }}>이력{r.latest && ` ${r.latest}`}</span>)}
                 {r.evidence.map((e, i) => (
                   <div key={i} className="mutedtext">
                     “{e.text}” — <span className="mono">{e.path}</span>{e.origin === 'form' && ' (양식 규칙)'}
+                    {e.origin === 'list' && ' (데이터 수집 목록)'}
+                    {e.observed_at && ` · 관측 ${e.observed_at}`}
+                    {(e.valid_from || e.valid_to) && ` · 효력 ${e.valid_from || '…'}~${e.valid_to || '…'}`}
                   </div>
                 ))}
               </li>

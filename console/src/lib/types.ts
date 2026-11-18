@@ -1374,8 +1374,9 @@ export interface SkillChange {
   frame?: unknown[];
 }
 
-/** GET /skills — 부를 수 있는 스킬. id는 「출처/스킬」. */
-export interface SkillOut extends SourceSkill {
+/** GET /skills — 부를 수 있는 스킬. id는 「출처/스킬」. 결과 열에는 고정(지식)·변경(정보) 판정이 붙는다. */
+export interface SkillOut extends Omit<SourceSkill, 'outputs'> {
+  outputs: { name: string; description: string; volatility?: 'fixed' | 'changing' | 'unknown'; change_rate?: number | null }[];
   id: string;
   source_id: number;
   source: string;
@@ -1741,9 +1742,11 @@ export type ProviderCheck = {
 
 
 // --- 내용 온톨로지(services/semantic) ---
+/** 층위 — 고정부(지식)와 변경부(정보)를 뜻의 역할 × 변화 속도로(services/semantic.LAYERS). */
+export type SemanticLayer = 'reference' | 'entity' | 'state' | 'event';
 export interface SemanticSchema {
-  classes: { name: string; description: string; examples: string[] }[];
-  relations: { name: string; from: string; to: string; description: string }[];
+  classes: { name: string; description: string; layer?: SemanticLayer; examples: string[] }[];
+  relations: { name: string; from: string; to: string; description: string; temporal?: boolean }[];
   version?: string;
   confirmed_at?: string;
   confirmed_by?: string;
@@ -1851,9 +1854,20 @@ export interface SemanticHit { cls: string; name: string; documents: number; ali
 export interface SemanticNeighbors {
   cls: string;
   name: string;
-  relations: { rel: string; direction: 'out' | 'in'; cls: string; name: string;
-               evidence: { path: string; text: string; origin: string }[] }[];
-  mentions: { path: string; evidence: string; origin: string }[];
+  layer?: string;
+  as_of?: string;
+  // temporal(시점에 매인 관계)이면 current — 같은 관계·방향에서 가장 늦게 본 값. latest는 가장 늦게 본 날
+  relations: { rel: string; direction: 'out' | 'in'; cls: string; name: string; layer?: string; temporal?: boolean;
+               current?: boolean; latest?: string;
+               evidence: { path: string; text: string; origin: string; observed_at?: string; valid_from?: string;
+                           valid_to?: string }[] }[];
+  mentions: { path: string; evidence: string; origin: string; observed_at?: string }[];
+}
+
+/** 품질 점검 — 개정 계열(지금 판·대체된 판)과 정의가 갈리는 용어(GET /ontology/stores/{s}/quality). */
+export interface OntologyQuality {
+  revisions: { family: string; docs: { path: string; effective: string; current: boolean }[] }[];
+  conflicts: { term: string; variants: number; definitions: { path: string; definition: string; documents: number }[] }[];
 }
 
 export interface OntologyCleanse {

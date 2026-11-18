@@ -58,7 +58,14 @@ export function SkillCatalog() {
                           <div key={p.name}>{p.name}{p.required ? '*' : ''}{p.default ? ` = ${p.default}` : ''}</div>
                         ))}
                       </td>
-                      <td style={{ maxWidth: 220 }}>{s.outputs.map((o) => o.name).join(', ') || '—'}</td>
+                      <td style={{ maxWidth: 220 }} title="다시 받아 본 건에서 열마다 바뀐 비율 — 고정은 지식(신원·기준), 변경은 정보(상태)">
+                        {s.outputs.length === 0 ? '—' : s.outputs.map((o, k) => (
+                          <span key={o.name}>{k > 0 && ', '}{o.name}
+                            {o.volatility === 'fixed' && <span className="mutedtext">(고정)</span>}
+                            {o.volatility === 'changing' && <span className="mutedtext">(변경)</span>}
+                          </span>
+                        ))}
+                      </td>
                       <td>{s.audience.length ? s.audience.map(orgName).join(', ') : <span className="mutedtext">관리자만</span>}</td>
                       <td>
                         <button className="small" disabled={!data.runnable} onClick={() => setRunning(s)}>실행</button>
@@ -201,6 +208,7 @@ export function SkillEditor({ sourceId, url, skill, conditions, saved, orgs, onC
   }
   const set = (next: Partial<SourceSkill>) => onChange({ ...skill, ...next });
   const used = new Set(conditions.flatMap((c) => [...(c.value || '').matchAll(/\{([^{}]{1,40})\}/g)].map((m) => m[1])));
+  const missing = [...used].filter((u) => !skill.params.some((p) => p.name === u));
   return (
     <div style={{ marginTop: 6, padding: 6, borderRadius: 4, background: 'rgba(56,189,248,0.06)', fontSize: 12 }}>
       <div className="row" style={{ gap: 6, alignItems: 'center' }}>
@@ -237,6 +245,14 @@ export function SkillEditor({ sourceId, url, skill, conditions, saved, orgs, onC
                 onClick={() => set({ params: [...skill.params, { name: '', description: '', default: '', required: false }] })}>
           입력 더하기
         </button>
+        {missing.length > 0 && (
+          <div style={{ marginTop: 2 }}>
+            <span className="status warn">입력 없음</span> 조건에 쓴 자리가 입력에 없습니다: <span className="mono">{missing.join(', ')}</span>
+            {' '}<button className="small secondary" onClick={() => set({ params: [...skill.params, ...missing.map((name) => ({
+              name, description: `「${conditions.find((c) => c.value.includes(`{${name}}`))?.field ?? name}」 칸에 넣을 값`,
+              default: '', required: false }))] })}>입력으로 더하기</button>
+          </div>
+        )}
       </div>
       <div style={{ marginTop: 4 }}>
         결과 열 <span className="mutedtext">(쉼표 — 비우면 지난 수집이 받은 열)</span>

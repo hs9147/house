@@ -159,3 +159,41 @@ def extract(rel_path: str, title: str, markdown: str) -> tuple[list[dict], list[
             link(current, "references", key)
 
     return list(nodes.values()), edges
+
+
+# --- 기준 지식의 판(시행일·개정 계열) ---
+#
+# 규정·지침은 고정부(지식)지만 **개정된다**. 같은 규정의 신·구 판이 저장소에 함께 있으면 둘 다 정의·조문을 내고,
+# 그래프는 어느 쪽이 지금 효력이 있는지 모른다. 사내 규정은 부칙에 시행일을 적는 관행이 일정해서(「이 규정은
+# 2024년 1월 1일부터 시행한다」) 규칙으로 잡힌다. 개정 이력이 쌓인 부칙은 시행일이 여럿이다 — 가장 늦은 날이 그 판의
+# 시행일이다. 판끼리는 이름(제목에서 날짜·판 표시를 뗀 것)이 같으면 한 계열이다(ontology_status.revisions).
+
+_EFFECTIVE_RE = re.compile(
+    r"(\d{4})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*일?\s*(?:부터|로부터|자로)?\s*(?:이를\s*)?(?:시행|적용|효력)")
+_EFFECTIVE_LABEL_RE = re.compile(
+    r"(?:시행일|시행\s*일자|적용일|효력\s*발생일)\s*[:：]?\s*(\d{4})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})")
+# 제목에서 뗄 판 표시 — 날짜, v1.2·Rev.3·개정3·제2차·(최종)·_최종본 같은 것
+_VERSION_MARKS = re.compile(
+    r"(\d{4}[.\-_년]?\s*\d{1,2}[.\-_월]?\s*\d{1,2}일?)|(\d{8})|(v\s*\d+(?:\.\d+)*)|(rev\.?\s*\d+)|"
+    r"(개정\s*\d*)|(제\s*\d+\s*차)|(최종본?)|(\(\s*\d+\s*\))|(초안|수정본|신구대비표?)", re.I)
+
+
+def effective_date(markdown: str) -> str:
+    """문서가 말하는 시행일(YYYY-MM-DD) — 여럿이면 가장 늦은 날. 없으면 ""."""
+    from datetime import date  # noqa: PLC0415
+
+    found = []
+    for m in [*_EFFECTIVE_RE.finditer(markdown), *_EFFECTIVE_LABEL_RE.finditer(markdown)]:
+        try:
+            found.append(date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat())
+        except ValueError:
+            continue
+    return max(found) if found else ""
+
+
+def family_of(rel_path: str) -> str:
+    """개정 계열의 이름 — 파일 이름에서 날짜·판 표시·기호를 뗀 것(소문자). 짧으면 "" (계열로 묶지 않는다)."""
+    stem = rel_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    stem = _VERSION_MARKS.sub(" ", stem)
+    key = re.sub(r"[^0-9a-z가-힣]+", "", stem.lower())
+    return key if len(key) >= 3 else ""

@@ -1973,17 +1973,45 @@ def _record_key(key: str, rec: dict) -> str:
     return "h:" + hashlib.sha256(json.dumps(rec, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:20]
 
 
-def _dataset_csv(columns: list[dict], records: list[dict]) -> bytes:
+SEEN_COLUMNS = ("수집 처음", "수집 바뀜")   # 목록 CSV 끝의 두 열 — 그 건의 관측 시점(내용 온톨로지가 읽는다)
+
+
+def _dataset_csv(columns: list[dict], records: list[dict], dates: list[list[str]] | None = None) -> bytes:
     keys = [c["key"] for c in columns]
     for r in records:
         keys += [k for k in r if k not in keys]
     label = {c["key"]: c["label"] for c in columns if c["label"]}
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
-    w.writerow([label.get(k) or k for k in keys])
-    for r in records:
-        w.writerow(["" if r.get(k) is None else r.get(k) for k in keys])
+    w.writerow([label.get(k) or k for k in keys] + (list(SEEN_COLUMNS) if dates is not None else []))
+    for i, r in enumerate(records):
+        w.writerow(["" if r.get(k) is None else r.get(k) for k in keys] + (list(dates[i]) if dates is not None else []))
     return buf.getvalue().encode("utf-8-sig")   # 엑셀이 한글을 깨뜨리지 않게
+
+
+VOLATILITY_MIN_SEEN = 20     # 이만큼 다시 받아 본 열만 판정한다(적으면 "모름")
+FIXED_RATE = 0.02            # 이하로 바뀌면 고정부(신원·기준 후보)
+CHANGING_RATE = 0.10         # 이상으로 바뀌면 변경부(상태 후보)
+
+
+def column_volatility(source_id: int, url: str) -> list[dict]:
+    """목록의 열마다 변화 — 다시 받아 본 수·바뀐 수·비율과 판정(fixed·changing·unknown). 재서 가른다: 고정부는 지식
+    (신원·기준), 변경부는 정보(상태)다 — 다만 관찰한 기간 안의 판정이고, 사람이 층위를 확정한다(내용 온톨로지 스키마)."""
+    path = _dataset_dir(source_id) / f"{_tag(url)}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, ValueError):
+        return []
+    vol = data.get("volatility") or {}
+    out = []
+    for c in data.get("columns") or []:
+        v = vol.get(c["key"]) or {"seen": 0, "changed": 0}
+        rate = v["changed"] / v["seen"] if v["seen"] else None
+        hint = ("unknown" if v["seen"] < VOLATILITY_MIN_SEEN else
+                "fixed" if rate <= FIXED_RATE else "changing" if rate >= CHANGING_RATE else "unknown")
+        out.append({"name": c.get("label") or c["key"], "key": c["key"], "seen": v["seen"],
+                    "changed": v["changed"], "rate": rate, "hint": hint})
+    return out
 
 
 def merge_dataset(source_id: int, ds: dict, today: str) -> tuple[dict, dict]:
@@ -1997,10 +2025,23 @@ def merge_dataset(source_id: int, ds: dict, today: str) -> tuple[dict, dict]:
     key = ds["key"] or old.get("key") or ""
     rows = {_record_key(key, r): r for r in old.get("records") or []}
     counts = {"new": 0, "changed": 0, "same": 0}
+    # 열마다 바뀐 비율 — 다시 받은 건(같은 키)에서 그 열이 몇 번 보였고 몇 번 바뀌었나(누적). 거의 안 바뀌는 열은
+    # 신원·기준(고정부), 자주 바뀌는 열은 상태(변경부) 후보다(column_volatility). 증분 조회라 같은 건을 다시 받을
+    # 때만 센다 — 처음 받은 건은 비교할 것이 없다.
+    volatility = {k: dict(v) for k, v in (old.get("volatility") or {}).items()}
+    # 건마다 처음 받은 날과 마지막으로 바뀐 날 — 상태 정보의 관측 시점이다(CSV의 「수집 처음」·「수집 바뀜」)
+    seen = dict(old.get("seen") or {})
     for r in ds["records"]:
         k = _record_key(key, r)
         prev = rows.get(k)
         counts["new" if prev is None else "same" if prev == r else "changed"] += 1
+        if prev is not None:
+            for col in set(prev) | set(r):
+                v = volatility.setdefault(col, {"seen": 0, "changed": 0})
+                v["seen"] += 1
+                v["changed"] += int(prev.get(col) != r.get(col))
+        first, changed = (seen.get(k) or [today, today])
+        seen[k] = [first, today if prev is None or prev != r else changed]
         rows[k] = r
     labels = {c["key"]: c["label"] for c in old.get("columns") or [] if c.get("label")}
     labels.update({c["key"]: c["label"] for c in ds["columns"] if c["label"]})
@@ -2011,13 +2052,15 @@ def merge_dataset(source_id: int, ds: dict, today: str) -> tuple[dict, dict]:
     records = list(rows.values())
     meta = {"screen": ds["screen"], "url": ds["url"], "key": key, "last": last, "rows": len(records),
             "total": ds["total"], "complete": ds["complete"], "since": ds["since"], "updated": today}
-    path.write_text(json.dumps({**meta, "columns": columns, "records": records}, ensure_ascii=False),
-                    encoding="utf-8")
+    seen = {k: v for k, v in seen.items() if k in rows}
+    path.write_text(json.dumps({**meta, "columns": columns, "records": records, "volatility": volatility,
+                                "seen": seen}, ensure_ascii=False), encoding="utf-8")
     meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     name = _folder_name(ds["screen"])[:60] + " 목록.csv"
+    dates = [seen.get(k) or ["", ""] for k in rows]
     sheet = {"url": f"{ds['url'].split('#')[0]}#{quote(ds['screen'] + ' 목록')}", "name": name,
              "text": f"{ds['screen']} — 누적 목록", "page": ds["url"].split("#")[0], "ext": ".csv",
-             "data": _dataset_csv(columns, records)}
+             "data": _dataset_csv(columns, records, dates)}
     return sheet, {**meta, **counts, "got": len(ds["records"])}
 
 

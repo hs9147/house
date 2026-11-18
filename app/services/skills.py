@@ -33,7 +33,7 @@ from ..models import ApiKey, InfoSource
 from . import infosource, llm, sourcebot
 from .infosource import SourceError
 
-MAX_PARAMS = 8
+MAX_PARAMS = 12              # 업무 조회 화면은 칸이 많다(실측 GPS4 계약 현황: 코드 칸 6 + 날짜 + 검색어)
 MAX_OUTPUTS = 40
 MAX_AUDIENCE = 50
 RUN_TIMEOUT = 240.0          # 스킬 한 번(화면 하나)의 상한 — 대화가 기다린다
@@ -77,7 +77,8 @@ def clean(raw, conditions: list[dict]) -> dict | None:
                        "default": _txt(p.get("default"), 200), "required": p.get("required") is True})
     used = {m for c in conditions for m in PLACEHOLDER.findall(c.get("value") or "")}
     if used - seen:
-        raise SourceError(f"스킬 {name}: 조건에 쓴 자리가 입력에 없습니다: {', '.join(sorted(used - seen))}")
+        raise SourceError(f"스킬 {name}: 조건에 쓴 자리가 입력에 없습니다: {', '.join(sorted(used - seen))} — 같은 이름의 "
+                          "입력을 더하거나, 조건 값에서 {…}를 지우세요(입력 이름과 자리 이름은 같아야 합니다)")
     outputs = [{"name": _txt(o.get("name"), 80), "description": _txt(o.get("description"), 200)}
                for o in (raw.get("outputs") if isinstance(raw.get("outputs"), list) else [])[:MAX_OUTPUTS]
                if isinstance(o, dict) and _txt(o.get("name"), 80)]
@@ -129,9 +130,13 @@ def runnable() -> tuple[bool, str]:
 
 def _out(row: InfoSource, s: dict) -> dict:
     skill = s["skill"]
+    vol = {v["name"]: v for v in infosource.column_volatility(row.id, s["url"])}
+    outputs = skill["outputs"] or [{"name": c, "description": ""} for c in _columns(row, s["url"])]
     return {"id": skill_id(row, skill["name"]), "source_id": row.id, "source": row.name, "screen": s["screen"],
             "url": s["url"], **skill,
-            "outputs": skill["outputs"] or [{"name": c, "description": ""} for c in _columns(row, s["url"])],
+            # 열마다 고정(지식)·변경(정보) 판정 — 다시 받아 본 건에서 바뀐 비율(infosource.column_volatility)
+            "outputs": [{**o, **({"volatility": vol[o["name"]]["hint"], "change_rate": vol[o["name"]]["rate"]}
+                                 if o["name"] in vol else {})} for o in outputs],
             "collect": s.get("collect") or "files", "has_path": bool(s.get("path")),
             "session": bool(row.headers_encrypted)}
 
@@ -410,6 +415,8 @@ def _facts_for_chat(row: InfoSource, screens: list[dict]) -> dict:
                     "skill": {k: v for k, v in (s.get("skill") or {}).items() if k != "audience"} or None,
                     "fields": list(dict.fromkeys([c["field"] for c in s["conditions"]] + list(page.get("fields") or []))),
                     "columns": _columns(row, s["url"]) or [h for t in (page.get("tables") or [])[:1] for h in t],
+                    # 다시 받아 본 건에서 열마다 바뀐 비율 — 고정(신원·기준)과 변경(상태)을 가르는 근거
+                    "volatility": {v["name"]: v["hint"] for v in infosource.column_volatility(row.id, s["url"])},
                     "info": page.get("info") or "",
                     "last_collect": {k: last[k] for k in ("rows", "details", "files", "notes") if k in last} or None})
     used = {s["url"] for s in screens}
@@ -438,6 +445,21 @@ def chat(db: Session, row: InfoSource, messages: list[dict], screens) -> dict:
                 "notes": []}
     changes, notes = _changes_in(row, draft, data.get("changes"))
     return {"reply": _txt(data.get("reply"), 2000), "changes": changes, "notes": notes}
+
+
+def _declare_missing(skill: dict, conditions: list[dict]) -> list[str]:
+    """LLM이 조건에 {자리}를 쓰고 입력으로 정의하지 않았으면(또는 다른 이름으로 정의했으면) 그 자리를 입력으로 더한다 —
+    설명은 그 칸 이름으로. 더한 이름들을 돌려준다(사람이 쓴 것은 고치지 않는다 — clean이 오류로 알린다)."""
+    params = skill["params"] = [p for p in skill.get("params") or [] if isinstance(p, dict)]
+    have = {slug(p.get("name")) for p in params}
+    added = []
+    for c in conditions:
+        for m in PLACEHOLDER.findall(c.get("value") or ""):
+            if m not in have and len(params) < MAX_PARAMS:
+                params.append({"name": m, "description": f"「{c['field']}」 칸에 넣을 값", "default": "", "required": False})
+                have.add(m)
+                added.append(m)
+    return added
 
 
 def _changes_in(row: InfoSource, draft: list[dict], raw) -> tuple[list[dict], list[str]]:
@@ -470,9 +492,13 @@ def _changes_in(row: InfoSource, draft: list[dict], raw) -> tuple[list[dict], li
         if "skill" in ch and ch["skill"] is None:
             change["skill"] = None
         elif isinstance(ch.get("skill"), dict):
+            raw_skill = {**ch["skill"], "audience": ((base or {}).get("skill") or {}).get("audience") or []}
+            added = _declare_missing(raw_skill, conditions)
+            if added:
+                notes.append(f"{raw_skill.get('name') or url}: 조건에 쓴 자리를 입력으로 더했습니다 — {', '.join(added)}"
+                             "(설명·기본값은 카드에서 고치세요)")
             try:
-                skill = clean({**ch["skill"], "audience": ((base or {}).get("skill") or {}).get("audience") or []},
-                              conditions)
+                skill = clean(raw_skill, conditions)
             except SourceError as e:
                 notes.append(str(e))
                 continue

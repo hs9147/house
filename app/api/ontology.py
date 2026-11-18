@@ -96,6 +96,33 @@ def ontology_store_neighbors(
     return docsearch.neighborhood(store_name, kind, name, max(1, min(limit, 200)))
 
 
+@router.get("/ontology/stores/{store_name}/quality")
+def ontology_quality(store_name: str, _: ApiKey = Depends(require_admin)):
+    """품질 점검 — 개정 계열(지금 판·대체된 판)과 정의가 갈리는 용어(표준 용어 후보). 색인 DB의 사실(LLM 없음)."""
+    from ..services import ontology_status as os_  # noqa: PLC0415
+
+    _store_or_404(store_name)
+    return os_.quality(store_name)
+
+
+@router.post("/ontology/stores/{store_name}/rebuild")
+def ontology_rebuild(store_name: str, scope: str = Body(..., embed=True), db: Session = Depends(get_db),
+                     admin: ApiKey = Depends(require_admin)):
+    """재구성 ① — 내용 그래프를 지운다(facts: 추출 결과만 · all: 확정한 것까지). 이어서 regraph로 형식 그래프의 판 정보를
+    다시 만들고, 내용 분석을 다시 돌린다(all이면 ① 스키마부터). 지운 수는 감사에 남긴다."""
+    _store_or_404(store_name)
+    out = _semantic(semantic.reset, store_name, scope, admin.name)
+    audit.record(db, admin.name, "ontology.rebuild", store_name, out)
+    return out
+
+
+@router.post("/ontology/stores/{store_name}/regraph")
+def ontology_regraph(store_name: str, db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    """재구성 ② — 형식 그래프를 .ready에서 다시 만든다(판 정보가 없는 문서만, 시간 예산 안에서 — 남으면 다시 부른다)."""
+    store = _store_or_404(store_name)
+    return docsearch.regraph(store.name, store.root, budget_seconds=_REINDEX_BUDGET)
+
+
 @router.post("/ontology/stores/{store_name}/reindex")
 def ontology_reindex(
     store_name: str,
@@ -325,7 +352,8 @@ def semantic_search(store_name: str, cls: str = "", q: str = "", limit: int = 40
 
 
 @router.get("/ontology/stores/{store_name}/semantic/neighbors")
-def semantic_neighbors(store_name: str, cls: str, name: str, limit: int = 60,
+def semantic_neighbors(store_name: str, cls: str, name: str, limit: int = 60, as_of: str = "",
                        db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """as_of(YYYY-MM-DD)를 주면 그날 기준으로 참이던 관계만 — 상태·사건 관계의 이력에서."""
     _indexed_store(db, key, store_name)
-    return semantic.neighbors(store_name, cls, name, max(1, min(limit, 200)))
+    return semantic.neighbors(store_name, cls, name, max(1, min(limit, 200)), as_of)

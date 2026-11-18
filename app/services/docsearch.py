@@ -95,6 +95,12 @@ CREATE TABLE IF NOT EXISTS edges (
   rel  TEXT NOT NULL,        -- contains | defines | references
   dst  TEXT NOT NULL
 );
+-- 문서의 판 — 시행일(부칙 등에서 읽은 것)과 개정 계열(제목에서 날짜·판 표시를 뗀 이름). ontology.effective_date·family_of
+CREATE TABLE IF NOT EXISTS doc_meta (
+  path      TEXT PRIMARY KEY,
+  effective TEXT NOT NULL DEFAULT '',
+  family    TEXT NOT NULL DEFAULT ''
+);
 CREATE INDEX IF NOT EXISTS ix_nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS ix_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS ix_edges_path ON edges(path)
@@ -378,6 +384,7 @@ def forget_one(store_name: str, rel: str) -> dict:
 def _forget_graph(conn: sqlite3.Connection, rel: str) -> None:
     conn.execute("DELETE FROM nodes WHERE path = ?", (rel,))
     conn.execute("DELETE FROM edges WHERE path = ?", (rel,))
+    conn.execute("DELETE FROM doc_meta WHERE path = ?", (rel,))
 
 
 def _write_graph(conn: sqlite3.Connection, rel: str, markdown: str) -> None:
@@ -400,6 +407,8 @@ def _write_graph(conn: sqlite3.Connection, rel: str, markdown: str) -> None:
         "INSERT INTO edges (path, src, rel, dst) VALUES (?, ?, ?, ?)",
         [(rel, e["src"], e["rel"], e["dst"]) for e in edges],
     )
+    conn.execute("INSERT OR REPLACE INTO doc_meta (path, effective, family) VALUES (?, ?, ?)",
+                 (rel, ontology.effective_date(markdown), ontology.family_of(rel)))
 
 
 def graph_schema(store_name: str) -> dict:
@@ -655,3 +664,32 @@ def _snippets(body: str, term: str, count: int, width: int) -> list[str]:
         out.append(f"{'…' if left else ''}{text}{'…' if right < len(body) else ''}")
         start = found + len(term)
     return out
+
+
+def regraph(store_name: str, root: Path, budget_seconds: float = _DEFAULT_BUDGET) -> dict:
+    """형식 그래프를 다시 만든다 — 판 정보(doc_meta)가 없는 문서만, .ready에서(다시 추출하지 않는다). 예산 안에서 돌고
+    남은 수를 돌려준다(done이 false면 다시 부른다). 판 정보가 생기기 전에 색인한 문서와, 재구성으로 비운 뒤에 쓴다 —
+    reindex(force)는 매번 처음부터 전부라 큰 저장소에서 끝나지 않는다."""
+    started = time.monotonic()
+    conn = _connect(store_name)
+    rebuilt = remaining = 0
+    try:
+        rows = [r["path"] for r in conn.execute(
+            "SELECT path FROM docs WHERE body IS NOT NULL AND path NOT IN (SELECT path FROM doc_meta) ORDER BY path")]
+        for rel in rows:
+            if time.monotonic() - started > budget_seconds:
+                remaining += 1
+                continue
+            try:
+                markdown = docready.read(store_name, rel, root / rel)
+            except Exception:  # noqa: BLE001 — 지워졌거나 못 읽는 문서는 다음 색인이 정리한다
+                conn.execute("INSERT OR REPLACE INTO doc_meta (path) VALUES (?)", (rel,))
+                continue
+            _write_graph(conn, rel, markdown)
+            rebuilt += 1
+            if rebuilt % 50 == 0:
+                conn.commit()
+        conn.commit()
+    finally:
+        conn.close()
+    return {"rebuilt": rebuilt, "remaining": remaining, "done": remaining == 0}

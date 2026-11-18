@@ -784,8 +784,9 @@ def test_list_data_accumulates_full_then_incremental_and_marks_the_next_start(cl
     with SessionLocal() as s:
         text = infosource.staged_file(s.get(InfoSource, sid), sheet).read_bytes().decode("utf-8-sig")
     lines = text.splitlines()
-    assert lines[0] == "번호,제목,regDt" and len(lines) == 27     # 머리글을 모르는 열은 키 이름 · 객체 값은 버린다
-    assert "25,공지 25 (고침),2026-10-01" in lines
+    # 머리글을 모르는 열은 키 이름 · 객체 값은 버린다 · 끝의 두 열은 그 건의 관측 시점(처음 받은 날·마지막으로 바뀐 날)
+    assert lines[0] == "번호,제목,regDt,수집 처음,수집 바뀜" and len(lines) == 27
+    assert f"25,공지 25 (고침),2026-10-01,{today},{today}" in lines
 
     # 덜 받았으면 다음 시작일을 옮기지 않는다(같은 날부터 다시 받는다)
     out = upload(later[:1], total=50, complete=False, since=today)
