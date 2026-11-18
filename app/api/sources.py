@@ -21,7 +21,7 @@ from ..config import get_settings
 from ..db import get_db
 from ..models import ApiKey, InfoSource
 from ..security import require_admin, require_api_key
-from ..services import infosource, llm, skills, storage
+from ..services import coverage, infosource, llm, skills, storage
 
 router = APIRouter(tags=["sources"])
 
@@ -91,6 +91,15 @@ class RepairRequest(BaseModel):
 class SkillChat(BaseModel):
     messages: list[dict]               # [{role: user|assistant, content}] — 대화는 화면이 들고 있다
     screens: list[QueryScreen] = []    # 편집 중인 수집 조건(저장 전 것) — 비우면 저장한 것
+
+
+class CoverageDecide(BaseModel):
+    url: str
+    status: str = ""                   # managed·duplicate·similar·new — ""이면 고친 것을 지운다(규칙으로)
+
+
+class CoverageConfirm(BaseModel):
+    urls: list[str]                    # 확정할 제안 화면(기본은 제안의 전부 — 빼고 싶은 것만 뺀다)
 
 
 class SkillRun(BaseModel):
@@ -169,6 +178,12 @@ def run_skill(body: SkillRun, db: Session = Depends(get_db), key: ApiKey = Depen
         return skills.run(db, key, body.skill, body.params, rows=body.rows)
     except infosource.SourceError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/sources/inventory")
+def source_inventory(db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """정보 현황 — 출처마다 관리하는 데이터의 종류·유형(목록·조회 화면·페이지·파일·스킬·API·MCP)과 유형별 합계."""
+    return coverage.inventory(db)
 
 
 @router.get("/sources")
@@ -369,17 +384,6 @@ def repair_query(source_id: int, body: RepairRequest, db: Session = Depends(get_
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/sources/{source_id}/skills/draft")
-def draft_skill(source_id: int, body: RepairRequest, db: Session = Depends(get_db),
-                _: ApiKey = Depends(require_admin)):
-    """화면 하나의 스킬 초안(이름·용도·입력·출력) — 저장하지 않는다. 화면이 보여 주고 사람이 고쳐 저장한다."""
-    row = _row_or_404(db, source_id)
-    try:
-        return skills.draft(db, row, body.url)
-    except infosource.SourceError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
 @router.post("/sources/{source_id}/skills/chat")
 def chat_skill(source_id: int, body: SkillChat, db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
     """스킬을 LLM과 대화로 정리한다 — 답과 고칠 것(changes)을 준다. 저장하지 않는다(화면이 적용하고 사람이 저장)."""
@@ -390,6 +394,63 @@ def chat_skill(source_id: int, body: SkillChat, db: Session = Depends(get_db), _
         return skills.chat(db, row, body.messages, [s.model_dump() for s in body.screens])
     except infosource.SourceError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/sources/{source_id}/coverage", status_code=202)
+def start_coverage(source_id: int, db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    """정보 현황 분석 — 사람 입력 없이 LLM이 신규 판정·추가할 화면·수집 방법·스킬 초안까지 제안을 만든다(뒤에서)."""
+    row = _row_or_404(db, source_id)
+    try:
+        coverage.start_proposal(db, row)
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    audit.record(db, admin.name, "source.coverage", row.name, {"kind": row.kind})
+    return {"started": True}
+
+
+@router.get("/sources/{source_id}/coverage")
+def get_coverage(source_id: int, db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
+    """제안(없으면 null)과 진행 기록 — 화면이 짧은 간격으로 읽는다."""
+    _row_or_404(db, source_id)
+    return {"proposal": coverage.proposal(source_id), "progress": infosource.progress(source_id),
+            "harness": coverage.harness(source_id)}
+
+
+@router.post("/sources/{source_id}/coverage/round")
+def coverage_round(source_id: int, db: Session = Depends(get_db), admin: ApiKey = Depends(require_admin)):
+    """하네스 라운드를 지금 — 스캔·수집이 끝날 때도 저절로 돈다(LLM 없이)."""
+    row = _row_or_404(db, source_id)
+    if not row.scan:
+        raise HTTPException(status_code=409, detail="스캔한 적이 없습니다 — 먼저 스캔하세요.")
+    coverage.run_round(db, row, f"수동 · {admin.name}")
+    return coverage.harness(source_id)
+
+
+@router.post("/sources/{source_id}/coverage/decide")
+def coverage_decide(source_id: int, body: CoverageDecide, db: Session = Depends(get_db),
+                    admin: ApiKey = Depends(require_admin)):
+    """판정 교정 — 다음 라운드·제안부터 규칙·LLM보다 먼저 쓴다."""
+    row = _row_or_404(db, source_id)
+    try:
+        coverage.decide(db, row, body.url, body.status, admin.name)
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    audit.record(db, admin.name, "source.coverage.decide", row.name, {"status": body.status or "(규칙으로)"})
+    return coverage.harness(source_id)
+
+
+@router.post("/sources/{source_id}/coverage/confirm")
+def confirm_coverage(source_id: int, body: CoverageConfirm, db: Session = Depends(get_db),
+                     admin: ApiKey = Depends(require_admin)):
+    """제안 확정 — 고른 화면을 제안한 그대로(받을 것·조건·스킬) 수집 조건에 더한다."""
+    row = _row_or_404(db, source_id)
+    try:
+        out = coverage.confirm(db, row, body.urls, admin.name)
+    except infosource.SourceError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    audit.record(db, admin.name, "source.coverage.confirm", row.name,
+                 {"added": len(out["added"]), "skills": out["skills"]})
+    return {**out, "source": _out(row, full=True)}
 
 
 @router.post("/sources/{source_id}/bot", status_code=202)
@@ -407,15 +468,6 @@ def run_bot(source_id: int, db: Session = Depends(get_db), admin: ApiKey = Depen
                                                           "screens": len(infosource.query_screens(row))})
     db.refresh(row)
     return _out(row, full=True)
-
-
-@router.post("/sources/{source_id}/queries/suggest")
-def suggest_queries(source_id: int, db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
-    """조건 제안 — 저장하지 않는다. 화면이 보여 주고 사람이 고쳐 저장한다."""
-    row = _row_or_404(db, source_id)
-    if row.kind != "web":
-        raise HTTPException(status_code=400, detail="수집 조건은 웹사이트 출처에만 둡니다.")
-    return infosource.suggest_queries(db, row)
 
 
 @router.get("/sources/{source_id}/scans")

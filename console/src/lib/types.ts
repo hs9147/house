@@ -1362,6 +1362,53 @@ export interface SourceSkill {
   audience: number[];
 }
 
+/** 정보 현황 — 출처마다 관리하는 데이터의 종류·유형(GET /sources/inventory). */
+export interface SourceInventory {
+  sources: {
+    id: number; name: string; kind: SourceKind; url: string; status: string; scanned_at: string | null;
+    saved_at: string | null;
+    screens: { screen: string; url: string; collect: string; type: string; skill: string; conditions: number;
+               dataset: { rows: number; last: string; updated: string; columns: string[] } | null }[];
+    files: { category: string; label: string; count: number; stores: string[] }[];
+    endpoints: number; tools: number;
+  }[];
+  totals: Record<string, number>;
+  files: Record<string, number>;
+  kinds: Record<string, number>;
+}
+
+/** 사이트에서 받을 수 있는 정보 하나와 판정 — managed(이 출처가 받는다)·duplicate(같은 정보를 관리)·similar·new. */
+export interface CoverageItem {
+  type: string; url: string; title: string; info: string; fields?: string[]; columns?: string[];
+  addable: boolean; status: 'managed' | 'duplicate' | 'similar' | 'new'; reason: string;
+}
+
+/** 하네스 — 출처의 발견과 저장소의 유형을 서로 교정하며 되풀이한 최신 라운드와 이력(services/coverage.run_round). */
+export interface CoverageHarness {
+  round?: { at: string; trigger: string; counts: Record<CoverageItem['status'], number>; items: number; gaps: number;
+            issues: number; changed: number; decided: number };
+  items?: (CoverageItem & { decided?: boolean;
+                            store_match?: { store: string; kind: string; name: string; documents: number; overlap: number } })[];
+  gaps?: { store: string; kind: string; name: string; documents: number }[];          // 저장소에 있는데 출처 미확인
+  issues?: { url: string; screen: string; kind: string; detail: string; at?: string }[]; // 교정할 것
+  changed?: { url: string; from: string | null; to: string }[];
+  rounds: NonNullable<CoverageHarness['round']>[];
+  decisions: Record<string, { status: CoverageItem['status']; by: string; at: string }>;
+}
+
+/** 정보 현황 분석의 제안 — 사람 입력 없이 LLM이 만든 것. running이면 아직 만드는 중, error면 실패. */
+export interface CoverageProposal {
+  source_id: number;
+  running?: boolean;
+  error?: string;
+  created_at?: string;
+  judged_by?: 'llm' | 'rule';
+  counts?: Record<CoverageItem['status'], number>;
+  items?: CoverageItem[];
+  proposed?: { url: string; title: string; type: string; reason: string; screen: SourceQueryScreen }[];
+  notes?: string[];
+}
+
 /** 스킬 대화(POST /sources/{id}/skills/chat)가 낸 고칠 것 — 화면 하나. skill이 null이면 스킬을 빼고, new면 더할 화면. */
 export interface SkillChange {
   url: string;

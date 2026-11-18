@@ -530,6 +530,15 @@ def test_browser_scan_carries_files(client, monkeypatch):
     assert scans[0]["via"] == "browser" and scans[0]["files"] == 1
 
 
+def _suggest(sid: int) -> dict:
+    """수집 방법·조건 분석(infosource.suggest_queries) — 정보 현황의 제안이 신규 화면에 쓴다."""
+    from app.db import SessionLocal
+    from app.models import InfoSource
+
+    with SessionLocal() as db:
+        return infosource.suggest_queries(db, db.get(InfoSource, sid))
+
+
 def _notice_scan(client, monkeypatch):
     """조회 칸이 보인 화면이 있는 브라우저 스캔 — 수집 조건을 정할 화면이 생긴다."""
     monkeypatch.setattr(infosource, "_submit_result", infosource._result_job)
@@ -575,9 +584,8 @@ def test_query_conditions_are_saved_for_the_bookmark_and_values_stay_out_of_audi
 
 def test_query_suggestion_keeps_only_real_screens_and_fields(client, monkeypatch):
     sid = _notice_scan(client, monkeypatch)
-    url = f"{API}/sources/{sid}/queries/suggest"
     # LLM 없이 — 날짜 칸만 전체 + 증분으로(지난 수집일부터, 처음이면 3년 전부터 · 한 칸 이름의 기간은 시작·끝 두 번)
-    out = client.post(url, headers=ADMIN).json()
+    out = _suggest(sid)
     assert out["screens"][0]["conditions"] == [{"field": "등록일", "value": "@last|@today-3y"},
                                                {"field": "등록일", "value": "@today"}]
 
@@ -587,7 +595,7 @@ def test_query_suggestion_keeps_only_real_screens_and_fields(client, monkeypatch
                      "conditions": [{"field": "등록일", "value": "@today-7d"},
                                     {"field": "지어낸 칸", "value": "x"}]},
                     {"url": "https://intra.test/made-up", "conditions": []}]}, ensure_ascii=False))
-    out = client.post(url, headers=ADMIN).json()
+    out = _suggest(sid)
     assert [s["url"] for s in out["screens"]] == ["https://intra.test/notice"]
     assert out["screens"][0]["conditions"] == [{"field": "등록일", "value": "@today-7d"}]
     assert any("지어낸 칸" in n for n in out["notes"])
@@ -599,9 +607,8 @@ def test_query_analysis_plans_how_to_collect_and_keeps_to_the_facts(client, monk
     """LLM 분석 — 화면마다 여는 길·조회 버튼·상세 열·엑셀 버튼까지. 찾은 길이 없는데 '메뉴 길'이면 녹화로 낮추고,
     표에 없는 열은 버린다. 받은 계획·힌트는 저장되고 북마크가 싣는다."""
     sid = _notice_scan(client, monkeypatch)
-    url = f"{API}/sources/{sid}/queries/suggest"
     # LLM 없이 — 지난 수집 기록이 없으면 주소로
-    assert client.post(url, headers=ADMIN).json()["screens"][0]["plan"]["method"] == "url"
+    assert _suggest(sid)["screens"][0]["plan"]["method"] == "url"
 
     seen = {}
 
@@ -614,7 +621,7 @@ def test_query_analysis_plans_how_to_collect_and_keeps_to_the_facts(client, monk
 
     monkeypatch.setattr(llm, "default_provider", lambda db, organization_id=None: object())
     monkeypatch.setattr(llm, "chat_completion", fake)
-    screen = client.post(url, headers=ADMIN).json()["screens"][0]
+    screen = _suggest(sid)["screens"][0]
     assert '"has_path": false' in seen["prompt"]
     assert screen["plan"]["method"] == "record" and "녹화" in screen["plan"]["reason"]
     assert screen["plan"]["risks"] == ["팝업 차단"]
@@ -623,7 +630,7 @@ def test_query_analysis_plans_how_to_collect_and_keeps_to_the_facts(client, monk
 
     monkeypatch.setattr(llm, "chat_completion", lambda *a, **kw: json.dumps({"screens": [{
         "url": "https://intra.test/notice", "conditions": [], "detail_column": "지어낸 열", "method": "보기"}]}))
-    other = client.post(url, headers=ADMIN).json()["screens"][0]
+    other = _suggest(sid)["screens"][0]
     assert "detail" not in other and other["plan"]["method"] == "url"
 
     saved = client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [screen]}).json()["screens"][0]
@@ -939,7 +946,7 @@ def test_recording_and_analysis_keep_what_the_person_chose_to_collect(client, mo
     assert len(screens) == 1 and screens[0]["path"]               # 녹화가 화면을 바꿨다(길이 생겼다)
     assert (screens[0]["collect"], screens[0]["page_format"]) == ("page", "md")
     monkeypatch.setattr(llm, "default_provider", lambda db, organization_id=None: None)
-    suggested = client.post(f"{API}/sources/{sid}/queries/suggest", headers=ADMIN).json()["screens"]
+    suggested = _suggest(sid)["screens"]
     assert [s.get("collect") for s in suggested if s["url"] == "https://intra.test/notice"] == ["page"]
 
 

@@ -1459,6 +1459,9 @@ def _finish(db: Session, row: InfoSource, result: dict, notes: list[str]) -> Non
     _record(db, row, via=via, started=started, status="done", urls=urls,
             counts=counts, pages=len(result.get("pages") or []), files=len(result.get("files") or []))
     db.commit()
+    from . import coverage  # noqa: PLC0415 — 하네스: 출처의 발견과 저장소의 유형을 다시 견준다(coverage.run_round)
+
+    coverage.after_scan(db, row, f"스캔 · {via}")
 
 
 def _fail(db: Session, source_id: int, error: Exception, via: str) -> None:
@@ -2173,7 +2176,7 @@ def accept_browser_result(db: Session, row: InfoSource, payload) -> dict:
 # 날짜 칸을 @last로 두면 지난번에 빠짐없이 받은 날부터 받는다(증분). 조건은 LLM이 스캔한 조회 항목과 지난
 # 수집 결과를 보고 제안하고, 사람이 고쳐 확정한다 — 확정한 조건이 북마크에 실린다.
 
-MAX_QUERY_SCREENS = 10
+MAX_QUERY_SCREENS = 30   # 메뉴 탐색이 100개까지 찾는다 — 정보 현황이 신규 화면을 더할 자리(예전 10)
 MAX_CONDITIONS = 15
 PAGE_FORMATS = ("md", "md_html")   # 「페이지」로 받을 때 — 마크다운만, 마크다운 + 원본 HTML
 _DATE_FIELD = re.compile(r"일자|날짜|일시|기간|등록일|작성일|date|day", re.I)
@@ -2495,7 +2498,7 @@ def _detail_of(page: dict, column: str) -> dict | None:
 
 
 def suggest_queries(db: Session, row: InfoSource) -> dict:
-    """화면마다 수집 방법과 조회 조건 분석 — 저장하지 않는다(사람이 보고 고쳐 저장한다).
+    """화면마다 수집 방법과 조회 조건 분석 — 저장하지 않는다. 정보 현황의 제안(services/coverage)이 신규 화면에 쓴다.
     지어낸 화면·칸·열은 버리고, 찾은 길이 없는데 '메뉴 길'이라 하면 '녹화 필요'로 낮춘다."""
     pages = query_candidates(row)
     if not pages:
@@ -2559,14 +2562,6 @@ def suggest_queries(db: Session, row: InfoSource) -> dict:
 
 
 # ---------------------------------------------------------------- 저장(admin 결정)
-
-def _env_path() -> Path:
-    # 설정이 읽는 **그 파일** — 다른 자리를 고치면 고쳤는데 반영되지 않는다.
-    # env_file=".env"는 작업 폴더 기준이다(서비스는 설치 폴더에서 뜬다).
-    from ..config import Settings  # noqa: PLC0415
-
-    return Path(str(Settings.model_config.get("env_file") or ".env")).resolve()
-
 
 def create_store(db: Session, name: str, folder: str, organization_id: int) -> storage.Store:
     """새 저장소를 부서 소속으로 DB에 등록한다. 원본 문서는 디스크에 남는다."""

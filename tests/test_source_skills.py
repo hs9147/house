@@ -88,14 +88,18 @@ def test_skill_rides_on_its_screen_and_placeholders_must_be_inputs(client, monke
     assert res.status_code == 400 and "같은 이름의 스킬" in res.json()["detail"]
 
 
+def _draft(sid: int, url: str) -> dict:
+    """스킬 초안(skills.draft) — 정보 현황의 제안이 신규 조회 화면에 쓴다."""
+    with SessionLocal() as db:
+        return skills.draft(db, db.get(InfoSource, sid), url)
+
+
 def test_draft_turns_fixed_values_into_inputs_and_tables_into_outputs(client, monkeypatch):
     """LLM이 없을 때의 초안 — 상대 날짜가 아닌 칸은 부를 때 바꿀 입력으로, 결과 표의 머리글은 출력으로."""
     sid = _notice_scan(client, monkeypatch)
     client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [{"url": NOTICE, "conditions": [
         {"field": "등록일", "value": "@today-1m"}, {"field": "구분", "value": "인사"}]}]})
-    res = client.post(f"{API}/sources/{sid}/skills/draft", headers=ADMIN, json={"url": NOTICE})
-    assert res.status_code == 200, res.text
-    out = res.json()
+    out = _draft(sid, NOTICE)
     assert out["via"] == "rule" and out["skill"]["name"] == "공지-조회"
     assert [p["name"] for p in out["skill"]["params"]] == ["구분"] and out["skill"]["params"][0]["default"] == "인사"
     assert out["conditions"] == [{"field": "등록일", "value": "@today-1m"}, {"field": "구분", "value": "{구분}"}]
@@ -104,8 +108,8 @@ def test_draft_turns_fixed_values_into_inputs_and_tables_into_outputs(client, mo
     saved = client.put(f"{API}/sources/{sid}/queries", headers=ADMIN, json={"screens": [
         {"url": NOTICE, "conditions": out["conditions"], "skill": out["skill"]}]})
     assert saved.status_code == 200, saved.text
-    assert client.post(f"{API}/sources/{sid}/skills/draft", headers=ADMIN,
-                       json={"url": "https://intra.test/none"}).status_code == 400
+    with pytest.raises(infosource.SourceError):
+        _draft(sid, "https://intra.test/none")
 
 
 def test_draft_from_llm_keeps_to_the_facts(client, monkeypatch):
@@ -118,7 +122,7 @@ def test_draft_from_llm_keeps_to_the_facts(client, monkeypatch):
               "outputs": [{"name": "제목", "description": "공지 제목"}, {"name": "지어낸 열"}]}
     monkeypatch.setattr(skills.llm, "default_provider", lambda db, organization_id=None: object())
     monkeypatch.setattr(skills.llm, "chat_completion", lambda *a, **kw: json.dumps(answer, ensure_ascii=False))
-    out = client.post(f"{API}/sources/{sid}/skills/draft", headers=ADMIN, json={"url": NOTICE}).json()
+    out = _draft(sid, NOTICE)
     assert out["via"] == "llm" and out["skill"]["name"] == "notice-search"
     assert [p["name"] for p in out["skill"]["params"]] == ["kind"]                 # 없는 칸은 버린다
     assert out["conditions"][-1] == {"field": "구분", "value": "{kind}"}           # 조건에 자리가 생긴다

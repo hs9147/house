@@ -220,10 +220,11 @@ DRAFT_PROMPT = """사내 업무 사이트의 조회 화면 하나를 **에이전
 """
 
 
-def draft(db: Session, row: InfoSource, url: str) -> dict:
+def draft(db: Session, row: InfoSource, url: str, screen: dict | None = None) -> dict:
     """화면 하나의 스킬 초안 — {"skill", "conditions", "via"}. LLM이 없거나 답이 틀리면 결정론 초안(조건 값이 상대
-    날짜가 아닌 칸을 입력으로, 지난 수집의 열을 출력으로). 저장하지 않는다 — 사람이 고쳐 수집 조건과 함께 저장한다."""
-    screen = next((s for s in infosource.query_screens(row) if s["url"] == url), None)
+    날짜가 아닌 칸을 입력으로, 지난 수집의 열을 출력으로). 저장하지 않는다 — 사람이 고쳐 수집 조건과 함께 저장한다.
+    screen을 주면 저장 전의 화면(정보 현황의 제안)으로 만든다."""
+    screen = screen or next((s for s in infosource.query_screens(row) if s["url"] == url), None)
     if screen is None:
         raise SourceError("수집 조건에 없는 화면입니다 — 먼저 수집 조건에 화면을 더하고 저장하세요.")
     page = next((c for c in infosource.query_candidates(row) if c["url"] == url.split("#")[0] or c["url"] == url), {})
@@ -370,12 +371,17 @@ def run(db: Session, key: ApiKey, ident: str, params: dict | None = None, *, row
     out = {"skill": skill_id(row, screen["skill"]["name"]), "screen": screen["screen"],
            "params": values, **_shape(result, max(1, min(rows, MAX_ROWS))),
            "seconds": round(time.monotonic() - started, 1), "cached": False}
+    landed = payload.get("landed") or {}
+    if landed.get("url") and not out["lists"] and not out["files"] and not out["pages"]:
+        out["notes"].append(f"서버 브라우저의 첫 화면: {landed.get('title') or '(제목 없음)'} · {landed['url']}")
     _CACHE[cache_key] = (time.monotonic(), out)
     for k in [k for k, (at, _) in _CACHE.items() if time.monotonic() - at >= CACHE_SECONDS]:
         _CACHE.pop(k, None)
     audit.record(db, key.name, "source.skill.run", out["skill"],
                  {"ok": True, "params": sorted(values), "rows": sum(x["got"] for x in out["lists"]),
-                  "files": len(out["files"]), "pages": len(out["pages"]), "seconds": out["seconds"]})
+                  "files": len(out["files"]), "pages": len(out["pages"]), "seconds": out["seconds"],
+                  # 메모는 화면 이름·막힌 까닭뿐이다(입력값은 싣지 않는다) — 하네스가 0건의 까닭으로 읽는다
+                  "notes": [n[:200] for n in out["notes"][:3]]})
     return out
 
 

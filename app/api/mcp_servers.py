@@ -233,6 +233,15 @@ _OPS_TOOLS = [
             },
         },
     },
+    {
+        "name": "source_coverage",
+        "description": (
+            "데이터 수집의 하네스 현황 — 출처마다 최신 라운드(받을 수 있는 정보의 판정 수: 관리 중·중복·비슷함·신규),"
+            " 저장소에 있는데 출처를 모르는 유형(출처 미확인), 교정할 것(0건·막힘·열 다름·스킬 0건), 라운드 이력."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "source": {"type": "string", "description": "출처 이름(비우면 전부 — 요약만)"}}},
+    },
 ]
 
 
@@ -267,6 +276,26 @@ def _project_by_name(db: Session, args: dict, discover: str = "list_routes") -> 
 
 
 def _ops_call(db: Session, actor: str, name: str, args: dict) -> str:
+    if name == "source_coverage":
+        from ..models import InfoSource  # noqa: PLC0415
+        from ..services import coverage  # noqa: PLC0415
+
+        wanted = _str_arg(args, "source", required=False)
+        out = []
+        for row in db.execute(select(InfoSource).order_by(InfoSource.id)).scalars():
+            if wanted and row.name != wanted:
+                continue
+            h = coverage.harness(row.id)
+            entry = {"source": row.name, "kind": row.kind, "round": h.get("round"), "rounds": h.get("rounds", []),
+                     "gaps": h.get("gaps", [])[:10], "issues": h.get("issues", []),
+                     "decisions": len(h.get("decisions") or {})}
+            if wanted:
+                entry["items"] = [{k: i.get(k) for k in ("type", "title", "status", "reason", "store_match")}
+                                  for i in h.get("items", [])][:100]
+                entry["changed"] = h.get("changed", [])
+            out.append(entry)
+        return _dump(out)
+
     if name == "list_routes":
         # 서버구성 화면과 같은 함수를 쓴다 — 화면과 다른 값을 말하기 시작하면 둘 중
         # 어느 쪽이 사실인지 알 수 없게 된다.

@@ -163,47 +163,21 @@ function SkillResult({ out }: { out: SkillRunResult }) {
   );
 }
 
-const EMPTY: SourceSkill = { name: '', description: '', when: '', params: [], outputs: [], audience: [] };
-
 /**
- * 화면 하나의 스킬 — 수집 조건의 그 화면 카드 안에서 고친다(저장은 수집 조건과 함께). 입력은 조건 값의 {이름}
- * 자리다 — 부를 때 값을 받고, 수집(북마크·봇)은 기본값으로 돈다.
+ * 화면 하나의 스킬 — 수집 조건의 그 화면 카드 안에서 고친다(저장은 수집 조건과 함께). 스킬은 「🔎 정보 현황」의 제안이나
+ * 「🧩 스킬 작업」 대화가 만든다 — 여기서는 확정 전에 손볼 것만 고친다. 입력은 조건 값의 {이름} 자리다.
  */
-export function SkillEditor({ sourceId, url, skill, conditions, saved, orgs, onChange }: {
-  sourceId: number;
-  url: string;
+export function SkillEditor({ skill, conditions, orgs, onChange }: {
   skill?: SourceSkill;
   conditions: SourceQueryCondition[];
-  saved: boolean;          // 이 화면이 저장돼 있어야 초안을 만든다(서버가 저장한 화면을 읽는다)
   orgs: OrgOut[];
   onChange: (skill: SourceSkill | undefined, conditions?: SourceQueryCondition[]) => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [via, setVia] = useState('');
-  const makeDraft = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      const out = await api.draftSourceSkill(sourceId, url);
-      setVia(out.via === 'llm' ? 'LLM 초안' : '규칙 초안(LLM 없음)');
-      onChange({ ...out.skill, audience: skill?.audience ?? [] }, out.conditions);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
   if (!skill) {
     return (
-      <div className="row" style={{ gap: 6, alignItems: 'center', marginTop: 6, fontSize: 11 }}>
-        <button className="small secondary" disabled={busy || !saved} onClick={() => void makeDraft()}>
-          {busy ? '…' : '스킬 초안 만들기'}
-        </button>
-        <button className="small secondary" onClick={() => onChange({ ...EMPTY, name: '' })}>직접 쓰기</button>
-        {!saved && <span className="mutedtext">수집 조건을 저장한 뒤에 초안을 만듭니다</span>}
-        {error && <span className="error">{error}</span>}
-      </div>
+      <p className="mutedtext" style={{ fontSize: 11, margin: '6px 0 0' }}>
+        스킬 없음 — 위 대화에 「이 화면의 스킬을 만들어 줘」라고 하거나, 「🔎 정보 현황」 제안으로 만듭니다.
+      </p>
     );
   }
   const set = (next: Partial<SourceSkill>) => onChange({ ...skill, ...next });
@@ -215,9 +189,7 @@ export function SkillEditor({ sourceId, url, skill, conditions, saved, orgs, onC
         <b>🧩 스킬</b>
         <input value={skill.name} placeholder="이름 — 예: 공지-검색" aria-label="스킬 이름" style={{ width: 180 }}
                onChange={(e) => set({ name: e.target.value })} />
-        {via && <span className="mutedtext">{via}</span>}
         <div className="spacer" />
-        <button className="small secondary" disabled={busy || !saved} onClick={() => void makeDraft()}>{busy ? '…' : '초안 다시'}</button>
         <button className="small secondary" onClick={() => onChange(undefined)}>스킬 빼기</button>
       </div>
       <textarea value={skill.description} rows={2} placeholder="용도 — 돌려주는 것(어떤 목록, 행 하나가 무엇인지)"
@@ -272,7 +244,6 @@ export function SkillEditor({ sourceId, url, skill, conditions, saved, orgs, onC
           ))}
         </div>
       </div>
-      {error && <p className="error">{error}</p>}
     </div>
   );
 }
@@ -373,7 +344,7 @@ export function SkillWorkspace({ row, q }: { row: SourceOut; q: QueryDraft }) {
               ))}
               {!screens.length && (
                 <span className="mutedtext" style={{ fontSize: 11 }}>
-                  수집 조건에 화면이 없습니다 — 왼쪽에서 화면을 더하거나 「LLM 분석」을 하세요.
+                  수집 조건에 화면이 없습니다 — 「🔎 정보 현황」에서 분석하고 제안을 확정하세요.
                 </span>
               )}
             </div>
@@ -425,8 +396,7 @@ export function SkillWorkspace({ row, q }: { row: SourceOut; q: QueryDraft }) {
             <span className="mutedtext mono" style={{ fontSize: 10, marginLeft: 6 }}>
               조건 {s.conditions.map((c) => `${c.field}=${c.value}`).join(', ') || '없음'}
             </span>
-            <SkillEditor sourceId={row.id} url={s.url} skill={s.skill} conditions={s.conditions}
-              saved={q.savedUrls.has(s.url)} orgs={orgs.data ?? []}
+            <SkillEditor skill={s.skill} conditions={s.conditions} orgs={orgs.data ?? []}
               onChange={(skill, conditions) => {
                 const { skill: _old, ...rest } = s;
                 q.setScreen(i, { ...rest, ...(skill ? { skill } : {}), ...(conditions ? { conditions } : {}) });

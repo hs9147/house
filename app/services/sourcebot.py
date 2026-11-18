@@ -69,6 +69,7 @@ def run(source: dict, screens: list[dict], headers: dict, *, start_url: str,
                         "queries": screens, "version": source.get("version", "")}}
     html = _RUNNER_HTML.replace("__START__", json.dumps(start, ensure_ascii=False).replace("</", "<\\/"))
     box: dict = {}
+    landed_title = landed_url = ""
     # 사내 루트 CA — OS가 검증한 인증서만 받는다(infosource.os_trusted)
     trust = os_trusted([start_url, *(s.get("url", "") for s in screens), *(s.get("start", "") for s in screens)])
     with sync_playwright() as pw:
@@ -95,6 +96,12 @@ def run(source: dict, screens: list[dict], headers: dict, *, start_url: str,
             page.on("dialog", lambda d: d.dismiss())
             step(f"서버 브라우저로 {start_url}을 엽니다")
             page.goto(start_url, wait_until="networkidle", timeout=60_000)
+            landed = _origin(page.url)
+            if landed != origin:
+                raise SourceError(f"다른 주소({landed})로 넘어갔습니다 — 로그인(SSO) 화면입니다. 서버에 맡긴 세션이 없거나 "
+                                  "만료됐습니다(무인 수집 설정과 출처의 요청 헤더를 보세요).")
+            landed_title, landed_url = page.title()[:80], page.url[:200]
+            step(f"열린 화면: {landed_title} · {landed_url}")
             if page.locator("input[type=password]").count():
                 raise SourceError("로그인 화면이 떴습니다 — 서버에 맡긴 세션이 없거나 만료됐습니다(무인 수집 설정과 "
                                   "출처의 요청 헤더를 보세요). 북마크로는 로그인한 내 브라우저에서 돌릴 수 있습니다.")
@@ -109,4 +116,5 @@ def run(source: dict, screens: list[dict], headers: dict, *, start_url: str,
     payload = box["payload"]
     if not isinstance(payload, dict):
         raise SourceError("봇이 결과를 돌려주지 않았습니다.")
+    payload["landed"] = {"title": landed_title, "url": landed_url}   # 진단 — 첫 화면이 무엇이었나
     return payload

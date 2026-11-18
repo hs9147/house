@@ -12,6 +12,7 @@ import type {
   OrgOut, SourceQueryMethod, SourceQueryScreen, SourceSaveResult, SourceSaveTarget, SourceTarget, StorageStore,
 } from '../lib/types';
 import { kindLabel, SourceStatus } from './Sources';
+import { CoveragePanel } from './SourceCoverage';
 import { SkillWorkspace } from './SourceSkills';
 
 const PAGE_KIND: Record<string, string> = {
@@ -126,10 +127,16 @@ export default function SourceDetail() {
   );
 
   // 웹사이트는 오른쪽이 둘 — 스캔이 읽은 것과, 스킬 작업(LLM과 대화로 스킬을 정리 — 왼쪽은 폭이 좁다)
-  const right = row.kind !== 'web' ? <ScanView row={row} /> : (
+  const right = row.kind !== 'web' ? (
+    <Tabs tabs={[
+      { key: 'scan', label: '스캔 결과', content: <ScanView row={row} /> },
+      { key: 'coverage', label: '🔎 정보 현황', content: <CoveragePanel row={row} onChange={setRow} /> },
+    ]} />
+  ) : (
     <Tabs initial={row.queries?.length ? 1 : 0} tabs={[
       { key: 'scan', label: '스캔 결과', content: <ScanView row={row} /> },
       { key: 'skills', label: '🧩 스킬 작업', content: <SkillWorkspace row={row} q={q} /> },
+      { key: 'coverage', label: '🔎 정보 현황', content: <CoveragePanel row={row} onChange={setRow} /> },
     ]} />
   );
   return <Split left={left} right={right} leftLabel="작업" />;
@@ -205,7 +212,6 @@ function useQueryDraft(id: number, row: SourceOut | null, onChange: (r: SourceOu
   const state = useApi(() => (web ? api.sourceQueries(id) : Promise.resolve(null)),
     [id, web, row?.scanned_at, row?.queries_version]);
   const [screens, setScreens] = useState<SourceQueryScreen[] | null>(null);
-  const [notes, setNotes] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
@@ -215,20 +221,6 @@ function useQueryDraft(id: number, row: SourceOut | null, onChange: (r: SourceOu
   const candidates = state.data?.candidates ?? [];
   const edit = (next: SourceQueryScreen[]) => { setScreens(next); setSaved(false); };
   const setScreen = (i: number, s: SourceQueryScreen) => edit((screens ?? []).map((x, j) => (j === i ? s : x)));
-
-  const suggest = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      const out = await api.suggestSourceQueries(id);
-      edit(out.screens);
-      setNotes(out.notes);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const save = async () => {
     if (!screens) return;
@@ -247,16 +239,14 @@ function useQueryDraft(id: number, row: SourceOut | null, onChange: (r: SourceOu
     }
   };
   const savedUrls = new Set((state.data?.screens ?? []).map((x) => x.url));
-  return { state, screens, candidates, notes, busy, setBusy, error, setError, saved, edit, setScreen, suggest, save,
-           savedUrls };
+  return { state, screens, candidates, busy, setBusy, error, setError, saved, edit, setScreen, save, savedUrls };
 }
 
 type Draft = ReturnType<typeof useQueryDraft>;
 
 function QueryPanel({ row, q }: { row: SourceOut; q: Draft }) {
-  const { state, screens, candidates, notes, busy, setBusy, error, setError, saved, edit, setScreen, suggest, save } = q;
+  const { state, screens, candidates, busy, setBusy, error, setError, saved, edit, setScreen, save } = q;
   const fieldsOf = (url: string) => candidates.find((c) => c.url === url)?.fields ?? [];
-  const unused = candidates.filter((c) => !(screens ?? []).some((s) => s.url === c.url));
   // 지난 수집에서 막힌 화면 — 고칠 길을 물을 수 있다(그 자리에 실제로 있던 것 중에서 고른다)
   const blocked = (row.scan?.collected ?? []).filter((c) => c.repair);
   const [fixes, setFixes] = useState<Record<string, Awaited<ReturnType<typeof api.repairSourceQuery>>>>({});
@@ -299,8 +289,8 @@ function QueryPanel({ row, q }: { row: SourceOut; q: Draft }) {
       </p>
       <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
         화면을 여는 길: ① 그 화면을 열어 둔 채 북마크를 누르면 그 자리에서, ② 「녹화」나 메뉴 탐색이 찾은 길이
-        있으면 메뉴를 다시 눌러서, ③ 아니면 주소로 엽니다. 「LLM 분석」은 화면마다 어느 길로 열지·조회 버튼·상세를
-        여는 열·엑셀 버튼·조건을 지난 스캔과 수집 기록에서 골라 줍니다(저장 전에 고칠 수 있다). 메뉴로만 열리는
+        있으면 메뉴를 다시 눌러서, ③ 아니면 주소로 엽니다. 「🔎 정보 현황」의 제안이 화면마다 어느 길로 열지·조회 버튼·상세를
+        여는 열·엑셀 버튼·조건을 지난 스캔과 수집 기록에서 골라 줍니다(확정하면 여기에 더해진다). 메뉴로만 열리는
         화면(주소로 열면 다른 화면이 뜬다)은 ③의 「녹화 시작」으로 메뉴 → 조건 → 조회 → 첫 행의 상세 → 첨부를 한 번
         보여 주면 여기에 바로 더해집니다.
       </p>
@@ -310,7 +300,7 @@ function QueryPanel({ row, q }: { row: SourceOut; q: Draft }) {
             {(screens ?? []).length === 0 && (
               <p className="mutedtext" style={{ fontSize: 12 }}>
                 {candidates.length
-                  ? '아직 조건이 없습니다 — 「LLM 분석」으로 받거나 아래에서 화면을 더하세요.'
+                  ? '아직 조건이 없습니다 — 오른쪽 「🔎 정보 현황」에서 분석하고 제안을 확정하세요.'
                   : '조회 칸이 보인 화면이 없습니다 — 조회 화면을 연 상태로 브라우저 스캔을 하세요.'}
               </p>
             )}
@@ -408,31 +398,15 @@ function QueryPanel({ row, q }: { row: SourceOut; q: Draft }) {
                 </div>
               );
             })}
-            {unused.length > 0 && (
-              <select value="" aria-label="화면 더하기" style={{ marginBottom: 6 }}
-                onChange={(e) => {
-                  const c = candidates.find((x) => x.url === e.target.value);
-                  if (c) {
-                    edit([...(screens ?? []), {
-                      screen: c.title || c.url, url: c.url, conditions: [],
-                      ...(c.path ? { path: c.path, start: c.start, frame: c.frame } : {}),
-                    }]);
-                  }
-                }}>
-                <option value="">+ 화면 더하기</option>
-                {unused.map((c) => <option key={c.url} value={c.url}>{c.title || c.url} ({c.fields.join(', ')})</option>)}
-              </select>
-            )}
+            <p className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>
+              새 화면은 오른쪽 「🔎 정보 현황」의 「분석」이 신규인지 판정해 받을 것·조건·스킬까지 제안합니다 — 확정하면 여기에 더해집니다.
+            </p>
             <div className="row" style={{ gap: 8 }}>
-              <button className="small secondary" disabled={busy || !candidates.length} onClick={suggest}>
-                {busy ? '…' : 'LLM 분석(방법·조건)'}
-              </button>
               <button className="small" disabled={busy || screens === null} onClick={save}>저장</button>
               {saved && <span className="mutedtext" style={{ fontSize: 11 }}>
                 저장했습니다 — 다음 스캔·수집·봇 실행부터 새 조건으로 돕니다(콘솔 없이 쓸 때는 북마크를 다시 끌어다 놓으세요).
               </span>}
             </div>
-            {notes.map((n) => <p key={n} className="mutedtext" style={{ fontSize: 11, margin: '4px 0' }}>{n}</p>)}
           </>
         )}
       </Async>

@@ -5,6 +5,7 @@ import Tabs from '../components/Tabs';
 import { api } from '../lib/api';
 import { useApi, type AsyncState } from '../lib/hooks';
 import type { SourceKind, SourceOut } from '../lib/types';
+import { InventoryTab } from './SourceCoverage';
 import { SkillCatalog } from './SourceSkills';
 
 export const SOURCE_KINDS: { key: SourceKind; label: string; hint: string }[] = [
@@ -113,6 +114,7 @@ export default function Sources() {
       <Tabs tabs={[
         { key: 'sources', label: '출처', content: <SourceList list={list} navigate={navigate} remove={remove} /> },
         { key: 'skills', label: '스킬', content: <SkillCatalog /> },
+        { key: 'inventory', label: '정보 현황', content: <InventoryTab /> },
       ]} />
     </>
   );
