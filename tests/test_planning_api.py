@@ -277,7 +277,8 @@ def test_solution_stage_offers_bound_mcp_server_tools(monkeypatch, fresh_setting
     # 바인딩 도구와 MCP 도구가 함께 노출되고, 호출은 해당 서버로 전달된다
     tool_payload = next(p for p in payloads if p.get("tools"))
     names = [t["function"]["name"] for t in tool_payload["tools"]]
-    assert names == ["bind_module", "docs-mcp__search"]
+    assert names == ["bind_module", "docs-mcp__search",
+                     "paas_apis__search_apis", "paas_apis__list_api_categories", "paas_apis__catalog_status"]
     assert called == [("search", {"q": "결제 규격"})]
     tool_msg = next(m for m in payloads[-1]["messages"] if m.get("role") == "tool")
     assert tool_msg["content"] == "결과 3건"
@@ -293,7 +294,43 @@ def test_bind_tool_absent_outside_solution_stage(monkeypatch, fresh_settings, tm
     calls = _mock_llm(monkeypatch)
     c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages",
            json={"content": "기획서"}, headers=ADMIN)
-    assert not any(p.get("tools") for p in calls)
+    # 바인딩은 솔루션 구성에서만 — 다른 단계에는 API 카탈로그 조회만 있다
+    names = {t["function"]["name"] for p in calls for t in p.get("tools") or []}
+    assert "bind_module" not in names and "paas_apis__search_apis" in names and "paas_apis__sync_catalog" not in names
+
+
+def test_every_stage_can_look_up_the_platform_api_catalog(monkeypatch, fresh_settings, tmp_path):
+    """에이전트 기획은 단계마다 플랫폼의 API 카탈로그를 조회한다(읽기만) — 지어낸 API 대신 실제 이름·주소로 쓰게."""
+    from app.db import SessionLocal
+    from app.models import ApiCatalogEntry
+    from app.services import llm as llm_service
+
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, prov = _project_and_provider(c)
+    with SessionLocal() as db:
+        db.add(ApiCatalogEntry(source="publicdata", ext_id="plan-test-1", title="조달청 나라장터 입찰공고",
+                               description="입찰 공고 목록", categories=["조달"], spec_url="https://apis.data.go.kr/x",
+                               search_text="plan-test-1 조달청 나라장터 입찰공고 입찰 공고 목록 조달"))
+        db.commit()
+    sid = c.post("/paas/api/v1/plan/sessions", json={"project_id": pid, "provider_id": prov},
+                 headers=ADMIN).json()["id"]
+    payloads: list[dict] = []
+
+    def fake_post(url, headers, payload):
+        payloads.append(payload)
+        if _FILE_SELECT_MARK in payload["messages"][0]["content"]:
+            return {"choices": [{"message": {"content": "[]"}}]}
+        if not any(m.get("role") == "tool" for m in payload["messages"]):
+            return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "t1", "function": {"name": "paas_apis__search_apis", "arguments": '{"keyword": "입찰"}'}}]}}]}
+        return {"choices": [{"message": {"content": "# 기획서 초안"}}]}
+
+    monkeypatch.setattr(llm_service, "_post_chat", fake_post)
+    r = c.post(f"/paas/api/v1/plan/sessions/{sid}/stages/spec/messages", json={"content": "기획서 써줘"}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    tool_msg = next(m for m in payloads[-1]["messages"] if m.get("role") == "tool")
+    assert "조달청 나라장터 입찰공고" in tool_msg["content"]
 
 
 def test_duplicate_bind_is_reported_not_raised(monkeypatch, fresh_settings, tmp_path):

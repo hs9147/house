@@ -349,7 +349,7 @@ async def post_plan_message(
     messages.extend({"role": m.role, "content": m.content} for m in history)
     messages.append({"role": "user", "content": body.content})
 
-    # 솔루션 구성 단계에서만 도구를 준다 — 쓰기로 결정한 모듈을 문서와 같은 자리에서
+    # 솔루션 구성 단계에서만 바인딩 도구를 준다 — 쓰기로 결정한 모듈을 문서와 같은 자리에서
     # 프로젝트에 붙이고(bind_module), 바인딩된 MCP 서버의 도구로 실제 규격을 확인한다.
     bound_modules: list[str] = []
     tools: list[dict] = []
@@ -359,6 +359,9 @@ async def post_plan_message(
             planning_service.solution_tools,
             db, project, constraints.get("available_resources") or [], key.name, bound_modules,
         )
+    # API 조회는 모든 단계에 — 플랫폼이 모아 둔 외부·공공 API 카탈로그(/mcp/apis와 같은 도구, 읽기만). 요구·솔루션을
+    # 쓰며 "이 데이터를 주는 API가 있나"를 그 자리에서 확인하고, 지어내지 않고 실제 이름·주소로 적게 한다.
+    tools, tool_executor = _with_api_catalog(db, key.name, tools, tool_executor)
 
     # 길이 제한에서 잘렸는지 — 부분 결과는 버리지 않고 경고와 함께 편집기로 보낸다.
     # 조용히 완전한 것처럼 저장하면 문서 끝의 C4 블록이 사라진 채 확정된다(실측 사례).
@@ -1085,6 +1088,31 @@ def list_common_constraints(
     return [_constraint_out(r) for r in db.execute(
         select(PlanConstraint).order_by(PlanConstraint.id)
     ).scalars()]
+
+
+API_TOOL_PREFIX = "paas_apis__"
+
+
+def _with_api_catalog(db: Session, actor: str, tools: list[dict], execute):
+    """기획 대화의 도구에 API 카탈로그 조회(search_apis·list_api_categories·catalog_status)를 더한다 — 수집(sync)은 빼고
+    읽기만. 이름 앞에 paas_apis__를 붙여 바인딩된 MCP 서버의 도구와 겹치지 않게 한다."""
+    from . import mcp_servers  # noqa: PLC0415 — 순환 import 회피
+
+    catalog = [{"type": "function", "function": {
+        "name": API_TOOL_PREFIX + t["name"],
+        "description": "[플랫폼 API 카탈로그] " + t["description"]
+        + " 기획 문서에 외부·공공 API를 쓰려면 여기서 찾은 실제 이름·주소·출처를 근거로 적는다(지어내지 않는다).",
+        "parameters": t["inputSchema"]}} for t in mcp_servers._read_only(mcp_servers._APIS_TOOLS)]
+
+    def run(name: str, args: dict) -> str:
+        if name.startswith(API_TOOL_PREFIX):
+            try:
+                return mcp_servers._apis_call(db, actor, name[len(API_TOOL_PREFIX):], args)
+            except mcp_server.McpToolError as e:
+                return f"API 카탈로그 조회 실패: {e}"
+        return execute(name, args) if execute is not None else f"unknown tool: {name}"
+
+    return [*tools, *catalog], run
 
 
 @router.post("/plan/constraints", response_model=PlanConstraintOut, status_code=201)
