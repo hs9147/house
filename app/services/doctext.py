@@ -758,7 +758,9 @@ def _legacy_office_text(path: Path) -> str:
     with tempfile.TemporaryDirectory() as outdir:
         try:
             done = subprocess.run(
-                [exe, "--headless", "--convert-to", "txt:Text", "--outdir", outdir, str(path)],
+                # **UTF-8로** — 「txt:Text」는 서버 계정의 기본 코드 페이지로 써서, 그 코드 페이지에 없는 한글이 전부 「?」가
+                # 됐다(실측 운영 contracts의 .doc: 「1) ? ? ? : ??????? ????」). 그 글로 내용 분석이 이름을 지어냈다.
+                [exe, "--headless", "--convert-to", "txt:Text (encoded):UTF8", "--outdir", outdir, str(path)],
                 capture_output=True, timeout=_SOFFICE_TIMEOUT, check=False,
             )
         except subprocess.TimeoutExpired:
@@ -905,3 +907,21 @@ def _decode(data: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return data.decode("utf-8", errors="replace")
+
+
+# --- 깨진 본문 ---
+
+_BROKEN = ("?", "\ufffd")
+
+
+def garbled_ratio(text: str) -> float:
+    """본문 글자 중 깨진 글자(「?」·「\ufffd」)의 비율 — 공백을 뺀 글자 기준. 문장 부호로 쓰인 「?」도 세지만 보통 1%도
+    안 된다. 코드 페이지가 맞지 않게 뽑힌 한글은 이 비율이 수십 %다."""
+    letters = [c for c in text or "" if not c.isspace()]
+    broken = sum(1 for c in letters if c in _BROKEN)
+    if broken < 20:      # 짧은 글의 물음표 몇 개는 깨진 것이 아니다
+        return 0.0
+    return broken / len(letters)
+
+
+GARBLED = 0.15      # 이 이상이면 깨진 본문으로 본다(LLM에 보내지 않는다 — 지어낸 이름만 쌓인다)

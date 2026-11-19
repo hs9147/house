@@ -278,7 +278,8 @@ def test_solution_stage_offers_bound_mcp_server_tools(monkeypatch, fresh_setting
     tool_payload = next(p for p in payloads if p.get("tools"))
     names = [t["function"]["name"] for t in tool_payload["tools"]]
     assert names == ["bind_module", "docs-mcp__search",
-                     "paas_apis__search_apis", "paas_apis__list_api_categories", "paas_apis__catalog_status"]
+                     "paas_apis__search_apis", "paas_apis__list_api_categories", "paas_apis__catalog_status",
+                     "paas_apis__bind_api"]      # 카탈로그 API 바인딩은 솔루션 구성에서만
     assert called == [("search", {"q": "결제 규격"})]
     tool_msg = next(m for m in payloads[-1]["messages"] if m.get("role") == "tool")
     assert tool_msg["content"] == "결과 3건"
@@ -297,6 +298,7 @@ def test_bind_tool_absent_outside_solution_stage(monkeypatch, fresh_settings, tm
     # 바인딩은 솔루션 구성에서만 — 다른 단계에는 API 카탈로그 조회만 있다
     names = {t["function"]["name"] for p in calls for t in p.get("tools") or []}
     assert "bind_module" not in names and "paas_apis__search_apis" in names and "paas_apis__sync_catalog" not in names
+    assert "paas_apis__bind_api" not in names
 
 
 def test_every_stage_can_look_up_the_platform_api_catalog(monkeypatch, fresh_settings, tmp_path):
@@ -2339,3 +2341,35 @@ def test_unconfirmed_stage_draft_stays_a_draft(monkeypatch, fresh_settings, tmp_
 
     levels = _c4(c, sid, stage="spec", draft=_C4_SPEC_DOC)["levels"]
     assert levels["context"]["confirmed"] is False
+
+
+def test_catalog_api_is_bound_to_the_project_from_the_catalog(monkeypatch, fresh_settings, tmp_path):
+    """카탈로그에서 찾은 API를 과제에 바인딩한다(MCP /mcp/apis bind_api · 기획 솔루션 구성) — 과제 조직 범위의 external_api
+    모듈로 만들고(같은 항목은 한 모듈) 붙인다. 그 과제 조직 사람이나 관리자만, 대화 묶음에는 없다."""
+    from app.api import mcp_servers
+    from app.db import SessionLocal
+    from app.models import ApiCatalogEntry, Module, ModuleBinding, Project
+
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, _prov = _project_and_provider(c)
+    with SessionLocal() as db:
+        db.add(ApiCatalogEntry(source="publicdata", ext_id="bind-test-1", title="나라장터 입찰공고", description="",
+                               categories=["조달"], spec_url="https://apis.data.go.kr/bid", search_text="bind-test-1"))
+        db.commit()
+        project = db.get(Project, pid)
+        admin = type("K", (), {"name": "admin", "is_admin": True})()
+        member = type("K", (), {"name": "nobody@lge.com", "is_admin": False})()
+        args = {"project": project.name, "api_id": "bind-test-1", "env_prefix": "public_bid"}
+        out = json.loads(mcp_servers._apis_call(db, "admin", "bind_api", args, key=admin))
+        assert out["created"] and out["env_prefix"] == "PUBLIC_BID" and any(k.startswith("PUBLIC_BID") for k in out["injected_env"])
+        module = db.query(Module).filter_by(name=out["module"]).one()
+        assert module.organization_id == project.organization_id and module.config["catalog"] == "publicdata:bind-test-1"
+        again = json.loads(mcp_servers._apis_call(db, "admin", "bind_api", args, key=admin))
+        assert again["already"] and again["module"] == out["module"]
+        assert db.query(ModuleBinding).filter_by(project_id=pid, module_id=module.id).count() == 1
+        with pytest.raises(mcp_servers.mcp_server.McpToolError, match="권한"):
+            mcp_servers._apis_call(db, "x", "bind_api", args, key=member)
+        with pytest.raises(mcp_servers.mcp_server.McpToolError, match="env_prefix"):
+            mcp_servers._apis_call(db, "admin", "bind_api", {**args, "env_prefix": "1x"}, key=admin)
+    assert "bind_api" not in {t["name"] for t in mcp_servers._read_only(mcp_servers._APIS_TOOLS)}

@@ -361,7 +361,8 @@ async def post_plan_message(
         )
     # API 조회는 모든 단계에 — 플랫폼이 모아 둔 외부·공공 API 카탈로그(/mcp/apis와 같은 도구, 읽기만). 요구·솔루션을
     # 쓰며 "이 데이터를 주는 API가 있나"를 그 자리에서 확인하고, 지어내지 않고 실제 이름·주소로 적게 한다.
-    tools, tool_executor = _with_api_catalog(db, key.name, tools, tool_executor)
+    tools, tool_executor = _with_api_catalog(db, key.name, tools, tool_executor,
+                                             project if plan_stage == PlanStage.solution else None, bound_modules)
 
     # 길이 제한에서 잘렸는지 — 부분 결과는 버리지 않고 경고와 함께 편집기로 보낸다.
     # 조용히 완전한 것처럼 저장하면 문서 끝의 C4 블록이 사라진 채 확정된다(실측 사례).
@@ -1093,9 +1094,11 @@ def list_common_constraints(
 API_TOOL_PREFIX = "paas_apis__"
 
 
-def _with_api_catalog(db: Session, actor: str, tools: list[dict], execute):
+def _with_api_catalog(db: Session, actor: str, tools: list[dict], execute, project=None, bound: list | None = None):
     """기획 대화의 도구에 API 카탈로그 조회(search_apis·list_api_categories·catalog_status)를 더한다 — 수집(sync)은 빼고
-    읽기만. 이름 앞에 paas_apis__를 붙여 바인딩된 MCP 서버의 도구와 겹치지 않게 한다."""
+    읽기만. 이름 앞에 paas_apis__를 붙여 바인딩된 MCP 서버의 도구와 겹치지 않게 한다. project를 주면(솔루션 구성 단계)
+    찾은 API를 그 자리에서 과제에 붙이는 bind_api도 — 바인딩한 모듈은 bound에 쌓인다(bind_module과 같다)."""
+    from ..services import apisearch  # noqa: PLC0415
     from . import mcp_servers  # noqa: PLC0415 — 순환 import 회피
 
     catalog = [{"type": "function", "function": {
@@ -1103,8 +1106,25 @@ def _with_api_catalog(db: Session, actor: str, tools: list[dict], execute):
         "description": "[플랫폼 API 카탈로그] " + t["description"]
         + " 기획 문서에 외부·공공 API를 쓰려면 여기서 찾은 실제 이름·주소·출처를 근거로 적는다(지어내지 않는다).",
         "parameters": t["inputSchema"]}} for t in mcp_servers._read_only(mcp_servers._APIS_TOOLS)]
+    if project is not None:
+        bind = next(t for t in mcp_servers._APIS_TOOLS if t["name"] == "bind_api")
+        props = {k: v for k, v in bind["inputSchema"]["properties"].items() if k != "project"}   # 과제는 이 기획의 것
+        catalog.append({"type": "function", "function": {
+            "name": API_TOOL_PREFIX + "bind_api",
+            "description": "[플랫폼 API 카탈로그] 솔루션에 쓰기로 정한 카탈로그 API를 이 과제에 바인딩한다 — 배포하면"
+                           " {env_prefix}_URL 같은 환경변수가 주입된다. 문서에 쓰기로 적은 카탈로그 API는 이것으로 붙인다.",
+            "parameters": {"type": "object", "properties": props, "required": ["api_id", "env_prefix"]}}})
 
     def run(name: str, args: dict) -> str:
+        if name == API_TOOL_PREFIX + "bind_api" and project is not None:
+            try:
+                out = apisearch.bind_to_project(db, project, str(args.get("api_id") or ""),
+                                                str(args.get("env_prefix") or ""), actor, str(args.get("source") or ""))
+            except apisearch.BindError as e:
+                return f"바인딩하지 못했습니다: {e}"
+            if bound is not None and out["module"] not in bound:
+                bound.append(out["module"])
+            return json.dumps(out, ensure_ascii=False)
         if name.startswith(API_TOOL_PREFIX):
             try:
                 return mcp_servers._apis_call(db, actor, name[len(API_TOOL_PREFIX):], args)

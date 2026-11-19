@@ -954,7 +954,12 @@ _EXTRACT_RULES = (
     " 문장을 **글자 그대로** 옮긴다(요약·번역 금지) — 되도록 개체 이름이 들어 있는 문장으로. outside에는 스키마에"
     " 없는 **개념 종류**(예: 인증·공장)만 적는다 — 개별 회사명·등급 값 같은 개체는 적지 않는다.\n"
     " 시점에 매인 관계(스키마의 temporal)는 문서에 기간·날짜가 적혀 있으면 valid_from·valid_to(YYYY-MM-DD)로"
-    " 옮긴다 — 적혀 있지 않으면 비운다(지어내지 않는다).\n"
+    " 옮긴다 — 적혀 있지 않으면 비운다(지어내지 않는다)."
+    # 운영 표본 검토에서 틀린 항목의 모양(2026-11, contracts) — 규칙으로 막는다
+    " 관계의 evidence에는 **양쪽 개체의 이름이 모두** 들어 있어야 한다 — 한쪽 이름이 다른 문장에만 있으면 그 관계는 내지"
+    " 않는다(문서 전체의 문맥으로 잇지 않는다). 개체 이름에 근거 문장에 없는 값(금액·날짜·비율)을 덧붙이지 않는다."
+    " 기준 지식(layer reference) 개념 사이의 관계는 문서가 그것을 **규칙으로** 말할 때만(규정·표준 서식·지침) 낸다 —"
+    " 계약서 한 건의 조항 제목만으로 「이 계약 유형은 이 조항을 포함한다」 같은 일반 관계를 만들지 않는다.\n"
     'JSON: {"entities":[{"class":"","name":"","evidence":""}],'
     ' "relations":[{"from":{"class":"","name":""},"rel":"","to":{"class":"","name":""},"evidence":"",'
     '"valid_from":"","valid_to":""}],'
@@ -1004,9 +1009,15 @@ def _public(item: dict) -> dict:
 
 
 def _skip_reason(path: str, body: str) -> str:
+    from . import doctext  # noqa: PLC0415
+
     ext = ("." + path.rsplit(".", 1)[-1].lower()) if "." in path.rsplit("/", 1)[-1] else ""
     if ext in SKIP_EXTENSIONS:
         return f"분석 대상이 아닌 형식({ext})"
+    broken = doctext.garbled_ratio(body)
+    if broken >= doctext.GARBLED:
+        # 코드 페이지가 맞지 않게 뽑힌 글(한글이 ?로) — LLM은 그 사이의 숫자로 이름을 지어낸다(실측 표본 오류의 대부분)
+        return f"본문 글자가 깨져 있습니다(깨진 글자 {broken:.0%}) — 추출을 고친 뒤 다시 추출하세요(ontology_reextract)"
     if len(_compact(body)) < MIN_CHARS:
         return f"읽을 글이 거의 없습니다({len(_compact(body))}자)"
     return ""

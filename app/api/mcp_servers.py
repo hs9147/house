@@ -258,6 +258,14 @@ _OPS_TOOLS = [
         "inputSchema": {"type": "object", "properties": {"source": {"type": "string"}}, "required": ["source"]},
     },
     {
+        "name": "ontology_reextract",
+        "description": "그 형식(suffix, 예: .doc)의 문서를 다음 색인에서 다시 뽑게 한다 — 추출을 고친 뒤 깨진 본문을 바로잡는다."
+                       " 다시 뽑힌 문서는 내용 분석이 바뀐 문서로 보고 다시 읽는다. 깨진 문서 수는 ontology_checks의 「깨진 본문」.",
+        "inputSchema": {"type": "object", "properties": {
+            "source": {"type": "string"}, "suffixes": {"type": "array", "items": {"type": "string"}}},
+            "required": ["source", "suffixes"]},
+    },
+    {
         "name": "ontology_propose_forms",
         "description": "온톨로지 재구성 ③′ — 확정하지 않은 양식 대응표·템플릿 규칙을 문서가 많은 것부터 LLM이 제안·검토한다"
                        "(뒤에서, 각 limit개). 확정은 사람이 콘솔 내용 분석 ②·②′에서 — 확정한 양식·템플릿의 문서는 분석에서"
@@ -335,7 +343,7 @@ def _project_by_name(db: Session, args: dict, discover: str = "list_routes") -> 
 
 def _ops_call(db: Session, actor: str, name: str, args: dict, *, key: ApiKey | None = None) -> str:
     if name in ("ontology_rebuild", "ontology_regraph", "ontology_propose_schema", "ontology_semantic_status",
-                "ontology_analyze", "ontology_propose_forms"):
+                "ontology_analyze", "ontology_propose_forms", "ontology_reextract"):
         # 운영 서버의 다른 도구는 읽기라 키를 가리지 않지만, 재구성은 지우고 바꾼다 — 관리자만
         if name != "ontology_semantic_status" and not (key is not None and key.is_admin):
             raise mcp_server.McpToolError("온톨로지 재구성은 관리자만 합니다.")
@@ -1423,6 +1431,19 @@ _APIS_TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "bind_api",
+        "description": (
+            "카탈로그에서 찾은 API를 과제(프로젝트)에 바인딩한다 — 그 항목을 과제의 조직 범위 external_api 모듈로 만들고"
+            "(이미 있으면 그것) 붙인다. 배포하면 {env_prefix}_URL 같은 환경변수가 주입된다. api_id는 search_apis 결과의 id"
+            " 그대로, 같은 id가 소스마다 있으면 source도. 그 과제 조직 사람(또는 관리자)만."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "project": {"type": "string", "description": "과제(프로젝트) 이름"},
+            "api_id": {"type": "string"}, "source": {"type": "string"},
+            "env_prefix": {"type": "string", "description": "환경변수 접두사 — 영문 대문자·숫자·밑줄(예: PUBLIC_BID)"}},
+            "required": ["project", "api_id", "env_prefix"]},
+    },
+    {
         "name": "sync_catalog",
         "description": (
             "카탈로그를 지금 다시 받아 최신으로 만든다(원본 카탈로그로 나가는 호출)."
@@ -1458,7 +1479,10 @@ async def apis_mcp_server(
     같은 검색이 /modules/search에도 있지만 그쪽은 admin 전용이다. 여기가 admin이 아니어도
     되는 이유는 **밖으로 나가지 않기 때문**이다: 예전에는 검색이 곧 아웃바운드 조회라
     관리자 키로 묶을 수밖에 없었는데, 수집을 sync_catalog로 떼어 낸 뒤로 이 경로는 이미
-    받아 둔 표를 읽는 것이 전부다. 나가는 호출도 쓰기도 없다.
+    받아 둔 표를 읽는 것이 전부다. 나가는 호출도 없다.
+
+    쓰는 도구는 하나 — bind_api(찾은 API를 과제에 바인딩)다. 그 과제 조직 사람이나 관리자만 부르고(모듈 키·조직 없는
+    키는 안 된다), 만드는 모듈은 그 과제의 조직 범위다. 대화·통합 서버 묶음에는 넣지 않는다(_EXCLUDED).
 
     수집(sync_catalog)만 밖으로 나간다. mcp 모듈의 api_key는 배포된 앱의 환경변수로도
     주입되므로 이 키로 할 수 있는 일을 좁혀 두어야 하는데, 이 도구가 넓히는 것은 권한이
@@ -1469,11 +1493,24 @@ async def apis_mcp_server(
         await mcp_server.read_payload(request),
         server_name="paas-apis",
         tools=_APIS_TOOLS,
-        call=lambda name, args: _apis_call(db, key.name, name, args),
+        call=lambda name, args: _apis_call(db, key.name, name, args, key=key),
     )
 
 
-def _apis_call(db: Session, actor: str, name: str, args: dict) -> str:
+def _apis_call(db: Session, actor: str, name: str, args: dict, *, key: ApiKey | None = None) -> str:
+    if name == "bind_api":
+        # 쓰는 도구 — 그 과제 조직 사람이나 관리자만(모듈 키·조직 없는 키는 안 된다: 앱 환경변수로 새는 키가 남의 과제에
+        # 자원을 붙이면 안 된다). 전역 과제(조직 없음)도 관리자만.
+        project = _project_by_name(db, args, discover="code__list_projects")
+        if key is None or not (key.is_admin or (project.organization_id is not None
+                                                and project.organization_id in viewer_org_ids(db, key))):
+            raise mcp_server.McpToolError("이 과제에 바인딩할 권한이 없습니다 — 그 과제 조직 사람이나 관리자만 합니다.")
+        try:
+            out = apisearch.bind_to_project(db, project, _str_arg(args, "api_id"), _str_arg(args, "env_prefix"),
+                                            actor, _str_arg(args, "source", required=False))
+        except apisearch.BindError as e:
+            raise mcp_server.McpToolError(str(e))
+        return _dump(out)
     if name == "list_api_categories":
         return _dump(apisearch.list_categories(db))
     if name == "catalog_status":
@@ -1720,6 +1757,13 @@ def _ontology_ops_call(db: Session, actor: str, name: str, args: dict) -> str:
                 raise mcp_server.McpToolError("이 저장소에서 이미 돌고 있는 제안이 있습니다.")
             audit.record(db, actor, "ontology.semantic.schema.propose", store.name, {"via": "mcp"})
             return _dump({"started": True, "next": "ontology_semantic_status로 진행을 보고, 초안을 콘솔 ①에서 확정하세요"})
+        if name == "ontology_reextract":
+            suffixes = [str(s).strip() for s in args.get("suffixes") or [] if str(s).strip()][:10]
+            if not suffixes:
+                raise mcp_server.McpToolError("suffixes에 형식을 적으세요(예: [\".doc\"]).")
+            out = docsearch.reextract(store.name, suffixes)
+            audit.record(db, actor, "ontology.reextract", store.name, {**out, "via": "mcp"})
+            return _dump({**out, "next": "색인 주기 작업(doc_index)이 다시 뽑습니다 — 끝나면 ontology_checks의 「깨진 본문」"})
         if name == "ontology_propose_forms":
             if not semantic.status(store.name)["schema"]:
                 raise mcp_server.McpToolError("확정한 스키마가 없습니다 — 콘솔 내용 분석 ①에서 확정한 뒤에 하세요.")
@@ -2254,10 +2298,10 @@ def _concept_call(name: str, args: dict, sources) -> str:
 
 # 대화·통합 서버가 쓰는 도구는 **읽기**만 고른다. 색인 다시 돌리기·카탈로그 동기화·주기 작업 실행은
 # 대화 한 줄로 일어날 일이 아니다 — 그건 각 메뉴(또는 개별 서버)에서 사람이 한다.
-_EXCLUDED = {"reindex_docs", "sync_catalog", "run_scheduled_job",
+_EXCLUDED = {"reindex_docs", "sync_catalog", "run_scheduled_job", "bind_api",
              # 온톨로지 재구성 — 지우고 다시 만드는 일은 운영 서버(/mcp/ops)에서만, 관리자가
              "ontology_rebuild", "ontology_regraph", "ontology_propose_schema", "ontology_analyze",
-             "ontology_propose_forms"}
+             "ontology_propose_forms", "ontology_reextract"}
 
 # 저장소 서버(/mcp/storage/{저장소})는 저장소마다 따로라, 묶음에는 목록 보기 하나만 source 인자를
 # 붙여 얹는다. 검색·읽기는 docs 도구가 저장소를 가로질러 이미 한다.

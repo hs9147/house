@@ -89,7 +89,7 @@ def test_ops_tools_list():
         "list_routes", "get_deploy_status", "list_deployments", "tail_app_log",
         "host_snapshot", "list_ports", "list_scheduled_jobs", "run_scheduled_job",
         "search_audit", "ontology_rebuild", "ontology_regraph", "ontology_propose_schema",
-        "ontology_propose_forms", "ontology_semantic_status", "ontology_analyze", "ontology_checks", "source_coverage",
+        "ontology_reextract", "ontology_propose_forms", "ontology_semantic_status", "ontology_analyze", "ontology_checks", "source_coverage",
     ]
 
 
@@ -802,7 +802,7 @@ def test_apis_server_searches_the_collected_catalog(monkeypatch, fresh_settings)
 
     c = _apis_client(monkeypatch)
     tools = {t["name"] for t in _rpc(c, "/mcp/apis", "tools/list")["result"]["tools"]}
-    assert tools == {"search_apis", "list_api_categories", "catalog_status", "sync_catalog"}
+    assert tools == {"search_apis", "list_api_categories", "catalog_status", "bind_api", "sync_catalog"}
 
     hits = json.loads(_text(_call(c, "/mcp/apis", "search_apis", {"keyword": "payment"})))
     assert [h["id"] for h in hits] == ["stripe.com"]

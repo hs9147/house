@@ -19,6 +19,7 @@ REVIEW_ERROR = (0.10, semantic.STOP_ERROR_RATE)   # 표본 검토 오류율 이�
 OBSERVED = (0.9, 0.5)              # 시점에 매인 관계 중 관측한 날이 있는 비율 이상
 VERSIONED = (0.99, 0.8)            # 판 정보(시행일·개정 계열)를 만든 문서 비율 이상
 GOLD_MIN = 20                      # 사람 정답 — semantic_tune.MIN_LABELS와 같다
+GARBLED_DOCS = (0.01, 0.05)        # 본문이 깨진 문서 비율 이하(실측 contracts의 .doc — 코드 페이지 문제)
 
 
 def _level(value: float, good: float, warn: float, higher_is_better: bool = True) -> str:
@@ -54,6 +55,13 @@ def checks(store_name: str) -> dict:
                       f"전환 현황에서 실패 이유를 보고 추출기(스캔 PDF OCR·LibreOffice)를 갖추세요 — {top}" if top else
                       "전환 현황에서 실패 이유를 보세요"))
     structure = summary["with_nodes"] / extracted if extracted else 0.0
+    g = docsearch.garbled_docs(store_name, 0)
+    broken = g["garbled"] / g["total"] if g["total"] else 0.0
+    out.append(_check("garbled", "깨진 본문(한글이 ?로)", _level(broken, *GARBLED_DOCS, higher_is_better=False),
+                      f"{_pct(broken)} ({g['garbled']:,}/{g['total']:,})"
+                      + (f" — {', '.join(f'{k} {v}' for k, v in g['by_suffix'].items())}" if g["by_suffix"] else ""),
+                      f"≤ {_pct(GARBLED_DOCS[0])}",
+                      "추출을 고친 형식을 다시 추출하세요(ops__ontology_reextract) — 깨진 문서는 내용 분석이 건너뜁니다"))
     out.append(_check("structure", "구조 전환율(절·용어·표)", _level(structure, *STRUCTURE), f"{_pct(structure)}",
                       f"≥ {_pct(STRUCTURE[0])}", "제목·표가 없는 평문이 많습니다 — 내용 분석(LLM)이 그 관계를 맡습니다"))
 

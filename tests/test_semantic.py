@@ -1074,3 +1074,26 @@ def test_llm_documents_are_read_concurrently(store, tmp_path, monkeypatch):
     finally:
         conn.close()
     assert n == 6
+
+
+def test_garbled_documents_are_not_sent_and_can_be_reextracted(store, tmp_path):
+    """한글이 ?로 깨진 본문(.doc를 기본 코드 페이지로 뽑은 것 — 실측)은 LLM에 보내지 않는다 — 깨진 글 사이의 숫자로 이름을
+    지어냈다. 운영 기준 점검이 깨진 문서를 세고, 그 형식을 다시 뽑게 할 수 있다."""
+    from app.services import ontology_ops
+
+    root = tmp_path / "docs"
+    (root / "깨진계약.md").write_text("# 계약\n\n" + "1. ? ? ? ? 1) ? ? ? : ??????? ????(???) ?? 2) ? ? : KR-CT1 " * 5,
+                                     encoding="utf-8")
+    docsearch.reindex("docs", root)
+    semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+    with _db() as db:
+        semantic.analyze(db, "docs")
+    conn = semantic._conn("docs")
+    try:
+        row = conn.execute("SELECT status, error FROM sem_docs WHERE path = '깨진계약.md'").fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "skipped" and "깨져" in row["error"]
+    by = {c["key"]: c for c in ontology_ops.checks("docs")["checks"]}
+    assert by["garbled"]["level"] != "ok" and ".md 1" in by["garbled"]["value"]
+    assert docsearch.reextract("docs", [".md"])["marked"] >= 1

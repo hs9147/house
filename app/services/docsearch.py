@@ -692,3 +692,36 @@ def regraph(store_name: str, root: Path, budget_seconds: float = _DEFAULT_BUDGET
     finally:
         conn.close()
     return {"rebuilt": rebuilt, "remaining": remaining, "done": remaining == 0}
+
+
+def reextract(store_name: str, suffixes: list[str]) -> dict:
+    """그 형식의 문서를 다음 색인에서 다시 뽑게 한다 — 추출 능력 지문을 비운다(색인이 「능력이 바뀐 문서」로 보고
+    다시 추출한다). 추출을 고친 형식만 골라서 — 지문 전체를 바꾸면 모든 문서(PDF 수천 건)를 다시 뽑는다."""
+    conn = _connect(store_name)
+    try:
+        marked = 0
+        for suffix in suffixes:
+            s = suffix if suffix.startswith(".") else f".{suffix}"
+            marked += conn.execute("UPDATE docs SET extractor_fp = NULL WHERE lower(path) LIKE ?",
+                                   (f"%{s.lower()}",)).rowcount
+        conn.commit()
+        return {"marked": marked, "suffixes": suffixes}
+    finally:
+        conn.close()
+
+
+def garbled_docs(store_name: str, limit: int = 20) -> dict:
+    """본문이 깨진 문서(doctext.garbled_ratio) — 수와 앞의 몇 개(형식별)."""
+    conn = _connect(store_name)
+    try:
+        rows = [(r["path"], doctext.garbled_ratio(r["body"] or ""))
+                for r in conn.execute("SELECT path, body FROM docs WHERE body IS NOT NULL")]
+    finally:
+        conn.close()
+    bad = [(p, x) for p, x in rows if x >= doctext.GARBLED]
+    by_suffix: dict[str, int] = {}
+    for p, _x in bad:
+        suffix = Path(p).suffix.lower() or "(없음)"
+        by_suffix[suffix] = by_suffix.get(suffix, 0) + 1
+    return {"total": len(rows), "garbled": len(bad), "by_suffix": by_suffix,
+            "examples": [{"path": p, "ratio": round(x, 2)} for p, x in bad[:limit]]}

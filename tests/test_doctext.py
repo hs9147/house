@@ -357,7 +357,7 @@ def test_legacy_office_uses_soffice_conversion(tmp_path, monkeypatch):
     monkeypatch.setattr(doctext, "_soffice", lambda: "/usr/bin/soffice")
     monkeypatch.setattr(doctext.subprocess, "run", fake_run)
     assert doctext.extract_text(_ole(tmp_path)) == "반출 승인 절차"
-    assert "--headless" in seen["argv"] and "txt:Text" in seen["argv"]
+    assert "--headless" in seen["argv"] and "txt:Text (encoded):UTF8" in seen["argv"]   # 기본 코드 페이지면 한글이 ?가 된다
     assert seen["timeout"] == doctext._SOFFICE_TIMEOUT  # 서버 스레드를 무한정 잡지 않는다
 
 

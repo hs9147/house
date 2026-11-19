@@ -589,3 +589,71 @@ def normalize_module_name(raw: str) -> str:
     if not s or not s[0].isalnum():
         s = "api-" + s.lstrip("-")
     return s[:40].rstrip("-") or "api"
+
+
+# --- 카탈로그의 API를 과제에 바인딩 ---
+#
+# 검색으로 찾은 API를 쓰기로 하면 그 자리에서 과제에 붙인다(에이전트 기획의 솔루션 구성 · MCP /mcp/apis bind_api).
+# 카탈로그 항목을 external_api 모듈로 만들고(이미 만든 것이 있으면 그것) 과제에 바인딩한다 — 배포하면 규약된 환경변수
+# ({접두사}_URL 등)가 주입된다. 모듈은 **과제의 조직 범위**로 만든다(전역 자원 목록을 늘리지 않는다). 카탈로그의 어느
+# 항목에서 왔는지 config.catalog에 남긴다(같은 항목은 한 모듈).
+
+_PREFIX = re.compile(r"^[A-Z][A-Z0-9_]{1,30}$")
+
+
+class BindError(ValueError):
+    pass
+
+
+def bind_to_project(db: Session, project, api_id: str, env_prefix: str, actor: str, source: str = "") -> dict:
+    """카탈로그 항목 하나를 과제에 바인딩한다 — {module, env_prefix, created, injected_env}."""
+    from .. import audit  # noqa: PLC0415
+    from ..models import Module, ModuleBinding, ModuleType  # noqa: PLC0415
+    from . import modules as modules_service  # noqa: PLC0415
+
+    prefix = str(env_prefix or "").strip().upper()
+    if not _PREFIX.match(prefix):
+        raise BindError("env_prefix는 영문 대문자로 시작하는 대문자·숫자·밑줄(2~31자)입니다 — 예: PUBLIC_BID")
+    query = _live(select(ApiCatalogEntry).where(ApiCatalogEntry.ext_id == str(api_id or "").strip()))
+    if source:
+        query = query.where(ApiCatalogEntry.source == source)
+    rows = list(db.execute(query).scalars())
+    if not rows:
+        raise BindError(f"카탈로그에 없는 API입니다: {api_id} — search_apis 결과의 id를 그대로 쓰세요.")
+    if len(rows) > 1:
+        raise BindError(f"같은 id가 여러 소스에 있습니다 — source를 주세요: {', '.join(r.source for r in rows)}")
+    entry = rows[0]
+    url = entry.spec_url or entry.homepage
+    if not url:
+        raise BindError(f"이 API에는 주소(스펙·홈페이지)가 없어 바인딩할 수 없습니다: {entry.title}")
+    marker = f"{entry.source}:{entry.ext_id}"
+    module = next((m for m in db.execute(select(Module).where(
+        Module.type == ModuleType.external_api, Module.organization_id == project.organization_id)).scalars()
+        if (m.config or {}).get("catalog") == marker), None)
+    created = module is None
+    if created:
+        base = normalize_module_name(f"api-{entry.title or entry.ext_id}")
+        name, n = base, 2
+        while db.execute(select(Module).where(Module.name == name)).scalar_one_or_none():
+            name, n = f"{base[:37]}-{n}", n + 1
+        module = Module(name=name, type=ModuleType.external_api,
+                        category=(_as_categories(entry.categories) or [""])[0][:64],
+                        organization_id=project.organization_id,
+                        config=modules_service.encrypt_config({"url": url, "catalog": marker}))
+        db.add(module)
+        db.flush()
+    bindings = list(db.execute(select(ModuleBinding).where(ModuleBinding.project_id == project.id)).scalars())
+    same = next((b for b in bindings if b.module_id == module.id), None)
+    if same is not None:
+        db.commit()
+        return {"module": module.name, "env_prefix": same.env_prefix, "created": False, "already": True,
+                "injected_env": sorted(modules_service.binding_env(module, same.env_prefix, db=db))}
+    if any(b.env_prefix == prefix for b in bindings):
+        db.rollback()
+        raise BindError(f"이 과제에서 이미 쓰는 접두사입니다: {prefix}")
+    db.add(ModuleBinding(project_id=project.id, module_id=module.id, env_prefix=prefix))
+    db.commit()
+    audit.record(db, actor, "module.bind.catalog", project.name,
+                 {"module": module.name, "prefix": prefix, "catalog": marker, "created": created})
+    return {"module": module.name, "env_prefix": prefix, "created": created, "already": False,
+            "injected_env": sorted(modules_service.binding_env(module, prefix, db=db))}
