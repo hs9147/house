@@ -1746,6 +1746,9 @@ def _ontology_ops_call(db: Session, actor: str, name: str, args: dict) -> str:
                               "confirmed_by": st["schema"].get("confirmed_by"),
                               "confirmed_at": st["schema"].get("confirmed_at")},
                           "review": {k: st["review"][k] for k in ("items", "wrong", "error_rate")},
+                          # 틀린 항목의 메모(무엇을 왜) · 실패한 문서 · 한꺼번에 제안에서 실패한 것 — 스키마를 고칠 근거
+                          "review_notes": st["review"]["notes"][-20:], "failed": st["failed"][:10],
+                          "proposal_failures": (st.get("batch_proposals") or {}).get("failed") or [],
                           # 양식·템플릿 — 몇 개가 제안돼 있고 몇 개를 확정했나(지금 스키마의 판으로)
                           **{kind: {"total": len(rows),
                                     "drafted": sum(1 for r in rows if r.get("draft")),

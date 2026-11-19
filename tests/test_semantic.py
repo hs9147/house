@@ -1036,3 +1036,41 @@ def test_forms_and_templates_are_proposed_in_one_go_for_the_admin_to_confirm(sto
     with SessionLocal() as db:
         st = json.loads(mcp_servers._ops_call(db, "admin", "ontology_semantic_status", {"source": "docs"}, key=admin))
     assert st["forms"]["drafted"] >= 1 and st["forms"]["confirmed"] == 0
+
+
+def test_llm_documents_are_read_concurrently(store, tmp_path, monkeypatch):
+    """LLM으로 읽는 문서는 동시에(semantic_concurrency) — 하나씩이면 6천 건에 이틀이었다(실측 분당 2건)."""
+    import threading
+    import time as _time
+
+    root = tmp_path / "docs"
+    for i in range(6):
+        (root / f"메모{i}.md").write_text(f"# 메모 {i}\n\nA-Electronics는 배터리를 공급한다. {i}\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+    monkeypatch.setenv("PAAS_SEMANTIC_CONCURRENCY", "3")
+    get_settings.cache_clear()
+    flying, peak, lock = [0], [0], threading.Lock()
+    real = store.__call__
+
+    def slow(provider, messages, db=None, *a, **kw):
+        with lock:
+            flying[0] += 1
+            peak[0] = max(peak[0], flying[0])
+        try:
+            _time.sleep(0.2)
+            return real(provider, messages, db, *a, **kw)
+        finally:
+            with lock:
+                flying[0] -= 1
+
+    monkeypatch.setattr(semantic.llm_service, "chat_completion", slow)
+    with _db() as db:
+        result = semantic.analyze(db, "docs")
+    assert peak[0] >= 2 and result["failed"] == 0
+    conn = semantic._conn("docs")
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM sem_docs WHERE path LIKE '메모%' AND status = 'ok'").fetchone()["n"]
+    finally:
+        conn.close()
+    assert n == 6

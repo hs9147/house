@@ -31,6 +31,7 @@ from html import unescape
 
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from . import docsearch, docready, ontology
 from . import semantic_template as st
 from . import llm as llm_service
@@ -1088,6 +1089,12 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                  "dropped": 0, "copied": 0, "skipped": 0}
         outside: dict = _get(conn, "outside", {})
         remaining = 0
+        concurrency = max(1, int(get_settings().semantic_concurrency))
+        jobs: list[dict] = []
+        queued_fp: dict[str, str] = {}
+        deferred: list[tuple] = []      # (원본, 사본, 지문, 관측한 날) — 원본의 LLM 결과가 나오면 옮긴다
+        max_jobs = concurrency * 8      # 한 번(예산 120초)에 끝낼 만큼만 모은다 — 남은 문서는 다음 번에
+        full = False
         for path in paths:
             fms = sorted(form_of.get(path, []))
             doc = conn.execute("SELECT body, mtime FROM docs WHERE path = ?", (path,)).fetchone()
@@ -1101,10 +1108,13 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
             fp = _digest(parts + [template_rules[tid]["version"]] if tid else parts)   # 템플릿 밖 문서의 지문은 그대로
             if known.get(path) == fp:
                 continue
-            if time.monotonic() - started > budget_seconds or should_stop():
+            if full or time.monotonic() - started > budget_seconds or should_stop():
                 remaining += 1
                 continue
             try:
+                if fp in queued_fp and queued_fp[fp] != path:   # 같은 본문이 이번에 LLM으로 가 있다 — 끝나면 옮긴다
+                    deferred.append((queued_fp[fp], path, fp, observed))
+                    continue
                 twin = done_fp.get(fp)
                 if twin and twin != path:
                     _copy(conn, twin, path, observed)
@@ -1169,38 +1179,14 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                     _write(conn, path, form_nodes + nodes, form_edges + edges, "template", observed)
                     stats["template_docs"] += 1
                 else:
+                    # LLM으로 읽는 문서 — 지금 부르지 않고 모았다가 아래에서 동시에(semantic_concurrency) 부른다
                     stats["escalated"] += bool(tid)      # 템플릿인데 필수 필드가 없다 — 틀이 다르다
-                    text = rest[:DOC_CHARS]
-                    data = _extract_doc(db, provider, schema, path, text)
-                    nodes, edges, dropped, unanchored = check_extraction(data, schema, text)
-                    reviewed = 0
-                    # ① 검토할 것만 고른다. 표본(10%)이면 전부 — 이것이 오류율(멈춤 조건)의 표본이다. 표본이 아니면
-                    # 이름이 근거에 없는 항목만(남겨 둔 대신 판정을 받는다). 버린 것이 더 많으면 전부.
-                    sampled = _sampled(path)
-                    every = sampled or (dropped and dropped >= (len(nodes) + len(edges)))
-                    targets = [("n", i) for i, n in enumerate(nodes)
-                               if every or not n["anchored"] or n["cls"] in reference] + \
-                              [("e", i) for i, e in enumerate(edges)
-                               if every or not e["anchored"] or {e["src_cls"], e["dst_cls"]} & reference]
-                    stats["range_errors"] = stats.get("range_errors", 0) + sum(e["bad_range"] for e in edges)
-                    if targets:
-                        items = [{"entity": _public(nodes[i])} if k == "n" else {"relation": _public(edges[i])}
-                                 for k, i in targets]
-                        wrong = _review_items(db, provider, schema, path, items)
-                        reviewed = 1
-                        _tally_review(state, path, items, wrong, sampled)
-                        drop = {targets[j] for j in wrong}
-                        nodes = [n for i, n in enumerate(nodes) if ("n", i) not in drop]
-                        edges = [e for i, e in enumerate(edges) if ("e", i) not in drop]
-                        stats["reviewed"] += 1
-                    for o in data.get("outside") or []:
-                        if isinstance(o, dict) and o.get("name"):
-                            name = str(o["name"])[:60]
-                            outside[name] = outside.get(name, 0) + 1
-                    _write(conn, path, form_nodes + [_public(n) for n in nodes], form_edges + [_public(e) for e in edges],
-                           "llm", observed)
-                    status = "ok"
-                    stats["dropped"] += dropped
+                    jobs.append({"path": path, "fp": fp, "text": rest[:DOC_CHARS], "long": len(rest) > DOC_CHARS,
+                                 "form_nodes": form_nodes, "form_edges": form_edges, "observed": observed})
+                    queued_fp[fp] = path
+                    if len(jobs) >= max_jobs:
+                        full = True
+                    continue
                 _record(conn, path, fp, status, truncated=int(status == "ok" and len(rest) > DOC_CHARS),
                         dropped=dropped, reviewed=reviewed)
                 done_fp.setdefault(fp, path)
@@ -1217,12 +1203,103 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                 _put(conn, "state", state)
                 break
             _put(conn, "state", state)
+        conn.commit()       # LLM을 기다리는 동안 색인 파일을 잡고 있지 않게
+        if not state.get("paused"):
+            remaining += _run_llm_jobs(conn, store_name, schema, reference, jobs, state, stats, outside, done_fp,
+                                       concurrency, started, budget_seconds, should_stop)
+        for source, target, fp, observed in deferred:   # ② 같은 본문 — 원본이 끝났으면 옮기고, 아니면 다음 번에
+            if done_fp.get(fp) == source:
+                _copy(conn, source, target, observed)
+                _record(conn, target, fp, "copy")
+                stats["copied"] += 1
+                stats["analyzed"] += 1
+            else:
+                remaining += 1
+        conn.commit()
         outside = dict(sorted(outside.items(), key=lambda kv: -kv[1])[:100])
         _put(conn, "outside", outside)
         return {**stats, "remaining": remaining, "done": remaining == 0 and not state.get("paused"),
                 "paused": state.get("paused")}
     finally:
         conn.close()
+
+
+def _llm_doc(store_name: str, schema: dict, reference: set[str], job: dict) -> dict:
+    """LLM으로 읽는 문서 하나 — 추출 → 기계 검사 → 검토할 것만 검토. 작업 스레드에서 돈다(자기 세션 — 색인 파일은 만지지
+    않는다). ① 검토할 것만 고른다: 표본(10%)이면 전부 — 이것이 오류율(멈춤 조건)의 표본이다. 표본이 아니면 이름이 근거에
+    없는 항목과 기준 지식(H)만. 버린 것이 더 많으면 전부."""
+    from ..db import SessionLocal  # noqa: PLC0415
+
+    path, text = job["path"], job["text"]
+    with SessionLocal() as wdb:
+        provider = provider_for(wdb, store_name)
+        data = _extract_doc(wdb, provider, schema, path, text)
+        nodes, edges, dropped, _unanchored = check_extraction(data, schema, text)
+        sampled = _sampled(path)
+        every = sampled or (dropped and dropped >= (len(nodes) + len(edges)))
+        targets = [("n", i) for i, n in enumerate(nodes) if every or not n["anchored"] or n["cls"] in reference] + \
+                  [("e", i) for i, e in enumerate(edges)
+                   if every or not e["anchored"] or {e["src_cls"], e["dst_cls"]} & reference]
+        items = [{"entity": _public(nodes[i])} if k == "n" else {"relation": _public(edges[i])} for k, i in targets]
+        wrong = _review_items(wdb, provider, schema, path, items) if items else {}
+    return {"data": data, "nodes": nodes, "edges": edges, "dropped": dropped, "sampled": sampled, "targets": targets,
+            "items": items, "wrong": wrong}
+
+
+def _run_llm_jobs(conn, store_name: str, schema: dict, reference: set[str], jobs: list[dict], state: dict, stats: dict,
+                  outside: dict, done_fp: dict, concurrency: int, started: float, budget: float, should_stop) -> int:
+    """모은 LLM 문서를 동시에 — 결과는 이 스레드가 받아 쓴다(색인 파일에 쓰는 것은 하나뿐이다). 예산을 넘기거나 멈추라고
+    하면 새로 보내지 않는다(돌던 것은 끝까지 받아 쓴다). 멈춤 기준을 넘으면 그 자리에서 멈춘다. 보내지 못한 수를 돌려준다."""
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait  # noqa: PLC0415
+
+    queue = list(jobs)
+    flying: dict = {}
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix=f"semantic-{store_name}") as pool:
+        while queue or flying:
+            while queue and len(flying) < concurrency and not state.get("paused") \
+                    and time.monotonic() - started <= budget and not should_stop():
+                job = queue.pop(0)
+                flying[pool.submit(_llm_doc, store_name, schema, reference, job)] = job
+            if not flying:
+                break
+            finished, _ = wait(list(flying), return_when=FIRST_COMPLETED)
+            for fut in finished:
+                job = flying.pop(fut)
+                path, fp = job["path"], job["fp"]
+                try:
+                    r = fut.result()
+                    nodes, edges, targets, wrong = r["nodes"], r["edges"], r["targets"], r["wrong"]
+                    stats["range_errors"] = stats.get("range_errors", 0) + sum(e["bad_range"] for e in edges)
+                    reviewed = 0
+                    if targets:
+                        reviewed = 1
+                        _tally_review(state, path, r["items"], wrong, r["sampled"])
+                        drop = {targets[j] for j in wrong}
+                        nodes = [n for i, n in enumerate(nodes) if ("n", i) not in drop]
+                        edges = [e for i, e in enumerate(edges) if ("e", i) not in drop]
+                        stats["reviewed"] += 1
+                    for o in r["data"].get("outside") or []:
+                        if isinstance(o, dict) and o.get("name"):
+                            name = str(o["name"])[:60]
+                            outside[name] = outside.get(name, 0) + 1
+                    _write(conn, path, job["form_nodes"] + [_public(n) for n in nodes],
+                           job["form_edges"] + [_public(e) for e in edges], "llm", job["observed"])
+                    _record(conn, path, fp, "ok", truncated=int(job["long"]), dropped=r["dropped"], reviewed=reviewed)
+                    stats["dropped"] += r["dropped"]
+                    done_fp.setdefault(fp, path)
+                    stats["analyzed"] += 1
+                except Exception as e:  # noqa: BLE001 — 한 문서의 실패가 나머지를 막지 않게, 사유를 남긴다
+                    conn.execute("INSERT OR REPLACE INTO sem_docs (path, fp, status, error, analyzed_at)"
+                                 " VALUES (?, ?, 'failed', ?, ?)", (path, fp, f"{type(e).__name__}: {e}"[:300], time.time()))
+                    stats["failed"] += 1
+                items = state.get("review_items", 0)
+                if items >= STOP_MIN_ITEMS and state.get("review_wrong", 0) / items > STOP_ERROR_RATE \
+                        and not state.get("paused"):
+                    state["paused"] = (f"표본 검토에서 {state['review_wrong']}/{items}개가 틀렸습니다"
+                                       f"(기준 {int(STOP_ERROR_RATE * 100)}%) — 스키마나 대응표를 고친 뒤 다시 시작하세요.")
+                _put(conn, "state", state)
+                conn.commit()
+    return len(queue)
 
 
 def resume(store_name: str) -> None:
@@ -1777,7 +1854,7 @@ def status(store_name: str) -> dict:
                        "check_items": state.get("check_items", 0), "check_wrong": state.get("check_wrong", 0)},
             "last_run": _get(conn, "last_run"), "outside": _get(conn, "outside", {}),
             "task": {**(_get(conn, "task") or {}), "running": task_running(store_name)},
-            "last_merge": _get(conn, "last_merge"),
+            "last_merge": _get(conn, "last_merge"), "batch_proposals": _get(conn, "batch_proposals"),
             "merge_rules": merge_rules(conn), "merge_rules_draft": _get(conn, "merge_rules_draft"),
             "gold": gold_metrics(conn), "tune_history": _get(conn, "tune_history", [])[-5:],
             "pairs": {f'{r["source"]}:{r["decision"]}': r["n"] for r in conn.execute(

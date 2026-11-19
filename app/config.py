@@ -365,6 +365,11 @@ class Settings(BaseSettings):
     # 설치본(bootstrap-admin)은 여기를 채워야 알림을 받는다. 메일 발송이 설정돼 있어야 보낸다(smtp_host·mail_from).
     register_notify_to: str = ""
 
+    # --- 내용 분석(services/semantic.analyze) ---
+    # LLM으로 읽는 문서를 동시에 몇 건 — 문서마다 추출·검토로 LLM을 두 번 부르고 한 건에 수십 초라, 하나씩이면 저장소
+    # 하나(6천 건)에 이틀이 걸렸다(실측 contracts: 분당 2건). 프로바이더의 동시 호출 한도(Bedrock 할당량) 안에서 올린다.
+    semantic_concurrency: int = 4
+
     # --- 웹 검색(선택, services/websearch.py · MCP /mcp/web) ---
     # 출처는 키를 넣은 것만 켜진다. Brave 키 하나로 전 세계·일본이 함께 켜진다(야후 재팬은 공식 API가 없다).
     search_brave_key: str = ""          # Brave Search API 구독 토큰(매달 무료 크레딧)
