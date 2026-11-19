@@ -137,7 +137,9 @@ def extract(path: Path) -> tuple[str, str]:
         return markdown, plain
 
     if head[:4] == _OLE_MAGIC:
-        text = _legacy_office_text(path)
+        # 97-2003은 최신 형식으로 바꿔 OOXML 추출기로 읽는다 — 표·제목이 살고(형식 그래프), 한글이 깨지지 않는다
+        markdown = _legacy_office_markdown(path)[:MAX_TEXT_CHARS]
+        return markdown, to_plain(markdown)
     else:
         text = _plain_text(path)
     text = text[:MAX_TEXT_CHARS]
@@ -742,13 +744,41 @@ def _tesseract() -> str | None:
 
 # --- 97-2003 바이너리 오피스 ---
 
-def _legacy_office_text(path: Path) -> str:
-    """.doc/.xls/.ppt(OLE) — LibreOffice에 맡긴다.
+# 97-2003 → 최신 형식. 텍스트(txt)로 뽑으면 두 가지가 틀렸다(실측 운영 contracts): Calc·Impress에는 txt 내보내기
+# 필터가 없어 .xls가 1,196/1,198건 실패했고(「Please verify input parameters」), Writer의 txt는 서버 계정의 코드 페이지로
+# 써서 한글이 「?」가 됐다. 최신 형식(UTF-8 XML)으로 바꾸면 둘 다 없고, 표·제목까지 OOXML 추출기가 읽는다.
+_OOXML_OF = {".doc": "docx", ".dot": "docx", ".xls": "xlsx", ".xlt": "xlsx", ".ppt": "pptx", ".pps": "pptx",
+             ".pot": "pptx"}
+
+
+def _legacy_office_markdown(path: Path) -> str:
+    """.doc/.xls/.ppt(OLE) — LibreOffice로 docx·xlsx·pptx로 바꿔 OOXML 추출기로 읽는다. 형식을 모르는 OLE(또는 변환이
+    아무것도 만들지 못한 것)는 텍스트(UTF-8)로."""
+    target = _OOXML_OF.get(path.suffix.lower())
+    exe = _soffice()
+    if exe is not None and target:
+        with tempfile.TemporaryDirectory() as outdir:
+            try:
+                subprocess.run([exe, "--headless", "--convert-to", target, "--outdir", outdir, str(path)],
+                               capture_output=True, timeout=_SOFFICE_TIMEOUT, check=False)
+            except subprocess.TimeoutExpired:
+                raise ExtractError(f"변환이 {_SOFFICE_TIMEOUT}초를 넘겼습니다.")
+            produced = list(Path(outdir).glob(f"*.{target}"))
+            if produced:
+                return _ooxml_markdown(produced[0])
+    return _legacy_office_text(path, exe)
+
+
+_UNSET = object()
+
+
+def _legacy_office_text(path: Path, exe=_UNSET) -> str:
+    """.doc/.xls/.ppt(OLE)를 텍스트로 — 최신 형식으로 바꾸지 못했을 때(_legacy_office_markdown).
 
     순수 파이썬으로 이 형식을 제대로 뽑는 방법이 없다. 서버에 LibreOffice가 있으면
-    그걸 쓰고, 없으면 무엇을 하면 되는지 알린다(조용히 깨진 텍스트를 주지 않는다).
+    그걸 쓰고, 없으면 무엇을 하면 되는지 알린다(조용히 깨진 텍스트를 주지 않는다). exe는 이미 찾은 soffice(다시 찾지 않게).
     """
-    exe = _soffice()
+    exe = _soffice() if exe is _UNSET else exe
     if exe is None:
         raise ExtractError(
             "97-2003 바이너리 형식(doc·xls·ppt)입니다 — LibreOffice를 설치하고 "

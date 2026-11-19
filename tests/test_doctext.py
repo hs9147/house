@@ -361,6 +361,27 @@ def test_legacy_office_uses_soffice_conversion(tmp_path, monkeypatch):
     assert seen["timeout"] == doctext._SOFFICE_TIMEOUT  # 서버 스레드를 무한정 잡지 않는다
 
 
+def test_legacy_office_is_converted_to_ooxml_and_read_with_its_tables(tmp_path, monkeypatch):
+    """97-2003은 최신 형식으로 바꿔 OOXML 추출기로 읽는다 — .xls는 txt 필터가 없어 거의 전부 실패했고(실측 1,196/1,198),
+    .doc의 txt는 한글이 ?가 됐다. 표가 표로 남는다."""
+    from pathlib import Path
+
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        outdir = Path(argv[argv.index("--outdir") + 1])
+        if argv[argv.index("--convert-to") + 1] == "xlsx":
+            _xlsx_inline(outdir / "a.xlsx", [["품목", "금액"], ["배터리", "1200"]])
+        return type("R", (), {"stdout": b"", "stderr": b""})()
+
+    monkeypatch.setattr(doctext, "_soffice", lambda: "/usr/bin/soffice")
+    monkeypatch.setattr(doctext.subprocess, "run", fake_run)
+    markdown = doctext.extract_markdown(_ole(tmp_path, "a.xls"))
+    assert "| 품목 | 금액 |" in markdown and "배터리" in markdown
+    assert seen[0][seen[0].index("--convert-to") + 1] == "xlsx" and len(seen) == 1
+
+
 def test_legacy_office_conversion_failure_includes_soffice_output(tmp_path, monkeypatch):
     """대개 원인이 "필터 미설치"라서, 그 출력을 문구에 실어야 되짚을 수 있다."""
     def fake_run(argv, **kwargs):
