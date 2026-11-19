@@ -605,8 +605,15 @@ class BindError(ValueError):
     pass
 
 
-def bind_to_project(db: Session, project, api_id: str, env_prefix: str, actor: str, source: str = "") -> dict:
-    """카탈로그 항목 하나를 과제에 바인딩한다 — {module, env_prefix, created, injected_env}."""
+def bind_to_project(db: Session, project, api_id: str, env_prefix: str, actor: str, source: str = "",
+                    module_name: str = "") -> dict:
+    """카탈로그 항목 하나를 과제에 바인딩한다 — {module, env_prefix, created, injected_env, setup_required, setup_note}.
+
+    호출 주소가 비었거나 형식만 있으면(「http://」) 바인딩하지 않는다 — 예전에는 바인딩은 되고 부를 때 502였다. 주소가
+    스펙(API 문서)이 아니라 홈페이지면 바인딩은 하되 「호출 주소·키 설정 필요」를 알린다(공공데이터 카탈로그의 주소는
+    대개 기관 홈페이지다 — 실제 호출 주소 apis.data.go.kr/…와 키는 활용 신청 뒤에 관리자가 모듈 설정에 넣는다).
+    module_name을 주면 그 이름으로(예전에는 한글 제목을 정규화하다 날짜만 남았다 — api-20221121)."""
+    from urllib.parse import urlsplit  # noqa: PLC0415
     from .. import audit  # noqa: PLC0415
     from ..models import Module, ModuleBinding, ModuleType  # noqa: PLC0415
     from . import modules as modules_service  # noqa: PLC0415
@@ -623,16 +630,24 @@ def bind_to_project(db: Session, project, api_id: str, env_prefix: str, actor: s
     if len(rows) > 1:
         raise BindError(f"같은 id가 여러 소스에 있습니다 — source를 주세요: {', '.join(r.source for r in rows)}")
     entry = rows[0]
-    url = entry.spec_url or entry.homepage
-    if not url:
-        raise BindError(f"이 API에는 주소(스펙·홈페이지)가 없어 바인딩할 수 없습니다: {entry.title}")
+    url = (entry.spec_url or entry.homepage or "").strip()
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc or "." not in parts.netloc:
+        raise BindError(f"이 API의 주소가 비었거나 형식만 있습니다({url or '없음'}) — 바인딩하지 않습니다: {entry.title}."
+                        " 제공처의 실제 호출 주소를 알면 관리자가 모듈을 직접 등록하세요.")
+    setup = [] if entry.spec_url else ["url"]
+    setup.append("api_key")      # 카탈로그에는 키가 없다 — 키가 필요 없는 API라면 무시한다
     marker = f"{entry.source}:{entry.ext_id}"
     module = next((m for m in db.execute(select(Module).where(
         Module.type == ModuleType.external_api, Module.organization_id == project.organization_id)).scalars()
         if (m.config or {}).get("catalog") == marker), None)
     created = module is None
     if created:
-        base = normalize_module_name(f"api-{entry.title or entry.ext_id}")
+        wanted = normalize_module_name(module_name) if module_name else ""
+        base = wanted or normalize_module_name(f"api-{entry.title or entry.ext_id}")
+        if not wanted and not re.search(r"[a-z]{3,}", base.removeprefix("api-")):
+            # 한글 제목은 정규화하면 날짜·숫자만 남는다 — 소스와 id로 알아볼 수 있게
+            base = normalize_module_name(f"api-{entry.source}-{entry.ext_id}")
         name, n = base, 2
         while db.execute(select(Module).where(Module.name == name)).scalar_one_or_none():
             name, n = f"{base[:37]}-{n}", n + 1
@@ -647,7 +662,8 @@ def bind_to_project(db: Session, project, api_id: str, env_prefix: str, actor: s
     if same is not None:
         db.commit()
         return {"module": module.name, "env_prefix": same.env_prefix, "created": False, "already": True,
-                "injected_env": sorted(modules_service.binding_env(module, same.env_prefix, db=db))}
+                "injected_env": sorted(modules_service.binding_env(module, same.env_prefix, db=db)),
+                **_setup_note(setup, url)}
     if any(b.env_prefix == prefix for b in bindings):
         db.rollback()
         raise BindError(f"이 과제에서 이미 쓰는 접두사입니다: {prefix}")
@@ -656,4 +672,15 @@ def bind_to_project(db: Session, project, api_id: str, env_prefix: str, actor: s
     audit.record(db, actor, "module.bind.catalog", project.name,
                  {"module": module.name, "prefix": prefix, "catalog": marker, "created": created})
     return {"module": module.name, "env_prefix": prefix, "created": created, "already": False,
-            "injected_env": sorted(modules_service.binding_env(module, prefix, db=db))}
+            "injected_env": sorted(modules_service.binding_env(module, prefix, db=db)), **_setup_note(setup, url)}
+
+
+def _setup_note(setup: list[str], url: str) -> dict:
+    """바인딩 뒤 관리자가 할 일 — 화면·MCP 결과가 그대로 보여 준다."""
+    notes = []
+    if "url" in setup:
+        notes.append(f"모듈의 url이 홈페이지({url})입니다 — 실제 호출 주소(예: https://apis.data.go.kr/…)로 바꿔야 부를 수"
+                     " 있습니다")
+    notes.append("인증키가 필요한 API면 관리자가 모듈 설정 api_key에 넣으세요 — 쿼리 인자로 받는 키(serviceKey·crtfc_key·"
+                 "authkey)는 key_param에 인자 이름을 적으면 게이트웨이가 붙입니다(공공데이터는 디코딩 키)")
+    return {"setup_required": setup, "setup_note": " · ".join(notes)}

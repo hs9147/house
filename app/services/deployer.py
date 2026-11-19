@@ -240,7 +240,8 @@ def secret_env_keys(db: Session, project: Project) -> frozenset[str]:
     from . import modules  # noqa: PLC0415 — 순환 import 회피
 
     keys.update(
-        k for k in modules.env_for_project(db, project) if k.endswith(("_API_KEY", "_DSN"))
+        k for k in modules.env_for_project(db, project)
+        if k.endswith(("_API_KEY", "_DSN")) or modules.is_sensitive(k)
     )
     return frozenset(keys)
 

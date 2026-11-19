@@ -84,7 +84,13 @@ async def proxy_module_call(
     headers = egress.forward_headers(request.headers)
 
     api_key = cfg.get("api_key") or cfg.get("secret_key")
-    if api_key:
+    params = dict(request.query_params)
+    key_param = str(cfg.get("key_param") or "").strip()
+    if api_key and key_param:
+        # 쿼리 인자로 키를 받는 API(공공데이터 serviceKey · OpenDART crtfc_key · 수출입은행 authkey) — 게이트웨이가
+        # 붙인다. 앱은 키 없이 부르므로 키가 앱 환경·요청 주소에 남지 않는다. 디코딩 키를 넣는다(여기서 한 번 인코딩된다).
+        params[key_param] = api_key
+    elif api_key:
         headers["authorization"] = f"Bearer {api_key}"
         headers["x-api-key"] = api_key
 
@@ -96,7 +102,7 @@ async def proxy_module_call(
                 method=request.method,
                 url=full_target_url,
                 headers=headers,
-                params=request.query_params,
+                params=params,
                 content=body_bytes,
             )
         audit.record(db, key.name, "proxy.module.call", module_name, {"status": resp.status_code, "path": path})

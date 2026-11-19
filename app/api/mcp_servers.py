@@ -1435,12 +1435,15 @@ _APIS_TOOLS = [
         "description": (
             "카탈로그에서 찾은 API를 과제(프로젝트)에 바인딩한다 — 그 항목을 과제의 조직 범위 external_api 모듈로 만들고"
             "(이미 있으면 그것) 붙인다. 배포하면 {env_prefix}_URL 같은 환경변수가 주입된다. api_id는 search_apis 결과의 id"
-            " 그대로, 같은 id가 소스마다 있으면 source도. 그 과제 조직 사람(또는 관리자)만."
+            " 그대로, 같은 id가 소스마다 있으면 source도. 그 과제 조직 사람(또는 관리자)만. 결과의 setup_required가 있으면"
+            " 관리자가 모듈의 호출 주소(url)·인증키를 넣어야 부를 수 있다(setup_note) — 사용자에게 그대로 알린다."
         ),
         "inputSchema": {"type": "object", "properties": {
             "project": {"type": "string", "description": "과제(프로젝트) 이름"},
             "api_id": {"type": "string"}, "source": {"type": "string"},
-            "env_prefix": {"type": "string", "description": "환경변수 접두사 — 영문 대문자·숫자·밑줄(예: PUBLIC_BID)"}},
+            "env_prefix": {"type": "string", "description": "환경변수 접두사 — 영문 대문자·숫자·밑줄(예: PUBLIC_BID)"},
+            "module_name": {"type": "string", "description": "만들 모듈 이름(영문 소문자·숫자·-, 예: kotra-overseas-market-news)"
+                                                           " — 비우면 제목에서"}},
             "required": ["project", "api_id", "env_prefix"]},
     },
     {
@@ -1507,7 +1510,8 @@ def _apis_call(db: Session, actor: str, name: str, args: dict, *, key: ApiKey | 
             raise mcp_server.McpToolError("이 과제에 바인딩할 권한이 없습니다 — 그 과제 조직 사람이나 관리자만 합니다.")
         try:
             out = apisearch.bind_to_project(db, project, _str_arg(args, "api_id"), _str_arg(args, "env_prefix"),
-                                            actor, _str_arg(args, "source", required=False))
+                                            actor, _str_arg(args, "source", required=False),
+                                            _str_arg(args, "module_name", required=False))
         except apisearch.BindError as e:
             raise mcp_server.McpToolError(str(e))
         return _dump(out)

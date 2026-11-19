@@ -25,6 +25,10 @@ os.environ.setdefault("PAAS_DOC_INDEX_DIR", tempfile.mkdtemp(prefix="paas-test-i
 # 모듈 목록을 세는 시험들(기획의 가용 자원·스케줄러 작업)이 그 PC에서만 깨진다. 환경변수가 .env보다
 # 앞선다. 공용 DB 시험(test_shareddb)은 직접 켠다.
 os.environ.setdefault("PAAS_SHARED_DB_ADMIN_URL", "")
+# 테스트의 git은 자격 증명을 묻지 않고 실패한다 — 사내 Gitea 주소(gpax.lge.com/git)를 쓰는 시험이 가짜 토큰으로
+# 401을 받으면 Git Credential Manager가 로그인 창을 띄우고, 누가 닫을 때까지 테스트가 멈췄다.
+os.environ["GIT_TERMINAL_PROMPT"] = "0"
+os.environ["GCM_INTERACTIVE"] = "never"   # helper를 비우는 설정(빈 값)은 Windows가 빈 환경변수를 지워 못 쓴다
 
 import pytest  # noqa: E402
 

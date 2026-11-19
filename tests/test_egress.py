@@ -242,3 +242,39 @@ def test_proxy_does_not_append_a_slash_when_the_path_is_empty(monkeypatch, fresh
     c.post(f"{API}/proxy/modules/docs-mcp/tools/list", headers={
         **ADMIN, "content-type": "application/json"}, json={})
     assert sent["url"] == "http://gpax.lge.com/paas/api/v1/mcp/docs/tools/list"
+
+
+def test_query_key_is_attached_by_the_gateway_and_never_shown(monkeypatch, fresh_settings):
+    """쿼리 인자로 키를 받는 API(공공데이터 serviceKey·OpenDART crtfc_key) — key_param을 두면 게이트웨이가 api_key를 그
+    인자로 붙인다(헤더로는 인증되지 않는다). 앱은 키 없이 부른다. 「…_key」 항목은 암호화되고 화면에서 가려진다."""
+    sent = {}
+
+    class _FakeResponse:
+        content, status_code, headers = b"{}", 200, {"content-type": "application/json"}
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, method, url, headers, params, content):
+            sent.update(headers=headers, url=url, params=dict(params))
+            return _FakeResponse()
+
+    from app.api import proxy_gateway
+
+    monkeypatch.setattr(proxy_gateway.httpx, "AsyncClient", lambda **kw: _FakeClient())
+    c = TestClient(create_app())
+    made = c.post(f"{API}/modules", json={
+        "name": "kotra-news", "type": "external_api",
+        "config": {"url": "https://apis.data.go.kr/B410001/news", "api_key": "dec/oded+key", "key_param": "serviceKey",
+                   "service_key": "other-secret"},
+    }, headers=ADMIN).json()
+    assert made["config"]["api_key"] == "•••" and made["config"]["service_key"] == "•••"
+    assert made["config"]["key_param"] == "serviceKey"
+    r = c.get(f"{API}/proxy/modules/kotra-news?type=json&numOfRows=1", headers=ADMIN)
+    assert r.status_code == 200
+    assert sent["params"] == {"type": "json", "numOfRows": "1", "serviceKey": "dec/oded+key"}
+    assert "authorization" not in {k.lower() for k in sent["headers"]}

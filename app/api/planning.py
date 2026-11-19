@@ -1119,7 +1119,8 @@ def _with_api_catalog(db: Session, actor: str, tools: list[dict], execute, proje
         if name == API_TOOL_PREFIX + "bind_api" and project is not None:
             try:
                 out = apisearch.bind_to_project(db, project, str(args.get("api_id") or ""),
-                                                str(args.get("env_prefix") or ""), actor, str(args.get("source") or ""))
+                                                str(args.get("env_prefix") or ""), actor, str(args.get("source") or ""),
+                                                str(args.get("module_name") or ""))
             except apisearch.BindError as e:
                 return f"바인딩하지 못했습니다: {e}"
             if bound is not None and out["module"] not in bound:

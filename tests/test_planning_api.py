@@ -2373,3 +2373,33 @@ def test_catalog_api_is_bound_to_the_project_from_the_catalog(monkeypatch, fresh
         with pytest.raises(mcp_servers.mcp_server.McpToolError, match="env_prefix"):
             mcp_servers._apis_call(db, "admin", "bind_api", {**args, "env_prefix": "1x"}, key=admin)
     assert "bind_api" not in {t["name"] for t in mcp_servers._read_only(mcp_servers._APIS_TOOLS)}
+
+
+def test_bind_api_refuses_empty_addresses_and_says_what_to_set_up(monkeypatch, fresh_settings, tmp_path):
+    """bind_api 개선(gp-letter 요청 R-5) — 주소가 비었거나 「http://」뿐이면 바인딩하지 않는다(예전에는 부를 때 502). 주소가
+    홈페이지면 바인딩하되 「호출 주소·키 설정 필요」를 알린다. 모듈 이름을 받고, 한글 제목이라 날짜만 남으면 소스·id로."""
+    from app.db import SessionLocal
+    from app.models import ApiCatalogEntry, Project
+    from app.services import apisearch
+
+    _workspace_repo(monkeypatch, fresh_settings, tmp_path)
+    c = _client()
+    pid, _prov = _project_and_provider(c)
+    with SessionLocal() as db:
+        db.add_all([
+            ApiCatalogEntry(source="publicdata", ext_id="r5-empty", title="공시정보_20200609", homepage="http://",
+                            search_text="r5"),
+            ApiCatalogEntry(source="publicdata", ext_id="r5-home", title="해외시장뉴스_20221121",
+                            homepage="http://kotra.or.kr", search_text="r5"),
+            ApiCatalogEntry(source="publicdata", ext_id="r5-named", title="글로벌 공급망_20230101",
+                            homepage="https://kotra.or.kr", search_text="r5")])
+        db.commit()
+        project = db.get(Project, pid)
+        with pytest.raises(apisearch.BindError, match="형식만"):
+            apisearch.bind_to_project(db, project, "r5-empty", "DART", "admin")
+        out = apisearch.bind_to_project(db, project, "r5-home", "KOTRA_NEWS", "admin")
+        assert out["module"] == "api-publicdata-r5-home"            # 날짜만 남지 않는다
+        assert out["setup_required"] == ["url", "api_key"] and "apis.data.go.kr" in out["setup_note"]
+        named = apisearch.bind_to_project(db, project, "r5-named", "KOTRA_SUPPLY", "admin",
+                                          module_name="kotra-global-supply-insights")
+        assert named["module"] == "kotra-global-supply-insights"

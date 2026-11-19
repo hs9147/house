@@ -21,10 +21,19 @@ from ..security import decrypt_value, encrypt_value
 # config 안에서 저장 시 암호화되는 필드
 SENSITIVE_KEYS = {"api_key", "key", "dsn", "password", "secret", "client_secret", "token"}
 
+
+def is_sensitive(name: str) -> bool:
+    """비밀 항목인가 — 정해 둔 이름이거나, 이름이 key로 끝난다(service_key·crtfc_key·authkey·servicekey). 예전에는 정해 둔
+    이름만 봐서 공공데이터·OpenDART의 키 항목이 평문으로 저장되고 화면에 그대로 보였다(gp-letter 요청 2026-11-19)."""
+    n = name.lower()
+    return (n in SENSITIVE_KEYS or n.endswith("_key") or n in {"authkey", "servicekey", "apikey", "accesskey", "secretkey"}
+            or "secret" in n or "password" in n or n.endswith("token"))
+
+
 def encrypt_config(config: dict) -> dict:
     out = {}
     for k, v in config.items():
-        if k.lower() in SENSITIVE_KEYS and isinstance(v, str) and v:
+        if is_sensitive(k) and isinstance(v, str) and v:
             out[k] = {"__enc__": encrypt_value(v)}
         else:
             out[k] = v
