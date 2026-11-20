@@ -1090,10 +1090,12 @@ export const api = {
     }>('GET', '/plan/advice'),
   planConstraints: (projectId: number) =>
     request<{ document: string }>('GET', `/plan/projects/${projectId}/constraints`),
-  // 모든 프로젝트에 적용되는 공통 제약사항 — 등록·삭제는 관리자만
+  // 모든 프로젝트에 적용되는 공통 제약사항 — 등록·수정·삭제는 관리자만
   listCommonConstraints: () => request<PlanConstraintOut[]>('GET', '/plan/constraints'),
   addCommonConstraint: (text: string) =>
     request<PlanConstraintOut>('POST', '/plan/constraints', { text }),
+  updateCommonConstraint: (id: number, text: string) =>
+    request<PlanConstraintOut>('PUT', `/plan/constraints/${id}`, { text }),
   deleteCommonConstraint: (id: number) =>
     request<void>('DELETE', `/plan/constraints/${id}`),
   // 외주 빌드 작업 지시(work order)

@@ -280,7 +280,27 @@ export default function AgentPlanning() {
     }
   };
 
-  const removeConstraint = async (id: number) => {
+  // 수정 중인 항목 — 한 번에 하나만 연다.
+  const [editingConstraint, setEditingConstraint] = useState<{ id: number; text: string } | null>(null);
+
+  const saveConstraint = async () => {
+    if (!editingConstraint) return;
+    const text = editingConstraint.text.trim();
+    if (!text) return;
+    setError('');
+    try {
+      await api.updateCommonConstraint(editingConstraint.id, text);
+      setEditingConstraint(null);
+      commonConstraints.reload();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const removeConstraint = async (id: number, text: string) => {
+    // 모든 프로젝트의 기획·빌드에 실리는 규범이라 지우기 전에 무엇을 지우는지 보여 주고 묻는다.
+    const preview = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+    if (!window.confirm(`이 공통 제약사항을 삭제할까요? 모든 프로젝트에서 빠집니다.\n\n${preview}`)) return;
     setError('');
     try {
       await api.deleteCommonConstraint(id);
@@ -679,15 +699,40 @@ export default function AgentPlanning() {
               <ul style={{ margin: 0, paddingLeft: 16, fontSize: 13 }}>
                 {rows.map((r) => (
                   <li key={r.id} style={{ marginBottom: 6 }}>
-                    <span style={{ whiteSpace: 'pre-wrap' }}>{r.text}</span>
-                    {me.data?.is_admin && (
-                      <button
-                        className="small danger"
-                        style={{ marginLeft: 8 }}
-                        onClick={() => removeConstraint(r.id)}
-                      >
-                        삭제
-                      </button>
+                    {editingConstraint?.id === r.id ? (
+                      <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
+                        <textarea
+                          style={{ flex: 1, minHeight: 60, fontFamily: 'inherit' }}
+                          value={editingConstraint.text}
+                          onChange={(e) => setEditingConstraint({ id: r.id, text: e.target.value })}
+                        />
+                        <button className="small" disabled={!editingConstraint.text.trim()
+                          || editingConstraint.text.trim() === r.text}
+                          onClick={() => void saveConstraint()}>저장</button>
+                        <button className="small secondary" onClick={() => setEditingConstraint(null)}>취소</button>
+                      </div>
+                    ) : (
+                      <>
+                        <span style={{ whiteSpace: 'pre-wrap' }}>{r.text}</span>
+                        {me.data?.is_admin && (
+                          <>
+                            <button
+                              className="small secondary"
+                              style={{ marginLeft: 8 }}
+                              onClick={() => setEditingConstraint({ id: r.id, text: r.text })}
+                            >
+                              수정
+                            </button>
+                            <button
+                              className="small danger"
+                              style={{ marginLeft: 4 }}
+                              onClick={() => void removeConstraint(r.id, r.text)}
+                            >
+                              삭제
+                            </button>
+                          </>
+                        )}
+                      </>
                     )}
                   </li>
                 ))}

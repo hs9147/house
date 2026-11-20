@@ -1444,7 +1444,7 @@ def test_constraints_document_lists_rules():
 
 
 def test_common_constraints_are_admin_only_to_edit():
-    """공통 제약은 플랫폼 차원의 규범이다 — 등록·삭제는 관리자만, 조회는 누구나."""
+    """공통 제약은 플랫폼 차원의 규범이다 — 등록·수정·삭제는 관리자만, 조회는 누구나."""
     c = _client()
     member = c.post("/paas/api/v1/keys", json={"name": "planner", "is_admin": False},
                     headers=ADMIN).json()["key"]
@@ -1466,6 +1466,16 @@ def test_common_constraints_are_admin_only_to_edit():
     listed = c.get("/paas/api/v1/plan/constraints", headers=MEMBER)
     assert listed.status_code == 200
     assert [row["text"] for row in listed.json()] == ["외부 솔루션은 쓰지 않는다."]
+
+    # 수정도 관리자만 — 빈 내용·없는 항목은 거절, 고친 글이 그대로 목록에 나온다
+    edited = {"text": "  외부 솔루션(Redis 등)은 쓰지 않는다.  "}
+    assert c.put(f"/paas/api/v1/plan/constraints/{cid}", json=edited, headers=MEMBER).status_code == 403
+    assert c.put(f"/paas/api/v1/plan/constraints/{cid}", json={"text": " "}, headers=ADMIN).status_code == 422
+    assert c.put("/paas/api/v1/plan/constraints/99999", json=edited, headers=ADMIN).status_code == 404
+    r = c.put(f"/paas/api/v1/plan/constraints/{cid}", json=edited, headers=ADMIN)
+    assert r.status_code == 200 and r.json()["text"] == "외부 솔루션(Redis 등)은 쓰지 않는다."
+    listed = c.get("/paas/api/v1/plan/constraints", headers=MEMBER).json()
+    assert [row["text"] for row in listed] == ["외부 솔루션(Redis 등)은 쓰지 않는다."]
 
     assert c.delete(f"/paas/api/v1/plan/constraints/{cid}", headers=MEMBER).status_code == 403
     assert c.delete(f"/paas/api/v1/plan/constraints/{cid}", headers=ADMIN).status_code == 204

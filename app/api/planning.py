@@ -1152,6 +1152,27 @@ def add_common_constraint(
     return _constraint_out(row)
 
 
+@router.put("/plan/constraints/{constraint_id}", response_model=PlanConstraintOut)
+def update_common_constraint(
+    constraint_id: int,
+    body: PlanConstraintIn,
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    row = db.get(PlanConstraint, constraint_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="constraint not found")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="제약사항 내용이 비어 있습니다.")
+    before = row.text
+    row.text = text
+    db.commit()
+    audit.record(db, admin.name, "plan.constraint.update", "-",
+                 {"id": constraint_id, "before": before[:200], "text": text[:200]})
+    return _constraint_out(row)
+
+
 @router.delete("/plan/constraints/{constraint_id}", status_code=204)
 def delete_common_constraint(
     constraint_id: int,
