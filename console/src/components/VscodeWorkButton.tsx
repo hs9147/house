@@ -1,5 +1,9 @@
-import { hasUsableGitUrl, vscodeCloneUri } from '../lib/vscode';
+import { useState } from 'react';
+import { hasUsableGitUrl, INSTALL_URLS, vscodeCloneUri } from '../lib/vscode';
 import type { ProjectOut } from '../lib/types';
+
+// 눌렀는데 이만큼 지나도 브라우저 창이 포커스를 잃지 않으면 VS Code가 뜨지 않은 것으로 본다.
+const LAUNCH_WAIT_MS = 2000;
 
 /**
  * "VS Code로 작업" — 이 프로젝트 리포를 사용자 PC의 VS Code로 clone한다.
@@ -9,26 +13,49 @@ import type { ProjectOut } from '../lib/types';
  *
  * git_url은 비관리자·비소속 사용자에게 안내 문구로 마스킹돼 내려오므로(GIT_URL_MASK),
  * 실제 주소일 때만 활성화한다 — 마스킹 문구를 clone에 넘기면 VS Code만 열리고 실패한다.
+ *
+ * VS Code가 없는 PC에서는 Chrome·Edge가 아무 반응 없이 넘어간다(개발자 콘솔에만 「scheme does not have a
+ * registered handler」). 브라우저에는 핸들러가 있는지 묻는 API가 없어서, 누른 뒤 창이 포커스를 잃지 않으면
+ * 설치 페이지 링크를 보여 준다. 짐작이라 오류가 아니라 질문으로 쓴다. 타이머 뒤의 window.open은 팝업
+ * 차단에 걸리므로 사용자가 누르는 링크(새 창)로 둔다.
  */
 export default function VscodeWorkButton({ project }: { project: ProjectOut | null | undefined }) {
   const ready = hasUsableGitUrl(project?.git_url);
-  return (
-    <button
-      className="small secondary"
-      disabled={!ready}
-      title={
-        ready
-          ? `${project!.name} 리포를 VS Code로 clone합니다 (첫 push 때 브라우저로 로그인)`
-          : '리포 주소를 볼 수 있는 프로젝트만 열 수 있습니다'
-      }
-      // 프로젝트 목록은 행 클릭이 상세 이동이라 전파를 막아야 한다(삭제 버튼과 동일).
-      onClick={(e) => { e.stopPropagation(); openInVscode(project!.git_url); }}
-    >
-      VS Code로 작업
-    </button>
-  );
-}
+  const [notOpened, setNotOpened] = useState(false);
 
-function openInVscode(gitUrl: string) {
-  window.location.href = vscodeCloneUri(gitUrl);
+  const launch = () => {
+    setNotOpened(false);
+    let left = false;
+    const onLeave = () => { left = true; };
+    window.addEventListener('blur', onLeave, { once: true });
+    window.location.href = vscodeCloneUri(project!.git_url);
+    window.setTimeout(() => {
+      window.removeEventListener('blur', onLeave);
+      if (!left && document.hasFocus()) setNotOpened(true);
+    }, LAUNCH_WAIT_MS);
+  };
+
+  return (
+    <>
+      <button
+        className="small secondary"
+        disabled={!ready}
+        title={
+          ready
+            ? `${project!.name} 리포를 VS Code로 clone합니다 (첫 push 때 브라우저로 로그인)`
+            : '리포 주소를 볼 수 있는 프로젝트만 열 수 있습니다'
+        }
+        // 프로젝트 목록은 행 클릭이 상세 이동이라 전파를 막아야 한다(삭제 버튼과 동일).
+        onClick={(e) => { e.stopPropagation(); launch(); }}
+      >
+        VS Code로 작업
+      </button>
+      {notOpened && (
+        <span className="mutedtext" style={{ fontSize: 11 }} onClick={(e) => e.stopPropagation()}>
+          VS Code가 열리지 않았나요?{' '}
+          <a href={INSTALL_URLS.vscode} target="_blank" rel="noopener noreferrer">설치 페이지(새 창)</a>
+        </span>
+      )}
+    </>
+  );
 }

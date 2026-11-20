@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import Async from '../components/Async';
 import C4Diagram from '../components/C4Diagram';
 import Modal from '../components/Modal';
+import OrcaWorkButton from '../components/OrcaWorkButton';
 import VscodeWorkButton from '../components/VscodeWorkButton';
 import ZipDownloadButton from '../components/ZipDownloadButton';
 import { ApiError, api } from '../lib/api';
@@ -1019,6 +1020,9 @@ export default function AgentPlanning() {
                       리포를 바로 VS Code로 받게 한다. 세션에는 project_id만 있으므로
                       목록에서 프로젝트를 찾아 넘긴다. */}
                   <VscodeWorkButton
+                    project={availableProjects.find((p) => p.id === session?.project_id)}
+                  />
+                  <OrcaWorkButton
                     project={availableProjects.find((p) => p.id === session?.project_id)}
                   />
                   <ZipDownloadButton

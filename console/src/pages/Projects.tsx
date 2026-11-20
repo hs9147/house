@@ -5,6 +5,7 @@ import GitBrowseButton from '../components/GitBrowseButton';
 import TypeBadges from '../components/TypeBadges';
 import Modal from '../components/Modal';
 import StatusPill from '../components/StatusPill';
+import OrcaWorkButton from '../components/OrcaWorkButton';
 import VscodeWorkButton from '../components/VscodeWorkButton';
 import ZipDownloadButton from '../components/ZipDownloadButton';
 import { api } from '../lib/api';
@@ -58,7 +59,7 @@ export default function Projects() {
                 <tr>
                   <th>이름</th>
                   <th>타입</th>
-                  {/* Git 주소를 보여 주는 칸이 아니라 리포로 하는 작업(조회·VS Code·ZIP)을
+                  {/* Git 주소를 보여 주는 칸이 아니라 리포로 하는 작업(조회·VS Code·Orca·ZIP)을
                       모아 둔 칸이다 — 열 이름도 그대로 '작업'이다. */}
                   <th>작업</th>
                   <th>기본 프로필</th>
@@ -77,6 +78,7 @@ export default function Projects() {
                       <span className="row" style={{ alignItems: 'center', gap: 8 }}>
                         <GitBrowseButton project={p} />
                         <VscodeWorkButton project={p} />
+                        <OrcaWorkButton project={p} />
                         <ZipDownloadButton project={p} />
                       </span>
                     </td>
