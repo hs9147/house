@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { hasUsableGitUrl, INSTALL_URLS, vscodeCloneUri } from '../lib/vscode';
+import { hasUsableGitUrl, VSCODE_INSTALL_URL, vscodeCloneUri } from '../lib/vscode';
 import type { ProjectOut } from '../lib/types';
 
 // 눌렀는데 이만큼 지나도 브라우저 창이 포커스를 잃지 않으면 VS Code가 뜨지 않은 것으로 본다.
@@ -53,7 +53,7 @@ export default function VscodeWorkButton({ project }: { project: ProjectOut | nu
       {notOpened && (
         <span className="mutedtext" style={{ fontSize: 11 }} onClick={(e) => e.stopPropagation()}>
           VS Code가 열리지 않았나요?{' '}
-          <a href={INSTALL_URLS.vscode} target="_blank" rel="noopener noreferrer">설치 페이지(새 창)</a>
+          <a href={VSCODE_INSTALL_URL} target="_blank" rel="noopener noreferrer">설치 페이지(새 창)</a>
         </span>
       )}
     </>

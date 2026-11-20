@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  gitArchiveZipUrl, gitRepoWebUrl, hasUsableGitUrl, INSTALL_URLS, orcaAddCommand, orcaCloneCommand, orcaDefaultPath, vscodeCloneUri,
+  gitArchiveZipUrl, gitRepoWebUrl, hasUsableGitUrl, vscodeCloneUri,
 } from '../lib/vscode';
 
 describe('vscodeCloneUri', () => {
@@ -76,35 +76,5 @@ describe('gitRepoWebUrl', () => {
   // 경로 안의 .git은 리포 이름의 일부일 수 있다 — 끝에 있는 것만 뗀다.
   it('경로 중간의 .git은 건드리지 않는다', () => {
     expect(gitRepoWebUrl('https://h/o/my.git.repo')).toBe('https://h/o/my.git.repo');
-  });
-});
-
-describe('Orca로 작업 명령', () => {
-  const bs = '\u005c';
-  const home = ['$env:USERPROFILE', 'Projects', 'r'].join(bs);
-
-  it('기본 위치는 사용자 폴더 아래 Projects/<이름>이다', () => {
-    expect(orcaDefaultPath('gp-letter')).toBe(['$env:USERPROFILE', 'Projects', 'gp-letter'].join(bs));
-  });
-
-  it('git·Orca가 있을 때만 받고, clone이 성공했을 때만 Orca를 켜고 등록한다', () => {
-    const cmd = orcaCloneCommand('http://git.example.com/o/r.git', home);
-    expect(cmd.startsWith('if (-not (Get-Command git -ErrorAction SilentlyContinue))')).toBe(true);
-    expect(cmd).toContain(`Start-Process '${INSTALL_URLS.git}'`);
-    expect(cmd).toContain(`elseif (-not (Get-Command orca -ErrorAction SilentlyContinue))`);
-    expect(cmd).toContain(`Start-Process '${INSTALL_URLS.orca}'`);
-    expect(cmd.endsWith(`else { git clone 'http://git.example.com/o/r.git' "${home}"; `
-      + `if ($?) { orca open; orca repo add --path "${home}" } }`)).toBe(true);
-  });
-
-  it('등록만 하는 명령은 git을 검사하지 않는다', () => {
-    const cmd = orcaAddCommand(home);
-    expect(cmd).not.toContain('Get-Command git');
-    expect(cmd.endsWith(`else { orca open; orca repo add --path "${home}" }`)).toBe(true);
-  });
-
-  it('경로의 큰따옴표·백틱과 주소의 작은따옴표를 이스케이프한다 — 안 하면 명령이 중간에서 끊긴다', () => {
-    expect(orcaAddCommand('C:/a"b`c')).toContain('orca repo add --path "C:/a`"b``c"');
-    expect(orcaCloneCommand("http://h/o'r.git", 'D:/x')).toContain("'http://h/o''r.git'");
   });
 });

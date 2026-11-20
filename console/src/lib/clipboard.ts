@@ -2,7 +2,7 @@
 //
 // `navigator.clipboard`는 보안 컨텍스트(https·localhost)에서만 있다. 사내는 평문 http로
 // 접속하므로 그것만 쓰면 복사가 조용히 안 되고, 화면은 "복사됨"이라고 말한다(실제로 그랬다 —
-// components/GitBrowseButton.tsx에도 같은 기록이 있다). 그래서 두 가지를 순서대로 시도하고
+// components/GitCopyButton.tsx에도 같은 기록이 있다). 그래서 두 가지를 순서대로 시도하고
 // **성공 여부를 돌려준다** — 호출측이 거짓말하지 않게 하는 것이 이 함수의 요점이다.
 
 /** 복사에 성공하면 true. 두 방법 다 안 되면 false(호출측이 "직접 복사하세요"를 말해야 한다). */

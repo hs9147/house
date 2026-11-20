@@ -43,48 +43,5 @@ export function hasUsableGitUrl(gitUrl: string | null | undefined): boolean {
   return typeof gitUrl === 'string' && /^https?:\/\//i.test(gitUrl.trim());
 }
 
-// "Orca로 작업" — Orca에는 vscode:처럼 주소로 clone하는 링크가 없다(orca: 링크는 공유 스킬·봇·페어링뿐이고
-// CLI의 `orca repo add`도 이미 받은 폴더 경로만 받는다). 그래서 clone은 git이, 등록은 orca가 하도록
-// PowerShell 한 줄을 만들어 사용자가 붙여 넣게 한다. 경로는 큰따옴표로 감싸 $env:USERPROFILE을 펼치고,
-// 큰따옴표·백틱만 PowerShell 방식(`)으로 이스케이프한다. 주소는 펼칠 것이 없으니 작은따옴표로 감싼다.
-
-/** clone할 기본 위치 — 사용자 폴더 아래 Projects\<프로젝트 이름>. */
-const BACKSLASH = '\u005c';
-
-export function orcaDefaultPath(projectName: string): string {
-  return ['$env:USERPROFILE', 'Projects', projectName].join(BACKSLASH);
-}
-
-function psPath(path: string): string {
-  return `"${path.trim().replace(/[`"]/g, (c) => `\`${c}`)}"`;
-}
-
-/** 설치 페이지 — 프로그램이 없을 때 새 창(브라우저 새 탭)으로 연다. */
-export const INSTALL_URLS = {
-  vscode: 'https://code.visualstudio.com/download',
-  orca: 'https://orca.dev/download',
-  git: 'https://git-scm.com/downloads/win',
-} as const;
-
-// 붙여 넣은 PC에 git·orca가 없으면 하던 일을 시작하지 않고 설치 페이지를 연다(Start-Process는 기본 브라우저로
-// 연다). 검사 없이 돌리면 git만 있는 PC에서 clone은 되고 등록은 「orca 인식 안 됨」으로 실패해, 등록 안 된 폴더가 남는다.
-function ifInstalled(tools: ('git' | 'orca')[], body: string): string {
-  const missing = tools.map((t, i) => `${i ? 'elseif' : 'if'} (-not (Get-Command ${t} -ErrorAction SilentlyContinue)) `
-    + `{ '${t === 'git' ? 'git이' : 'Orca가'} 설치돼 있지 않습니다 — 설치 페이지를 엽니다'; Start-Process '${INSTALL_URLS[t]}' }`);
-  return `${missing.join(' ')} else { ${body} }`;
-}
-
-// orca open: Orca 창이 이미 떠 있으면 아무것도 하지 않고, 꺼져 있으면 앞으로 띄우지 않고 켠다 — 앱이 꺼져 있으면
-// repo add가 런타임에 닿지 못한다.
-const ORCA_REGISTER = (path: string) => `orca open; orca repo add --path ${psPath(path)}`;
-
-/** 리포를 받아 Orca에 등록하는 PowerShell 한 줄 — git·Orca가 없으면 설치 페이지를 열고, clone이 실패하면 등록하지 않는다. */
-export function orcaCloneCommand(gitUrl: string, path: string): string {
-  const url = `'${gitUrl.trim().replace(/'/g, "''")}'`;
-  return ifInstalled(['git', 'orca'], `git clone ${url} ${psPath(path)}; if ($?) { ${ORCA_REGISTER(path)} }`);
-}
-
-/** 이미 받아 둔 폴더를 Orca에 등록만 하는 명령 — Orca가 없으면 설치 페이지를 연다. */
-export function orcaAddCommand(path: string): string {
-  return ifInstalled(['orca'], ORCA_REGISTER(path));
-}
+/** VS Code 설치 페이지 — VS Code가 열리지 않을 때 새 창으로 안내한다. */
+export const VSCODE_INSTALL_URL = 'https://code.visualstudio.com/download';
