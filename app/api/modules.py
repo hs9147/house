@@ -13,7 +13,7 @@ from ..schemas import (
     ModuleHistoryItem,
     PlatformModuleReportOut,
 )
-from ..security import require_admin, require_api_key
+from ..security import require_admin, require_api_key, viewer_org_ids
 from ..services import a2a as a2a_service
 from ..services import apisearch
 from ..services import egress
@@ -68,6 +68,11 @@ def update_module(
     row = db.get(Module, module_id)
     if row is None:
         raise HTTPException(status_code=404, detail="module not found")
+    # 설정에는 호출 주소·인증키가 있고 게이트웨이가 그 키를 붙여 부른다 — 아무 키나 고치면 주소를 다른 곳으로 돌려
+    # 키를 빼낼 수 있다. 관리자, 또는 그 모듈 조직 사람이 조직을 그대로 둘 때만.
+    if not key.is_admin and (row.organization_id is None or body.organization_id != row.organization_id
+                             or row.organization_id not in viewer_org_ids(db, key)):
+        raise HTTPException(status_code=403, detail="모듈은 관리자나 그 모듈 조직 사람만 고칩니다(조직은 관리자만 바꿉니다)")
     row.name = body.name
     row.category = body.category
     row.organization_id = body.organization_id

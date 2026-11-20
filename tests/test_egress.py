@@ -278,3 +278,62 @@ def test_query_key_is_attached_by_the_gateway_and_never_shown(monkeypatch, fresh
     assert r.status_code == 200
     assert sent["params"] == {"type": "json", "numOfRows": "1", "serviceKey": "dec/oded+key"}
     assert "authorization" not in {k.lower() for k in sent["headers"]}
+
+
+def test_module_calls_and_edits_are_limited_to_who_the_module_belongs_to(monkeypatch, fresh_settings):
+    """게이트웨이는 모듈 설정의 인증키를 붙여 준다 — 아무 플랫폼 키나 부르거나 고치면 남의 과제 키를 쓰거나(호출) 주소를
+    돌려 키를 빼낸다(수정). 조직 모듈은 관리자·그 조직 사람·그 모듈이 바인딩된 과제의 앱 키(app-{과제})만 부르고,
+    고치는 것은 관리자·그 조직 사람만. 전역 모듈은 지금처럼 누구나 부른다."""
+    from app.api import proxy_gateway
+    from app.db import SessionLocal
+    from app.models import Project
+
+    class _FakeResponse:
+        content, status_code, headers = b"{}", 200, {"content-type": "application/json"}
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, method, url, headers, params, content):
+            return _FakeResponse()
+
+    monkeypatch.setattr(proxy_gateway.httpx, "AsyncClient", lambda **kw: _FakeClient())
+    c = TestClient(create_app())
+    org = c.post(f"{API}/orgs", json={"name": "gp-sil"}, headers=ADMIN).json()["id"]
+    news = c.post(f"{API}/modules", json={"name": "kotra-news", "type": "external_api", "organization_id": org,
+                                          "config": {"url": "https://apis.data.go.kr/x", "api_key": "k"}},
+                  headers=ADMIN).json()
+    c.post(f"{API}/modules", json={"name": "dart", "type": "external_api", "organization_id": org,
+                                   "config": {"url": "https://opendart.fss.or.kr/api/list.json"}}, headers=ADMIN)
+    c.post(f"{API}/modules", json={"name": "open", "type": "external_api",
+                                   "config": {"url": "https://example.com"}}, headers=ADMIN)
+    pid = c.post(f"{API}/projects", json={"name": "gp-letter", "type": "python",
+                                          "git_url": "https://git.example.com/o/gp-letter.git"}, headers=ADMIN).json()["id"]
+    db = SessionLocal()
+    try:
+        db.get(Project, pid).organization_id = org
+        db.commit()
+    finally:
+        db.close()
+    assert c.post(f"{API}/projects/{pid}/modules/{news['id']}/bind", json={"env_prefix": "KOTRA_NEWS"},
+                  headers=ADMIN).status_code == 201
+
+    def key(name):
+        return {"x-api-key": c.post(f"{API}/keys", json={"name": name}, headers=ADMIN).json()["key"]}
+
+    app, other = key("app-gp-letter"), key("someone-else")
+    assert c.get(f"{API}/proxy/modules/kotra-news", headers=app).status_code == 200      # 바인딩된 과제의 앱 키
+    assert c.get(f"{API}/proxy/modules/dart", headers=app).status_code == 403            # 같은 조직이어도 바인딩 안 됨
+    assert c.get(f"{API}/proxy/modules/kotra-news", headers=other).status_code == 403
+    assert c.get(f"{API}/proxy/modules/open", headers=other).status_code == 200          # 전역 모듈
+    assert c.get(f"{API}/proxy/modules/kotra-news", headers=ADMIN).status_code == 200
+
+    edit = {"name": "kotra-news", "type": "external_api", "organization_id": org, "config": {"url": "https://evil.example"}}
+    assert c.put(f"{API}/modules/{news['id']}", json=edit, headers=app).status_code == 403
+    assert c.put(f"{API}/modules/{news['id']}", json=edit, headers=other).status_code == 403
+    assert c.put(f"{API}/modules/{news['id']}", json={**edit, "config": {"url": "https://apis.data.go.kr/y"}},
+                 headers=ADMIN).status_code == 200

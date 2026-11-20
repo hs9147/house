@@ -402,6 +402,17 @@ def viewer_org_ids(db: Session, key: ApiKey) -> set[int]:
     return {o.id for o in user.organizations} if user else set()
 
 
+APP_KEY_PREFIX = "app-"
+
+
+def app_key_project(db: Session, key: ApiKey) -> Project | None:
+    """앱 서비스 키(이름 `app-{과제}`, 비관리자)가 묶인 과제. 배포된 앱이 정기 실행처럼 사람 세션 없이 게이트웨이를
+    부를 때 쓴다 — 관리자가 키 목록에서 이 이름으로 발급한다(사내 MCP 모듈 키 `mcp-{모듈}`과 같은 이름 규약)."""
+    if key.is_admin or not key.name.startswith(APP_KEY_PREFIX):
+        return None
+    return db.execute(select(Project).where(Project.name == key.name[len(APP_KEY_PREFIX):])).scalar_one_or_none()
+
+
 def _module_store(db: Session, key: ApiKey) -> str | None:
     """사내 저장소 서버(/mcp/storage/{저장소})를 모듈로 등록할 때 발급한 전용 키라면 그 저장소 이름.
 

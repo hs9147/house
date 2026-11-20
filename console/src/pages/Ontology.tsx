@@ -13,13 +13,14 @@ import type { OntologyCleanse } from '../lib/types';
  * 조회는 "이것이 무엇과 이어져 있나"다 — 전자는 전체 분포라 집계가 맞고, 후자는 국소
  * 구조라 노드-링크가 맞는다(그래서 쓰는 표현도 다르다).
  */
-// 순서가 뜻이다 — 쓰는 일(찾아 보기)이 먼저고, 고치는 일(전환 현황)이 그 다음이다.
-// 그래서 기본 탭도 정보 조회다(/ontology).
+// 순서가 뜻이다 — 쓰는 일(찾아 보기)이 먼저고(기본 탭 /ontology), 만드는 일은 그 뒤에 일하는 순서로 놓는다.
+// 전환 현황(색인 → 형식 그래프)이 맨 앞인 까닭: 내용 분석은 색인한 본문을, 워크플로 연결은 형식 그래프의
+// 용어·조문·표와 전문 색인을 읽는다 — 색인 실패·깨진 본문을 먼저 고치지 않으면 뒤의 둘이 빈 곳을 남긴다.
 const TABS: [string, string][] = [
   ['/ontology', '정보 조회'],
+  ['/ontology/conversion', '전환 현황'],
   ['/ontology/semantic', '내용 분석'],
   ['/ontology/workflows', '워크플로 연결'],
-  ['/ontology/conversion', '전환 현황'],
 ];
 
 export default function Ontology() {

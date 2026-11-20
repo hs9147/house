@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from .. import audit
 from ..db import get_db
-from ..models import ApiKey, LlmProvider, Module
-from ..security import decrypt_value, require_agent_key, viewer_org_ids
+from ..models import ApiKey, LlmProvider, Module, ModuleBinding
+from ..security import app_key_project, decrypt_value, require_agent_key, viewer_org_ids
 from ..services import egress
 from ..services import llm as llm_service
 from ..services import modules as modules_service
@@ -49,6 +49,17 @@ def proxy_llm_call(
 _PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"]
 
 
+def _may_call_module(db: Session, key: ApiKey, module: Module) -> bool:
+    """이 키로 이 모듈을 불러도 되나 — 관리자, 전역 모듈, 모듈 조직 사람, 그 모듈이 바인딩된 과제의 앱 키.
+    게이트웨이는 모듈 설정의 인증키를 붙여 준다(api_key·key_param) — 아무 플랫폼 키나 부를 수 있으면 남의 과제가
+    발급받은 키로 호출하게 된다."""
+    if key.is_admin or module.organization_id is None or module.organization_id in viewer_org_ids(db, key):
+        return True
+    project = app_key_project(db, key)
+    return project is not None and db.execute(select(ModuleBinding.id).where(
+        ModuleBinding.project_id == project.id, ModuleBinding.module_id == module.id)).first() is not None
+
+
 # 경로 없는 형태도 **직접** 받는다. `{path:path}` 하나만 두면 `/proxy/modules/{이름}`은
 # FastAPI의 redirect_slashes가 307로 돌려보내는데, POST에서 그 리다이렉트를 따라가며 본문을
 # 흘리는 클라이언트가 있다(MCP는 전부 POST + JSON-RPC 본문이다). 두 경로가 같은 함수를 쓰므로
@@ -66,6 +77,9 @@ async def proxy_module_call(
     row = db.execute(select(Module).where(Module.name == module_name)).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Module '{module_name}' not found")
+    if not _may_call_module(db, key, row):
+        raise HTTPException(status_code=403, detail=f"Module '{module_name}' is not available to this key — "
+                            "관리자, 모듈 조직 사람, 그 모듈이 바인딩된 과제의 앱 키(app-{과제})만 부릅니다")
 
     cfg = modules_service.decrypt_config(row.config or {})
     target_url = cfg.get("url") or cfg.get("endpoint")
