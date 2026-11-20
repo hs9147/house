@@ -232,7 +232,9 @@ def test_unbind_module_removes_only_that_binding():
 
     c.post(f"/paas/api/v1/projects/{pid}/modules/{mid}/bind", json={"env_prefix": "MAIL"}, headers=ADMIN)
     c.post(f"/paas/api/v1/projects/{other_pid}/modules/{mid}/bind", json={"env_prefix": "MAIL"}, headers=ADMIN)
-    binding_id = c.get(f"/paas/api/v1/projects/{pid}/modules", headers=ADMIN).json()[0]["binding_id"]
+    card = c.get(f"/paas/api/v1/projects/{pid}/modules", headers=ADMIN).json()[0]
+    binding_id = card["binding_id"]
+    assert card["module_id"] == mid      # 콘솔의 「설정」이 이 모듈을 고친다
     other_binding_id = c.get(f"/paas/api/v1/projects/{other_pid}/modules", headers=ADMIN).json()[0]["binding_id"]
 
     # 다른 프로젝트의 바인딩 id로 해제 시도 → 404 (프로젝트 소속 검증)

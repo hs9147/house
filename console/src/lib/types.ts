@@ -166,6 +166,7 @@ export interface ModuleSummary {
   skills: string[];
   env_prefix: string;
   binding_id: number; // 이 프로젝트에서의 바인딩 식별자 — 해제(unbind) 시 사용
+  module_id: number; // 바인딩된 모듈 — 설정 수정(PUT /modules/{id}) 시 사용
 }
 
 export interface LlmProviderOut {

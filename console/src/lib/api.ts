@@ -735,6 +735,11 @@ export const api = {
       category: category || null,
       organization_id: organization_id ?? null,
     }),
+  // 설정은 서버가 기존 값에 덮어 합친다 — 바꾼 항목만 보낸다(비밀 항목은 빈칸이면 그대로). 관리자·모듈 조직 사람만.
+  updateModule: (m: ModuleOut, config: Record<string, unknown>) =>
+    request<ModuleOut>('PUT', `/modules/${m.id}`, {
+      name: m.name, type: m.type, category: m.category, organization_id: m.organization_id, config,
+    }),
   deleteModule: (id: number) => request<void>('DELETE', `/modules/${id}`),
 
   me: () =>

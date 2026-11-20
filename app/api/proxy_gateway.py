@@ -47,6 +47,11 @@ def proxy_llm_call(
 
 
 _PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"]
+# 제공처 응답에서 넘기지 않는 헤더 — 전송 방식은 이 응답에서 새로 정해진다. 그대로 넘기면 본문은 이미 풀어 다 읽었는데
+# 「Transfer-Encoding: chunked」·옛 Content-Length·「Content-Encoding: gzip」이 따라가 앞단 프록시가 응답을 깨진 것으로
+# 보고 502를 낸다(실측 운영: OpenDART·수출입은행 JSON이 chunked라 502, 브라우저는 Failed to fetch).
+_HOP_HEADERS = {"transfer-encoding", "content-length", "content-encoding", "connection", "keep-alive", "te", "trailer",
+                "upgrade", "proxy-authenticate", "proxy-authorization"}
 
 
 def _may_call_module(db: Session, key: ApiKey, module: Module) -> bool:
@@ -120,6 +125,7 @@ async def proxy_module_call(
                 content=body_bytes,
             )
         audit.record(db, key.name, "proxy.module.call", module_name, {"status": resp.status_code, "path": path})
-        return Response(content=resp.content, status_code=resp.status_code, headers=dict(resp.headers))
+        return Response(content=resp.content, status_code=resp.status_code,
+                        headers={k: v for k, v in resp.headers.items() if k.lower() not in _HOP_HEADERS})
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"PaaS Module proxy call failed: {e}")

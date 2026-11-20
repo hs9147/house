@@ -337,3 +337,36 @@ def test_module_calls_and_edits_are_limited_to_who_the_module_belongs_to(monkeyp
     assert c.put(f"{API}/modules/{news['id']}", json=edit, headers=other).status_code == 403
     assert c.put(f"{API}/modules/{news['id']}", json={**edit, "config": {"url": "https://apis.data.go.kr/y"}},
                  headers=ADMIN).status_code == 200
+
+
+def test_upstream_transfer_headers_are_not_passed_back(monkeypatch, fresh_settings):
+    """제공처의 전송 헤더(chunked·gzip·옛 길이)를 그대로 돌려주면 이미 다 읽은 본문과 맞지 않아 앞단 프록시가 502를 낸다
+    (실측 운영: OpenDART·수출입은행 JSON). 내용 헤더(content-type)는 그대로 둔다."""
+    from app.api import proxy_gateway
+
+    body = '{"status":"010"}'.encode()
+
+    class _FakeResponse:
+        content, status_code = body, 200
+        headers = {"content-type": "application/json;charset=UTF-8", "transfer-encoding": "chunked",
+                   "content-encoding": "gzip", "content-length": "999", "connection": "keep-alive"}
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def request(self, method, url, headers, params, content):
+            return _FakeResponse()
+
+    monkeypatch.setattr(proxy_gateway.httpx, "AsyncClient", lambda **kw: _FakeClient())
+    c = TestClient(create_app())
+    c.post(f"{API}/modules", json={"name": "dart", "type": "external_api",
+                                   "config": {"url": "https://opendart.fss.or.kr/api/list.json"}}, headers=ADMIN)
+    r = c.get(f"{API}/proxy/modules/dart?crtfc_key=x", headers=ADMIN)
+    assert r.status_code == 200 and r.json() == {"status": "010"}
+    assert r.headers["content-type"].startswith("application/json")
+    assert "transfer-encoding" not in r.headers and "content-encoding" not in r.headers
+    assert r.headers["content-length"] == str(len(body))
