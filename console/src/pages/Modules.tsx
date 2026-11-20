@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
 import Async from '../components/Async';
 import Modal from '../components/Modal';
+import ModuleSettings, { ModuleUsageList } from '../components/ModuleSettings';
 import StatusPill from '../components/StatusPill';
 import { api } from '../lib/api';
 import { fmtDate } from '../lib/format';
 import { isAdmin } from '../lib/auth';
 import { useApi } from '../lib/hooks';
-import type { ApiSearchResult, OrgOut } from '../lib/types';
+import type { ApiSearchResult, ModuleOut, ModuleUsage, OrgOut } from '../lib/types';
 
 const TYPE_HINTS: Record<string, string> = {
   external_api: '{"url": "https://...", "api_key": "..."}',
@@ -22,6 +23,8 @@ export default function Modules() {
   const [showSearch, setShowSearch] = useState(false);
   const [showMcpSearch, setShowMcpSearch] = useState(false);
   const [showReport, setShowReport] = useState(false);
+  const [editing, setEditing] = useState<ModuleOut | null>(null);
+  const [deleting, setDeleting] = useState<ModuleOut | null>(null);
 
   return (
     <div className="panel">
@@ -95,23 +98,10 @@ export default function Modules() {
                     )}
                   </td>
                   {isAdmin() && (
-                    <td>
+                    <td style={{ whiteSpace: 'nowrap' }}>
                       {m.type === 'mcp' && <McpCheckButton moduleId={m.id} />}
-                      <button
-                        className="small danger"
-                        onClick={async () => {
-                          if (confirm(`정말로 도구 '${m.name}'을(를) 삭제하시겠습니까?`)) {
-                            try {
-                              await api.deleteModule(m.id);
-                              state.reload();
-                            } catch (err) {
-                              alert((err as Error).message);
-                            }
-                          }
-                        }}
-                      >
-                        삭제
-                      </button>
+                      <button className="small secondary" onClick={() => setEditing(m)}>수정</button>{' '}
+                      <button className="small danger" onClick={() => setDeleting(m)}>삭제</button>
                     </td>
                   )}
                 </tr>
@@ -142,7 +132,70 @@ export default function Modules() {
         />
       )}
       {showReport && <PlatformReportModal onClose={() => setShowReport(false)} />}
+      {editing && (
+        <ModuleSettings moduleId={editing.id} title={`수정 — ${editing.name}`} meta
+          onClose={() => setEditing(null)} onSaved={() => state.reload()} />
+      )}
+      {deleting && (
+        <DeleteModuleModal module={deleting} onClose={() => setDeleting(null)}
+          onDeleted={() => { setDeleting(null); state.reload(); }} />
+      )}
     </div>
+  );
+}
+
+/**
+ * 삭제 — 먼저 이 모듈을 쓰는 에이전트(바인딩한 과제·워크플로·최근 호출한 키)를 보여 준다. 쓰는 곳이 있으면 모듈
+ * 이름을 그대로 입력해야 지운다(서버도 같은 조건으로 거절한다). 지우면 바인딩이 함께 사라지고, 그 에이전트들은
+ * 다음 호출에서 404가 난다.
+ */
+function DeleteModuleModal({ module, onClose, onDeleted }: {
+  module: ModuleOut;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const usage = useApi<ModuleUsage>(() => api.moduleUsage(module.id), [module.id]);
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const u = usage.data;
+  const affected = u ? u.bindings.length + u.workflows.length + u.callers.length : 0;
+  const ready = !!u && (affected === 0 || typed === module.name);
+
+  const remove = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await api.deleteModule(module.id, affected ? typed : '');
+      onDeleted();
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={`삭제 — ${module.name}`} onClose={onClose} wide>
+      <h4 style={{ margin: '0 0 6px' }}>영향받는 에이전트</h4>
+      <Async state={usage}>{(data) => <ModuleUsageList usage={data} />}</Async>
+      {u && affected > 0 && (
+        <>
+          <p className="error" style={{ fontSize: 12 }}>
+            지우면 바인딩 {u.bindings.length}건이 함께 해제되고, 위 에이전트는 다음 호출부터
+            /proxy/modules/{module.name}에서 404가 납니다. 확인했으면 도구 이름을 그대로 입력하세요.
+          </p>
+          <input className="mono" style={{ width: '100%' }} placeholder={module.name} value={typed}
+            onChange={(e) => setTyped(e.target.value)} />
+        </>
+      )}
+      {error && <p className="error">{error}</p>}
+      <div className="row" style={{ justifyContent: 'flex-end', gap: 6, marginTop: 12 }}>
+        <button type="button" className="secondary" onClick={onClose}>취소</button>
+        <button type="button" className="danger" disabled={!ready || busy} onClick={() => void remove()}>
+          {busy ? '삭제 중…' : '삭제'}
+        </button>
+      </div>
+    </Modal>
   );
 }
 

@@ -28,6 +28,7 @@ import type {
   LlmTurnList,
   McpDirectoryItem,
   ModuleOut,
+  ModuleUsage,
   ModuleSummary,
   OntologyNeighborhood,
   OntologyNode,
@@ -740,7 +741,11 @@ export const api = {
     request<ModuleOut>('PUT', `/modules/${m.id}`, {
       name: m.name, type: m.type, category: m.category, organization_id: m.organization_id, config,
     }),
-  deleteModule: (id: number) => request<void>('DELETE', `/modules/${id}`),
+  // 이 모듈을 쓰는 에이전트(바인딩·워크플로·최근 호출 키) — 지우거나 이름·범위를 바꾸기 전에 본다. 관리자만.
+  moduleUsage: (id: number) => request<ModuleUsage>('GET', `/modules/${id}/usage`),
+  // 쓰는 에이전트가 있으면 서버가 confirm(모듈 이름) 없이는 409로 거절한다.
+  deleteModule: (id: number, confirm = '') =>
+    request<void>('DELETE', `/modules/${id}${confirm ? `?confirm=${encodeURIComponent(confirm)}` : ''}`),
 
   me: () =>
     request<{ name: string; is_admin: boolean; allowed_email_domain: string | null; organization_id: number | null; organization_name: string | null; organizations?: UserOrgOut[] }>('GET', '/auth/me'),

@@ -1,10 +1,13 @@
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import audit
 from ..db import get_db
-from ..models import ApiKey, Module, ModuleBinding, ModuleType, Organization, Project
+from ..models import (ApiKey, AuditEvent, Module, ModuleBinding, ModuleType, Organization, Project, Workflow,
+                      utcnow)
 from ..schemas import (
     ApiModuleImport,
     GlobalModuleUsageSummary,
@@ -73,6 +76,8 @@ def update_module(
     if not key.is_admin and (row.organization_id is None or body.organization_id != row.organization_id
                              or row.organization_id not in viewer_org_ids(db, key)):
         raise HTTPException(status_code=403, detail="모듈은 관리자나 그 모듈 조직 사람만 고칩니다(조직은 관리자만 바꿉니다)")
+    if body.name != row.name and db.execute(select(Module.id).where(Module.name == body.name)).first():
+        raise HTTPException(status_code=409, detail="module name already exists")
     row.name = body.name
     row.category = body.category
     row.organization_id = body.organization_id
@@ -86,16 +91,61 @@ def update_module(
             "organization_id": row.organization_id, "config": svc.masked_config(row.config)}
 
 
-@router.delete("/modules/{module_id}", status_code=204)
-def delete_module(
-    module_id: int,
-    db: Session = Depends(get_db),
-    admin: ApiKey = Depends(require_admin),
-):
-    """admin 권한으로 모듈을 삭제한다."""
+USAGE_DAYS = 30
+
+
+def module_usage(db: Session, row: Module) -> dict:
+    """이 모듈을 지우거나 이름·범위를 바꾸면 영향을 받는 에이전트 — 바인딩한 과제, 노드로 쓰는 워크플로, 최근
+    게이트웨이로 부른 키. 전역 모듈은 바인딩 없이도 아무 키나 부르므로 바인딩만 보면 빠진다(감사 기록으로 찾는다)."""
+    bindings = db.execute(
+        select(Project.id, Project.name, ModuleBinding.env_prefix)
+        .join(ModuleBinding, ModuleBinding.project_id == Project.id)
+        .where(ModuleBinding.module_id == row.id).order_by(Project.name)).all()
+    workflows = [{"id": w.id, "name": w.name, "organization_id": w.organization_id}
+                 for w in db.execute(select(Workflow).order_by(Workflow.name)).scalars()
+                 if any(isinstance(n, dict) and str(n.get("module") or "") == row.name
+                        for n in (w.spec or {}).get("nodes") or [])]
+    callers = db.execute(
+        select(AuditEvent.actor, func.count(), func.max(AuditEvent.created_at))
+        .where(AuditEvent.action == "proxy.module.call", AuditEvent.target == row.name,
+               # created_at은 naive UTC로 저장된다 — 기준도 같은 모양으로(api/telemetry와 동일)
+               AuditEvent.created_at >= (utcnow() - timedelta(days=USAGE_DAYS)).replace(tzinfo=None))
+        .group_by(AuditEvent.actor).order_by(func.count().desc())).all()
+    return {
+        "module_id": row.id, "module_name": row.name, "days": USAGE_DAYS,
+        "bindings": [{"project_id": pid, "project_name": name, "env_prefix": prefix}
+                     for pid, name, prefix in bindings],
+        "workflows": workflows,
+        "callers": [{"actor": actor, "calls": n, "last_called_at": last} for actor, n, last in callers],
+    }
+
+
+@router.get("/modules/{module_id}/usage")
+def get_module_usage(module_id: int, db: Session = Depends(get_db), _: ApiKey = Depends(require_admin)):
     row = db.get(Module, module_id)
     if row is None:
         raise HTTPException(status_code=404, detail="module not found")
+    return module_usage(db, row)
+
+
+@router.delete("/modules/{module_id}", status_code=204)
+def delete_module(
+    module_id: int,
+    confirm: str = Query("", description="영향받는 에이전트가 있으면 모듈 이름을 그대로 적어야 지운다"),
+    db: Session = Depends(get_db),
+    admin: ApiKey = Depends(require_admin),
+):
+    """admin 권한으로 모듈을 삭제한다. 바인딩한 과제·쓰는 워크플로·최근 호출한 키가 있으면 confirm에 모듈 이름을
+    받아야 지운다 — 확인 창 한 번으로 지우면 그 에이전트들은 다음 호출에서야 404로 알게 된다."""
+    row = db.get(Module, module_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="module not found")
+    usage = module_usage(db, row)
+    if (usage["bindings"] or usage["workflows"] or usage["callers"]) and confirm != row.name:
+        raise HTTPException(status_code=409, detail=(
+            f"'{row.name}'을 쓰는 에이전트가 있습니다 — 바인딩 {len(usage['bindings'])}건, 워크플로 "
+            f"{len(usage['workflows'])}건, 최근 {USAGE_DAYS}일 호출 키 {len(usage['callers'])}개. "
+            "영향을 확인했으면 confirm에 모듈 이름을 적어 다시 요청하세요."))
 
     bindings = db.execute(select(ModuleBinding).where(ModuleBinding.module_id == module_id)).scalars().all()
     for b in bindings:

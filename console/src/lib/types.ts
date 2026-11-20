@@ -104,6 +104,16 @@ export interface ModuleOut {
   egress: EgressVerdict;
 }
 
+/** GET /modules/{id}/usage — 이 모듈을 쓰는 에이전트. callers는 최근 days일 게이트웨이 호출(감사 기록)이다. */
+export interface ModuleUsage {
+  module_id: number;
+  module_name: string;
+  days: number;
+  bindings: { project_id: number; project_name: string; env_prefix: string }[];
+  workflows: { id: number; name: string; organization_id: number }[];
+  callers: { actor: string; calls: number; last_called_at: string }[];
+}
+
 /**
  * 이 모듈로 나가는 **플랫폼 호출**에 내부 정보가 실리는지(services/egress.py).
  * 배포된 앱이 {PREFIX}_URL로 직접 부르는 것까지는 판정 범위가 아니다 — 배지 문구도
