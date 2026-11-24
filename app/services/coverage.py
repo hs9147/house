@@ -105,8 +105,16 @@ def inventory(db: Session) -> dict:
             by_file[f["label"] or f["category"]] = by_file.get(f["label"] or f["category"], 0) + f["count"]
         totals["API 엔드포인트"] += s["endpoints"]
         totals["MCP 도구"] += s["tools"]
+    from . import pathshape  # noqa: PLC0415
+
+    try:
+        # 저장소 쪽 — 폴더·파일 이름의 칸(건 폴더·대상 폴더·연도…)과 저장소 사이 연결 후보. 판정만(색인의 경로로)
+        shapes = pathshape.profile_all()
+    except Exception as e:  # noqa: BLE001 — 출처 현황은 그대로 보인다
+        shapes = {"stores": [], "links": [], "error": str(e)[:200]}
     return {"sources": sources, "totals": totals, "files": by_file,
-            "kinds": {k: sum(1 for s in sources if s["kind"] == k) for k in infosource.KINDS}}
+            "kinds": {k: sum(1 for s in sources if s["kind"] == k) for k in infosource.KINDS},
+            "store_shapes": shapes}
 
 
 # ---------------------------------------------------------------- 발견 + 판정

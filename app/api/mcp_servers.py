@@ -306,6 +306,16 @@ _OPS_TOOLS = [
             "source": {"type": "string", "description": "출처 이름(비우면 전부 — 요약만)"},
             "refresh": {"type": "boolean", "description": "라운드를 지금 돌린다(LLM 없이 — 라운드가 없으면 저절로 돈다)"}}},
     },
+    {
+        "name": "folder_profile",
+        "description": (
+            "저장소의 경로 틀 — 폴더·파일 이름에서 뜻을 가진 칸(식별자: 폴더 하나가 개체 하나 · 연도 · 옛 판 · 원자료 ·"
+            " 종류)과 저장소 모양(건 폴더·대상 폴더·종류/기간·평평함·계층), 같은 모양의 식별자가 여러 저장소에 나오면"
+            " 겹치는 값의 수(저장소 사이 연결 후보). 판정만 한다(색인의 경로로 — LLM 없음)."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "source": {"type": "string", "description": "저장소 이름(비우면 전부 + 저장소 사이 연결)"}}},
+    },
 ]
 
 
@@ -376,6 +386,12 @@ def _ops_call(db: Session, actor: str, name: str, args: dict, *, key: ApiKey | N
                 entry["changed"] = h.get("changed", [])
             out.append(entry)
         return _dump(out)
+
+    if name == "folder_profile":
+        from ..services import pathshape  # noqa: PLC0415
+
+        wanted = _str_arg(args, "source", required=False)
+        return _dump(pathshape.profile(_doc_source(wanted, db).name) if wanted else pathshape.profile_all())
 
     if name == "list_routes":
         # 서버구성 화면과 같은 함수를 쓴다 — 화면과 다른 값을 말하기 시작하면 둘 중

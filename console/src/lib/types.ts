@@ -1386,6 +1386,24 @@ export interface SourceInventory {
   totals: Record<string, number>;
   files: Record<string, number>;
   kinds: Record<string, number>;
+  store_shapes: StoreShapes;
+}
+
+/** 저장소의 경로 틀 한 칸(services/pathshape) — 폴더·파일 이름에서 뜻을 가진 자리. */
+export interface PathSlot {
+  where: 'folder' | 'file';
+  role: 'identifier' | 'year' | 'category';
+  pattern?: string; share?: number; count?: number; siblings?: number; files?: number; documents?: number;
+  parent?: string; groups?: string[]; tail?: 'number' | 'name'; tail_values?: Record<string, number>;
+  values?: number; names?: string[]; example?: string; examples?: string[]; outside?: string[];
+  repeats_folder?: boolean;
+}
+
+export interface StoreShapes {
+  stores: { store: string; kind: string; documents: number; folders: number; slots: PathSlot[];
+            marked: { folder: string; role: 'year' | 'version' | 'raw'; documents: number }[] }[];
+  links: { pattern: string; stores: Record<string, number>; shared: number; examples: string[] }[];
+  error?: string;
 }
 
 /** 사이트에서 받을 수 있는 정보 하나와 판정 — managed(이 출처가 받는다)·duplicate(같은 정보를 관리)·similar·new. */

@@ -56,6 +56,27 @@ def test_inventory_lists_what_each_source_manages_by_type(client, monkeypatch):
     assert inv["totals"]["목록"] >= 1 and inv["totals"]["스킬"] >= 1 and inv["kinds"]["web"] >= 2
 
 
+def test_inventory_and_the_ops_tool_show_each_stores_path_template(client):
+    """저장소 쪽 — 폴더 이름이 식별자인 저장소(건 폴더)를 정보 현황과 운영 도구(folder_profile)가 같은 판정으로 보인다."""
+    from app.api import mcp_servers
+    from app.services import docsearch
+
+    root = client.tmp / "docs"
+    for i in range(6):
+        folder = root / f"KR-CT2401{i:05d}_{i % 2}"
+        folder.mkdir(parents=True)
+        (folder / f"KR-CT2401{i:05d}_품의서.md").write_text(f"# 품의 {i}\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    inv = client.get(f"{API}/sources/inventory", headers=ADMIN).json()
+    docs = next(s for s in inv["store_shapes"]["stores"] if s["store"] == "docs")
+    assert docs["kind"] == "건 폴더"
+    slot = next(s for s in docs["slots"] if s["where"] == "folder")
+    assert slot["pattern"] == r"KR\-CT\d{9}" and slot["tail"] == "number"
+    with SessionLocal() as db:
+        out = json.loads(mcp_servers._ops_call(db, "admin", "folder_profile", {"source": "docs"}))
+    assert out["kind"] == "건 폴더" and out["documents"] == 6
+
+
 def test_discovered_items_are_judged_managed_duplicate_similar_or_new(client, monkeypatch):
     a, _b = _setup(client, monkeypatch)
     with SessionLocal() as db:

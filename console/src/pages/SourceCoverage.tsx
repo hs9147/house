@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
 import { api } from '../lib/api';
 import { useApi, usePolling } from '../lib/hooks';
-import type { CoverageHarness, CoverageItem, CoverageProposal, SourceInventory, SourceOut } from '../lib/types';
+import type { CoverageHarness, CoverageItem, CoverageProposal, PathSlot, SourceInventory, SourceOut, StoreShapes } from '../lib/types';
 
 const STATUS: Record<CoverageItem['status'], { label: string; cls: string }> = {
   new: { label: '신규', cls: 'info' },
@@ -61,9 +61,72 @@ export function InventoryTab() {
             출처를 열어 오른쪽 「🔎 정보 현황」에서 「분석」을 누르면, LLM이 사이트에서 받을 수 있는 정보마다 신규인지 판정하고
             신규 화면의 받을 것·조건·스킬 초안까지 제안합니다 — 확정만 하면 됩니다.
           </p>
+          <StoreShapesTable shapes={data.store_shapes} />
         </div>
       )}
     </Async>
+  );
+}
+
+/** 정규식 모양을 읽을 글로 — KR\-CT\d{9} → KR-CT{9자리}. */
+const readable = (pattern = '') => pattern
+  .replace(/\\d\{(\d+)\}/g, '{$1자리}').replace(/\[a-z0-9\]\{(\d+)\}/g, '{영숫자 $1}').replace(/\\/g, '');
+
+const pct = (v?: number) => `${Math.round((v ?? 0) * 100)}%`;
+
+function slotText(s: PathSlot): string {
+  if (s.role === 'category') return `종류${s.parent ? ` (${s.parent} 아래)` : ''}: ${(s.names ?? []).slice(0, 6).join(' · ')}`;
+  if (s.where === 'folder') {
+    const tail = s.tail === 'number' ? ' + 번호(차수)' : s.tail === 'name' ? ' + 이름' : '';
+    return `폴더 식별자${s.parent ? ` (${s.parent} 아래)` : ''} ${readable(s.pattern)}${tail} — 폴더 ${(s.count ?? 0).toLocaleString()}개`
+      + `(${pct(s.share)}) · 값 ${(s.values ?? 0).toLocaleString()}개`;
+  }
+  const what = s.role === 'year' ? '파일 이름 연도' : '파일 이름 식별자';
+  return `${what} ${readable(s.pattern)} — ${pct(s.share)}${s.repeats_folder ? ' (폴더의 식별자를 되풀이)' : ''}`;
+}
+
+/**
+ * 저장소의 경로 틀(services/pathshape) — 폴더·파일 이름의 칸으로 저장소가 무엇을 담는지 본다(판정만).
+ * 건 폴더: 폴더 하나가 건 하나(계약) · 대상 폴더: 폴더 하나가 대상 하나(협력사) · 종류/기간 · 평평함 · 계층.
+ */
+function StoreShapesTable({ shapes }: { shapes?: StoreShapes }) {
+  if (!shapes || shapes.stores.length === 0) return null;
+  return (
+    <>
+      <h4 style={{ margin: '16px 0 6px' }}>저장소의 경로 틀</h4>
+      {shapes.error && <p className="error">{shapes.error}</p>}
+      <table style={{ fontSize: 12 }}>
+        <thead><tr><th>저장소</th><th>모양</th><th>문서</th><th>뜻을 가진 칸</th><th>연도·옛 판·원자료 폴더</th></tr></thead>
+        <tbody>
+          {shapes.stores.filter((st) => st.documents > 0).map((st) => {
+            const marks = st.marked.reduce<Record<string, number>>((a, m) => ({ ...a, [m.role]: (a[m.role] ?? 0) + 1 }), {});
+            return (
+              <tr key={st.store}>
+                <td className="mono">{st.store}</td>
+                <td>{st.kind}</td>
+                <td>{st.documents.toLocaleString()}</td>
+                <td>{st.slots.length === 0 ? <span className="mutedtext">없음</span>
+                  : st.slots.map((s, i) => <div key={i}>{slotText(s)}</div>)}</td>
+                <td className="mutedtext">
+                  {[['year', '연도'], ['version', '옛 판'], ['raw', '원자료']].filter(([k]) => marks[k])
+                    .map(([k, label]) => `${label} ${marks[k]}`).join(' · ') || '—'}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {shapes.links.length > 0 && (
+        <p style={{ fontSize: 12, margin: '6px 0 0' }}>
+          저장소 사이 연결 후보: {shapes.links.map((l) => (
+            `${readable(l.pattern)} — ${Object.entries(l.stores).map(([k, v]) => `${k} ${v}`).join(' · ')} 중 ${l.shared}개가 같음`
+          )).join(' / ')}
+        </p>
+      )}
+      <p className="mutedtext" style={{ fontSize: 11, margin: '6px 0 0' }}>
+        색인의 경로로 판정합니다(주기 색인만큼 늦습니다). 칸이 어느 개념(계약·협력사…)인지는 아직 확정하지 않습니다.
+      </p>
+    </>
   );
 }
 
