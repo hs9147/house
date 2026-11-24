@@ -10,7 +10,7 @@
 
   ① 스키마   표본 문서 → 개념 종류 제안 → 검토 → 고침 → 관계는 개념 몇 개씩 묶어 차례로 제안 → 묶음마다 검토
              → 관리자 확정(판 번호가 생긴다). 관계 수에 상한을 두지 않는다
-  ② 양식     되풀이되는 표(견적서 양식 하나가 320개 문서에 있다)는 LLM이 문서마다 읽지 않는다. 열이 어떤
+  ②-1 양식   되풀이되는 표(견적서 양식 하나가 320개 문서에 있다)는 LLM이 문서마다 읽지 않는다. 열이 어떤
              개념인지 대응표를 제안 → 실제 값 표본과 대조해 검토 → 관리자 확정 → **규칙으로** 전부 뽑는다
   ③ 문서     나머지 문서 → 추출 → 기계 검사(전부: 근거 문장이 원문에 있나·스키마에 있나) → 표본 검토(10%)
              → 표본 오류율이 기준을 넘으면 멈추고 알린다(스키마·지시가 틀린 것이라 계속 돌면 비용만 든다)
@@ -54,7 +54,7 @@ FORM_SAMPLE_DOCS = 3
 # 양식 표 몇 개를 품은 보고서) 나머지 글은 LLM이 읽는다. 문서 전체를 건너뛰면 그 본문의 관계가 통째로 빠진다(실측).
 FORM_REST_CHARS = 1_500
 FORM_SAMPLE_ROWS = 8
-# 템플릿(③′) — 같은 틀의 문서가 이만큼이면 규칙을 짤 만하다. 규칙은 표본 몇 건(정답은 LLM 추출)으로 짜고 **다른**
+# 템플릿(②-2) — 같은 틀의 문서가 이만큼이면 규칙을 짤 만하다. 규칙은 표본 몇 건(정답은 LLM 추출)으로 짜고 **다른**
 # 몇 건으로 검증한다. 검증 정밀도가 기준을 넘어야 확정할 수 있다.
 TEMPLATE_MIN_DOCS = 5
 TEMPLATE_TRAIN_DOCS = 3
@@ -339,7 +339,7 @@ def _sample(store_name: str, conn, n: int = SAMPLE_DOCS) -> list[dict]:
             form_docs.setdefault(r["path"], r["name"])
     seen_forms: set[str] = set()
     picked: list[str] = []
-    # 데이터 수집 목록(… 목록.csv)은 표본에서 뺀다 — 길어서 큰 것부터 고르면 표본을 먹고, 그 행은 ② 대응표로 뽑는다
+    # 데이터 수집 목록(… 목록.csv)은 표본에서 뺀다 — 길어서 큰 것부터 고르면 표본을 먹고, 그 행은 ②-1 대응표로 뽑는다
     rows = list(conn.execute("SELECT path FROM docs WHERE body IS NOT NULL AND path NOT LIKE ?"
                              " ORDER BY length(body) DESC", (f"%{LIST_SUFFIX}",)))
     step = max(1, len(rows) // max(1, n * 2))
@@ -559,7 +559,7 @@ def _schema(conn) -> dict:
     return schema
 
 
-# --- ② 양식 ---
+# --- ②-1 양식 ---
 
 def _rows_of(markdown: str, columns: list[str]) -> list[dict]:
     """문서 안에서 머리글이 columns인 표의 행들 — 마크다운 표와 병합 셀 HTML 표 둘 다."""
@@ -626,7 +626,7 @@ def _form_samples(store_name: str, conn, form: dict) -> list[dict]:
 
 
 def propose_mapping(db: Session, store_name: str, form_name: str, report=_quiet) -> dict:
-    """② 양식 하나의 열 대응표 — 제안 → 실제 값 표본과 대조한 검토 → 한 번 고침. 확정은 관리자가."""
+    """②-1 양식 하나의 열 대응표 — 제안 → 실제 값 표본과 대조한 검토 → 한 번 고침. 확정은 관리자가."""
     provider = provider_for(db, store_name)
     conn = _conn(store_name)
     try:
@@ -743,7 +743,7 @@ def extract_rows(rows: list[dict], mapping: dict) -> tuple[list[dict], list[dict
     return nodes, edges
 
 
-# --- ③′ 템플릿 ---
+# --- ②-2 템플릿 ---
 
 def _template_groups(conn) -> dict[str, dict]:
     """템플릿 → {skeleton, paths}. 문서마다 앞부분을 읽어야 해서, 색인이 바뀌지 않았으면 지난 결과를 쓴다."""
@@ -835,7 +835,7 @@ def _brief(evaluation: dict | None) -> dict | None:
 
 
 def propose_template(db: Session, store_name: str, tid: str, report=_quiet) -> dict:
-    """③′ 템플릿 하나의 추출 규칙 — 정답 만들기(LLM 추출) → 규칙 짜기(LLM) → 다른 문서로 검증 → 모자라면 한 번 고침.
+    """②-2 템플릿 하나의 추출 규칙 — 정답 만들기(LLM 추출) → 규칙 짜기(LLM) → 다른 문서로 검증 → 모자라면 한 번 고침.
     확정은 관리자가(confirm_template — 검증을 다시 통과해야 한다)."""
     provider = provider_for(db, store_name)
     conn = _conn(store_name)
@@ -911,7 +911,7 @@ def confirm_template(store_name: str, tid: str, rules: dict, actor: str) -> dict
 
 # --- ③ 문서 ---
 
-# ---------------------------------------------------------------- ②″ 경로 틀 — 폴더·파일 이름의 식별자를 개념으로
+# ---------------------------------------------------------------- ②-3 경로 틀 — 폴더·파일 이름의 식별자를 개념으로
 #
 # 사내 문서 폴더는 폴더 하나가 계약 하나(KR-CT…_차수)·협력사 하나(KR######_회사명)인 경우가 많다(docs/folder-structure.md).
 # 경로 틀(services/pathshape)이 찾은 식별자 칸을 관리자가 개념에 대응시키면(「이 칸은 계약」) 그 아래 모든 문서에 규칙으로
@@ -1424,7 +1424,7 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                     else:
                         _write(conn, path, [], [], "list")
                         _record(conn, path, fp, "skipped",
-                                error="데이터 수집 목록 — ② 양식에서 열 대응을 확정하면 행마다 규칙으로 뽑습니다")
+                                error="데이터 수집 목록 — ②-1 양식에서 열 대응을 확정하면 행마다 규칙으로 뽑습니다")
                         stats["skipped"] += 1
                     stats["analyzed"] += 1
                     done_fp.setdefault(fp, path)
@@ -2293,7 +2293,7 @@ PROPOSE_LIMIT = 15
 
 def propose_all(db: Session, store_name: str, report=_quiet, limit: int = PROPOSE_LIMIT) -> dict:
     """확정하지 않은(또는 옛 스키마의) 양식 대응표와 템플릿 규칙을 문서가 많은 것부터 limit개씩 제안·검토한다 — 확정은
-    사람이 한다(② 양식·②′ 템플릿). 하나가 실패해도 나머지는 간다(사유를 남긴다). 재구성 뒤 분석 전에 쓴다: 확정하면 그
+    사람이 한다(②-1 양식·②-2 템플릿). 하나가 실패해도 나머지는 간다(사유를 남긴다). 재구성 뒤 분석 전에 쓴다: 확정하면 그
     문서들은 LLM 대신 규칙으로 뽑힌다."""
     conn = _conn(store_name)
     try:

@@ -224,7 +224,7 @@ def semantic_confirm_schema(store_name: str, schema: dict = Body(...), db: Sessi
 
 @router.get("/ontology/stores/{store_name}/semantic/forms")
 def semantic_forms(store_name: str, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
-    """② 되풀이 양식과 각각의 열 대응표(제안·검토·확정)."""
+    """②-1 되풀이 양식과 각각의 열 대응표(제안·검토·확정)."""
     _indexed_store(db, key, store_name)
     return {"forms": semantic.forms(store_name)}
 
@@ -250,7 +250,7 @@ def semantic_confirm_mapping(store_name: str, form: str = Body(...), mapping: di
 
 @router.get("/ontology/stores/{store_name}/semantic/templates")
 def semantic_templates(store_name: str, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
-    """③′ 같은 틀로 되풀이되는 문서(템플릿)와 각각의 추출 규칙(제안·검증·확정)."""
+    """②-2 같은 틀로 되풀이되는 문서(템플릿)와 각각의 추출 규칙(제안·검증·확정)."""
     _indexed_store(db, key, store_name)
     return {"templates": semantic.templates(store_name)}
 
@@ -279,7 +279,7 @@ def semantic_confirm_template(store_name: str, template: str = Body(...), rules:
 
 @router.get("/ontology/stores/{store_name}/semantic/paths")
 def semantic_paths(store_name: str, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
-    """②″ 경로 틀 — 폴더·파일 이름의 식별자 칸 후보와 개념 대응 제안(값이 겹치는 개념), 확정한 대응, 적용 결과,
+    """②-3 경로 틀 — 폴더·파일 이름의 식별자 칸 후보와 개념 대응 제안(값이 겹치는 개념), 확정한 대응, 적용 결과,
     폴더와 내용이 어긋난 문서."""
     _indexed_store(db, key, store_name)
     return _semantic(semantic.path_slots, store_name)

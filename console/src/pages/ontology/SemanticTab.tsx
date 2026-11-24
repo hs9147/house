@@ -145,7 +145,7 @@ export default function SemanticTab() {
         <>
           <SchemaStep status={status} busy={busy}
             onPropose={() => track('스키마 제안·검토', () => api.semanticProposeSchema(store))}
-            onConfirm={(s) => act('스키마를 확정했습니다 — ② 양식과 ③ 분석으로 넘어가세요.', () => api.semanticConfirmSchema(store, s))} />
+            onConfirm={(s) => act('스키마를 확정했습니다 — ②-1 양식·②-2 템플릿·②-3 경로 틀을 정한 뒤 ③ 분석으로 넘어가세요.', () => api.semanticConfirmSchema(store, s))} />
           {status.schema && (
             <>
               <FormsStep forms={forms} schemaVersion={status.schema.version ?? ''} busy={busy}
@@ -261,7 +261,7 @@ function FormsStep({ forms, schemaVersion, busy, onPropose, onConfirm }: {
   const [open, setOpen] = useState('');
   return (
     <section style={{ marginTop: 16 }}>
-      <h3 style={{ fontSize: 14 }}>② 양식 — 되풀이되는 표의 열 대응</h3>
+      <h3 style={{ fontSize: 14 }}>②-1 양식 — 되풀이되는 표의 열 대응</h3>
       <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
         여러 문서에 되풀이되는 표는 LLM이 문서마다 읽지 않습니다. 열이 어떤 개념인지 대응표를 정하면 그 양식의 모든
         문서에서 규칙으로 뽑습니다. 검토는 실제 값 표본과 대조합니다.
@@ -307,7 +307,7 @@ const pct = (v: number) => `${Math.round(v * 100)}%`;
 type PathPick = { cls: string; name_from: 'value' | 'tail' | 'link'; link_store?: string };
 
 /**
- * ②″ 경로 틀 — 폴더·파일 이름의 식별자 칸(건 폴더 KR-CT…_차수, 대상 폴더 KR######_회사명)을 개념에 대응시킨다.
+ * ②-3 경로 틀 — 폴더·파일 이름의 식별자 칸(건 폴더 KR-CT…_차수, 대상 폴더 KR######_회사명)을 개념에 대응시킨다.
  * 확정하면 그 아래 모든 문서에 개체를 단다(LLM 없음 — 경로에서). 제안은 값이 내용 그래프의 개체와 겹치는 개념이다.
  */
 function PathsStep({ paths, schema, onConfirm }: {
@@ -328,7 +328,7 @@ function PathsStep({ paths, schema, onConfirm }: {
   const applied = paths.applied;
   return (
     <section style={{ marginTop: 16 }}>
-      <h3 style={{ fontSize: 14 }}>②″ 경로 틀 — 폴더·파일 이름의 식별자</h3>
+      <h3 style={{ fontSize: 14 }}>②-3 경로 틀 — 폴더·파일 이름의 식별자</h3>
       <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
         폴더 하나가 계약 하나·협력사 하나인 저장소는 폴더 이름이 곧 그 문서가 속한 개체입니다. 칸마다 개념을 고르면 그 아래
         모든 문서에 규칙으로 개체를 답니다(LLM 없음). 폴더 이름을 바꿔도(차수) 분석할 때마다 경로에서 다시 만듭니다.
@@ -445,7 +445,7 @@ function TemplatesStep({ templates, schemaVersion, busy, onPropose, onConfirm }:
   const [open, setOpen] = useState('');
   return (
     <section style={{ marginTop: 16 }}>
-      <h3 style={{ fontSize: 14 }}>②′ 템플릿 — 같은 틀로 되풀이되는 문서</h3>
+      <h3 style={{ fontSize: 14 }}>②-2 템플릿 — 같은 틀로 되풀이되는 문서</h3>
       <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
         표가 아니어도 같은 틀(라벨 줄은 같고 값만 다른)로 되풀이되는 문서는 LLM이 정규식 규칙을 짭니다. 규칙은 몇 건으로
         짜고 <b>다른</b> 몇 건에서 LLM 추출과 견줘 검증합니다 — 정밀도가 기준을 넘어야 확정할 수 있습니다. 확정하면 그

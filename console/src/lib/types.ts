@@ -1858,7 +1858,7 @@ export interface SemanticTemplateEval {
   docs: { path: string; found?: number; expected?: number; hit?: number; extra: string[]; missed: string[];
           missing_required: number[] }[];
 }
-/** ②″ 경로 틀의 칸 하나 — 후보(pathshape의 식별자 칸)와 개념 대응 제안(값이 겹치는 개념). */
+/** ②-3 경로 틀의 칸 하나 — 후보(pathshape의 식별자 칸)와 개념 대응 제안(값이 겹치는 개념). */
 export interface SemanticPathSlot extends PathSlot {
   key: string;
   sample: { value: string; tail: string }[];

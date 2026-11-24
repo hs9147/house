@@ -346,7 +346,7 @@ def _registration_docs(root: Path) -> None:
 
 
 def test_template_documents_get_rules_checked_on_other_documents(store, tmp_path, monkeypatch):
-    """③′ 같은 틀의 문서 여섯은 LLM이 짠 규칙으로 뽑는다. 규칙은 세 건(정답: LLM 추출)으로 짜고 **다른** 세 건으로
+    """②-2 같은 틀의 문서 여섯은 LLM이 짠 규칙으로 뽑는다. 규칙은 세 건(정답: LLM 추출)으로 짜고 **다른** 세 건으로
     검증한다 — 처음 규칙이 틀려 정밀도가 모자라면 검증 결과로 한 번 고친다. 확정 뒤 분석은 그 문서들에 LLM 추출을
     부르지 않고, 필수 필드가 없는 문서(틀이 다르다)만 LLM으로 넘긴다."""
     monkeypatch.setattr(semantic, "REVIEW_EVERY", 10 ** 9)     # 표본 검토는 따로 본다
@@ -1150,7 +1150,7 @@ def test_document_dates_come_from_names_years_and_folders_before_the_file_time()
 
 
 def test_path_template_names_the_entity_of_every_document_and_follows_renamed_folders(store, monkeypatch):
-    """②″ 경로 틀 — 폴더 이름의 식별자 칸을 관리자가 개념에 대응시키면 그 아래 모든 문서에 개체를 단다(origin path, LLM
+    """②-3 경로 틀 — 폴더 이름의 식별자 칸을 관리자가 개념에 대응시키면 그 아래 모든 문서에 개체를 단다(origin path, LLM
     없음). 대응은 값이 내용 그래프의 개체와 겹치는 개념으로 제안한다. 폴더 이름을 바꾸면(차수) 경로에서 다시 만들고,
     폴더와 내용이 어긋나면 알리며, LLM 추출에는 「이 문서가 속한 개체」를 함께 준다."""
     root = Path(get_settings().doc_roots.split("=")[-1] if "=" in get_settings().doc_roots else get_settings().doc_roots)

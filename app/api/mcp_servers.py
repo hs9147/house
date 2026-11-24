@@ -253,7 +253,7 @@ _OPS_TOOLS = [
     },
     {
         "name": "ontology_propose_schema",
-        "description": "온톨로지 재구성 ③ — 내용 분석 스키마(층위 포함)를 LLM이 제안·검토한다(뒤에서). 확정은 사람이 콘솔"
+        "description": "온톨로지 재구성 ③-1 — 내용 분석 스키마(층위 포함)를 LLM이 제안·검토한다(뒤에서). 확정은 사람이 콘솔"
                        " 내용 분석 ①에서 한다. 진행은 ontology_semantic_status로.",
         "inputSchema": {"type": "object", "properties": {"source": {"type": "string"}}, "required": ["source"]},
     },
@@ -267,8 +267,8 @@ _OPS_TOOLS = [
     },
     {
         "name": "ontology_propose_forms",
-        "description": "온톨로지 재구성 ③′ — 확정하지 않은 양식 대응표·템플릿 규칙을 문서가 많은 것부터 LLM이 제안·검토한다"
-                       "(뒤에서, 각 limit개). 확정은 사람이 콘솔 내용 분석 ②·②′에서 — 확정한 양식·템플릿의 문서는 분석에서"
+        "description": "온톨로지 재구성 ③-2 — 확정하지 않은 양식 대응표·템플릿 규칙을 문서가 많은 것부터 LLM이 제안·검토한다"
+                       "(뒤에서, 각 limit개). 확정은 사람이 콘솔 내용 분석 ②-1·②-2에서 — 확정한 양식·템플릿의 문서는 분석에서"
                        " LLM 대신 규칙으로 뽑힌다. 진행은 ontology_semantic_status로.",
         "inputSchema": {"type": "object", "properties": {
             "source": {"type": "string"}, "limit": {"type": "integer", "description": "양식·템플릿 각각(기본 15)"}},
@@ -1795,7 +1795,7 @@ def _ontology_ops_call(db: Session, actor: str, name: str, args: dict) -> str:
                                    lambda s, report: semantic.propose_all(s, store.name, report, limit)):
                 raise mcp_server.McpToolError("이 저장소에서 이미 돌고 있는 제안이 있습니다.")
             audit.record(db, actor, "ontology.semantic.propose_all", store.name, {"via": "mcp", "limit": limit})
-            return _dump({"started": True, "next": "ontology_semantic_status로 진행을 보고, 콘솔 ②·②′에서 확정하세요"})
+            return _dump({"started": True, "next": "ontology_semantic_status로 진행을 보고, 콘솔 ②-1·②-2에서 확정하세요"})
         if name == "ontology_semantic_status":
             st = semantic.status(store.name)
             draft = st.get("schema_draft") or {}
