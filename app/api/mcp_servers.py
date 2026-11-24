@@ -316,6 +316,15 @@ _OPS_TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "source": {"type": "string", "description": "저장소 이름(비우면 전부 + 저장소 사이 연결)"}}},
     },
+    {
+        "name": "ontology_paths",
+        "description": (
+            "내용 분석 ②-3 경로 틀의 상태 — 식별자 칸 후보(모양·폴더/파일·문서 수·겹치는 개념·이름을 가져올 다른 저장소),"
+            " 확정한 대응(칸 → 개념), 적용 결과(개체·문서·틀 밖), 폴더와 내용이 어긋난 문서. 읽기만 한다 — 확정은 콘솔에서."
+        ),
+        "inputSchema": {"type": "object", "properties": {"source": {"type": "string", "description": "저장소 이름"}},
+                        "required": ["source"]},
+    },
 ]
 
 
@@ -387,6 +396,15 @@ def _ops_call(db: Session, actor: str, name: str, args: dict, *, key: ApiKey | N
                                   for i in h.get("items", [])][:100]
                 entry["changed"] = h.get("changed", [])
             out.append(entry)
+        return _dump(out)
+
+    if name == "ontology_paths":
+        from ..services import semantic  # noqa: PLC0415
+
+        out = semantic.path_slots(_doc_source(_str_arg(args, "source"), db).name)
+        keep = ("key", "where", "parent", "pattern", "count", "documents", "share", "tail", "values", "suggested",
+                "hits", "links", "name_from", "sample")
+        out["candidates"] = [{k: c[k] for k in keep if k in c} for c in out["candidates"]]
         return _dump(out)
 
     if name == "folder_profile":

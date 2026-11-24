@@ -1858,6 +1858,32 @@ export interface SemanticTemplateEval {
   docs: { path: string; found?: number; expected?: number; hit?: number; extra: string[]; missed: string[];
           missing_required: number[] }[];
 }
+/** 전환 현황 — 저장소마다 정보 조회 → 내용 분석 → 워크플로 연결과 다음 할 일(GET /ontology/progress). */
+export interface OntologyProgressStore {
+  store: string;
+  formal: { indexed: number; extracted: number; extract_failed: number; with_nodes: number; no_nodes: number;
+            nodes: number; edges: number };
+  semantic: {
+    schema: { version: string; classes: number; relations: number; layered: boolean } | null;
+    forms: { total: number; confirmed: number };
+    templates: { total: number | null; confirmed: number };
+    paths: { candidates: number; confirmed: number; stale: boolean; mismatches: number;
+             applied: { nodes: number; documents: number; outside: number } | null };
+    documents: number; analyzed: Record<string, number>; paused: string | null; running: boolean;
+    nodes: Record<string, number>; edges: number; aliases: number; content_docs: number; path_docs: number;
+  } | null;
+  workflow: { links: number; workflows: number; documents: number; by_source: Record<string, number>; pending: number };
+  next: { stage: string; text: string; tab: '' | 'semantic' | 'workflows' };
+}
+
+export interface OntologyProgress {
+  stores: OntologyProgressStore[];
+  totals: { stores: number; indexed: number; extracted: number; with_nodes: number; analyzed: number;
+            content_docs: number; path_docs: number; schemas: number; paths_confirmed: number; paths_possible: number;
+            workflow_docs: number; workflow_links: number; linked_workflows: number };
+  errors: { store: string; stage: string; error: string }[];
+}
+
 /** ②-3 경로 틀의 칸 하나 — 후보(pathshape의 식별자 칸)와 개념 대응 제안(값이 겹치는 개념). */
 export interface SemanticPathSlot extends PathSlot {
   key: string;

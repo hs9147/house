@@ -134,8 +134,8 @@ _ADDED = (("sem_nodes", "observed_at"), ("sem_edges", "observed_at"), ("sem_edge
           ("sem_edges", "valid_to"))
 
 
-def _conn(store_name: str):
-    conn = docsearch._connect(store_name)
+def _conn(store_name: str, timeout: float = 5.0):
+    conn = docsearch._connect(store_name, timeout=timeout)
     conn.executescript(_SCHEMA)
     for table, column in _ADDED:
         if column not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
@@ -918,6 +918,7 @@ def confirm_template(store_name: str, tid: str, rules: dict, actor: str) -> dict
 # 개체를 단다(origin path — LLM 없음). 경로에서 얻은 사실은 **늘 경로에서 다시 만든다**(apply_paths — 분석이 끝날 때마다):
 # 폴더 이름이 바뀌면(차수) 그대로 따라간다. 내용에서 뽑은 것보다 약하다 — 어긋나면 알린다(mismatches).
 PATH_MISMATCH_EXAMPLES = 10
+PATH_WRITE_TIMEOUT = 30.0     # 확정의 쓰기는 다른 쓰기(분석·색인)가 끝나기를 이만큼 기다린다(기본 5초)
 _PATH_ID = re.compile(r"식별자 (\S+)")     # _path_nodes가 근거에 떼어 적은 식별자
 
 
@@ -941,7 +942,9 @@ def path_slots(store_name: str) -> dict:
     candidates = _path_candidates(store_name)
     conn = _conn(store_name)
     try:
-        schema = _schema(conn)
+        # 스키마가 없어도 후보는 보인다(읽기) — _schema()는 없으면 예외다. 예전에 그것을 불러, 스키마가 없는 저장소는 이
+        # 조회가 409가 되고 내용 분석 화면이 통째로 비었다(화면이 상태·양식·템플릿·경로 틀을 한꺼번에 읽는다)
+        schema = _get(conn, "schema")
         names: dict[str, set[str]] = {}
         for r in conn.execute("SELECT DISTINCT cls, name FROM sem_nodes WHERE origin != 'path'"):
             names.setdefault(r["cls"], set()).add(_space(r["name"]).lower())
@@ -975,7 +978,7 @@ def confirm_paths(store_name: str, slots: list[dict], actor: str) -> dict:
     """대응을 확정한다 — [{key, cls, name_from}]. 칸은 지금 판정한 후보에서만 고른다(모양·위치는 후보의 것). 빈 목록이면
     대응을 지운다. 확정하면 바로 적용한다(경로에서 만드는 것이라 싸다)."""
     by_key = {c["key"]: c for c in _path_candidates(store_name)}
-    conn = _conn(store_name)
+    conn = _conn(store_name, timeout=PATH_WRITE_TIMEOUT)
     try:
         paths = [r["path"] for r in conn.execute("SELECT path FROM docs")]
         links = _path_links(store_name, list(by_key.values()), paths)
@@ -1091,26 +1094,40 @@ def _path_nodes(confirmed: dict | None, path: str, mtime: float | None,
 
 def apply_paths(conn) -> dict:
     """경로에서 얻은 개체를 **전부 다시** 만든다(origin path) — 확정한 대응이 없거나 옛 스키마의 것이면 지우기만. 문서 수만큼
-    경로를 맞춰 볼 뿐이라 싸다(실측 contracts 7,615건). 옮기거나 이름을 바꾼 문서도 이것으로 맞는다."""
+    경로를 맞춰 볼 뿐이라 싸다(실측 contracts 7,615건). 옮기거나 이름을 바꾼 문서도 이것으로 맞는다.
+
+    **먼저 다 계산하고, 쓰기는 한 번에 짧게** 한다. 색인 DB는 rollback 저널이라 쓰기 잠금을 잡은 채 문서를 훑으면 그동안
+    다른 요청(화면의 동시 조회·MCP 그래프 질의)과 부딪혀 「database is locked」가 난다 — 지우기를 먼저 해 두고 7천여 건을
+    계산하던 예전 순서가 그랬다."""
     confirmed = (_get(conn, "paths", {}) or {}).get("confirmed")
-    schema = _schema(conn)
-    conn.execute("DELETE FROM sem_nodes WHERE origin = 'path'")
-    if not confirmed or confirmed.get("schema_version") != (schema or {}).get("version"):
-        conn.commit()
-        return {"nodes": 0, "documents": 0, "outside": 0, "stale": bool(confirmed)}
+    schema = _get(conn, "schema")     # 없으면 None — 지우기만 한다(_schema()는 없으면 예외)
+    usable = bool(confirmed) and confirmed.get("schema_version") == (schema or {}).get("version")
     rows, docs, outside = [], 0, 0
-    linked = _linked_names(confirmed)
-    for r in conn.execute("SELECT path, mtime FROM docs"):
-        nodes = _path_nodes(confirmed, r["path"], r["mtime"], linked)
-        if nodes:
-            docs += 1
-            rows += [(r["path"], n["cls"], n["name"], n["evidence"], "path", n["observed_at"]) for n in nodes]
-        else:
-            outside += 1
-    conn.executemany("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at) VALUES (?, ?, ?, ?, ?, ?)",
-                     rows)
-    out = {"nodes": len(rows), "documents": docs, "outside": outside, "version": confirmed["version"], "at": _now()}
-    _put(conn, "paths_applied", out)
+    if usable:
+        linked = _linked_names(confirmed)
+        for r in list(conn.execute("SELECT path, mtime FROM docs")):
+            nodes = _path_nodes(confirmed, r["path"], r["mtime"], linked)
+            if nodes:
+                docs += 1
+                rows += [(r["path"], n["cls"], n["name"], n["evidence"], "path", n["observed_at"]) for n in nodes]
+            else:
+                outside += 1
+    out = ({"nodes": len(rows), "documents": docs, "outside": outside, "version": confirmed["version"], "at": _now()}
+           if usable else {"nodes": 0, "documents": 0, "outside": 0, "stale": bool(confirmed)})
+    if conn.in_transaction:      # 호출자가 남긴 쓰기가 있으면 먼저 닫는다(BEGIN이 겹치지 않게)
+        conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")      # 쓰기 잠금을 여기서 — 계산은 끝났다
+        conn.execute("DELETE FROM sem_nodes WHERE origin = 'path'")
+        conn.executemany("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                         rows)
+        if usable:
+            conn.execute("INSERT OR REPLACE INTO sem_meta (key, value) VALUES ('paths_applied', ?)",
+                         (json.dumps(out, ensure_ascii=False),))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return out
 
 

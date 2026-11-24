@@ -1301,3 +1301,59 @@ def test_codes_only_in_file_names_take_names_from_another_stores_folders_and_lin
                                                 [storage.store("docs"), storage.store("credit")]))
     by = {h["source"]: h for h in hits}
     assert by["docs"]["same_as"] == [{"source": "credit", "cls": "협력사", "name": "비상사", "by": "식별자"}]
+
+
+def test_progress_shows_every_stage_per_store_and_the_next_step(store, monkeypatch):
+    """전환 현황 — 저장소마다 정보 조회 → 내용 분석(①·②-3·③) → 워크플로 연결과 다음 할 일 하나. 단계를 마칠 때마다 다음 할 일이
+    넘어간다. ②-3 화면·운영 도구는 실패의 까닭을 돌려준다(잠금이면 503)."""
+    import sqlite3
+
+    from app.api import mcp_servers
+
+    root = Path(get_settings().doc_roots.split("=")[-1] if "=" in get_settings().doc_roots else get_settings().doc_roots)
+    for i in range(5):
+        no = f"KR-CT2403{i:05d}"
+        (root / f"{no}_0").mkdir()
+        (root / f"{no}_0" / f"{no}_품의.md").write_text(f"# 품의 {no}\n\n에이전자는 배터리를 공급한다. {i}\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    c = TestClient(create_app())
+
+    def row():
+        data = c.get(f"{API}/ontology/progress", headers=ADMIN).json()
+        assert data["errors"] == []
+        return next(r for r in data["stores"] if r["store"] == "docs"), data["totals"]
+
+    r, totals = row()
+    assert r["formal"]["indexed"] >= 5 and r["semantic"]["schema"] is None
+    assert r["next"] == {"stage": "내용 분석", "text": "① 스키마를 제안·확정하세요", "tab": "semantic"}
+    assert r["semantic"]["paths"]["candidates"] == 1 and totals["paths_possible"] >= 1
+    # 스키마가 없어도 ②-3 조회는 된다 — 예전에는 409가 되어 내용 분석 화면이 통째로 비었다
+    before = c.get(f"{API}/ontology/stores/docs/semantic/paths", headers=ADMIN)
+    assert before.status_code == 200 and before.json()["candidates"][0]["pattern"] == r"KR\-CT\d{9}"
+
+    semantic.confirm_schema("docs", {**GOOD_SCHEMA, "classes": GOOD_SCHEMA["classes"] + [
+        {"name": "계약", "description": "", "examples": []}]}, "admin")
+    r, _ = row()
+    assert r["next"]["text"].startswith("②-3 경로 틀")
+
+    url = f"{API}/ontology/stores/docs/semantic/paths"
+    key = c.get(url, headers=ADMIN).json()["candidates"][0]["key"]
+    real = semantic.confirm_paths
+    monkeypatch.setattr(semantic, "confirm_paths", lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")))
+    busy = c.put(url, json={"slots": [{"key": key, "cls": "계약"}]}, headers=ADMIN)
+    assert busy.status_code == 503 and "잠시 후" in busy.json()["detail"]
+    monkeypatch.setattr(semantic, "confirm_paths", lambda *a: (_ for _ in ()).throw(KeyError("slots")))
+    broken = c.put(url, json={"slots": [{"key": key, "cls": "계약"}]}, headers=ADMIN)
+    assert broken.status_code == 500 and "KeyError" in broken.json()["detail"]
+    monkeypatch.setattr(semantic, "confirm_paths", real)
+    assert c.put(url, json={"slots": [{"key": key, "cls": "계약"}]}, headers=ADMIN).status_code == 200
+
+    r, totals = row()
+    assert r["semantic"]["paths"]["confirmed"] == 1 and r["semantic"]["path_docs"] == 5 and totals["paths_confirmed"] >= 1
+    assert r["next"]["text"].startswith("③ 분석")
+    with _db() as db:
+        semantic.analyze(db, "docs")
+        out = json.loads(mcp_servers._ops_call(db, "admin", "ontology_paths", {"source": "docs"}))
+    assert out["confirmed"]["slots"][0]["cls"] == "계약" and out["candidates"][0]["pattern"] == r"KR\-CT\d{9}"
+    r, _ = row()
+    assert r["next"] == {"stage": "워크플로 연결", "text": "이 저장소를 쓰는 워크플로를 연결하세요", "tab": "workflows"}

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import Modal from '../../components/Modal';
 import { api } from '../../lib/api';
 import { useApi, usePolling } from '../../lib/hooks';
@@ -25,7 +26,9 @@ import type {
 export default function SemanticTab() {
   const overview = useApi(() => api.ontologyOverview(), []);
   const stores = useMemo(() => (overview.data?.stores ?? []).filter((s) => s.extracted > 0), [overview.data]);
-  const [store, setStore] = useState('');
+  // ?store= — 전환 현황의 「다음 할 일」에서 그 저장소로 바로 온다
+  const [params] = useSearchParams();
+  const [store, setStore] = useState(params.get('store') ?? '');
   const [status, setStatus] = useState<SemanticStatus | null>(null);
   const [forms, setForms] = useState<SemanticForm[]>([]);
   const [templates, setTemplates] = useState<SemanticTemplate[]>([]);
@@ -34,21 +37,21 @@ export default function SemanticTab() {
   const [notice, setNotice] = useState('');
 
   useEffect(() => {
-    if (!store && stores.length > 0) setStore(stores[0].store);
+    if (stores.length > 0 && !stores.some((s) => s.store === store)) setStore(stores[0].store);
   }, [stores, store]);
 
   const reload = async () => {
     if (!store) return;
-    try {
-      const [s, f, t, p] = await Promise.all([api.semanticStatus(store), api.semanticForms(store), api.semanticTemplates(store),
-                                              api.semanticPaths(store)]);
-      setStatus(s);
-      setForms(f.forms);
-      setTemplates(t.templates);
-      setPaths(p);
-    } catch (e) {
-      setError((e as Error).message);
-    }
+    // 하나가 실패해도 나머지는 보인다 — 예전에는 한꺼번에(Promise.all) 읽어, 경로 틀 조회 하나가 실패하면(스키마가 없는
+    // 저장소의 409) 화면 전체가 비었다. 실패한 것만 그 까닭을 위에 적는다.
+    const [s, f, t, p] = await Promise.allSettled([api.semanticStatus(store), api.semanticForms(store),
+                                                   api.semanticTemplates(store), api.semanticPaths(store)]);
+    const failed: string[] = [];
+    if (s.status === 'fulfilled') setStatus(s.value); else failed.push(`상태: ${(s.reason as Error).message}`);
+    if (f.status === 'fulfilled') setForms(f.value.forms); else failed.push(`②-1 양식: ${(f.reason as Error).message}`);
+    if (t.status === 'fulfilled') setTemplates(t.value.templates); else failed.push(`②-2 템플릿: ${(t.reason as Error).message}`);
+    if (p.status === 'fulfilled') setPaths(p.value); else failed.push(`②-3 경로 틀: ${(p.reason as Error).message}`);
+    if (failed.length) setError(failed.join(' · '));
   };
   useEffect(() => { setStatus(null); setForms([]); setTemplates([]); setPaths(null); void reload(); }, [store]); // eslint-disable-line react-hooks/exhaustive-deps
   // 제안(뒤에서 LLM)이나 분석이 도는 동안만 다시 읽는다.
@@ -175,6 +178,7 @@ export default function SemanticTab() {
               <QualityStep store={store} />
             </>
           )}
+          {!status.schema && <PathsStep paths={paths} schema={null} onConfirm={() => undefined} />}
           <RebuildStep store={store} busy={busy || status.running}
             onDone={(text) => { setNotice(text); void reload(); }} onError={setError} />
         </>
@@ -311,7 +315,7 @@ type PathPick = { cls: string; name_from: 'value' | 'tail' | 'link'; link_store?
  * 확정하면 그 아래 모든 문서에 개체를 단다(LLM 없음 — 경로에서). 제안은 값이 내용 그래프의 개체와 겹치는 개념이다.
  */
 function PathsStep({ paths, schema, onConfirm }: {
-  paths: SemanticPaths | null; schema: SemanticSchema;
+  paths: SemanticPaths | null; schema: SemanticSchema | null;
   onConfirm: (slots: ({ key: string } & PathPick)[]) => void;
 }) {
   const [pick, setPick] = useState<Record<string, PathPick>>({});
@@ -335,6 +339,12 @@ function PathsStep({ paths, schema, onConfirm }: {
         내용에서 뽑은 것과 어긋나면 아래에 알립니다. 파일 이름에 코드만 있으면(회사소개서) 같은 코드의 폴더에 이름이 붙은
         다른 저장소(신용평가서)에서 이름을 가져올 수 있습니다 — 저장소 사이의 같은 대상이 같은 이름·식별자로 이어집니다.
       </p>
+      {!schema && paths.candidates.length > 0 && (
+        <p className="mutedtext" style={{ fontSize: 12 }}>
+          아래는 이 저장소의 폴더·파일 이름에서 찾은 식별자 칸입니다. <b>① 스키마를 확정하면</b> 칸마다 개념을 골라 확정할 수
+          있습니다(개념은 스키마에 있는 것만 고릅니다).
+        </p>
+      )}
       {paths.candidates.length === 0 ? (
         <p className="mutedtext" style={{ fontSize: 12 }}>식별자 칸이 없습니다 — 폴더가 없거나 폴더 이름이 제각각입니다.</p>
       ) : (
@@ -360,9 +370,9 @@ function PathsStep({ paths, schema, onConfirm }: {
                   <td>{Object.keys(c.hits).length === 0 ? <span className="mutedtext">없음</span>
                     : Object.entries(c.hits).map(([k, n]) => `${k} ${n}`).join(' · ')}</td>
                   <td>
-                    <select value={p.cls} onChange={(e) => set(c.key, { cls: e.target.value })}>
-                      <option value="">쓰지 않음</option>
-                      {schema.classes.map((k) => (
+                    <select value={p.cls} disabled={!schema} onChange={(e) => set(c.key, { cls: e.target.value })}>
+                      <option value="">{schema ? '쓰지 않음' : '스키마 확정 뒤'}</option>
+                      {(schema?.classes ?? []).map((k) => (
                         <option key={k.name} value={k.name}>{k.name}{k.name === c.suggested ? ' (제안)' : ''}</option>
                       ))}
                     </select>
@@ -391,7 +401,7 @@ function PathsStep({ paths, schema, onConfirm }: {
           </tbody>
         </table>
       )}
-      {paths.candidates.length > 0 && (
+      {schema && paths.candidates.length > 0 && (
         <div className="row" style={{ gap: 8, marginTop: 6, alignItems: 'center' }}>
           <button className="small" onClick={() => onConfirm(chosen)}>
             {chosen.length ? `확정(${chosen.length}칸)` : paths.confirmed ? '대응 지우기' : '확정'}

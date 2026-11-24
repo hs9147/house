@@ -4,6 +4,9 @@
 재색인이고, 그건 이미 있는 경로를 그대로 쓴다(docsearch.reindex) — 온톨로지는 색인의
 파생물이라 별도의 "전환" 작업이 따로 있지 않다.
 """
+import sqlite3
+import traceback
+
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -43,6 +46,15 @@ def ontology_overview(db: Session = Depends(get_db), key: ApiKey = Depends(requi
     except storage_service.StorageError as e:
         # 저장소 설정 오류다 — 요청이 잘못된 것이 아니다.
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/ontology/progress")
+def ontology_progress(db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """전환 현황 — 저장소마다 정보 조회(형식 그래프) → 내용 분석(①·②-1~3·③) → 워크플로 연결이 어디까지 왔는지와 다음
+    할 일 하나, 합계. 읽기만 한다(services/ontology_progress)."""
+    from ..services import ontology_progress as progress_service  # noqa: PLC0415
+
+    return progress_service.progress(db, accessible_document_stores(db, key))
 
 
 @router.get("/ontology/stores/{store_name}")
@@ -181,6 +193,25 @@ def _semantic(fn, *args):
         raise HTTPException(status_code=409, detail=str(e))
 
 
+def _explained(fn, *args):
+    """_semantic과 같되, **예상하지 못한 실패도 까닭을 돌려준다** — 「HTTP 500」만 보이면 화면에서 원인을 알 길이 없다
+    (경로 틀 확정에서 겪었다). 색인 DB를 다른 작업이 쓰는 중이면 503(잠시 후 다시), 그 밖은 500에 예외 종류·메시지를 싣고
+    서버 로그에 traceback을 남긴다."""
+    try:
+        return fn(*args)
+    except semantic.SemanticError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            raise HTTPException(status_code=503, detail="다른 작업(분석·색인·조회)이 이 저장소의 색인 DB를 쓰는 중입니다 — "
+                                                        "잠시 후 다시 하세요.")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"색인 DB 오류: {str(e)[:300]}")
+    except Exception as e:  # noqa: BLE001 — 까닭을 화면에
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"처리하지 못했습니다 — {type(e).__name__}: {str(e)[:300]}")
+
+
 def _store_or_404(store_name: str):
     store = storage_service.store(store_name)
     if store is None or not storage_service.indexed(store):
@@ -282,7 +313,7 @@ def semantic_paths(store_name: str, db: Session = Depends(get_db), key: ApiKey =
     """②-3 경로 틀 — 폴더·파일 이름의 식별자 칸 후보와 개념 대응 제안(값이 겹치는 개념), 확정한 대응, 적용 결과,
     폴더와 내용이 어긋난 문서."""
     _indexed_store(db, key, store_name)
-    return _semantic(semantic.path_slots, store_name)
+    return _explained(semantic.path_slots, store_name)
 
 
 @router.put("/ontology/stores/{store_name}/semantic/paths")
@@ -290,7 +321,7 @@ def semantic_confirm_paths(store_name: str, slots: list[dict] = Body(..., embed=
                            admin: ApiKey = Depends(require_admin)):
     """대응 확정 — [{key, cls, name_from}]. 빈 목록이면 지운다. 확정하면 바로 모든 문서에 적용한다(경로에서 — LLM 없음)."""
     _store_or_404(store_name)
-    out = _semantic(semantic.confirm_paths, store_name, slots, admin.name)
+    out = _explained(semantic.confirm_paths, store_name, slots, admin.name)
     audit.record(db, admin.name, "ontology.semantic.paths.confirm", store_name,
                  {"slots": [{k: s[k] for k in ("pattern", "cls", "name_from")} for s in (out["confirmed"] or {}).get("slots", [])],
                   "nodes": out["applied"]["nodes"]})
