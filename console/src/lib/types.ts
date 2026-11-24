@@ -1493,6 +1493,7 @@ export interface SourceSaveResult {
   created: boolean;
   files: string[];      // 새로 쓰거나 덮어쓴 것
   same: string[];       // 내용이 같아 그대로 둔 것
+  held: string[];       // "저장소:경로" — 저장소의 다른 자리에 같은 내용이 이미 있어 쓰지 않은 것
   removed: string[];    // "저장소:경로" — 사이트에서 없어져 휴지통으로 옮긴 것
   source: SourceOut;
 }

@@ -154,6 +154,28 @@ def _judge(row: InfoSource, item: dict, cat: dict) -> tuple[str, str]:
     return "new", ""
 
 
+def _held_in_stores(row: InfoSource, files: list[dict]) -> dict[str, tuple[str, str, bool]]:
+    """출처가 저장한 기록에는 없지만 **저장소에 이미 있는** 파일 — {sha: (저장소, 자리, 이 출처가 쓰는 저장소인가)}.
+    색인 대상 저장소를 모두 본다(정보 현황은 관리자 화면이다) — 이 출처가 쓰는(쓸) 저장소가 먼저다(지난 저장 자리 ·
+    저장 제안). 색인으로 본다(싸다 — 주기 색인만큼 늦다)."""
+    from . import storage as storage_service  # noqa: PLC0415
+
+    mine = {f["store"] for f in row.saved_files or []}
+    mine |= {t.get("store") for t in ((row.proposal or {}).get("targets") or {}).values()
+             if isinstance(t, dict) and t.get("mode") == "existing"}
+    out: dict[str, tuple[str, str, bool]] = {}
+    if not files:
+        return out
+    for store in sorted(storage_service.indexed_stores(), key=lambda s: (s.name not in mine, s.name)):
+        try:
+            found = infosource.held_files(store, files, from_index=True)
+        except Exception:  # noqa: BLE001 — 판정의 거듦이다: 색인을 못 읽으면 규칙 판정 그대로
+            continue
+        for sha, rel in found.items():
+            out.setdefault(sha, (store.name, rel, store.name in mine))
+    return out
+
+
 def discover(db: Session, row: InfoSource) -> dict:
     """이 출처의 지난 스캔이 읽은 것마다 신규인지 — 조회 화면·페이지·파일·API·MCP 도구."""
     scan = row.scan or {}
@@ -170,10 +192,16 @@ def discover(db: Session, row: InfoSource) -> dict:
                     "fields": (p.get("fields") or [])[:15], "columns": ((p.get("tables") or [[]])[0] or [])[:20],
                     "has_path": bool(p.get("path")), "addable": True}
             items.append(item)
-        for f in scan.get("files") or []:
+        files = scan.get("files") or []
+        in_store = _held_in_stores(row, [f for f in files if (f.get("sha") or "") not in cat["shas"]])
+        for f in files:
             saved = cat["shas"].get(f.get("sha") or "")
             status, why = (("managed" if saved["source_id"] == row.id else "duplicate"),
                            f"「{saved['source']}」에 저장돼 있습니다({saved['path']})") if saved else ("new", "")
+            if not saved and f.get("sha") in in_store:
+                name, rel, own = in_store[f["sha"]]
+                status, why = "duplicate", (f"저장소 「{name}」에 이미 있습니다({rel})"
+                                            + (" — 저장할 때 다시 쓰지 않습니다" if own else ""))
             items.append({"type": f"파일 · {_CATEGORY_LABEL.get(f.get('category'), '')}", "url": f["url"],
                           "title": f["name"], "info": f.get("text") or "", "addable": False,
                           "status": status, "reason": why or "저장 위치에서 저장하면 저장소에 들어갑니다"})

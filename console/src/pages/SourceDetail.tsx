@@ -832,6 +832,7 @@ function SavePanel({ row, onSaved }: { row: SourceOut; onSaved: (r: SourceSaveRe
         <div style={{ fontSize: 12, marginTop: 8 }}>
           <p style={{ margin: '4px 0' }}>
             {result.files.length}개를 썼습니다 · 내용이 같아 그대로 둔 것 {result.same.length}개
+            {result.held.length > 0 && <> · 저장소에 이미 있어 쓰지 않은 것 {result.held.length}개</>}
             {result.removed.length > 0 && <> · 휴지통으로 옮긴 것 {result.removed.length}개</>}.
             색인이 돌면 문서 검색·온톨로지에 나타납니다.
           </p>
@@ -843,6 +844,11 @@ function SavePanel({ row, onSaved }: { row: SourceOut; onSaved: (r: SourceSaveRe
           {result.removed.length > 0 && (
             <ul className="mono" style={{ fontSize: 11, margin: '4px 0', paddingLeft: 18 }}>
               {result.removed.map((r) => <li key={r}>{r}</li>)}
+            </ul>
+          )}
+          {result.held.length > 0 && (
+            <ul className="mono" style={{ fontSize: 11, margin: '4px 0', paddingLeft: 18 }}>
+              {result.held.map((r) => <li key={r}>이미 있음 · {r}</li>)}
             </ul>
           )}
         </div>

@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
 from app.main import create_app
-from app.services import bedrock, infosource, llm, storage
+from app.services import bedrock, docsearch, infosource, llm, storage
 
 ADMIN = {"x-api-key": "test-admin-key"}
 API = "/paas/api/v1"
@@ -439,6 +439,44 @@ def test_downloads_are_saved_per_type_overwritten_and_trashed(client, monkeypatc
     assert "rules:인사-포털/문서/rules.pdf" in out["removed"]
     assert not pdf.exists()
     assert (client.tmp / "rules" / storage.TRASH_DIRNAME / "인사-포털" / "문서" / "rules.pdf").exists()
+
+
+def test_files_already_in_the_store_are_not_written_twice(client, monkeypatch):
+    """저장소에 이미 있는 파일(사람이 올렸거나 직접 옮긴 것)은 내용으로 알아보고 다시 쓰지 않는다 — 판정에도 보인다.
+    사람의 파일은 사이트에서 없어져도 휴지통으로 보내지 않는다(우리가 쓴 것이 아니다)."""
+    _files_site(monkeypatch)
+    made = _create(client)
+    # 사람이 먼저 올려 둔 같은 규정 — 이름·폴더가 다르다
+    (client.tmp / "docs" / "규정").mkdir()
+    (client.tmp / "docs" / "규정" / "휴가규정.pdf").write_bytes(PDF[1])
+    docsearch.reindex("docs", client.tmp / "docs")     # 판정은 색인으로 본다(주기 색인이 디스크와 맞춘다)
+    _scan(client, made["id"])
+    found = client.get(f"{API}/sources/{made['id']}/coverage", headers=ADMIN).json()["harness"]
+    pdf_item = next(i for i in found["items"] if i["url"].endswith("rules.pdf"))
+    assert pdf_item["status"] == "duplicate" and "규정/휴가규정.pdf" in pdf_item["reason"]
+
+    docs = {"mode": "existing", "store": "docs"}
+    res = _save(client, made["id"], pages=docs, documents=docs, sheets=docs).json()
+    assert "docs:규정/휴가규정.pdf" in res["held"]
+    assert not (client.tmp / "docs" / "인사-포털" / "문서" / "rules.pdf").exists()
+    assert (client.tmp / "docs" / "인사-포털" / "표" / "days.xlsx").exists()     # 신규는 쓴다
+    index = (client.tmp / "docs" / "인사-포털" / "index.md").read_text(encoding="utf-8")
+    assert "이미 있음 — 저장소 docs: 규정/휴가규정.pdf" in index
+
+    # 우리가 쓴 파일을 사람이 직접 옮겼다 — 다시 저장해도 원래 자리에 두 벌째를 쓰지 않는다
+    xlsx = client.tmp / "docs" / "인사-포털" / "표" / "days.xlsx"
+    (client.tmp / "docs" / "보관").mkdir()
+    xlsx.rename(client.tmp / "docs" / "보관" / "days.xlsx")
+    again = _save(client, made["id"], pages=docs, documents=docs, sheets=docs).json()
+    assert "docs:보관/days.xlsx" in again["held"] and not xlsx.exists()
+
+    # 사이트에서 없어져도 사람의 파일은 그대로
+    monkeypatch.setitem(SITE, "https://intra.test/leave", SITE["https://intra.test/leave/history"])
+    _scan(client, made["id"])
+    out = _save(client, made["id"], pages=docs).json()
+    assert not any(r.endswith((".pdf", ".xlsx")) for r in out["removed"])   # 휴지통에는 우리가 쓴 정리 문서만
+    assert (client.tmp / "docs" / "규정" / "휴가규정.pdf").exists()
+    assert (client.tmp / "docs" / "보관" / "days.xlsx").exists()
 
 
 def test_save_refuses_unknown_type_and_all_skipped(client):

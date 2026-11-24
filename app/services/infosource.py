@@ -2630,13 +2630,14 @@ def file_paths(row: InfoSource) -> list[tuple[dict, str]]:
     return out
 
 
-def render(row: InfoSource, places: dict[str, str] | None = None) -> dict[str, str]:
+def render(row: InfoSource, places: dict[str, str] | None = None,
+           held: dict[str, tuple[str, str]] | None = None) -> dict[str, str]:
     """저장할 문서들 — {상대경로: 마크다운}. 색인·온톨로지가 제목·표를 그대로 읽는다.
 
     places는 유형별로 고른 저장소 이름 — 내려받은 파일이 정리와 같은 저장소면 링크로, 다른
-    저장소면 그 이름으로 적는다."""
+    저장소면 그 이름으로 적는다. held는 저장소에 이미 있어 쓰지 않은 파일(주소 → (저장소, 자리)) — 그 자리를 적는다."""
     scan_data = row.scan or {}
-    places = places or {}
+    places, held = places or {}, held or {}
     folder = _folder_name(row.name)
     head = [f"# {row.name}", "", f"- 출처: {row.url}", f"- 종류: {row.kind}",
             f"- 스캔: {row.scanned_at:%Y-%m-%d %H:%M}" if row.scanned_at else "- 스캔: -", ""]
@@ -2673,7 +2674,8 @@ def render(row: InfoSource, places: dict[str, str] | None = None) -> dict[str, s
             head += ["", "## 내려받은 파일", "", "| 파일 | 종류 | 링크 글자 | 위치 |", "|---|---|---|---|"]
             for f, rel in placed:
                 store = places.get(f["category"])
-                where = (f"[{rel.split('/', 1)[1]}]({rel.split('/', 1)[1]})" if store == places.get("pages")
+                where = (f"이미 있음 — 저장소 {held[f['url']][0]}: {held[f['url']][1]}" if f["url"] in held
+                         else f"[{rel.split('/', 1)[1]}]({rel.split('/', 1)[1]})" if store == places.get("pages")
                          else f"저장소 {store}: {rel}" if store else f"저장 안 함 — {f['url']}")
                 head.append(f"| {f['name'].replace('|', '/')} | {CATEGORIES[f['category']][0]} | "
                             f"{(f.get('text') or '').replace('|', '/')} | {where} |")
@@ -2718,6 +2720,43 @@ def _sha_of(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
 
 
+def held_files(store: storage.Store, files: list[dict], *, from_index: bool = False) -> dict[str, str]:
+    """저장소에 **이미 있는** 같은 내용의 파일 — {sha: 저장소 안 상대경로}. files는 [{size, sha}].
+
+    이름·폴더가 달라도 내용이 같으면 확보한 데이터다(사람이 올려 두었거나, 우리가 쓴 것을 사람이 직접 옮겼다).
+    크기가 같은 파일만 열어 본다. from_index면 색인의 목록(docs)으로 고른다 — 싸지만 주기 색인(15분)만큼 늦다(판정용).
+    아니면 디스크를 훑는다(저장용 — 쓸지 말지는 지금 디스크로 정한다). 점 폴더(휴지통·캐시)는 어느 쪽이든 빠진다.
+    """
+    want: dict[int, set[str]] = {}
+    for f in files:
+        if f.get("sha") and isinstance(f.get("size"), int):
+            want.setdefault(f["size"], set()).add(f["sha"])
+    if not want:
+        return {}
+    if from_index:
+        if not storage.indexed(store) or not docsearch.index_path(store.name).exists():
+            return {}
+        conn = docsearch._connect(store.name)
+        try:
+            marks = ",".join("?" * len(want))
+            candidates = [(r["path"], r["size"]) for r in conn.execute(
+                f"SELECT path, size FROM docs WHERE size IN ({marks}) ORDER BY path", list(want))]
+        finally:
+            conn.close()
+    else:
+        found, _ = docsearch._candidates(store.root)
+        candidates = [(rel, size) for rel, size, _ in found if size in want]
+    out: dict[str, str] = {}
+    for rel, size in candidates:
+        try:
+            sha = _sha_of(storage.resolve(store.root, rel))
+        except (OSError, storage.StorageError):
+            continue
+        if sha in want[size]:
+            out.setdefault(sha, rel)
+    return out
+
+
 def save(db: Session, row: InfoSource, targets: dict) -> dict:
     """유형마다 고른 저장소에 쓴다. targets = {유형: {mode: existing|new|skip, store, path}}.
 
@@ -2752,13 +2791,13 @@ def save(db: Session, row: InfoSource, targets: dict) -> dict:
             raise SourceError("같은 새 저장소는 모든 유형에서 경로와 소속 부서가 같아야 합니다.")
 
     # 쓰기 전에 다 확인한다 — 새 저장소를 만든 뒤에 다른 유형에서 막히면 빈 저장소만 남는다.
-    plan: list[tuple[str, str, bytes]] = []   # (유형, 상대경로, 내용)
+    plan: list[tuple[str, str, bytes, str]] = []   # (유형, 상대경로, 내용, 받은 주소 — 정리 문서는 "")
     for f, rel in file_paths(row):
         if f["category"] in chosen:
             staged = staged_file(row, f)
             if not staged.is_file():
                 raise SourceError("받아 둔 파일이 없습니다 — 다시 스캔한 뒤 저장하세요.")
-            plan.append((f["category"], rel, staged.read_bytes()))
+            plan.append((f["category"], rel, staged.read_bytes(), f["url"]))
     stores: dict[str, storage.Store] = {}
     for c, t in chosen.items():
         if t["mode"] == "existing" and t["store"] not in stores:
@@ -2775,13 +2814,29 @@ def save(db: Session, row: InfoSource, targets: dict) -> dict:
                                                 t["organization_id"])
             created.append(t["store"])
     places = {c: t["store"] for c, t in chosen.items()}
+    # 확보한 것과 새로 받은 것을 가른다 — 제자리에 같은 내용이 없는 파일 중, 저장소의 다른 자리에 같은 내용이 있으면
+    # (사람이 올려 두었거나 우리가 쓴 것을 직접 옮겼다) 다시 쓰지 않고 그 자리를 기록한다. 같은 내용을 두 벌 두면
+    # 검색에 두 번 나오고 내용 분석도 두 번 한다.
+    held: dict[str, tuple[str, str]] = {}    # 받은 주소 → (저장소, 이미 있는 자리)
+    for name in {places[c] for c, *_ in plan}:
+        store = stores[name]
+        pending = [(rel, url, len(data), hashlib.sha256(data).hexdigest())
+                   for c, rel, data, url in plan if places[c] == name]
+        pending = [p for p in pending if _sha_of(storage.resolve(store.root, p[0])) != p[3]]
+        found = held_files(store, [{"size": size, "sha": sha} for _, _, size, sha in pending])
+        held.update({url: (name, found[sha]) for rel, url, _, sha in pending if sha in found})
     if "pages" in chosen:
-        plan += [("pages", rel, text.encode("utf-8")) for rel, text in render(row, places).items()]
+        plan += [("pages", rel, text.encode("utf-8"), "") for rel, text in render(row, places, held).items()]
 
-    written, same, saved = [], [], []
-    for category, rel, data in plan:
+    written, same, kept, saved = [], [], [], []
+    for category, rel, data, url in plan:
         store = stores[places[category]]
         sha = hashlib.sha256(data).hexdigest()
+        if url in held:
+            kept.append(f"{held[url][0]}:{held[url][1]}")
+            # held — 우리가 쓴 것이 아니다: 사이트에서 없어져도 휴지통으로 보내지 않는다(아래)
+            saved.append({"category": category, "store": store.name, "path": held[url][1], "sha": sha, "held": True})
+            continue
         if _sha_of(storage.resolve(store.root, rel)) == sha:
             same.append(rel)
         else:
@@ -2794,8 +2849,8 @@ def save(db: Session, row: InfoSource, targets: dict) -> dict:
         if old["category"] in categories and old["category"] not in chosen:
             untouched.append(old)
             continue
-        if (old["store"], old["path"]) in keep:
-            continue
+        if (old["store"], old["path"]) in keep or old.get("held"):
+            continue   # held — 저장소에 원래 있던 파일: 기록만 했고 우리가 쓰지 않았다. 이번에 없으면 기록에서만 빠진다
         store = storage.store(old["store"])
         if store is None or store.read_only:
             continue
@@ -2811,7 +2866,7 @@ def save(db: Session, row: InfoSource, targets: dict) -> dict:
     db.commit()
     return {"stores": [{"store": s.name, "root": str(s.root), "created": s.name in created}
                        for s in stores.values()],
-            "created": bool(created), "files": written, "same": same, "removed": removed}
+            "created": bool(created), "files": written, "same": same, "held": kept, "removed": removed}
 
 
 # ---------------------------------------------------------------- 무인 수집(PAAS_SOURCE_UNATTENDED)
@@ -2872,7 +2927,8 @@ def collect(db: Session, row: InfoSource, actor: str = "scheduler") -> dict:
         raise SourceError(row.error)
     categories = categories_of(row.scan)
     result = save(db, row, {c: {"mode": "existing", "store": previous[c]} for c in categories if c in previous})
-    out = {"written": len(result["files"]), "same": len(result["same"]), "removed": len(result["removed"]),
+    out = {"written": len(result["files"]), "same": len(result["same"]), "held": len(result["held"]),
+           "removed": len(result["removed"]),
            "pages": len(pages), "unsaved": [c for c in categories if c not in previous]}
     audit.record(db, actor, "source.collect", row.name, out)
     return out

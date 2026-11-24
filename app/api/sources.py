@@ -334,7 +334,8 @@ def save_source(source_id: int, body: SourceSave, db: Session = Depends(get_db),
     proposed = (row.proposal or {}).get("targets") or {}
     audit.record(db, admin.name, "source.save", row.name, {
         "targets": {c: t["store"] if t["mode"] != "skip" else "-" for c, t in targets.items()},
-        "written": len(result["files"]), "same": len(result["same"]), "removed": len(result["removed"]),
+        "written": len(result["files"]), "same": len(result["same"]), "held": len(result["held"]),
+        "removed": len(result["removed"]),
         # 유형마다 제안을 그대로 받았는지 — 제안이 자주 틀리면 여기서 보인다.
         "as_proposed": {c: (proposed.get(c) or {}).get("mode") == t["mode"]
                         and (proposed.get(c) or {}).get("store") == t["store"]
