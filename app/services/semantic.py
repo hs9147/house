@@ -918,6 +918,7 @@ def confirm_template(store_name: str, tid: str, rules: dict, actor: str) -> dict
 # 개체를 단다(origin path — LLM 없음). 경로에서 얻은 사실은 **늘 경로에서 다시 만든다**(apply_paths — 분석이 끝날 때마다):
 # 폴더 이름이 바뀌면(차수) 그대로 따라간다. 내용에서 뽑은 것보다 약하다 — 어긋나면 알린다(mismatches).
 PATH_MISMATCH_EXAMPLES = 10
+_PATH_ID = re.compile(r"식별자 (\S+)")     # _path_nodes가 근거에 떼어 적은 식별자
 
 
 def _slot_key(slot: dict) -> str:
@@ -945,12 +946,14 @@ def path_slots(store_name: str) -> dict:
         for r in conn.execute("SELECT DISTINCT cls, name FROM sem_nodes WHERE origin != 'path'"):
             names.setdefault(r["cls"], set()).add(_space(r["name"]).lower())
         paths = [r["path"] for r in conn.execute("SELECT path FROM docs")]
+        links = _path_links(store_name, candidates, paths)
         for c in candidates:
             values = {}
             for p in paths:
                 for v, tail, _ in pathshape.match(p, c):
                     values.setdefault(v, tail)
             c["sample"] = [{"value": v, "tail": t} for v, t in list(values.items())[:5]]
+            c["links"] = links.get(c["key"], [])
             hits = {}
             for cls, known in names.items():
                 n = sum(1 for v, t in values.items() if v.lower() in known or (t and _space(t).lower() in known))
@@ -958,7 +961,7 @@ def path_slots(store_name: str) -> dict:
                     hits[cls] = n
             c["hits"] = dict(sorted(hits.items(), key=lambda kv: -kv[1])[:5])
             c["suggested"] = next(iter(c["hits"]), "")
-            c["name_from"] = "tail" if c.get("tail") == "name" else "value"
+            c["name_from"] = "tail" if c.get("tail") == "name" else "link" if c["links"] else "value"
         saved = _get(conn, "paths", {})
         confirmed = saved.get("confirmed")
         return {"candidates": candidates, "confirmed": confirmed,
@@ -974,6 +977,8 @@ def confirm_paths(store_name: str, slots: list[dict], actor: str) -> dict:
     by_key = {c["key"]: c for c in _path_candidates(store_name)}
     conn = _conn(store_name)
     try:
+        paths = [r["path"] for r in conn.execute("SELECT path FROM docs")]
+        links = _path_links(store_name, list(by_key.values()), paths)
         schema = _schema(conn)
         if not schema:
             raise SemanticError("확정한 스키마가 없습니다 — ① 스키마를 먼저 확정하세요.")
@@ -988,8 +993,15 @@ def confirm_paths(store_name: str, slots: list[dict], actor: str) -> dict:
                 problems.append(f"스키마에 없는 개념입니다: {s.get('cls')}")
                 continue
             name_from = "tail" if s.get("name_from") == "tail" and cand.get("tail") == "name" else "value"
-            chosen.append({"key": cand["key"], "where": cand["where"], "parent": cand.get("parent", ""),
-                           "pattern": cand["pattern"], "cls": s["cls"], "name_from": name_from})
+            slot = {"key": cand["key"], "where": cand["where"], "parent": cand.get("parent", ""),
+                    "pattern": cand["pattern"], "cls": s["cls"], "name_from": name_from}
+            if s.get("name_from") == "link":
+                link = next((x for x in links.get(cand["key"], []) if x["store"] == s.get("link_store")), None)
+                if link is None:
+                    problems.append(f"이름을 가져올 저장소가 이 칸과 식별자를 나누지 않습니다: {s.get('link_store')}")
+                    continue
+                slot.update(name_from="link", link={"store": link["store"], "parent": link["parent"]})
+            chosen.append(slot)
         if problems:
             raise SemanticError("경로 틀을 확정할 수 없습니다: " + " / ".join(problems))
         saved = _get(conn, "paths", {})
@@ -1002,18 +1014,77 @@ def confirm_paths(store_name: str, slots: list[dict], actor: str) -> dict:
         conn.close()
 
 
-def _path_nodes(confirmed: dict | None, path: str, mtime: float | None) -> list[dict]:
+def _path_links(store_name: str, candidates: list[dict], paths: list[str]) -> dict[str, list[dict]]:
+    """다른 저장소에서 이름을 가져올 수 있는 칸 — {후보 key: [{store, parent, shared, values, names}]}. 같은 모양의 식별자
+    폴더에 이름이 붙어 있고(KR{6자리}_{회사명} — credit) 값이 겹치는 저장소. intro는 파일 이름에 코드만 있어 회사명을 거기서
+    받는다(실측: intro 147개 중 120개가 credit 폴더의 코드)."""
+    from . import pathshape  # noqa: PLC0415
+
+    wanted = {c["pattern"] for c in candidates}
+    others = []
+    for st in storage_service.indexed_stores():
+        if st.name == store_name or not wanted:
+            continue
+        prof = pathshape.profile(st.name)
+        named = [x for x in prof["slots"] if x["where"] == "folder" and x["role"] == "identifier"
+                 and x.get("tail") == "name" and x["pattern"] in wanted]
+        if named:
+            other_paths = pathshape._paths(st.name)
+            for x in named:
+                others.append((st.name, x, {v for op in other_paths for v, t, _ in pathshape.match(op, x) if t}))
+    out: dict[str, list[dict]] = {}
+    for c in candidates:
+        mine = {v for p in paths for v, _, _ in pathshape.match(p, c)}
+        for name, x, vals in others:
+            shared = len(mine & vals)
+            if x["pattern"] == c["pattern"] and shared:
+                out.setdefault(c["key"], []).append({"store": name, "parent": x.get("parent", ""), "shared": shared,
+                                                     "values": len(mine), "names": len(vals)})
+    return out
+
+
+def _linked_names(confirmed: dict | None) -> dict[str, dict[str, str]]:
+    """「다른 저장소의 이름」으로 확정한 칸마다 {식별자: 이름} — 그 저장소 폴더 이름의 뒤(회사명)."""
+    from . import pathshape  # noqa: PLC0415
+
+    out: dict[str, dict[str, str]] = {}
+    for slot in (confirmed or {}).get("slots") or []:
+        link = slot.get("link")
+        if slot["name_from"] != "link" or not link:
+            continue
+        probe = {"where": "folder", "parent": link.get("parent", ""), "pattern": slot["pattern"]}
+        names: dict[str, str] = {}
+        for p in pathshape._paths(link["store"]):
+            for v, tail, _ in pathshape.match(p, probe):
+                if tail:
+                    names.setdefault(v, tail)
+        out[slot["key"]] = names
+    return out
+
+
+def _path_nodes(confirmed: dict | None, path: str, mtime: float | None,
+                linked: dict[str, dict[str, str]] | None = None) -> list[dict]:
+    """경로 하나의 개체들. 근거에는 식별자를 **따로 떼어** 적는다(「· 식별자 KR054632」) — 「KR054632_회사명」처럼 밑줄로
+    붙어 있으면 묶기의 식별자 패턴(낱말 경계)이 찾지 못한다(밑줄도 낱말 글자다). 그래야 같은 코드의 이름끼리 묶인다(④)."""
     from . import pathshape  # noqa: PLC0415
 
     out, seen = [], set()
     for slot in (confirmed or {}).get("slots") or []:
         for value, tail, segment in pathshape.match(path, slot):
-            name = tail if slot["name_from"] == "tail" and tail else value
+            if slot["name_from"] == "tail" and tail:
+                name = tail
+            elif slot["name_from"] == "link":
+                name = (linked or {}).get(slot["key"], {}).get(value) or value
+            else:
+                name = value
             if (slot["cls"], name) in seen:
                 continue
             seen.add((slot["cls"], name))
             where = "폴더" if slot["where"] == "folder" else "파일 이름"
-            out.append({"cls": slot["cls"], "name": name, "evidence": f"{where} {segment}", "origin": "path",
+            evidence = f"{where} {segment} · 식별자 {value}"
+            if slot["name_from"] == "link" and name != value:
+                evidence += f" · 이름은 저장소 {slot['link']['store']}의 폴더에서"
+            out.append({"cls": slot["cls"], "name": name, "evidence": evidence, "origin": "path",
                         "observed_at": doc_date(path, mtime), "value": value})
     return out
 
@@ -1028,8 +1099,9 @@ def apply_paths(conn) -> dict:
         conn.commit()
         return {"nodes": 0, "documents": 0, "outside": 0, "stale": bool(confirmed)}
     rows, docs, outside = [], 0, 0
+    linked = _linked_names(confirmed)
     for r in conn.execute("SELECT path, mtime FROM docs"):
-        nodes = _path_nodes(confirmed, r["path"], r["mtime"])
+        nodes = _path_nodes(confirmed, r["path"], r["mtime"], linked)
         if nodes:
             docs += 1
             rows += [(r["path"], n["cls"], n["name"], n["evidence"], "path", n["observed_at"]) for n in nodes]
@@ -1068,9 +1140,9 @@ def _path_mismatches(conn, confirmed: dict | None) -> dict:
     return out
 
 
-def _path_hint(confirmed: dict | None, path: str) -> str:
+def _path_hint(confirmed: dict | None, path: str, linked: dict | None = None) -> str:
     """LLM 추출에 함께 주는 한 줄 — 이 문서가 경로로 속한 개체. 관계의 한쪽 끝을 문서 안에서 짐작하지 않게."""
-    nodes = _path_nodes(confirmed, path, None)
+    nodes = _path_nodes(confirmed, path, None, linked)
     if not nodes:
         return ""
     return ("경로가 말하는 것(관리자가 확정한 경로 틀 — 이 문서가 속한 개체): "
@@ -1281,6 +1353,7 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
         path_conf = (_get(conn, "paths", {}) or {}).get("confirmed")
         if path_conf and path_conf.get("schema_version") != schema["version"]:
             path_conf = None        # 옛 스키마의 경로 틀 — 쓰지 않는다(apply_paths도 지운다)
+        path_linked = _linked_names(path_conf)
         form_of: dict[str, list[str]] = {}
         for r in conn.execute("SELECT DISTINCT path, name FROM nodes WHERE kind = 'table'"):
             if r["name"] in confirmed_forms:
@@ -1399,7 +1472,7 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                     stats["escalated"] += bool(tid)      # 템플릿인데 필수 필드가 없다 — 틀이 다르다
                     jobs.append({"path": path, "fp": fp, "text": rest[:DOC_CHARS], "long": len(rest) > DOC_CHARS,
                                  "form_nodes": form_nodes, "form_edges": form_edges, "observed": observed,
-                                 "hint": _path_hint(path_conf, path)})
+                                 "hint": _path_hint(path_conf, path, path_linked)})
                     queued_fp[fp] = path
                     if len(jobs) >= max_jobs:
                         full = True
@@ -2099,18 +2172,20 @@ def search(store_name: str, cls: str = "", q: str = "", limit: int = 40) -> list
     try:
         aliases = canonical_map(conn)
         groups: dict[tuple[str, str], dict] = {}
-        for r in conn.execute("SELECT cls, name, path FROM sem_nodes"):
+        for r in conn.execute("SELECT cls, name, path, evidence, origin FROM sem_nodes"):
             key = (r["cls"], _canon(aliases, r["cls"], r["name"]))
             if cls and key[0] != cls:
                 continue
-            g = groups.setdefault(key, {"cls": key[0], "name": key[1], "paths": set(), "names": set()})
+            g = groups.setdefault(key, {"cls": key[0], "name": key[1], "paths": set(), "names": set(), "ids": set()})
             g["paths"].add(r["path"])
             g["names"].add(r["name"])
+            if r["origin"] == "path":       # 경로 틀이 단 식별자(협력사 코드) — 저장소 사이를 잇는 열쇠
+                g["ids"].update(_PATH_ID.findall(r["evidence"] or ""))
         needle = q.strip().lower()
         out = [{"cls": g["cls"], "name": g["name"], "documents": len(g["paths"]),
-                "aliases": sorted(g["names"] - {g["name"]})}
+                "aliases": sorted(g["names"] - {g["name"]}), **({"ids": sorted(g["ids"])} if g["ids"] else {})}
                for g in groups.values()
-               if not needle or any(needle in n.lower() for n in g["names"])]
+               if not needle or any(needle in n.lower() for n in g["names"] | g["ids"])]
         return sorted(out, key=lambda g: (-g["documents"], g["name"]))[:limit]
     finally:
         conn.close()

@@ -1861,12 +1861,15 @@ export interface SemanticPathSlot extends PathSlot {
   sample: { value: string; tail: string }[];
   hits: Record<string, number>;      // 개념 → 값이 그 개념의 개체 이름과 겹친 수
   suggested: string;
-  name_from: 'value' | 'tail';
+  name_from: 'value' | 'tail' | 'link';
+  /** 같은 식별자 폴더에 이름이 붙어 있는 다른 저장소(credit의 KR######_회사명) — 이름을 거기서 가져올 수 있다. */
+  links: { store: string; parent: string; shared: number; values: number; names: number }[];
 }
 
 export interface SemanticPaths {
   candidates: SemanticPathSlot[];
-  confirmed: { slots: { key: string; where: string; parent: string; pattern: string; cls: string; name_from: 'value' | 'tail' }[];
+  confirmed: { slots: { key: string; where: string; parent: string; pattern: string; cls: string;
+                         name_from: 'value' | 'tail' | 'link'; link?: { store: string; parent: string } }[];
                version: string; schema_version: string; confirmed_at: string; confirmed_by: string } | null;
   stale: boolean;
   applied: { nodes: number; documents: number; outside: number; at?: string } | null;

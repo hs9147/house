@@ -622,7 +622,8 @@ export const api = {
     request<SemanticTemplate['confirmed']>('PUT', `/ontology/stores/${encodeURIComponent(store)}/semantic/templates`, { template, rules }),
   semanticPaths: (store: string) =>
     request<SemanticPaths>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/paths`),
-  semanticConfirmPaths: (store: string, slots: { key: string; cls: string; name_from: 'value' | 'tail' }[]) =>
+  semanticConfirmPaths: (store: string,
+                         slots: { key: string; cls: string; name_from: 'value' | 'tail' | 'link'; link_store?: string }[]) =>
     request<{ confirmed: SemanticPaths['confirmed']; applied: SemanticPaths['applied'] }>(
       'PUT', `/ontology/stores/${encodeURIComponent(store)}/semantic/paths`, { slots }),
   semanticGold: (store: string, kind: SemanticGoldKind) =>

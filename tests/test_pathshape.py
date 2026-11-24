@@ -81,3 +81,15 @@ def test_shared_identifier_shapes_link_stores(monkeypatch):
     out = pathshape.profile_all()
     link = next(link for link in out["links"] if link["pattern"] == r"KR\d{6}")
     assert link["stores"] == {"credit": 6, "intro": 7} and link["shared"] == 4
+
+
+def test_mixed_file_names_keep_real_identifiers_but_not_version_dates_and_counters_share_a_shape():
+    """파일 이름 식별자는 다른 문서와 섞여 있어도 같은 모양이 5건 이상이면 칸이다(contracts의 KR-PR 구매요청 번호). 글자 하나에
+    날짜를 붙인 판 표시(V20241224)는 식별자가 아니고, 붙여 센 번호(-1 · -10)는 한 모양이다."""
+    files = [f"KR-CT2401{i:05d}_0/KR-CT2401{i:05d}_품의서_KR-PR2403{i:05d}.pdf" for i in range(6)]
+    files += [f"KR-CT2401{i:05d}_0/KR-CT2401{i:05d}_견적서_V2024122{i}.xls" for i in range(6)]
+    files += [f"KR-CT2401{i:05d}_0/KR-CT2401{i:05d}_계약서.doc" for i in range(6)]
+    out = pathshape.analyze(files)
+    patterns = {s["pattern"] for s in out["slots"] if s["where"] == "file" and s["role"] == "identifier"}
+    assert r"KR\-PR\d{9}" in patterns and not any(p.startswith("V") for p in patterns)
+    assert pathshape.shape("r-doc-20261028-gh6n-1") == pathshape.shape("r-doc-20261028-gh6n-10")

@@ -16,7 +16,8 @@
   version     옛 판을 모은 폴더(History, old, 구버전, 백업, archive)
   raw         원자료 폴더(Raw, 원본, 원자료)
   category    식별자도 연도도 아닌 형제 폴더 — 문서 종류일 가능성이 높다(WPR(팀)·KPI·MBR(팀))
-  파일 칸     같은 묶음(식별자·연도 폴더는 형제를 한 묶음으로)의 파일 이름에 60% 이상 나오는 식별자 토큰·연도 토큰
+  파일 칸     같은 묶음(식별자·연도 폴더는 형제를 한 묶음으로)의 파일 이름에 같은 모양으로 5건 이상 나오는 식별자 토큰,
+              60% 이상 나오는 연도 토큰
 
 판정의 근거: 분류 트리의 노드 뜻을 경로 라벨들의 결합으로 보는 방식(Giunchiglia 외, *Encoding classifications into
 lightweight ontologies*, 2007)과 계층 라벨을 경로 문맥 안에서 해석하는 방식(Bouquet 외, CtxMatch, ISWC 2003). 칸과
@@ -57,21 +58,30 @@ def _piece(text: str) -> str:
 
 def shape(text: str) -> str:
     """이름 조각의 모양 — 숫자 묶음을 자릿수로(KR-CT230700629 → KR-CT\\d{9}). 「-」로 나눈 조각 중 숫자 4자리 묶음이 없는
-    짧은 영숫자 혼합(doc-20261028-**gh6n**의 끝처럼 무작위로 붙인 것)은 [a-z0-9]{n}으로 — 그대로 두면 형제마다 모양이 갈린다."""
+    짧은 영숫자 혼합(doc-20261028-**gh6n**의 끝처럼 무작위로 붙인 것)은 [a-z0-9]{n}으로, 1~3자리 숫자 조각(…-gh6n-**1** ·
+    …-gh6n-**10**처럼 붙여 센 번호)은 \\d{1,3}으로 — 그대로 두면 형제마다 모양이 갈린다."""
     out = []
-    for part in text.split("-"):
+    parts = text.split("-")
+    for i, part in enumerate(parts):
         if (re.fullmatch(r"[A-Za-z0-9]{2,8}", part) and re.search(r"\d", part) and re.search(r"[A-Za-z]", part)
                 and not re.search(r"\d{4}", part)):
             out.append(f"[a-z0-9]{{{len(part)}}}")
+        elif i > 0 and re.fullmatch(r"\d{1,3}", part):
+            out.append(r"\d{1,3}")
         else:
             out.append(_piece(part))
     return r"\-".join(out)
 
 
+# 글자 하나 + 날짜(V20241224 · R251217) — 판·개정 날짜를 붙인 것이지 식별자가 아니다(실측 contracts 파일 이름)
+_LETTER_DATE = re.compile(r"[A-Za-z]((19|20)\d{2}|\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])")
+
+
 def _is_identifier(token: str) -> bool:
     """식별자 모양 — 영문자가 있고 숫자가 4자리 이상. 숫자만인 것(20251210 · 251217)은 날짜일 수 있고, 한글과 숫자
-    (「3080억원기준」)는 금액·수량이라 뺀다."""
-    return bool(re.search(r"[A-Za-z]", token)) and sum(c.isdigit() for c in token) >= 4
+    (「3080억원기준」)는 금액·수량이며, 글자 하나에 날짜를 붙인 것(V20241224)은 판 표시라 뺀다."""
+    return (bool(re.search(r"[A-Za-z]", token)) and sum(c.isdigit() for c in token) >= 4
+            and not _LETTER_DATE.fullmatch(token))
 
 
 def _folder_role(name: str) -> str:
@@ -177,8 +187,10 @@ def analyze(paths: list[str]) -> dict:
             for f in found:
                 seen[f] += 1
         for (role, pat), n in seen.most_common():
-            if n / len(items) < FILE_SHARE:
-                break
+            # 식별자는 같은 모양이 MIN_FILES 이상이면(폴더 칸과 같은 규칙 — 다른 문서와 섞여 있어도), 연도는 비율로
+            # (「24년」은 아무 문서 제목에나 나온다)
+            if (n < MIN_FILES) if role == "identifier" else (n / len(items) < FILE_SHARE):
+                continue
             # 같은 모양은 하나로 — 묶음(폴더)마다 따로 내면 하위 폴더마다 같은 「YY년」이 되풀이된다
             m = merged.setdefault((role, pat), {"where": "file", "role": role, "pattern": pat, "count": 0, "files": 0,
                                                 "groups": [], "example": example.get(pat, ""), "folder_hits": 0})

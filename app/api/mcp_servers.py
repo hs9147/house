@@ -2262,6 +2262,30 @@ def _graph_call(name: str, args: dict, *, db: Session | None = None,
     return _dump(found)
 
 
+def _link_across_stores(hits: list[dict]) -> None:
+    """다른 저장소의 같은 대상을 잇는다(same_as) — **같은 식별자**(경로 틀이 단 협력사 코드: credit 폴더 · intro 파일 이름)
+    또는 같은 개념 종류에서 법인 표기·띄어쓰기를 뗀 **같은 이름**(묶기 기준의 정규화). 내용 그래프는 저장소마다 따로라,
+    잇지 않으면 「에이전자」가 저장소 수만큼 따로 나온다."""
+    from ..services import semantic_merge as sm  # noqa: PLC0415
+
+    rules = sm.DEFAULT_RULES
+    for h in hits:
+        h["_norm"] = sm.normalize(h["name"], rules)
+    for h in hits:
+        same = []
+        for o in hits:
+            if o is h or o["source"] == h["source"]:
+                continue
+            by = ("식별자" if set(h.get("ids") or ()) & set(o.get("ids") or ()) else
+                  "이름" if o["cls"] == h["cls"] and h["_norm"] and o["_norm"] == h["_norm"] else "")
+            if by:
+                same.append({"source": o["source"], "cls": o["cls"], "name": o["name"], "by": by})
+        if same:
+            h["same_as"] = same
+    for h in hits:
+        del h["_norm"]
+
+
 def _concept_call(name: str, args: dict, sources) -> str:
     from ..services import semantic  # noqa: PLC0415
 
@@ -2281,12 +2305,12 @@ def _concept_call(name: str, args: dict, sources) -> str:
     if name == "find_concepts":
         limit = _int_arg(args, "limit", 20, _MAX_LIST)
         hits: list[dict] = []
+        # 저장소마다 limit까지 받아 많은 문서에 나오는 것부터 — 앞 저장소가 자리를 다 차지하면 다른 저장소의 같은 대상을 못 잇는다
         for store in sources:
-            if len(hits) >= limit:
-                break
             hits += [{"source": store.name, **row} for row in semantic.search(
-                store.name, _str_arg(args, "cls", required=False), _str_arg(args, "q", required=False),
-                limit - len(hits))]
+                store.name, _str_arg(args, "cls", required=False), _str_arg(args, "q", required=False), limit)]
+        hits = sorted(hits, key=lambda h: -h["documents"])[:limit]
+        _link_across_stores(hits)
         return _dump(hits)
 
     cls, node = _str_arg(args, "cls"), _str_arg(args, "name")

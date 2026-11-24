@@ -304,7 +304,7 @@ function FormsStep({ forms, schemaVersion, busy, onPropose, onConfirm }: {
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 
-type PathPick = { cls: string; name_from: 'value' | 'tail' };
+type PathPick = { cls: string; name_from: 'value' | 'tail' | 'link'; link_store?: string };
 
 /**
  * ②″ 경로 틀 — 폴더·파일 이름의 식별자 칸(건 폴더 KR-CT…_차수, 대상 폴더 KR######_회사명)을 개념에 대응시킨다.
@@ -317,8 +317,10 @@ function PathsStep({ paths, schema, onConfirm }: {
   const [pick, setPick] = useState<Record<string, PathPick>>({});
   useEffect(() => {
     if (!paths) return;
-    const done = Object.fromEntries((paths.confirmed?.slots ?? []).map((s) => [s.key, { cls: s.cls, name_from: s.name_from }]));
-    setPick(Object.fromEntries(paths.candidates.map((c) => [c.key, done[c.key] ?? { cls: '', name_from: c.name_from }])));
+    const done = Object.fromEntries((paths.confirmed?.slots ?? []).map((s) => [s.key,
+      { cls: s.cls, name_from: s.name_from, link_store: s.link?.store }]));
+    setPick(Object.fromEntries(paths.candidates.map((c) => [c.key,
+      done[c.key] ?? { cls: '', name_from: c.name_from, link_store: c.links[0]?.store }])));
   }, [paths]);
   if (!paths) return null;
   const chosen = Object.entries(pick).filter(([, v]) => v.cls).map(([key, v]) => ({ key, ...v }));
@@ -330,7 +332,8 @@ function PathsStep({ paths, schema, onConfirm }: {
       <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
         폴더 하나가 계약 하나·협력사 하나인 저장소는 폴더 이름이 곧 그 문서가 속한 개체입니다. 칸마다 개념을 고르면 그 아래
         모든 문서에 규칙으로 개체를 답니다(LLM 없음). 폴더 이름을 바꿔도(차수) 분석할 때마다 경로에서 다시 만듭니다.
-        내용에서 뽑은 것과 어긋나면 아래에 알립니다.
+        내용에서 뽑은 것과 어긋나면 아래에 알립니다. 파일 이름에 코드만 있으면(회사소개서) 같은 코드의 폴더에 이름이 붙은
+        다른 저장소(신용평가서)에서 이름을 가져올 수 있습니다 — 저장소 사이의 같은 대상이 같은 이름·식별자로 이어집니다.
       </p>
       {paths.candidates.length === 0 ? (
         <p className="mutedtext" style={{ fontSize: 12 }}>식별자 칸이 없습니다 — 폴더가 없거나 폴더 이름이 제각각입니다.</p>
@@ -365,9 +368,19 @@ function PathsStep({ paths, schema, onConfirm }: {
                     </select>
                   </td>
                   <td>
-                    {c.tail === 'name' ? (
-                      <select value={p.name_from} onChange={(e) => set(c.key, { name_from: e.target.value as PathPick['name_from'] })}>
-                        <option value="tail">뒤의 이름(회사명)</option>
+                    {c.tail === 'name' || c.links.length > 0 ? (
+                      <select value={p.name_from === 'link' ? `link:${p.link_store ?? ''}` : p.name_from}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          set(c.key, v.startsWith('link:') ? { name_from: 'link', link_store: v.slice(5) }
+                            : { name_from: v as PathPick['name_from'] });
+                        }}>
+                        {c.tail === 'name' && <option value="tail">뒤의 이름(회사명)</option>}
+                        {c.links.map((l) => (
+                          <option key={l.store} value={`link:${l.store}`}>
+                            {l.store}의 폴더 이름(같은 식별자 {l.shared.toLocaleString()}/{l.values.toLocaleString()})
+                          </option>
+                        ))}
                         <option value="value">식별자(코드)</option>
                       </select>
                     ) : <span className="mutedtext">식별자</span>}

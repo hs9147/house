@@ -1186,7 +1186,7 @@ def test_path_template_names_the_entity_of_every_document_and_follows_renamed_fo
             conn.close()
 
     assert path_nodes("KR050001_비상사/24년 신용평가.md") == [
-        {"cls": "협력사", "name": "비상사", "evidence": "폴더 KR050001_비상사", "observed_at": "2024-01-01"}]
+        {"cls": "협력사", "name": "비상사", "evidence": "폴더 KR050001_비상사 · 식별자 KR050001", "observed_at": "2024-01-01"}]
     assert path_nodes("KR-CT240100002_0/KR-CT240100002_품의.md")[0]["name"] == "KR-CT240100002"
     with pytest.raises(semantic.SemanticError):
         semantic.confirm_paths("docs", [{"key": contract["key"], "cls": "없는개념"}], "admin")
@@ -1248,3 +1248,56 @@ def test_path_template_api_is_confirmed_by_admins_only(store):
     assert done["applied"]["nodes"] == 5 and done["confirmed"]["slots"][0]["cls"] == "계약"
     assert c.put(url, json={"slots": []}, headers=ADMIN).json()["confirmed"] is None     # 지우기
     assert c.get(url, headers=ADMIN).json()["applied"] is not None
+
+
+def test_codes_only_in_file_names_take_names_from_another_stores_folders_and_link_across_stores(store, tmp_path):
+    """P3 — 회사소개서(intro)는 파일 이름에 협력사 코드만 있고, 신용평가서(credit)는 폴더가 「코드_회사명」이다. intro의 칸을
+    「credit의 폴더 이름」으로 확정하면 같은 코드의 회사명으로 개체를 단다. 근거에는 코드를 떼어 적어(묶기의 식별자 패턴이
+    찾게) 저장소 사이 조회(find_concepts)가 같은 대상을 잇는다."""
+    from app.api import mcp_servers
+    from app.db import SessionLocal
+    from app.models import DocumentStore
+    from app.services import semantic_merge as sm
+    from app.services import storage
+
+    root = Path(get_settings().doc_roots.split("=")[-1] if "=" in get_settings().doc_roots else get_settings().doc_roots)
+    credit = tmp_path / "credit"
+    credit.mkdir()
+    with SessionLocal() as db:
+        db.add(DocumentStore(name="credit", root_path=str(credit), read_only=False, active=True))
+        db.commit()
+    names = ["에이전자", "비상사", "가상사", "나상사", "다상사"]
+    for i, name in enumerate(names):
+        (credit / f"KR0500{i:02d}_{name}").mkdir()
+        (credit / f"KR0500{i:02d}_{name}" / "24년 신용평가.md").write_text(f"# 신용평가\n\n{name} ({i})\n", encoding="utf-8")
+        (root / f"(주)회사{i}_KR0500{i:02d}_회사소개서.md").write_text(f"# 회사 소개 {i}\n", encoding="utf-8")
+    docsearch.reindex("credit", credit)
+    docsearch.reindex("docs", root)
+    for s in ("docs", "credit"):
+        semantic.confirm_schema(s, GOOD_SCHEMA, "admin")
+
+    slot = next(c for c in semantic.path_slots("docs")["candidates"] if c["pattern"] == r"KR\d{6}")
+    assert slot["where"] == "file" and slot["name_from"] == "link"
+    assert slot["links"] == [{"store": "credit", "parent": "", "shared": 5, "values": 5, "names": 5}]
+    with pytest.raises(semantic.SemanticError):
+        semantic.confirm_paths("docs", [{"key": slot["key"], "cls": "협력사", "name_from": "link", "link_store": "없음"}],
+                               "admin")
+    semantic.confirm_paths("docs", [{"key": slot["key"], "cls": "협력사", "name_from": "link", "link_store": "credit"}],
+                           "admin")
+    folder = next(c for c in semantic.path_slots("credit")["candidates"] if c["where"] == "folder")
+    semantic.confirm_paths("credit", [{"key": folder["key"], "cls": "협력사", "name_from": "tail"}], "admin")
+
+    conn = semantic._conn("docs")
+    try:
+        row = dict(conn.execute("SELECT name, evidence FROM sem_nodes WHERE origin = 'path' AND path LIKE '%KR050001%'").fetchone())
+    finally:
+        conn.close()
+    assert row["name"] == "비상사" and "식별자 KR050001" in row["evidence"] and "저장소 credit" in row["evidence"]
+    assert sm.ids_of([row["evidence"]], sm.DEFAULT_RULES) == {"KR050001"}      # 묶기(④)가 코드를 찾는다
+
+    found = semantic.search("docs", q="KR050002")                              # 코드로도 찾는다
+    assert found[0]["name"] == "가상사" and found[0]["ids"] == ["KR050002"]
+    hits = json.loads(mcp_servers._concept_call("find_concepts", {"q": "비상사"},
+                                                [storage.store("docs"), storage.store("credit")]))
+    by = {h["source"]: h for h in hits}
+    assert by["docs"]["same_as"] == [{"source": "credit", "cls": "협력사", "name": "비상사", "by": "식별자"}]
