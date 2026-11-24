@@ -1097,3 +1097,53 @@ def test_garbled_documents_are_not_sent_and_can_be_reextracted(store, tmp_path):
     by = {c["key"]: c for c in ontology_ops.checks("docs")["checks"]}
     assert by["garbled"]["level"] != "ok" and ".md 1" in by["garbled"]["value"]
     assert docsearch.reextract("docs", [".md"])["marked"] >= 1
+
+
+def test_a_moved_document_keeps_its_content_graph_without_asking_the_llm(store, monkeypatch):
+    """탐색기로 옮기거나 폴더 이름을 바꾸면 색인에는 「옛 경로 없어짐 + 새 경로 생김」으로 온다. 새 경로는 본문이 같으니
+    옛 경로의 결과를 옮겨 받아야 한다 — 옛 경로를 먼저 지우면 빈 결과를 옮겨 받고 다시 분석되지도 않았다. 예산을 다 써도
+    옮겨 받기(LLM 없음)는 한다."""
+    root = Path(get_settings().doc_roots.split("=")[-1] if "=" in get_settings().doc_roots else get_settings().doc_roots)
+    semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+    with _db() as db:
+        semantic.analyze(db, "docs")
+
+    def nodes(path):
+        conn = semantic._conn("docs")
+        try:
+            return sorted(map(tuple, conn.execute("SELECT cls, name FROM sem_nodes WHERE path = ?", (path,))))
+        finally:
+            conn.close()
+
+    before = nodes("공급계약.md")
+    assert before
+    (root / "보관").mkdir()
+    (root / "공급계약.md").rename(root / "보관" / "공급계약.md")
+    docsearch.reindex("docs", root)
+    store.calls.clear()
+    with _db() as db:
+        result = semantic.analyze(db, "docs", budget_seconds=0)
+    assert store.calls == [] and result["copied"] == 1
+    assert nodes("보관/공급계약.md") == before
+    assert nodes("공급계약.md") == []          # 옛 경로는 옮긴 뒤에 지운다
+    conn = semantic._conn("docs")
+    try:
+        assert "공급계약.md" not in {r["path"] for r in conn.execute("SELECT path FROM sem_docs")}
+    finally:
+        conn.close()
+
+
+def test_document_dates_come_from_names_years_and_folders_before_the_file_time():
+    """관측한 날 — 이름의 날짜 → 이름의 연도(YY년·YYYY년) → 가까운 폴더 → 수정일. 연도만 있으면 수정일이 그 해 안일 때만
+    수정일, 아니면 그 해 첫날(한꺼번에 복사해 수정일이 뭉개져도 해의 순서를 지킨다). 범위(23-25년)는 읽지 않는다."""
+    from datetime import datetime, timezone
+    copied = datetime(2025, 6, 30, tzinfo=timezone.utc).timestamp()     # 세 파일을 한날 복사했다
+    years = [semantic.doc_date(f"KR054632_MEKAS CO.,LTD/{y}년 신용평가.pdf", copied) for y in (22, 23, 24)]
+    assert years == ["2022-01-01", "2023-01-01", "2024-01-01"]
+    assert semantic.doc_date("KR054632_x/25년 신용평가.pdf", copied) == "2025-06-30"         # 그 해 안 — 수정일
+    assert semantic.doc_date("WPR(팀)/2024년/W29 (7월 3주차)_GP담당.pptx", copied) == "2024-01-01"
+    assert semantic.doc_date("KPI/2023/GPS Raw Data/x.xlsx", copied) == "2023-01-01"
+    assert semantic.doc_date("audit/2026-10/a.json", copied) == "2026-10-01"
+    assert semantic.doc_date("KR-CT230700629_1/KR-CT230700629_정리_CNS_20251210_최종.xlsx", copied) == "2025-12-10"
+    assert semantic.doc_date("KR-CT230700629_1/KR-CT230700629_23-25년 통합운영계약.doc", copied) == "2025-06-30"
+    assert semantic.doc_date("2024년/#24년 실적 Master.xlsx", copied) == "2024-01-01"

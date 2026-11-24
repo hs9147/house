@@ -159,15 +159,48 @@ def iso_date(value) -> str:
         return ""
 
 
-def doc_date(path: str, mtime: float | None) -> str:
-    """문서의 날 — 관측 시점. 파일 이름의 날짜(메일·수집 파일은 이름에 날짜가 있다)가 먼저, 없으면 파일의 수정일."""
-    m = _NAME_DATE.search(path.rsplit("/", 1)[-1])
+# 연도만 적힌 이름 — 「22년 신용평가」·「#24년 실적」·「2024년」. 범위(「23-25년」·「23~25년」)는 어느 해인지 몰라 읽지 않는다.
+_NAME_YEAR = re.compile(r"(?<![\d~\-])((?:19|20)\d{2}|\d{2})\s*년")
+# 폴더 이름 전체가 연도·연월인 것 — 「2024」·「2026-10」(work-square KPI/2024, dream-rsi audit/2026-10)
+_FOLDER_YM = re.compile(r"^((?:19|20)\d{2})(?:[-_.](0[1-9]|1[0-2]))?$")
+
+
+def _name_date(name: str, mdate: date | None, *, folder: bool) -> str:
+    m = _NAME_DATE.search(name)
     if m:
         try:
             return date(int(m[1]), int(m[2]), int(m[3])).isoformat()
         except ValueError:
             pass
-    return datetime.fromtimestamp(mtime, timezone.utc).date().isoformat() if mtime else ""
+    year = month = None
+    ym = _FOLDER_YM.match(name.strip()) if folder else None
+    if ym:
+        year, month = int(ym[1]), int(ym[2]) if ym[2] else None
+    elif (y := _NAME_YEAR.search(name)):
+        year = int(y[1])
+        if year < 100:      # 두 자리 — 올해(+1)까지는 2000년대, 넘으면 1900년대
+            year += 2000 if year <= date.today().year % 100 + 1 else 1900
+    if year is None:
+        return ""
+    # 수정일이 그 해(달) 안이면 수정일이 더 정확하다. 아니면 그 해(달)의 첫날 — 복사·이관으로 수정일이 한날로 뭉개져도
+    # 해의 순서(22년 → 23년 → 24년 신용평가)는 지킨다.
+    if mdate and mdate.year == year and (month is None or mdate.month == month):
+        return mdate.isoformat()
+    return date(year, month or 1, 1).isoformat()
+
+
+def doc_date(path: str, mtime: float | None) -> str:
+    """문서의 날 — 관측 시점. 파일 이름의 날짜(메일·수집 파일은 이름에 날짜가 있다) → 파일 이름의 연도(「22년 신용평가.pdf」)
+    → 가까운 폴더부터 폴더 이름의 날짜·연월·연도(「WPR(팀)/2024년/…」) → 파일의 수정일.
+
+    연도를 읽지 않던 때는 신용평가서(협력사마다 22·23·24년 파일)가 모두 수정일 — 한꺼번에 복사한 날 — 로 관측돼 「가장
+    늦게 본 값」이 해의 순서와 어긋났다(실측: credit 467건이 「YY년 신용평가」)."""
+    mdate = datetime.fromtimestamp(mtime, timezone.utc).date() if mtime else None
+    for i, name in enumerate(reversed(path.split("/"))):
+        got = _name_date(name, mdate, folder=i > 0)
+        if got:
+            return got
+    return mdate.isoformat() if mdate else ""
 
 
 def _now() -> str:
@@ -1090,11 +1123,10 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
         # ② 같은 본문은 한 번만 — 경로만 다르고 본문·스키마 판·대응표 판이 같으면(지문이 같으면) 앞의 결과를 옮긴다.
         done_fp = {r["fp"]: r["path"] for r in rows if r["status"] in ("ok", "form", "template")}
         paths = _paths(conn)
-        # 지워진 문서의 내용 그래프는 함께 지운다
-        for gone in set(known) - set(paths):
-            _write(conn, gone, [], [], "llm")
-            conn.execute("DELETE FROM sem_docs WHERE path = ?", (gone,))
-        conn.commit()
+        # 지워진 문서의 내용 그래프는 **이번 분석이 끝난 뒤에** 지운다(아래). 탐색기로 옮기거나 폴더 이름을 바꾸면 색인에는
+        # 「옛 경로가 없어지고 새 경로가 생긴」 것으로 오고, 새 경로는 본문이 같아 옛 경로의 결과를 옮겨 받는다(②) — 먼저
+        # 지우면 빈 결과를 옮겨 받고, 지문이 같아 다시 분석되지도 않는다(실측: 계약 폴더의 차수 이름 바꾸기).
+        gone = set(known) - set(paths)
 
         stats = {"analyzed": 0, "form_docs": 0, "template_docs": 0, "escalated": 0, "failed": 0, "reviewed": 0,
                  "dropped": 0, "copied": 0, "skipped": 0}
@@ -1119,7 +1151,9 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
             fp = _digest(parts + [template_rules[tid]["version"]] if tid else parts)   # 템플릿 밖 문서의 지문은 그대로
             if known.get(path) == fp:
                 continue
-            if full or time.monotonic() - started > budget_seconds or should_stop():
+            # 같은 본문을 옮겨 받는 것(LLM 없음 — 싸다)은 예산을 넘겨도 한다: 옮길 원본(지워진 옛 경로)은 이번 분석이 끝나면 지운다
+            cheap = fp in queued_fp or done_fp.get(fp) not in (None, path)
+            if not cheap and (full or time.monotonic() - started > budget_seconds or should_stop()):
                 remaining += 1
                 continue
             try:
@@ -1226,6 +1260,9 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                 stats["analyzed"] += 1
             else:
                 remaining += 1
+        for path in gone:      # 지워진 문서의 내용 그래프 — 옮겨 받을 것은 위에서 다 옮겼다
+            _write(conn, path, [], [], "llm")
+            conn.execute("DELETE FROM sem_docs WHERE path = ?", (path,))
         conn.commit()
         outside = dict(sorted(outside.items(), key=lambda kv: -kv[1])[:100])
         _put(conn, "outside", outside)
