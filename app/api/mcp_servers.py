@@ -379,6 +379,8 @@ def _ops_call(db: Session, actor: str, name: str, args: dict, *, key: ApiKey | N
             h = coverage.harness(row.id)
             entry = {"source": row.name, "kind": row.kind, "round": h.get("round"), "rounds": h.get("rounds", []),
                      "gaps": h.get("gaps", [])[:10], "issues": h.get("issues", []),
+                     # 식별자 대조 — 목록과 저장소의 건 폴더가 같은 식별자면 확보한 건·목록에만 있는 신규·저장소에만 있는 건
+                     "id_matches": h.get("id_matches", []),
                      "decisions": len(h.get("decisions") or {})}
             if wanted:
                 entry["items"] = [{k: i.get(k) for k in ("type", "title", "status", "reason", "store_match")}

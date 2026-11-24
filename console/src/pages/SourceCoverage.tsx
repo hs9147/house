@@ -300,7 +300,25 @@ function Harness({ id, h, onChange, onError }: {
             <div style={{ marginTop: 4 }}>
               <b>출처 미확인 {h.gaps.length}</b> <span className="mutedtext">— 저장소에 되풀이되는데 어느 출처의 화면과도 겹치지 않는 유형</span>
               <ul style={{ margin: '2px 0', paddingLeft: 18 }}>
-                {h.gaps.map((g) => <li key={`${g.store}:${g.name}`}><span className="mono">{g.store}</span> · {g.kind} 「{g.name}」 (문서 {g.documents}건)</li>)}
+                {h.gaps.map((g) => (
+                  <li key={`${g.store}:${g.name}`}><span className="mono">{g.store}</span> · {g.kind} 「{g.kind.includes('식별자')
+                    ? readable(g.name) : g.name}」 (문서 {g.documents}건)</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {!!h.id_matches?.length && (
+            <div style={{ marginTop: 4 }}>
+              <b>저장소와 식별자로 대조</b>
+              <span className="mutedtext"> — 목록의 열이 저장소의 건 폴더와 같은 식별자입니다. 목록에만 있는 것이 신규(저장소에 아직 없는 건)입니다.</span>
+              <ul style={{ margin: '2px 0', paddingLeft: 18 }}>
+                {h.id_matches.map((m) => (
+                  <li key={`${m.url}:${m.column}:${m.store}`}>
+                    {m.screen} 「{m.column}」 ↔ <span className="mono">{m.store}</span> {readable(m.pattern)} — 확보 {m.shared.toLocaleString()}
+                    {' · '}<b>신규 {m.new.toLocaleString()}</b>{m.new_examples.length > 0 && <span className="mono"> ({m.new_examples.join(', ')}{m.new > m.new_examples.length ? ' …' : ''})</span>}
+                    {' · '}저장소에만 {m.only_in_store.toLocaleString()}
+                  </li>
+                ))}
               </ul>
             </div>
           )}

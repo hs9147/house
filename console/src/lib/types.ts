@@ -1420,6 +1420,9 @@ export interface CoverageHarness {
                             store_match?: { store: string; kind: string; name: string; documents: number; overlap: number } })[];
   gaps?: { store: string; kind: string; name: string; documents: number }[];          // 저장소에 있는데 출처 미확인
   issues?: { url: string; screen: string; kind: string; detail: string; at?: string }[]; // 교정할 것
+  /** 목록 ↔ 저장소 건 폴더를 식별자로 — 확보한 건(shared)·목록에만 있는 신규(new)·저장소에만 있는 건. */
+  id_matches?: { screen: string; url: string; column: string; store: string; where: string; pattern: string; list: number;
+                 store_values: number; shared: number; new: number; new_examples: string[]; only_in_store: number }[];
   changed?: { url: string; from: string | null; to: string }[];
   rounds: NonNullable<CoverageHarness['round']>[];
   decisions: Record<string, { status: CoverageItem['status']; by: string; at: string }>;

@@ -168,3 +168,33 @@ def test_harness_rounds_cross_check_the_source_and_the_stores_and_take_correctio
     assert any(o["source"] == "인사 포털" and o["round"]["gaps"] >= 1 for o in out)
     assert client.post(f"{API}/sources/{a}/coverage/decide", headers=ADMIN,
                        json={"url": "x", "status": "maybe"}).status_code == 400
+
+
+def test_collected_lists_are_matched_to_record_folders_by_identifier(client, monkeypatch):
+    """P4 — 목록의 계약번호가 저장소 건 폴더(KR-CT…_차수)와 같은 식별자면 확보한 건 · 목록에만 있는 신규 · 저장소에만 있는 건을
+    센다. 어느 출처의 목록도 덮지 않는 식별자 폴더는 출처 미확인이다."""
+    from app.services import docsearch
+
+    root = client.tmp / "docs"
+    for i in range(6):
+        folder = root / f"KR-CT2401{i:05d}_0"
+        folder.mkdir(parents=True)
+        (folder / f"KR-CT2401{i:05d}_품의서.md").write_text(f"# 품의 {i}\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    a, b = _setup(client, monkeypatch)
+    h = client.post(f"{API}/sources/{b}/coverage/round", headers=ADMIN).json()
+    from app.services import pathshape, coverage as cov
+    assert any(g["kind"] == "식별자 폴더" and g["name"] == r"KR\-CT\d{9}" for g in h["gaps"])     # 아직 출처가 없다
+
+    cols = [{"key": k, "label": k} for k in ("계약번호", "업체", "금액")]
+    numbers = [f"KR-CT2401{i:05d}" for i in range(4)] + ["KR-CT240199990_1", "KR-CT240199991"]
+    infosource.merge_dataset(b, {"screen": "계약 목록", "url": "https://intra.test/c2", "key": "계약번호", "columns": cols,
+                                 "records": [{"계약번호": n, "업체": "에이", "금액": 1} for n in numbers], "total": 6,
+                                 "complete": True, "since": ""}, date.today().isoformat())
+    h = client.post(f"{API}/sources/{b}/coverage/round", headers=ADMIN).json()
+    m = next(x for x in h["id_matches"] if x["store"] == "docs")
+    assert (m["column"], m["list"], m["shared"], m["new"], m["only_in_store"]) == ("계약번호", 6, 4, 2, 2)
+    assert m["new_examples"] == ["KR-CT240199990", "KR-CT240199991"] and h["round"]["id_new"] == 2
+    assert not any(g["kind"] == "식별자 폴더" for g in h["gaps"])            # 이 출처의 목록이 덮는다
+    h_a = client.post(f"{API}/sources/{a}/coverage/round", headers=ADMIN).json()
+    assert not any(g["kind"] == "식별자 폴더" for g in h_a["gaps"])          # 다른 출처가 덮어도 출처 있음

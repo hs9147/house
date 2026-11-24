@@ -552,6 +552,55 @@ def _checks(db: Session, row: InfoSource) -> list[dict]:
     return out
 
 
+ID_COLUMN_SHARE = 0.8     # 목록 열의 값이 이만큼 저장소 식별자 칸의 모양이면 그 칸과 같은 식별자로 본다
+ID_MIN_VALUES = 5
+
+
+def _id_slots(shapes: dict) -> list[tuple[str, dict]]:
+    return [(st["store"], s) for st in shapes.get("stores") or [] for s in st["slots"]
+            if s["role"] == "identifier" and not s.get("repeats_folder")]
+
+
+def _lead(value: str) -> str:
+    # 「KR-CT230700629_1」처럼 차수가 붙어 와도 앞머리로 — 저장소 칸의 값도 앞머리다(pathshape.match)
+    return re.split(r"[_\s]", value.strip(), maxsplit=1)[0]
+
+
+def _id_matches(row: InfoSource, slots: list[tuple[str, dict]], cache: dict) -> list[dict]:
+    """수집 목록 ↔ 저장소를 **식별자로** 대조한다 — 목록의 열 값이 저장소 식별자 칸(건 폴더 KR-CT… · 대상 폴더 KR######)의
+    모양이면, 같은 값(확보한 건) · 목록에만 있는 값(신규 — 저장소에 아직 없는 건) · 저장소에만 있는 값을 센다. 열 이름의
+    겹침(Jaccard)으로는 계약 목록과 계약 폴더를 잇지 못한다 — 한쪽은 표, 한쪽은 폴더 이름이다."""
+    from . import pathshape  # noqa: PLC0415
+
+    out = []
+    for scr in infosource.query_screens(row):
+        path = infosource._dataset_dir(row.id) / f"{infosource._tag(scr['url'])}.json"
+        data = _read(path, {})
+        records = data.get("records") or []
+        if not records:
+            continue
+        labels = {c["key"]: c.get("label") or c["key"] for c in data.get("columns") or [] if c.get("key")}
+        for key in labels or sorted({k for r in records for k in r}):
+            vals = {str(r.get(key)).strip() for r in records if r.get(key) not in (None, "")}
+            if len(vals) < ID_MIN_VALUES:
+                continue
+            for store, s in slots:
+                rx = re.compile(s["pattern"])
+                hit = {_lead(v) for v in vals if rx.fullmatch(_lead(v))}
+                if len(hit) < ID_COLUMN_SHARE * len({_lead(v) for v in vals}):
+                    continue
+                ck = (store, s["where"], s.get("parent", ""), s["pattern"])
+                if ck not in cache:
+                    cache[ck] = pathshape._values(store, s)
+                have = cache[ck]
+                new = sorted(hit - have)
+                out.append({"screen": scr["screen"], "url": scr["url"], "column": labels.get(key, key), "store": store,
+                            "where": s["where"], "pattern": s["pattern"], "list": len(hit), "store_values": len(have),
+                            "shared": len(hit & have), "new": len(new), "new_examples": new[:5],
+                            "only_in_store": len(have - hit)})
+    return out
+
+
 def run_round(db: Session, row: InfoSource, trigger: str = "") -> dict:
     """하네스 한 라운드 — 발견·판정(사람의 교정 먼저) · 저장소 유형과의 교차 · 수집 점검 · 지난 라운드와의 차이."""
     from datetime import datetime, timezone  # noqa: PLC0415
@@ -583,7 +632,24 @@ def run_round(db: Session, row: InfoSource, trigger: str = "") -> dict:
                 if _jaccard(cols, t["columns"]) >= OVERLAP:
                     matched.add((t["store"], t["name"]))
     gaps = [{"store": t["store"], "kind": t["kind"], "name": t["name"][:120], "documents": t["documents"]}
-            for t in types if (t["store"], t["name"]) in mine - matched and t["documents"] >= GAP_MIN_DOCS][:30]
+            for t in types if (t["store"], t["name"]) in mine - matched and t["documents"] >= GAP_MIN_DOCS]
+    # 식별자로 — 이 출처의 목록이 저장소의 건 폴더와 같은 식별자인가, 어느 출처의 목록도 덮지 않는 식별자 칸은 출처 미확인
+    from . import pathshape  # noqa: PLC0415
+
+    try:
+        slots = _id_slots(pathshape.profile_all())
+    except Exception:  # noqa: BLE001 — 식별자 대조는 거듦이다(색인을 못 읽으면 열 겹침 판정 그대로)
+        slots = []
+    cache: dict = {}
+    id_matches = _id_matches(row, slots, cache)
+    covered = {(m["store"], m["pattern"]) for m in id_matches}
+    for r in db.execute(select(InfoSource).where(InfoSource.id != row.id)).scalars():
+        covered |= {(m["store"], m["pattern"]) for m in _id_matches(r, slots, cache)}
+    id_gaps = [{"store": st, "kind": "식별자 폴더" if s["where"] == "folder" else "파일 이름 식별자", "name": s["pattern"],
+                "documents": s.get("documents") or s.get("count") or 0}
+               for st, s in slots if (st, s["pattern"]) not in covered
+               and (s.get("documents") or s.get("count") or 0) >= GAP_MIN_DOCS]
+    gaps = (id_gaps + gaps)[:30]
     issues = _checks(db, row)
     counts = {s: sum(1 for i in found["items"] if i["status"] == s) for s in STATUSES}
     history = _read(_side_path(row.id, "rounds"), [])
@@ -592,12 +658,13 @@ def run_round(db: Session, row: InfoSource, trigger: str = "") -> dict:
     changed = [{"url": u, "from": before.get(u), "to": st} for u, st in judged.items() if before.get(u) != st]
     rnd = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "trigger": trigger, "counts": counts,
            "items": len(found["items"]), "gaps": len(gaps), "issues": len(issues), "changed": len(changed),
-           "decided": len(decisions(row.id)), "judged": judged}
+           "decided": len(decisions(row.id)), "judged": judged,
+           "id_new": sum(m["new"] for m in id_matches)}     # 목록에만 있는 건(저장소에 아직 없는 신규)
     _write_json(_side_path(row.id, "rounds"), (history + [rnd])[-MAX_ROUNDS:])
     _write_json(_side_path(row.id, "latest"), {"round": rnd, "items": found["items"], "gaps": gaps, "issues": issues,
-                                               "changed": changed[:50]})
+                                               "changed": changed[:50], "id_matches": id_matches})
     return {"round": {k: v for k, v in rnd.items() if k != "judged"}, "gaps": gaps, "issues": issues,
-            "changed": changed[:50], "items": found["items"]}
+            "changed": changed[:50], "items": found["items"], "id_matches": id_matches}
 
 
 def harness(source_id: int) -> dict:
