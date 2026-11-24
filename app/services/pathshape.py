@@ -10,7 +10,7 @@
 
 그래서 칸의 역할을 이렇게 가른다:
 
-  identifier  형제 폴더(5개 이상) 이름의 앞머리 모양(숫자를 자릿수로 바꾼 틀)이 90% 이상 같고, 글자와 숫자 4자리 이상이
+  identifier  형제 폴더 중 앞머리 모양(숫자를 자릿수로 바꾼 틀)이 같은 것이 5개 이상이고, 영문자와 숫자 4자리 이상이
               섞인 것 — 폴더 하나가 개체 하나. 뒤따르는 부분은 number(「_1」 — 차수)나 name(「_MEKAS CO.,LTD」)
   year        이름 전체가 연도·연월인 폴더(2024, 2024년, 24년, 2026-10)
   version     옛 판을 모은 폴더(History, old, 구버전, 백업, archive)
@@ -119,22 +119,25 @@ def analyze(paths: list[str]) -> dict:
                           "documents": sum(docs_under[join(parent, k)] for k in rest)})
             continue
         leads = {k: _LEAD.match(k) for k in rest}
-        by_shape = Counter(shape(m.group(1)) for m in leads.values() if m)
-        if not by_shape:
-            continue
-        top, count = by_shape.most_common(1)[0]
-        sample = next(m.group(1) for m in leads.values() if m and shape(m.group(1)) == top)
-        if count / len(rest) >= ID_SHARE and _is_identifier(sample):
-            members = sorted(k for k, m in leads.items() if m and shape(m.group(1)) == top)
+        members_of: dict[str, list[str]] = defaultdict(list)
+        for k, m in leads.items():
+            if m:
+                members_of[shape(m.group(1))].append(k)
+        # 같은 모양이 MIN_SIBLINGS 이상이고 식별자 모양이면 식별자 칸 — 한 부모 아래 두 갈래(계약 폴더와 협력사 폴더)가
+        # 섞여 있어도 갈래마다 따로 낸다. 모양이 갈래마다 다르므로 섞여도 서로를 가리지 않는다.
+        families = [(pat, sorted(ks)) for pat, ks in sorted(members_of.items(), key=lambda kv: -len(kv[1]))
+                    if len(ks) >= MIN_SIBLINGS and _is_identifier(leads[ks[0]].group(1))]
+        covered = {k for _, ks in families for k in ks}
+        for top, members in families:
             tails = [(leads[k].group(2) or "").lstrip("_ ").strip() for k in members]
             numeric = [t for t in tails if t.isdigit()]
             tail = ("number" if tails and len(numeric) / len(tails) >= ID_SHARE else
                     "name" if tails and sum(bool(t) for t in tails) / len(tails) >= ID_SHARE else "")
             slot = {"where": "folder", "parent": parent, "role": "identifier", "pattern": top,
-                    "share": round(count / len(rest), 3), "count": count, "siblings": len(kids),
+                    "share": round(len(members) / len(rest), 3), "count": len(members), "siblings": len(kids),
                     "documents": sum(docs_under[join(parent, k)] for k in members),
                     "examples": members[:EXAMPLES], "values": len({leads[k].group(1) for k in members}),
-                    "outside": sorted(set(rest) - set(members))[:EXAMPLES]}   # 틀 밖(수집이 쓴 폴더 등)
+                    "outside": sorted(set(rest) - covered)[:EXAMPLES]}   # 틀 밖(수집이 쓴 폴더 등)
             if tail:
                 slot["tail"] = tail
                 if tail == "number":
@@ -142,7 +145,7 @@ def analyze(paths: list[str]) -> dict:
             slots.append(slot)
             for k in members:
                 group_of[join(parent, k)] = join(parent, "*")
-        else:
+        if not families:
             slots.append({"where": "folder", "parent": parent, "role": "category", "siblings": len(kids),
                           "names": sorted(rest, key=lambda k: -docs_under[join(parent, k)])[:12],
                           "documents": sum(docs_under[join(parent, k)] for k in rest)})
@@ -219,21 +222,26 @@ def profile(store_name: str) -> dict:
     return {"store": store_name, **analyze(_paths(store_name))}
 
 
+def match(path: str, slot: dict) -> list[tuple[str, str, str]]:
+    """경로 하나에서 칸의 값 — [(값, 뒤따르는 부분, 그 칸이 있던 이름)]. 폴더 칸은 많아야 하나(그 깊이의 폴더 이름),
+    파일 칸은 파일 이름의 토큰마다. 폴더 칸은 그 폴더 **아래의 파일**에만 걸린다(폴더 이름 = 파일이 속한 개체)."""
+    names = path.split("/")
+    rx = re.compile(slot["pattern"])
+    if slot["where"] == "folder":
+        parent = slot.get("parent") or ""
+        depth = parent.count("/") + 1 if parent else 0
+        if len(names) <= depth + 1 or (parent and not path.startswith(parent + "/")):
+            return []
+        m = _LEAD.match(names[depth])
+        if m and rx.fullmatch(m.group(1)):
+            return [(m.group(1), (m.group(2) or "").lstrip("_ ").strip(), names[depth])]
+        return []
+    return [(t, "", names[-1]) for t in _TOKEN_SPLIT.split(names[-1].rsplit(".", 1)[0]) if rx.fullmatch(t)]
+
+
 def _values(store_name: str, slot: dict) -> set[str]:
     """식별자 칸의 값 — 저장소 사이를 잇는 데 쓴다."""
-    rx = re.compile(slot["pattern"])
-    out: set[str] = set()
-    for p in _paths(store_name):
-        names = p.split("/")
-        if slot["where"] == "folder":
-            depth = slot["parent"].count("/") + 1 if slot["parent"] else 0
-            if len(names) > depth + 1 and (not slot["parent"] or p.startswith(slot["parent"] + "/")):
-                m = _LEAD.match(names[depth])
-                if m and rx.fullmatch(m.group(1)):
-                    out.add(m.group(1))
-        else:
-            out |= {t for t in _TOKEN_SPLIT.split(names[-1].rsplit(".", 1)[0]) if rx.fullmatch(t)}
-    return out
+    return {v for p in _paths(store_name) for v, _, _ in match(p, slot)}
 
 
 def profile_all() -> dict:

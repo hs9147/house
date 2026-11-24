@@ -911,6 +911,172 @@ def confirm_template(store_name: str, tid: str, rules: dict, actor: str) -> dict
 
 # --- ③ 문서 ---
 
+# ---------------------------------------------------------------- ②″ 경로 틀 — 폴더·파일 이름의 식별자를 개념으로
+#
+# 사내 문서 폴더는 폴더 하나가 계약 하나(KR-CT…_차수)·협력사 하나(KR######_회사명)인 경우가 많다(docs/folder-structure.md).
+# 경로 틀(services/pathshape)이 찾은 식별자 칸을 관리자가 개념에 대응시키면(「이 칸은 계약」) 그 아래 모든 문서에 규칙으로
+# 개체를 단다(origin path — LLM 없음). 경로에서 얻은 사실은 **늘 경로에서 다시 만든다**(apply_paths — 분석이 끝날 때마다):
+# 폴더 이름이 바뀌면(차수) 그대로 따라간다. 내용에서 뽑은 것보다 약하다 — 어긋나면 알린다(mismatches).
+PATH_MISMATCH_EXAMPLES = 10
+
+
+def _slot_key(slot: dict) -> str:
+    return f'{slot["where"]}:{slot.get("parent", "")}:{slot["pattern"]}'
+
+
+def _path_candidates(store_name: str) -> list[dict]:
+    from . import pathshape  # noqa: PLC0415
+
+    prof = pathshape.profile(store_name)
+    return [{**s, "key": _slot_key(s)} for s in prof["slots"]
+            if s["role"] == "identifier" and not s.get("repeats_folder")]
+
+
+def path_slots(store_name: str) -> dict:
+    """경로 틀 — 식별자 칸 후보마다 **값이 내용 그래프의 어느 개념 개체와 겹치는지**(대응 제안의 근거, LLM 없음), 확정한
+    대응, 적용 결과(개체 수·틀 밖 문서), 폴더와 내용이 어긋난 문서."""
+    from . import pathshape  # noqa: PLC0415
+
+    candidates = _path_candidates(store_name)
+    conn = _conn(store_name)
+    try:
+        schema = _schema(conn)
+        names: dict[str, set[str]] = {}
+        for r in conn.execute("SELECT DISTINCT cls, name FROM sem_nodes WHERE origin != 'path'"):
+            names.setdefault(r["cls"], set()).add(_space(r["name"]).lower())
+        paths = [r["path"] for r in conn.execute("SELECT path FROM docs")]
+        for c in candidates:
+            values = {}
+            for p in paths:
+                for v, tail, _ in pathshape.match(p, c):
+                    values.setdefault(v, tail)
+            c["sample"] = [{"value": v, "tail": t} for v, t in list(values.items())[:5]]
+            hits = {}
+            for cls, known in names.items():
+                n = sum(1 for v, t in values.items() if v.lower() in known or (t and _space(t).lower() in known))
+                if n:
+                    hits[cls] = n
+            c["hits"] = dict(sorted(hits.items(), key=lambda kv: -kv[1])[:5])
+            c["suggested"] = next(iter(c["hits"]), "")
+            c["name_from"] = "tail" if c.get("tail") == "name" else "value"
+        saved = _get(conn, "paths", {})
+        confirmed = saved.get("confirmed")
+        return {"candidates": candidates, "confirmed": confirmed,
+                "stale": bool(confirmed and confirmed.get("schema_version") != (schema or {}).get("version")),
+                "applied": _get(conn, "paths_applied"), "mismatches": _path_mismatches(conn, confirmed)}
+    finally:
+        conn.close()
+
+
+def confirm_paths(store_name: str, slots: list[dict], actor: str) -> dict:
+    """대응을 확정한다 — [{key, cls, name_from}]. 칸은 지금 판정한 후보에서만 고른다(모양·위치는 후보의 것). 빈 목록이면
+    대응을 지운다. 확정하면 바로 적용한다(경로에서 만드는 것이라 싸다)."""
+    by_key = {c["key"]: c for c in _path_candidates(store_name)}
+    conn = _conn(store_name)
+    try:
+        schema = _schema(conn)
+        if not schema:
+            raise SemanticError("확정한 스키마가 없습니다 — ① 스키마를 먼저 확정하세요.")
+        classes = {c["name"] for c in schema["classes"]}
+        chosen, problems = [], []
+        for s in slots or []:
+            cand = by_key.get(str(s.get("key") or ""))
+            if cand is None:
+                problems.append(f"지금 경로 틀에 없는 칸입니다: {s.get('key')}")
+                continue
+            if s.get("cls") not in classes:
+                problems.append(f"스키마에 없는 개념입니다: {s.get('cls')}")
+                continue
+            name_from = "tail" if s.get("name_from") == "tail" and cand.get("tail") == "name" else "value"
+            chosen.append({"key": cand["key"], "where": cand["where"], "parent": cand.get("parent", ""),
+                           "pattern": cand["pattern"], "cls": s["cls"], "name_from": name_from})
+        if problems:
+            raise SemanticError("경로 틀을 확정할 수 없습니다: " + " / ".join(problems))
+        saved = _get(conn, "paths", {})
+        saved["confirmed"] = ({"slots": chosen, "version": _digest(chosen), "schema_version": schema["version"],
+                               "confirmed_at": _now(), "confirmed_by": actor} if chosen else None)
+        _put(conn, "paths", saved)
+        applied = apply_paths(conn)
+        return {"confirmed": saved["confirmed"], "applied": applied}
+    finally:
+        conn.close()
+
+
+def _path_nodes(confirmed: dict | None, path: str, mtime: float | None) -> list[dict]:
+    from . import pathshape  # noqa: PLC0415
+
+    out, seen = [], set()
+    for slot in (confirmed or {}).get("slots") or []:
+        for value, tail, segment in pathshape.match(path, slot):
+            name = tail if slot["name_from"] == "tail" and tail else value
+            if (slot["cls"], name) in seen:
+                continue
+            seen.add((slot["cls"], name))
+            where = "폴더" if slot["where"] == "folder" else "파일 이름"
+            out.append({"cls": slot["cls"], "name": name, "evidence": f"{where} {segment}", "origin": "path",
+                        "observed_at": doc_date(path, mtime), "value": value})
+    return out
+
+
+def apply_paths(conn) -> dict:
+    """경로에서 얻은 개체를 **전부 다시** 만든다(origin path) — 확정한 대응이 없거나 옛 스키마의 것이면 지우기만. 문서 수만큼
+    경로를 맞춰 볼 뿐이라 싸다(실측 contracts 7,615건). 옮기거나 이름을 바꾼 문서도 이것으로 맞는다."""
+    confirmed = (_get(conn, "paths", {}) or {}).get("confirmed")
+    schema = _schema(conn)
+    conn.execute("DELETE FROM sem_nodes WHERE origin = 'path'")
+    if not confirmed or confirmed.get("schema_version") != (schema or {}).get("version"):
+        conn.commit()
+        return {"nodes": 0, "documents": 0, "outside": 0, "stale": bool(confirmed)}
+    rows, docs, outside = [], 0, 0
+    for r in conn.execute("SELECT path, mtime FROM docs"):
+        nodes = _path_nodes(confirmed, r["path"], r["mtime"])
+        if nodes:
+            docs += 1
+            rows += [(r["path"], n["cls"], n["name"], n["evidence"], "path", n["observed_at"]) for n in nodes]
+        else:
+            outside += 1
+    conn.executemany("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                     rows)
+    out = {"nodes": len(rows), "documents": docs, "outside": outside, "version": confirmed["version"], "at": _now()}
+    _put(conn, "paths_applied", out)
+    return out
+
+
+def _path_mismatches(conn, confirmed: dict | None) -> dict:
+    """폴더와 내용이 어긋난 문서 — 경로는 계약 A라는데 내용에서 뽑은 같은 개념·같은 모양의 이름이 A가 아닌 것(다른 계약의
+    문서가 잘못 들어갔거나, 문서가 다른 계약을 말한다). 내용을 따르되(경로가 약하다) 사람이 볼 것으로 알린다."""
+    out = {"documents": 0, "examples": []}
+    slots = [s for s in (confirmed or {}).get("slots") or [] if s["name_from"] == "value"]
+    if not slots:
+        return out
+    by_path: dict[str, dict[str, set[str]]] = {}
+    for r in conn.execute("SELECT path, cls, name FROM sem_nodes WHERE origin = 'path'"):
+        by_path.setdefault(r["path"], {}).setdefault(r["cls"], set()).add(r["name"])
+    seen: set[str] = set()
+    for s in slots:
+        rx = re.compile(s["pattern"])
+        for r in conn.execute("SELECT DISTINCT path, name FROM sem_nodes WHERE cls = ? AND origin != 'path'", (s["cls"],)):
+            mine = by_path.get(r["path"], {}).get(s["cls"])
+            # 내용의 이름이 「KR-CT230700629_1」처럼 붙어 있어도 앞머리가 그 모양이면 같은 식별자로 본다
+            lead = re.split(r"[_\s]", r["name"].strip(), maxsplit=1)[0]
+            if mine and rx.fullmatch(lead) and lead not in mine and r["path"] not in seen:
+                seen.add(r["path"])
+                if len(out["examples"]) < PATH_MISMATCH_EXAMPLES:
+                    out["examples"].append({"path": r["path"], "cls": s["cls"], "path_says": sorted(mine)[0],
+                                            "content_says": r["name"]})
+    out["documents"] = len(seen)
+    return out
+
+
+def _path_hint(confirmed: dict | None, path: str) -> str:
+    """LLM 추출에 함께 주는 한 줄 — 이 문서가 경로로 속한 개체. 관계의 한쪽 끝을 문서 안에서 짐작하지 않게."""
+    nodes = _path_nodes(confirmed, path, None)
+    if not nodes:
+        return ""
+    return ("경로가 말하는 것(관리자가 확정한 경로 틀 — 이 문서가 속한 개체): "
+            + ", ".join(f'{n["cls"]} {n["name"]}' for n in nodes) + "\n")
+
+
 def _compact(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
@@ -1003,8 +1169,8 @@ _REVIEW_RULES = (
     'JSON: {"wrong":[{"i":0,"problem":""}]}\n' + _KO)
 
 
-def _extract_doc(db, provider, schema: dict, path: str, text: str) -> dict:
-    return _ask(db, provider, f"{_EXTRACT_RULES}\n\n스키마: {_schema_text(schema)}", f"문서 {path}:\n{text}")
+def _extract_doc(db, provider, schema: dict, path: str, text: str, hint: str = "") -> dict:
+    return _ask(db, provider, f"{_EXTRACT_RULES}\n\n스키마: {_schema_text(schema)}", f"문서 {path}:\n{hint}{text}")
 
 
 def _review_items(db, provider, schema: dict, path: str, items: list[dict]) -> dict[int, str]:
@@ -1064,12 +1230,13 @@ def _record(conn, path: str, fp: str, status: str, *, error: str | None = None, 
 
 def _copy(conn, source: str, target: str, observed: str = "") -> None:
     """본문이 같은 문서의 결과를 옮긴다(LLM 없이). 근거 문장도 같은 본문의 것이라 그대로 맞다. 관측한 날은 옮긴
-    문서의 날이다(같은 본문을 다른 날 다시 받았다 — 그날에도 그렇다는 관측이다). 행마다 날이 있던 것(목록)은 그대로."""
-    conn.execute("DELETE FROM sem_nodes WHERE path = ?", (target,))
+    문서의 날이다(같은 본문을 다른 날 다시 받았다 — 그날에도 그렇다는 관측이다). 행마다 날이 있던 것(목록)은 그대로.
+    경로에서 얻은 것(origin path)은 옮기지 않는다 — 경로마다 다르다(apply_paths가 경로에서 다시 만든다)."""
+    conn.execute("DELETE FROM sem_nodes WHERE path = ? AND origin != 'path'", (target,))
     conn.execute("DELETE FROM sem_edges WHERE path = ?", (target,))
     conn.execute("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at)"
                  " SELECT ?, cls, name, evidence, origin, CASE WHEN origin = 'list' THEN observed_at ELSE ? END"
-                 " FROM sem_nodes WHERE path = ?", (target, observed, source))
+                 " FROM sem_nodes WHERE path = ? AND origin != 'path'", (target, observed, source))
     conn.execute("INSERT INTO sem_edges (path, src_cls, src, rel, dst_cls, dst, evidence, origin, observed_at,"
                  " valid_from, valid_to) SELECT ?, src_cls, src, rel, dst_cls, dst, evidence, origin,"
                  " CASE WHEN origin = 'list' THEN observed_at ELSE ? END, valid_from, valid_to"
@@ -1078,8 +1245,9 @@ def _copy(conn, source: str, target: str, observed: str = "") -> None:
 
 def _write(conn, path: str, nodes: list[dict], edges: list[dict], origin: str, observed: str = "") -> None:
     """한 문서의 내용 그래프를 갈아 끼운다. 항목에 origin이 있으면 그것(양식 규칙과 LLM이 한 문서에 섞인다).
-    관측한 날(observed)은 그 문서의 날 — 항목에 제 날이 있으면(목록의 행) 그것."""
-    conn.execute("DELETE FROM sem_nodes WHERE path = ?", (path,))
+    관측한 날(observed)은 그 문서의 날 — 항목에 제 날이 있으면(목록의 행) 그것. 경로에서 얻은 것(origin path)은 그대로 둔다 —
+    본문이 아니라 경로에서 나왔다(apply_paths)."""
+    conn.execute("DELETE FROM sem_nodes WHERE path = ? AND origin != 'path'", (path,))
     conn.execute("DELETE FROM sem_edges WHERE path = ?", (path,))
     conn.executemany("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at) VALUES (?, ?, ?, ?, ?, ?)",
                      [(path, n["cls"], n["name"], n["evidence"], n.get("origin", origin),
@@ -1110,6 +1278,9 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
         template_rules = {tid: t["confirmed"] for tid, t in saved_templates.items()
                           if t.get("confirmed") and t["confirmed"].get("schema_version") == schema["version"]}
         skeletons = {tid: saved_templates[tid]["skeleton"] for tid in template_rules}
+        path_conf = (_get(conn, "paths", {}) or {}).get("confirmed")
+        if path_conf and path_conf.get("schema_version") != schema["version"]:
+            path_conf = None        # 옛 스키마의 경로 틀 — 쓰지 않는다(apply_paths도 지운다)
         form_of: dict[str, list[str]] = {}
         for r in conn.execute("SELECT DISTINCT path, name FROM nodes WHERE kind = 'table'"):
             if r["name"] in confirmed_forms:
@@ -1227,7 +1398,8 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
                     # LLM으로 읽는 문서 — 지금 부르지 않고 모았다가 아래에서 동시에(semantic_concurrency) 부른다
                     stats["escalated"] += bool(tid)      # 템플릿인데 필수 필드가 없다 — 틀이 다르다
                     jobs.append({"path": path, "fp": fp, "text": rest[:DOC_CHARS], "long": len(rest) > DOC_CHARS,
-                                 "form_nodes": form_nodes, "form_edges": form_edges, "observed": observed})
+                                 "form_nodes": form_nodes, "form_edges": form_edges, "observed": observed,
+                                 "hint": _path_hint(path_conf, path)})
                     queued_fp[fp] = path
                     if len(jobs) >= max_jobs:
                         full = True
@@ -1264,6 +1436,7 @@ def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_
             _write(conn, path, [], [], "llm")
             conn.execute("DELETE FROM sem_docs WHERE path = ?", (path,))
         conn.commit()
+        stats["path"] = apply_paths(conn)    # 경로에서 얻은 개체 — 옮기거나 이름을 바꾼 문서까지 경로에서 다시
         outside = dict(sorted(outside.items(), key=lambda kv: -kv[1])[:100])
         _put(conn, "outside", outside)
         return {**stats, "remaining": remaining, "done": remaining == 0 and not state.get("paused"),
@@ -1281,7 +1454,7 @@ def _llm_doc(store_name: str, schema: dict, reference: set[str], job: dict) -> d
     path, text = job["path"], job["text"]
     with SessionLocal() as wdb:
         provider = provider_for(wdb, store_name)
-        data = _extract_doc(wdb, provider, schema, path, text)
+        data = _extract_doc(wdb, provider, schema, path, text, job.get("hint", ""))
         nodes, edges, dropped, _unanchored = check_extraction(data, schema, text)
         sampled = _sampled(path)
         every = sampled or (dropped and dropped >= (len(nodes) + len(edges)))

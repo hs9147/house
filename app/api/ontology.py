@@ -277,6 +277,26 @@ def semantic_confirm_template(store_name: str, template: str = Body(...), rules:
     return out
 
 
+@router.get("/ontology/stores/{store_name}/semantic/paths")
+def semantic_paths(store_name: str, db: Session = Depends(get_db), key: ApiKey = Depends(require_api_key)):
+    """②″ 경로 틀 — 폴더·파일 이름의 식별자 칸 후보와 개념 대응 제안(값이 겹치는 개념), 확정한 대응, 적용 결과,
+    폴더와 내용이 어긋난 문서."""
+    _indexed_store(db, key, store_name)
+    return _semantic(semantic.path_slots, store_name)
+
+
+@router.put("/ontology/stores/{store_name}/semantic/paths")
+def semantic_confirm_paths(store_name: str, slots: list[dict] = Body(..., embed=True), db: Session = Depends(get_db),
+                           admin: ApiKey = Depends(require_admin)):
+    """대응 확정 — [{key, cls, name_from}]. 빈 목록이면 지운다. 확정하면 바로 모든 문서에 적용한다(경로에서 — LLM 없음)."""
+    _store_or_404(store_name)
+    out = _semantic(semantic.confirm_paths, store_name, slots, admin.name)
+    audit.record(db, admin.name, "ontology.semantic.paths.confirm", store_name,
+                 {"slots": [{k: s[k] for k in ("pattern", "cls", "name_from")} for s in (out["confirmed"] or {}).get("slots", [])],
+                  "nodes": out["applied"]["nodes"]})
+    return out
+
+
 @router.post("/ontology/stores/{store_name}/semantic/analyze")
 def semantic_analyze(store_name: str, action: str = "start", db: Session = Depends(get_db),
                      admin: ApiKey = Depends(require_admin)):

@@ -102,7 +102,7 @@ import type {
   UserOrgOut, OntologyCleanse, SemanticForm, SemanticHit, SemanticMapping, SemanticMergeRules, SemanticTemplate, SemanticTemplateRules, SemanticNeighbors, SemanticGoldItem,
   OntologyQuality,
   OntologyOperations,
-  SemanticGoldKind, SemanticGoldMetrics, SemanticTuneEntry, SemanticSchema, SemanticStatus,
+  SemanticGoldKind, SemanticGoldMetrics, SemanticTuneEntry, SemanticSchema, SemanticStatus, SemanticPaths,
 } from './types';
 
 // 백엔드 라우터는 모두 /paas 아래 마운트된다. /health, /status는 버전 prefix 없이
@@ -620,6 +620,11 @@ export const api = {
     request<{ started: boolean }>('POST', `/ontology/stores/${encodeURIComponent(store)}/semantic/templates/propose`, { template }),
   semanticConfirmTemplate: (store: string, template: string, rules: SemanticTemplateRules) =>
     request<SemanticTemplate['confirmed']>('PUT', `/ontology/stores/${encodeURIComponent(store)}/semantic/templates`, { template, rules }),
+  semanticPaths: (store: string) =>
+    request<SemanticPaths>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/paths`),
+  semanticConfirmPaths: (store: string, slots: { key: string; cls: string; name_from: 'value' | 'tail' }[]) =>
+    request<{ confirmed: SemanticPaths['confirmed']; applied: SemanticPaths['applied'] }>(
+      'PUT', `/ontology/stores/${encodeURIComponent(store)}/semantic/paths`, { slots }),
   semanticGold: (store: string, kind: SemanticGoldKind) =>
     request<{ items: SemanticGoldItem[] }>('GET', `/ontology/stores/${encodeURIComponent(store)}/semantic/gold`, undefined, { kind }),
   semanticLabel: (store: string, kind: SemanticGoldKind, item: string, label: boolean) =>

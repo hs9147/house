@@ -1855,6 +1855,24 @@ export interface SemanticTemplateEval {
   docs: { path: string; found?: number; expected?: number; hit?: number; extra: string[]; missed: string[];
           missing_required: number[] }[];
 }
+/** ②″ 경로 틀의 칸 하나 — 후보(pathshape의 식별자 칸)와 개념 대응 제안(값이 겹치는 개념). */
+export interface SemanticPathSlot extends PathSlot {
+  key: string;
+  sample: { value: string; tail: string }[];
+  hits: Record<string, number>;      // 개념 → 값이 그 개념의 개체 이름과 겹친 수
+  suggested: string;
+  name_from: 'value' | 'tail';
+}
+
+export interface SemanticPaths {
+  candidates: SemanticPathSlot[];
+  confirmed: { slots: { key: string; where: string; parent: string; pattern: string; cls: string; name_from: 'value' | 'tail' }[];
+               version: string; schema_version: string; confirmed_at: string; confirmed_by: string } | null;
+  stale: boolean;
+  applied: { nodes: number; documents: number; outside: number; at?: string } | null;
+  mismatches: { documents: number; examples: { path: string; cls: string; path_says: string; content_says: string }[] };
+}
+
 export interface SemanticTemplate {
   id: string;
   label: string;

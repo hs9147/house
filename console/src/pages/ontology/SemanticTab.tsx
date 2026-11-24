@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import Modal from '../../components/Modal';
 import { api } from '../../lib/api';
 import { useApi, usePolling } from '../../lib/hooks';
+import { readablePattern } from '../../lib/pathshape';
 import { runTask } from '../../lib/tasks';
 import type {
   OntologyOperations, OntologyQuality, SemanticForm, SemanticHit, SemanticMapping, SemanticMergeRules, SemanticNeighbors, SemanticReview, SemanticSchema,
   SemanticStatus, SemanticTemplate, SemanticTemplateEval, SemanticTemplateRules, SemanticGoldItem, SemanticGoldKind,
+  SemanticPaths,
 } from '../../lib/types';
 
 /**
@@ -27,6 +29,7 @@ export default function SemanticTab() {
   const [status, setStatus] = useState<SemanticStatus | null>(null);
   const [forms, setForms] = useState<SemanticForm[]>([]);
   const [templates, setTemplates] = useState<SemanticTemplate[]>([]);
+  const [paths, setPaths] = useState<SemanticPaths | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -37,15 +40,17 @@ export default function SemanticTab() {
   const reload = async () => {
     if (!store) return;
     try {
-      const [s, f, t] = await Promise.all([api.semanticStatus(store), api.semanticForms(store), api.semanticTemplates(store)]);
+      const [s, f, t, p] = await Promise.all([api.semanticStatus(store), api.semanticForms(store), api.semanticTemplates(store),
+                                              api.semanticPaths(store)]);
       setStatus(s);
       setForms(f.forms);
       setTemplates(t.templates);
+      setPaths(p);
     } catch (e) {
       setError((e as Error).message);
     }
   };
-  useEffect(() => { setStatus(null); setForms([]); setTemplates([]); void reload(); }, [store]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setStatus(null); setForms([]); setTemplates([]); setPaths(null); void reload(); }, [store]); // eslint-disable-line react-hooks/exhaustive-deps
   // 제안(뒤에서 LLM)이나 분석이 도는 동안만 다시 읽는다.
   usePolling(reload, 3000, !!status && (status.task.running || status.running));
 
@@ -151,6 +156,9 @@ export default function SemanticTab() {
                 onPropose={(t) => track('템플릿 규칙 제안·검증', () => api.semanticProposeTemplate(store, t))}
                 onConfirm={(t, r) => act('규칙을 확정했습니다 — 분석하면 이 템플릿의 문서는 규칙으로 뽑습니다.',
                   () => api.semanticConfirmTemplate(store, t, r))} />
+              <PathsStep paths={paths} schema={status.schema}
+                onConfirm={(slots) => act(slots.length ? '경로 틀을 확정했습니다 — 모든 문서에 바로 적용했습니다(LLM 없음).'
+                  : '경로 틀 대응을 지웠습니다.', () => api.semanticConfirmPaths(store, slots))} />
               <AnalyzeStep status={status}
                 onAction={(a) => (a === 'stop'
                   ? act('멈추라고 했습니다(지금 문서까지는 끝냅니다).', () => api.semanticAnalyze(store, a))
@@ -295,6 +303,108 @@ function FormsStep({ forms, schemaVersion, busy, onPropose, onConfirm }: {
 }
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
+
+type PathPick = { cls: string; name_from: 'value' | 'tail' };
+
+/**
+ * ②″ 경로 틀 — 폴더·파일 이름의 식별자 칸(건 폴더 KR-CT…_차수, 대상 폴더 KR######_회사명)을 개념에 대응시킨다.
+ * 확정하면 그 아래 모든 문서에 개체를 단다(LLM 없음 — 경로에서). 제안은 값이 내용 그래프의 개체와 겹치는 개념이다.
+ */
+function PathsStep({ paths, schema, onConfirm }: {
+  paths: SemanticPaths | null; schema: SemanticSchema;
+  onConfirm: (slots: ({ key: string } & PathPick)[]) => void;
+}) {
+  const [pick, setPick] = useState<Record<string, PathPick>>({});
+  useEffect(() => {
+    if (!paths) return;
+    const done = Object.fromEntries((paths.confirmed?.slots ?? []).map((s) => [s.key, { cls: s.cls, name_from: s.name_from }]));
+    setPick(Object.fromEntries(paths.candidates.map((c) => [c.key, done[c.key] ?? { cls: '', name_from: c.name_from }])));
+  }, [paths]);
+  if (!paths) return null;
+  const chosen = Object.entries(pick).filter(([, v]) => v.cls).map(([key, v]) => ({ key, ...v }));
+  const set = (key: string, patch: Partial<PathPick>) => setPick((p) => ({ ...p, [key]: { ...p[key], ...patch } }));
+  const applied = paths.applied;
+  return (
+    <section style={{ marginTop: 16 }}>
+      <h3 style={{ fontSize: 14 }}>②″ 경로 틀 — 폴더·파일 이름의 식별자</h3>
+      <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
+        폴더 하나가 계약 하나·협력사 하나인 저장소는 폴더 이름이 곧 그 문서가 속한 개체입니다. 칸마다 개념을 고르면 그 아래
+        모든 문서에 규칙으로 개체를 답니다(LLM 없음). 폴더 이름을 바꿔도(차수) 분석할 때마다 경로에서 다시 만듭니다.
+        내용에서 뽑은 것과 어긋나면 아래에 알립니다.
+      </p>
+      {paths.candidates.length === 0 ? (
+        <p className="mutedtext" style={{ fontSize: 12 }}>식별자 칸이 없습니다 — 폴더가 없거나 폴더 이름이 제각각입니다.</p>
+      ) : (
+        <table style={{ fontSize: 12 }}>
+          <thead><tr><th>칸</th><th>값 예</th><th>겹치는 개념</th><th>개념</th><th>이름으로 쓸 것</th></tr></thead>
+          <tbody>
+            {paths.candidates.map((c) => {
+              const p = pick[c.key] ?? { cls: '', name_from: c.name_from };
+              return (
+                <tr key={c.key}>
+                  <td>
+                    {c.where === 'folder' ? '폴더' : '파일 이름'}{c.parent ? ` (${c.parent} 아래)` : ''}{' '}
+                    <span className="mono">{readablePattern(c.pattern)}</span>
+                    {c.tail === 'number' && ' + 번호(차수)'}{c.tail === 'name' && ' + 이름'}
+                    <div className="mutedtext">
+                      {c.where === 'folder' ? `폴더 ${(c.count ?? 0).toLocaleString()}개 · 문서 ${(c.documents ?? 0).toLocaleString()}건`
+                        : `파일 ${(c.count ?? 0).toLocaleString()}건(${pct(c.share ?? 0)})`}
+                    </div>
+                  </td>
+                  <td className="mono" style={{ fontSize: 11 }}>
+                    {c.sample.slice(0, 3).map((v) => <div key={v.value}>{v.value}{v.tail && ` · ${v.tail}`}</div>)}
+                  </td>
+                  <td>{Object.keys(c.hits).length === 0 ? <span className="mutedtext">없음</span>
+                    : Object.entries(c.hits).map(([k, n]) => `${k} ${n}`).join(' · ')}</td>
+                  <td>
+                    <select value={p.cls} onChange={(e) => set(c.key, { cls: e.target.value })}>
+                      <option value="">쓰지 않음</option>
+                      {schema.classes.map((k) => (
+                        <option key={k.name} value={k.name}>{k.name}{k.name === c.suggested ? ' (제안)' : ''}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>
+                    {c.tail === 'name' ? (
+                      <select value={p.name_from} onChange={(e) => set(c.key, { name_from: e.target.value as PathPick['name_from'] })}>
+                        <option value="tail">뒤의 이름(회사명)</option>
+                        <option value="value">식별자(코드)</option>
+                      </select>
+                    ) : <span className="mutedtext">식별자</span>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      {paths.candidates.length > 0 && (
+        <div className="row" style={{ gap: 8, marginTop: 6, alignItems: 'center' }}>
+          <button className="small" onClick={() => onConfirm(chosen)}>
+            {chosen.length ? `확정(${chosen.length}칸)` : paths.confirmed ? '대응 지우기' : '확정'}
+          </button>
+          <span className="mutedtext" style={{ fontSize: 12 }}>
+            {!paths.confirmed ? '아직 확정하지 않았습니다'
+              : `${paths.stale ? '⚠️ 옛 스키마의 대응 — 다시 확정하세요' : '✅ 확정'}`
+                + (applied ? ` · 개체 ${applied.nodes.toLocaleString()}개 · 문서 ${applied.documents.toLocaleString()}건`
+                  + ` · 틀 밖 ${applied.outside.toLocaleString()}건` : '')}
+          </span>
+        </div>
+      )}
+      {paths.mismatches.documents > 0 && (
+        <div style={{ fontSize: 12, marginTop: 6 }}>
+          <b>폴더와 내용이 어긋난 문서 {paths.mismatches.documents.toLocaleString()}건</b>
+          <span className="mutedtext"> — 내용을 따릅니다. 다른 건의 문서가 잘못 들어갔거나, 문서가 다른 건을 말합니다.</span>
+          <ul className="mono" style={{ fontSize: 11, margin: '4px 0', paddingLeft: 18 }}>
+            {paths.mismatches.examples.map((m) => (
+              <li key={m.path}>{m.path} — 경로 {m.path_says} · 내용 {m.content_says}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function EvalView({ title, ev, need }: { title: string; ev: SemanticTemplateEval; need: number }) {
   return (

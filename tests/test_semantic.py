@@ -1147,3 +1147,104 @@ def test_document_dates_come_from_names_years_and_folders_before_the_file_time()
     assert semantic.doc_date("KR-CT230700629_1/KR-CT230700629_정리_CNS_20251210_최종.xlsx", copied) == "2025-12-10"
     assert semantic.doc_date("KR-CT230700629_1/KR-CT230700629_23-25년 통합운영계약.doc", copied) == "2025-06-30"
     assert semantic.doc_date("2024년/#24년 실적 Master.xlsx", copied) == "2024-01-01"
+
+
+def test_path_template_names_the_entity_of_every_document_and_follows_renamed_folders(store, monkeypatch):
+    """②″ 경로 틀 — 폴더 이름의 식별자 칸을 관리자가 개념에 대응시키면 그 아래 모든 문서에 개체를 단다(origin path, LLM
+    없음). 대응은 값이 내용 그래프의 개체와 겹치는 개념으로 제안한다. 폴더 이름을 바꾸면(차수) 경로에서 다시 만들고,
+    폴더와 내용이 어긋나면 알리며, LLM 추출에는 「이 문서가 속한 개체」를 함께 준다."""
+    root = Path(get_settings().doc_roots.split("=")[-1] if "=" in get_settings().doc_roots else get_settings().doc_roots)
+    names = ["에이전자", "비상사", "가상사", "나상사", "다상사"]
+    for i, name in enumerate(names):               # 대상 폴더 — KR{6자리}_{회사명}
+        folder = root / f"KR0500{i:02d}_{name}"
+        folder.mkdir()
+        (folder / "24년 신용평가.md").write_text(f"# 신용평가 {name}\n\n에이전자는 배터리를 공급한다. ({i})\n", encoding="utf-8")
+    for i in range(5):                             # 건 폴더 — KR-CT{9자리}_{차수}
+        no = f"KR-CT2401{i:05d}"
+        (root / f"{no}_0").mkdir()
+        (root / f"{no}_0" / f"{no}_품의.md").write_text(f"# 품의 {no}\n\n구매팀이 배터리를 담당한다. ({i})\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    semantic.confirm_schema("docs", {**GOOD_SCHEMA, "classes": GOOD_SCHEMA["classes"] + [
+        {"name": "계약", "description": "계약 한 건", "examples": [], "layer": "event"}]}, "admin")
+    with _db() as db:
+        semantic.analyze(db, "docs")
+
+    slots = {c["pattern"]: c for c in semantic.path_slots("docs")["candidates"]}
+    credit, contract = slots[r"KR\d{6}"], slots[r"KR\-CT\d{9}"]
+    assert credit["suggested"] == "협력사" and credit["name_from"] == "tail"       # 「에이전자」가 내용 그래프의 협력사
+    assert contract["suggested"] == "" and contract["tail"] == "number"
+    out = semantic.confirm_paths("docs", [{"key": credit["key"], "cls": "협력사", "name_from": "tail"},
+                                          {"key": contract["key"], "cls": "계약"}], "admin")
+    assert out["applied"]["nodes"] == 10 and out["applied"]["documents"] == 10
+
+    def path_nodes(path):
+        conn = semantic._conn("docs")
+        try:
+            return [dict(r) for r in conn.execute(
+                "SELECT cls, name, evidence, observed_at FROM sem_nodes WHERE path = ? AND origin = 'path'", (path,))]
+        finally:
+            conn.close()
+
+    assert path_nodes("KR050001_비상사/24년 신용평가.md") == [
+        {"cls": "협력사", "name": "비상사", "evidence": "폴더 KR050001_비상사", "observed_at": "2024-01-01"}]
+    assert path_nodes("KR-CT240100002_0/KR-CT240100002_품의.md")[0]["name"] == "KR-CT240100002"
+    with pytest.raises(semantic.SemanticError):
+        semantic.confirm_paths("docs", [{"key": contract["key"], "cls": "없는개념"}], "admin")
+
+    # 변경계약 — 차수 폴더 이름을 바꾼다. 경로에서 다시 만들고 옛 경로의 것은 남지 않는다. LLM은 부르지 않는다(같은 본문).
+    (root / "KR-CT240100002_0").rename(root / "KR-CT240100002_1")
+    docsearch.reindex("docs", root)
+    store.calls.clear()
+    with _db() as db:
+        semantic.analyze(db, "docs")
+    assert store.calls == []
+    assert path_nodes("KR-CT240100002_1/KR-CT240100002_품의.md")[0]["name"] == "KR-CT240100002"
+    assert path_nodes("KR-CT240100002_0/KR-CT240100002_품의.md") == []
+
+    # 폴더와 내용이 어긋남 — 경로는 KR-CT240100003인데 내용에서 다른 계약 번호를 뽑았다
+    conn = semantic._conn("docs")
+    try:
+        conn.execute("INSERT INTO sem_nodes (path, cls, name, evidence, origin) VALUES (?, '계약', 'KR-CT240199999_2', 'x', 'llm')",
+                     ("KR-CT240100003_0/KR-CT240100003_품의.md",))
+        conn.commit()
+    finally:
+        conn.close()
+    mism = semantic.path_slots("docs")["mismatches"]
+    assert mism["documents"] == 1 and mism["examples"][0]["path_says"] == "KR-CT240100003"
+
+    # 새 문서는 LLM 추출에 「이 문서가 속한 개체」를 함께 받는다
+    seen: list[str] = []
+    real = semantic.llm_service.chat_completion
+    monkeypatch.setattr(semantic.llm_service, "chat_completion",
+                        lambda p, messages, db=None, *a, **kw: (seen.append(messages[1]["content"]), real(p, messages, db))[1])
+    (root / "KR-CT240100004_0" / "KR-CT240100004_변경 품의.md").write_text(
+        "# 변경 품의\n\n에이전자는 배터리를 공급한다. 변경\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    with _db() as db:
+        semantic.analyze(db, "docs")
+    assert any("경로가 말하는 것" in u and "계약 KR-CT240100004" in u for u in seen)
+
+
+def test_path_template_api_is_confirmed_by_admins_only(store):
+    root = Path(get_settings().doc_roots.split("=")[-1] if "=" in get_settings().doc_roots else get_settings().doc_roots)
+    for i in range(5):
+        no = f"KR-CT2402{i:05d}"
+        (root / f"{no}_0").mkdir()
+        (root / f"{no}_0" / f"{no}_품의.md").write_text(f"# 품의 {no}\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    semantic.confirm_schema("docs", {**GOOD_SCHEMA, "classes": GOOD_SCHEMA["classes"] + [
+        {"name": "계약", "description": "", "examples": []}]}, "admin")
+    c = TestClient(create_app())
+    member = {"x-api-key": c.post(f"{API}/keys", json={"name": "sem-path"}, headers=ADMIN).json()["key"]}
+    url = f"{API}/ontology/stores/docs/semantic/paths"
+    assert c.get(url, headers=member).status_code == 404      # 그 저장소에 권한이 없다(다른 내용 분석 화면과 같다)
+    got = c.get(url, headers=ADMIN)
+    assert got.status_code == 200
+    key = next(s["key"] for s in got.json()["candidates"] if s["pattern"] == r"KR\-CT\d{9}")
+    body = {"slots": [{"key": key, "cls": "계약"}]}
+    assert c.put(url, json=body, headers=member).status_code == 403
+    assert c.put(url, json={"slots": [{"key": "folder::없음", "cls": "계약"}]}, headers=ADMIN).status_code == 409
+    done = c.put(url, json=body, headers=ADMIN).json()
+    assert done["applied"]["nodes"] == 5 and done["confirmed"]["slots"][0]["cls"] == "계약"
+    assert c.put(url, json={"slots": []}, headers=ADMIN).json()["confirmed"] is None     # 지우기
+    assert c.get(url, headers=ADMIN).json()["applied"] is not None

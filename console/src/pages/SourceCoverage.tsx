@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import Async from '../components/Async';
 import { api } from '../lib/api';
 import { useApi, usePolling } from '../lib/hooks';
+import { readablePattern } from '../lib/pathshape';
 import type { CoverageHarness, CoverageItem, CoverageProposal, PathSlot, SourceInventory, SourceOut, StoreShapes } from '../lib/types';
 
 const STATUS: Record<CoverageItem['status'], { label: string; cls: string }> = {
@@ -68,9 +69,7 @@ export function InventoryTab() {
   );
 }
 
-/** 정규식 모양을 읽을 글로 — KR\-CT\d{9} → KR-CT{9자리}. */
-const readable = (pattern = '') => pattern
-  .replace(/\\d\{(\d+)\}/g, '{$1자리}').replace(/\[a-z0-9\]\{(\d+)\}/g, '{영숫자 $1}').replace(/\\/g, '');
+const readable = readablePattern;
 
 const pct = (v?: number) => `${Math.round((v ?? 0) * 100)}%`;
 
