@@ -645,9 +645,14 @@ def run_round(db: Session, row: InfoSource, trigger: str = "") -> dict:
     covered = {(m["store"], m["pattern"]) for m in id_matches}
     for r in db.execute(select(InfoSource).where(InfoSource.id != row.id)).scalars():
         covered |= {(m["store"], m["pattern"]) for m in _id_matches(r, slots, cache)}
+    # 출처 미확인으로 올리는 것은 **저장소의 단위인** 식별자만 — 폴더 식별자, 또는 파일 대부분(60%)의 이름에 있는 것(intro).
+    # 몇 파일에만 나오는 토큰(contracts의 C{10} 21건)과 무작위 영숫자가 든 ID(dream-rsi의 doc-…-gh6n — 앱이 만든 것)는
+    # 출처를 찾을 일이 아니다(실측: 그것들이 출처 미확인의 앞자리를 다 차지했다). 대조(id_matches)에는 그대로 쓴다.
+    unit = [(st, s) for st, s in slots if "[a-z0-9]" not in s["pattern"]
+            and (s["where"] == "folder" or (s.get("share") or 0) >= pathshape.FILE_SHARE)]
     id_gaps = [{"store": st, "kind": "식별자 폴더" if s["where"] == "folder" else "파일 이름 식별자", "name": s["pattern"],
                 "documents": s.get("documents") or s.get("count") or 0}
-               for st, s in slots if (st, s["pattern"]) not in covered
+               for st, s in unit if (st, s["pattern"]) not in covered
                and (s.get("documents") or s.get("count") or 0) >= GAP_MIN_DOCS]
     gaps = (id_gaps + gaps)[:30]
     issues = _checks(db, row)

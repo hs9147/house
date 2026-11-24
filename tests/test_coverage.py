@@ -198,3 +198,22 @@ def test_collected_lists_are_matched_to_record_folders_by_identifier(client, mon
     assert not any(g["kind"] == "식별자 폴더" for g in h["gaps"])            # 이 출처의 목록이 덮는다
     h_a = client.post(f"{API}/sources/{a}/coverage/round", headers=ADMIN).json()
     assert not any(g["kind"] == "식별자 폴더" for g in h_a["gaps"])          # 다른 출처가 덮어도 출처 있음
+
+
+def test_only_unit_identifiers_are_reported_as_unknown_sources(client, monkeypatch):
+    """출처 미확인에는 저장소의 단위인 식별자만 — 몇 파일에만 나오는 토큰과 앱이 만든 무작위 ID는 올리지 않는다(실측 잡음)."""
+    from app.services import docsearch
+
+    root = client.tmp / "docs"
+    for i in range(6):
+        folder = root / f"doc-2026102{i}-{['h47d', 'gh6n', 'n5aw', 'b6ds', 'oym5', 'q2w3'][i]}"
+        folder.mkdir(parents=True)
+        (folder / "본문.md").write_text(f"# 문서 {i}\n", encoding="utf-8")
+    for i in range(30):
+        (root / f"보고서{i}.md").write_text(f"# 보고 {i}\n", encoding="utf-8")
+    for i in range(6):
+        (root / f"참고_C20210417{i:02d}.md").write_text(f"# 참고 {i}\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    a, _ = _setup(client, monkeypatch)
+    h = client.post(f"{API}/sources/{a}/coverage/round", headers=ADMIN).json()
+    assert not any("식별자" in g["kind"] for g in h["gaps"])
