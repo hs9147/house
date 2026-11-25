@@ -492,7 +492,7 @@ def _mark_encrypted(raw: bytes, name: bytes) -> bytes:
 
 
 def test_zip_upload_is_extracted_into_a_folder_when_asked(monkeypatch, tmp_path, fresh_settings):
-    """zip을 풀어 올린다 — 비우면 zip 이름의 폴더 아래에, 경로를 주면 그 폴더 아래에. 저장소 밖을 가리키는 항목과
+    """zip을 풀어 올린다 — 비우면 저장소 폴더에 그대로(zip 이름의 폴더를 만들지 않는다), 경로를 주면 그 폴더 아래에. 저장소 밖을 가리키는 항목과
     군더더기(__MACOSX)는 건너뛰고, 풀지 않으면 zip 그대로 저장한다. 색인은 다 푼 뒤 한 번만(백그라운드)."""
     import io
     import zipfile
@@ -516,10 +516,10 @@ def test_zip_upload_is_extracted_into_a_folder_when_asked(monkeypatch, tmp_path,
                  files={"file": ("자료.zip", data)})
     assert res.status_code == 201, res.text
     out = res.json()
-    assert out["path"] == "자료" and out["extracted"] == 2 and sorted(out["files"]) == ["자료/a.txt", "자료/sub/b.txt"]
+    assert out["path"] == "" and out["extracted"] == 2 and sorted(out["files"]) == ["a.txt", "sub/b.txt"]
     assert [s["path"] for s in out["skipped"]] == ["../escape.txt"]
-    assert (internal / "자료" / "sub" / "b.txt").read_text() == "B"
-    assert not (internal / "escape.txt").exists() and not (internal / "자료" / "__MACOSX").exists()
+    assert (internal / "sub" / "b.txt").read_text() == "B" and not (internal / "자료").exists()
+    assert not (tmp_path / "escape.txt").exists() and not (internal / "__MACOSX").exists()
     assert reindexed == ["internal"]
 
     again = c.post(f"{API}/storage/internal/files", headers=ADMIN, data={"extract": "true", "path": "docs/2026"},
@@ -554,8 +554,8 @@ def test_zip_with_korean_cp949_names_and_encrypted_entries(monkeypatch, tmp_path
     c = _client(monkeypatch, tmp_path)
     out = c.post(f"{API}/storage/internal/files", headers=ADMIN, data={"extract": "true"},
                  files={"file": ("k.zip", _cp949_zip("계약/견적서.txt", "견적".encode("utf-8")))}).json()
-    assert out["files"] == ["k/계약/견적서.txt"]
-    assert (tmp_path / "internal" / "k" / "계약" / "견적서.txt").read_text(encoding="utf-8") == "견적"
+    assert out["files"] == ["계약/견적서.txt"]
+    assert (tmp_path / "internal" / "계약" / "견적서.txt").read_text(encoding="utf-8") == "견적"
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
@@ -563,4 +563,4 @@ def test_zip_with_korean_cp949_names_and_encrypted_entries(monkeypatch, tmp_path
         z.writestr("secret.txt", "s")
     out = c.post(f"{API}/storage/internal/files", headers=ADMIN, data={"extract": "true"},
                  files={"file": ("e.zip", _mark_encrypted(buf.getvalue(), b"secret.txt"))}).json()
-    assert out["files"] == ["e/plain.txt"] and out["skipped"] == [{"path": "secret.txt", "reason": "암호가 걸려 있습니다"}]
+    assert out["files"] == ["plain.txt"] and out["skipped"] == [{"path": "secret.txt", "reason": "암호가 걸려 있습니다"}]

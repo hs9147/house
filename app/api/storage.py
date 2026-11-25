@@ -212,15 +212,15 @@ def upload_storage_file(
 ):
     """path를 주면 그 이름으로, 비우면 업로드한 파일명 그대로 저장한다.
 
-    extract=true이고 zip이면 풀어서 저장한다 — path(폴더)를 주면 그 아래에, 비우면 zip 이름의 폴더 아래에
-    (`자료.zip` → `자료/`). 색인은 다 푼 뒤 백그라운드에서 한 번."""
+    extract=true이고 zip이면 풀어서 저장한다 — path(폴더)를 주면 그 아래에, 비우면 **저장소 폴더에 그대로**(zip 이름의
+    폴더를 만들지 않는다 — zip 안의 폴더 구조가 그대로 저장소의 구조가 된다). 색인은 다 푼 뒤 백그라운드에서 한 번."""
     store = _store(db, key, store_name)
     _require_writable(store)
     rel = (path or file.filename or "").strip()
     if not rel:
         raise HTTPException(status_code=400, detail="file name required")
     if extract and (file.filename or "").lower().endswith(".zip"):
-        folder = (path or "").strip().strip("/\\") or Path(file.filename).stem
+        folder = (path or "").strip().strip("/\\")
         try:
             result = storage_service.extract_zip(store, folder, file.file)
         except storage_service.StorageError as e:
