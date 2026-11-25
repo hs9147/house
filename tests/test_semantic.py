@@ -1172,6 +1172,8 @@ def test_path_template_names_the_entity_of_every_document_and_follows_renamed_fo
     slots = {c["pattern"]: c for c in semantic.path_slots("docs")["candidates"]}
     credit, contract = slots[r"KR\d{6}"], slots[r"KR\-CT\d{9}"]
     assert credit["suggested"] == "협력사" and credit["name_from"] == "tail"       # 「에이전자」가 내용 그래프의 협력사
+    # 확신 정도 — 분석이 끝난 폴더(5개) 중 그 개념으로 나온 것(에이전자 하나)
+    assert credit["confidence"] == {"cls": "협력사", "checked": 5, "matched": 1, "share": 0.2}
     assert contract["suggested"] == "" and contract["tail"] == "number"
     out = semantic.confirm_paths("docs", [{"key": credit["key"], "cls": "협력사", "name_from": "tail"},
                                           {"key": contract["key"], "cls": "계약"}], "admin")
@@ -1418,3 +1420,29 @@ def test_semantic_writes_wait_out_another_writer_instead_of_failing(store):
     semantic.resume("docs")             # 분석 상태를 쓴다 — 기다렸다가 성공해야 한다
     t.join()
     assert time.time() - started >= 4 and semantic.SEMANTIC_DB_TIMEOUT >= 30
+
+
+def test_people_are_asked_about_uncertain_items_first(store):
+    """⑤ 사람 확인은 불확실한 것부터 — 근거 문장에 이름이 없던 LLM 추출, 폴더와 내용이 어긋난 문서, 한 문서에만 나온 것.
+    무작위 점검은 일부(30%)만. 경로 틀이 단 개체는 묻지 않고, 같은 식별자로 정한 짝은 점검에서도 뺀다. 묻는 까닭을 단다."""
+    semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+    with _db() as db:
+        semantic.analyze(db, "docs")
+    conn = semantic._conn("docs")
+    try:
+        stored = {r["anchored"] for r in conn.execute("SELECT anchored FROM sem_nodes WHERE origin = 'llm'")}
+        assert stored <= {"0", "1"} and "1" in stored                 # 근거 판정을 저장한다
+        conn.execute("UPDATE sem_nodes SET anchored = '0' WHERE path = '영문메모.md' AND origin = 'llm'")
+        conn.execute("INSERT INTO sem_nodes (path, cls, name, evidence, origin) VALUES ('공급계약.md', '협력사', 'KR000001', 'x', 'path')")
+        conn.execute("INSERT INTO sem_pairs (cls, a, b, decision, source, score, reason, decided_at)"
+                     " VALUES ('협력사', 'A', 'B', 'same', 'id', 0, '같은 식별자', 'now')")
+        conn.commit()
+    finally:
+        conn.close()
+    nodes = semantic.gold_queue("docs", "node", 10)
+    assert nodes[0]["why"] == "근거 문장에 이름이 없음" and nodes[0]["path"] == "영문메모.md"
+    assert all(n["origin"] != "path" for n in nodes)
+    assert {n["why"] for n in nodes} <= {"근거 문장에 이름이 없음", "한 문서에만 나옴", "점검(무작위)"}
+    pairs = semantic.gold_queue("docs", "pair", 10)
+    assert not any(p["source"] == "id" and p["why"] == "점검(무작위)" for p in pairs)
+    assert semantic.GOLD_AUDIT_SHARE <= 0.3

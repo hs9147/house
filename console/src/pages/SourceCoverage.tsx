@@ -219,7 +219,15 @@ export function CoveragePanel({ row, onChange }: { row: SourceOut; onChange: (r:
                         if (e.target.checked) next.delete(x.url); else next.add(x.url);
                         setOff(next);
                       }} /></td>
-                    <td>{x.title}<div className="mutedtext mono" style={{ fontSize: 10, wordBreak: 'break-all' }}>{x.url}</div></td>
+                    <td>
+                      {/* 누가 신규로 판정했나 — 규칙(이미 관리하는 것과 주소·결과 열·이름이 겹치지 않음)이면 확실하고,
+                          LLM이 다시 봤으면 뜻으로 판정한 것이다(사람이 보면 좋다) */}
+                      <span className={`status ${x.by === 'llm' ? 'warn' : 'ok'}`} style={{ marginRight: 6 }}
+                            title={x.reason || undefined}>
+                        {x.by === 'llm' ? 'LLM 판정' : x.by === 'human' ? '사람이 정함' : '규칙으로 확실'}
+                      </span>
+                      {x.title}<div className="mutedtext mono" style={{ fontSize: 10, wordBreak: 'break-all' }}>{x.url}</div>
+                    </td>
                     <td>{x.screen.collect === 'page' ? '페이지(본문)' : '파일·목록'}</td>
                     <td className="mono" style={{ fontSize: 11 }}>
                       {x.screen.conditions.map((c) => `${c.field}=${c.value}`).join(', ') || '—'}

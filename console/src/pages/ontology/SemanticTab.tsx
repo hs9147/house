@@ -386,8 +386,20 @@ function PathsStep({ paths, schema, onConfirm }: {
                   <td className="mono" style={{ fontSize: 11 }}>
                     {c.sample.slice(0, 3).map((v) => <div key={v.value}>{v.value}{v.tail && ` · ${v.tail}`}</div>)}
                   </td>
-                  <td>{Object.keys(c.hits).length === 0 ? <span className="mutedtext">없음</span>
-                    : Object.entries(c.hits).map(([k, n]) => `${k} ${n}`).join(' · ')}</td>
+                  <td>
+                    {Object.keys(c.hits).length === 0 ? <span className="mutedtext">없음</span>
+                      : Object.entries(c.hits).map(([k, n]) => `${k} ${n}`).join(' · ')}
+                    {c.confidence && c.confidence.checked > 0 && (
+                      <div className={c.confidence.share !== null && c.confidence.share >= 0.8 ? '' : 'mutedtext'}>
+                        분석이 끝난 {c.confidence.checked.toLocaleString()}개 중 {c.confidence.matched.toLocaleString()}개가
+                        「{c.confidence.cls}」 ({pct(c.confidence.share ?? 0)}){c.confidence.share !== null
+                          && c.confidence.share >= 0.8 ? ' — 제안대로 확정해도 됩니다' : ''}
+                      </div>
+                    )}
+                    {c.confidence && c.confidence.checked === 0 && (
+                      <div className="mutedtext">분석이 끝난 문서가 없어 아직 견줄 수 없습니다</div>
+                    )}
+                  </td>
                   <td>
                     <select value={p.cls} disabled={!schema} onChange={(e) => set(c.key, { cls: e.target.value })}>
                       <option value="">{schema ? '쓰지 않음' : '스키마 확정 뒤'}</option>
@@ -664,10 +676,13 @@ const GOLD_KINDS: { kind: SemanticGoldKind; label: string; yes: string; no: stri
 ];
 
 function GoldItem({ it }: { it: SemanticGoldItem }) {
+  // 묻는 까닭 — 불확실해서 묻는 것과 점검으로 무작위로 고른 것을 가른다
+  const why = it.why && (
+    <span className={`status ${it.why.startsWith('점검') ? 'dim' : 'info'}`} style={{ marginRight: 6 }}>{it.why}</span>);
   if (it.kind === 'pair') {
     return (
       <>
-        <b>{it.cls}: {it.a} ↔ {it.b}</b>
+        {why}<b>{it.cls}: {it.a} ↔ {it.b}</b>
         <span className="mutedtext"> — 지금 판정 {it.decision === 'same' ? '같다' : '다르다'}({it.source}, 점수 {it.score?.toFixed(2)})</span>
         {[it.a_evidence, it.b_evidence].map((e, i) => e && (
           <div key={i} className="mutedtext">“{e.evidence.slice(0, 160)}” — <span className="mono">{e.path}</span></div>))}
@@ -676,7 +691,7 @@ function GoldItem({ it }: { it: SemanticGoldItem }) {
   }
   return (
     <>
-      <b>{it.kind === 'node' ? `${it.cls}: ${it.name}` : `${it.src} —${it.rel}→ ${it.dst}`}</b>
+      {why}<b>{it.kind === 'node' ? `${it.cls}: ${it.name}` : `${it.src} —${it.rel}→ ${it.dst}`}</b>
       <span className="mutedtext"> ({it.origin})</span>
       <div className="mutedtext">“{it.evidence?.slice(0, 200)}” — <span className="mono">{it.path}</span></div>
     </>

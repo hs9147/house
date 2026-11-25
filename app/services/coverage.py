@@ -230,8 +230,11 @@ def discover(db: Session, row: InfoSource) -> dict:
         human = decided.get(item["url"])
         if human:
             item["status"], item["reason"], item["decided"] = human["status"], f"사람이 정함({human['by']})", True
-        elif "status" not in item:
-            item["status"], item["reason"] = _judge(row, item, cat)
+            item["by"] = "human"
+        else:
+            if "status" not in item:
+                item["status"], item["reason"] = _judge(row, item, cat)
+            item["by"] = "rule"     # 같은 주소·같은 결과 열·같은 파일 내용·이름 유사도 — 확실한 정도는 status가 말한다
     items = items[:MAX_ITEMS]
     counts = {s: sum(1 for i in items if i["status"] == s) for s in STATUSES}
     return {"source": row.name, "kind": row.kind, "scanned_at": row.scanned_at, "items": items, "counts": counts,
@@ -284,6 +287,8 @@ def judge_with_llm(db: Session, row: InfoSource) -> dict:
         out["notes"] = [f"LLM 판정을 하지 못해 규칙 판정만 했습니다: {str(e)[:120]}"]
         return out
     changed = 0
+    for _, item in targets:
+        item["by"] = "llm"          # LLM이 다시 본 것(바꾸지 않았어도 — 규칙이 확신하지 못해 물은 것이다)
     for j in data.get("items") or []:
         if not isinstance(j, dict) or not isinstance(j.get("i"), int) or not 0 <= j["i"] < len(found):
             continue
@@ -366,6 +371,7 @@ def build_proposal(db: Session, row: InfoSource, step=lambda _t: None) -> dict:
             except SourceError:
                 pass
         proposed.append({"url": item["url"], "title": item["title"], "type": item["type"], "reason": item["reason"],
+                         "by": item.get("by", "rule"),
                          "screen": {**screen, **({"skill": skill} if skill else {})}})
     # 스킬 이름이 겹치면 뒤에 번호 — 확정할 때 같은 이름이 두 화면에 있으면 거부된다
     used = {(s.get("skill") or {}).get("name") for s in infosource.query_screens(row)}

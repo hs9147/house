@@ -131,7 +131,15 @@ class SemanticError(RuntimeError):
 
 # 옛 색인 파일의 표에는 없던 열 — CREATE TABLE IF NOT EXISTS는 열을 더하지 않는다(docsearch._add_missing_columns와 같다)
 _ADDED = (("sem_nodes", "observed_at"), ("sem_edges", "observed_at"), ("sem_edges", "valid_from"),
-          ("sem_edges", "valid_to"))
+          ("sem_edges", "valid_to"),
+          # LLM 추출의 기계 검사 — 근거 문장에 이름이 있었나('1'·'0', 규칙으로 뽑은 것은 ''). ⑤ 사람 확인이 불확실한 것부터
+          # 묻는 근거다(예전에는 저장하지 않아 개체·관계를 무작위로만 물었다)
+          ("sem_nodes", "anchored"), ("sem_edges", "anchored"))
+
+
+def _anchored(item: dict) -> str:
+    v = item.get("anchored")
+    return "" if v is None else ("1" if v else "0")
 
 
 # 내용 분석의 연결은 쓰기를 30초까지 기다린다(색인 DB 기본 5초). 색인 DB는 WAL이라 읽기는 기다리지 않는다 — 기다리는 것은
@@ -955,11 +963,13 @@ def path_slots(store_name: str) -> dict:
             names.setdefault(r["cls"], set()).add(_space(r["name"]).lower())
         paths = [r["path"] for r in conn.execute("SELECT path FROM docs")]
         links = _path_links(store_name, candidates, paths)
+        analyzed = {r["path"] for r in conn.execute("SELECT path FROM sem_docs WHERE status IN ('ok', 'form', 'template', 'copy')")}
         for c in candidates:
-            values = {}
+            values, paths_of = {}, {}
             for p in paths:
                 for v, tail, _ in pathshape.match(p, c):
                     values.setdefault(v, tail)
+                    paths_of.setdefault(v, []).append(p)
             c["sample"] = [{"value": v, "tail": t} for v, t in list(values.items())[:5]]
             c["links"] = links.get(c["key"], [])
             hits = {}
@@ -969,6 +979,14 @@ def path_slots(store_name: str) -> dict:
                     hits[cls] = n
             c["hits"] = dict(sorted(hits.items(), key=lambda kv: -kv[1])[:5])
             c["suggested"] = next(iter(c["hits"]), "")
+            # 확신 정도 — 그 값의 문서 중 하나라도 분석이 끝난 값만 견준다(분석하지 않은 폴더는 겹칠 수 없다).
+            # contracts는 계약 1,067개 중 분석이 끝난 폴더가 일부라, 전체로 나누면 겹침이 0%에 가깝게 보인다
+            if c["suggested"]:
+                known = names[c["suggested"]]
+                checked = [(v, t) for v, t in values.items() if any(p in analyzed for p in paths_of.get(v, ()))]
+                matched = sum(1 for v, t in checked if v.lower() in known or (t and _space(t).lower() in known))
+                c["confidence"] = {"cls": c["suggested"], "checked": len(checked), "matched": matched,
+                                   "share": round(matched / len(checked), 3) if checked else None}
             c["name_from"] = "tail" if c.get("tail") == "name" else "link" if c["links"] else "value"
         saved = _get(conn, "paths", {})
         confirmed = saved.get("confirmed")
@@ -1166,6 +1184,7 @@ def _path_mismatches(conn, confirmed: dict | None) -> dict:
                     out["examples"].append({"path": r["path"], "cls": s["cls"], "path_says": sorted(mine)[0],
                                             "content_says": r["name"]})
     out["documents"] = len(seen)
+    out["paths"] = sorted(seen)[:500]
     return out
 
 
@@ -1335,12 +1354,12 @@ def _copy(conn, source: str, target: str, observed: str = "") -> None:
     경로에서 얻은 것(origin path)은 옮기지 않는다 — 경로마다 다르다(apply_paths가 경로에서 다시 만든다)."""
     conn.execute("DELETE FROM sem_nodes WHERE path = ? AND origin != 'path'", (target,))
     conn.execute("DELETE FROM sem_edges WHERE path = ?", (target,))
-    conn.execute("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at)"
-                 " SELECT ?, cls, name, evidence, origin, CASE WHEN origin = 'list' THEN observed_at ELSE ? END"
+    conn.execute("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at, anchored)"
+                 " SELECT ?, cls, name, evidence, origin, CASE WHEN origin = 'list' THEN observed_at ELSE ? END, anchored"
                  " FROM sem_nodes WHERE path = ? AND origin != 'path'", (target, observed, source))
     conn.execute("INSERT INTO sem_edges (path, src_cls, src, rel, dst_cls, dst, evidence, origin, observed_at,"
-                 " valid_from, valid_to) SELECT ?, src_cls, src, rel, dst_cls, dst, evidence, origin,"
-                 " CASE WHEN origin = 'list' THEN observed_at ELSE ? END, valid_from, valid_to"
+                 " valid_from, valid_to, anchored) SELECT ?, src_cls, src, rel, dst_cls, dst, evidence, origin,"
+                 " CASE WHEN origin = 'list' THEN observed_at ELSE ? END, valid_from, valid_to, anchored"
                  " FROM sem_edges WHERE path = ?", (target, observed, source))
 
 
@@ -1350,14 +1369,16 @@ def _write(conn, path: str, nodes: list[dict], edges: list[dict], origin: str, o
     본문이 아니라 경로에서 나왔다(apply_paths)."""
     conn.execute("DELETE FROM sem_nodes WHERE path = ? AND origin != 'path'", (path,))
     conn.execute("DELETE FROM sem_edges WHERE path = ?", (path,))
-    conn.executemany("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at) VALUES (?, ?, ?, ?, ?, ?)",
+    conn.executemany("INSERT INTO sem_nodes (path, cls, name, evidence, origin, observed_at, anchored)"
+                     " VALUES (?, ?, ?, ?, ?, ?, ?)",
                      [(path, n["cls"], n["name"], n["evidence"], n.get("origin", origin),
-                       n.get("observed_at") or observed) for n in nodes])
+                       n.get("observed_at") or observed, _anchored(n)) for n in nodes])
     conn.executemany(
         "INSERT INTO sem_edges (path, src_cls, src, rel, dst_cls, dst, evidence, origin, observed_at, valid_from,"
-        " valid_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " valid_to, anchored) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [(path, e["src_cls"], e["src"], e["rel"], e["dst_cls"], e["dst"], e["evidence"], e.get("origin", origin),
-          e.get("observed_at") or observed, e.get("valid_from") or "", e.get("valid_to") or "") for e in edges])
+          e.get("observed_at") or observed, e.get("valid_from") or "", e.get("valid_to") or "", _anchored(e))
+         for e in edges])
 
 
 def analyze(db: Session, store_name: str, budget_seconds: float = 120.0, should_stop=lambda: False) -> dict:
@@ -1605,8 +1626,9 @@ def _run_llm_jobs(conn, store_name: str, schema: dict, reference: set[str], jobs
                         if isinstance(o, dict) and o.get("name"):
                             name = str(o["name"])[:60]
                             outside[name] = outside.get(name, 0) + 1
-                    _write(conn, path, job["form_nodes"] + [_public(n) for n in nodes],
-                           job["form_edges"] + [_public(e) for e in edges], "llm", job["observed"])
+                    _write(conn, path, job["form_nodes"] + [{**_public(n), "anchored": n["anchored"]} for n in nodes],
+                           job["form_edges"] + [{**_public(e), "anchored": e["anchored"]} for e in edges], "llm",
+                           job["observed"])
                     _record(conn, path, fp, "ok", truncated=int(job["long"]), dropped=r["dropped"], reviewed=reviewed)
                     stats["dropped"] += r["dropped"]
                     done_fp.setdefault(fp, path)
@@ -1994,21 +2016,55 @@ def _gold_key(kind: str, row: dict) -> str:
     return "\t".join(row[c] for c in cols)
 
 
+GOLD_AUDIT_SHARE = 0.3    # ⑤ 무작위 점검의 몫 — 기계가 확신한 것도 맞는지 재야 기준 배우기가 정확도를 잰다(나머지는 불확실한 것)
+
+
 def gold_queue(store_name: str, kind: str, n: int = 10) -> list[dict]:
-    """사람이 확인할 것 — 아직 확인하지 않은 것에서. 짝은 반을 점수가 애매한 것(0.5 가까이)부터 — 그것을 알아야
-    문턱이 움직인다 — 나머지는 무작위(기준이 확신한 것도 맞는지 재야 한다). 개체·관계는 무작위."""
+    """사람이 확인할 것 — 아직 확인하지 않은 것에서, **불확실한 것부터**. 항목마다 묻는 까닭(why)을 단다.
+
+      짝     점수가 애매한 것(0.5 가까이 — 그것을 알아야 문턱이 움직인다) 70% · 무작위 점검 30%. 같은 식별자로 정한 짝은
+             점검에서도 뺀다(코드가 같다 — 물을 것이 없다)
+      개체·관계  ① 근거 문장에 이름이 없던 LLM 추출 ② 폴더와 내용이 어긋난 문서의 것(개체) ③ 한 문서에만 나온 LLM 추출 —
+             그다음 무작위 점검 30%. 경로 틀(path)이 단 개체는 묻지 않는다(확정한 틀의 규칙이다 — 틀을 고칠 일이다)
+
+    예전에는 짝의 절반, 개체·관계의 전부를 무작위로 물어 확실한 것을 사람이 다시 확인하는 일이 많았다."""
     if kind not in GOLD_KINDS:
         raise SemanticError(f"kind는 {', '.join(GOLD_KINDS)} 중 하나입니다.")
     select, key = _GOLD_SQL[kind]
     fresh = f" AND NOT EXISTS (SELECT 1 FROM sem_gold g WHERE g.kind = '{kind}' AND g.item = {key})"
+    audit = max(1, round(n * GOLD_AUDIT_SHARE))
     conn = _conn(store_name)
     try:
-        rows = []
+        picked: list[tuple[dict, str]] = []
+
+        def take(sql: str, args: tuple, why: str, limit: int) -> None:
+            if limit > 0:
+                picked.extend((dict(r), why) for r in conn.execute(select + fresh + sql + " LIMIT ?", (*args, limit)))
+
         if kind == "pair":
-            rows += [dict(r) for r in conn.execute(select + fresh + " ORDER BY ABS(score - 0.5) LIMIT ?", (n - n // 2,))]
-        rows += [dict(r) for r in conn.execute(select + fresh + " ORDER BY RANDOM() LIMIT ?", (n,))]
+            take(" ORDER BY ABS(score - 0.5)", (), "애매한 짝(점수가 문턱 사이)", n - audit)
+            take(" AND x.source != 'id' ORDER BY RANDOM()", (), "점검(무작위)", audit)
+        else:
+            base = " AND x.origin != 'path'"
+            take(base + " AND x.origin = 'llm' AND x.anchored = '0' ORDER BY RANDOM()", (),
+                 "근거 문장에 이름이 없음", n - audit)
+            if kind == "node":
+                confirmed = (_get(conn, "paths", {}) or {}).get("confirmed")
+                stuck = _path_mismatches(conn, confirmed).get("paths") or []
+                if stuck:
+                    marks = ",".join("?" * len(stuck))
+                    take(base + f" AND x.path IN ({marks}) ORDER BY RANDOM()", tuple(stuck),
+                         "폴더와 내용이 어긋난 문서", n - audit - len(picked))
+                take(base + " AND x.origin = 'llm' AND (SELECT COUNT(DISTINCT y.path) FROM sem_nodes y"
+                     " WHERE y.cls = x.cls AND y.name = x.name) = 1 ORDER BY RANDOM()", (),
+                     "한 문서에만 나옴", n - audit - len(picked))
+            else:
+                take(base + " AND x.origin = 'llm' AND (SELECT COUNT(DISTINCT y.path) FROM sem_edges y"
+                     " WHERE y.src = x.src AND y.rel = x.rel AND y.dst = x.dst) = 1 ORDER BY RANDOM()", (),
+                     "한 문서에만 나옴", n - audit - len(picked))
+            take(base + " ORDER BY RANDOM()", (), "점검(무작위)", n - len(picked))
         out, seen = [], set()
-        for r in rows:
+        for r, why in picked:
             item = _gold_key(kind, r)
             if item in seen:
                 continue
@@ -2018,7 +2074,7 @@ def gold_queue(store_name: str, kind: str, n: int = 10) -> list[dict]:
                     ev = conn.execute("SELECT evidence, path FROM sem_nodes WHERE cls = ? AND name = ? LIMIT 1",
                                       (r["cls"], r[side])).fetchone()
                     r[f"{side}_evidence"] = dict(ev) if ev else None
-            out.append({"kind": kind, "item": item, **r})
+            out.append({"kind": kind, "item": item, "why": why, **r})
         return out[:n]
     finally:
         conn.close()

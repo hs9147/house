@@ -1437,7 +1437,8 @@ export interface CoverageProposal {
   judged_by?: 'llm' | 'rule';
   counts?: Record<CoverageItem['status'], number>;
   items?: CoverageItem[];
-  proposed?: { url: string; title: string; type: string; reason: string; screen: SourceQueryScreen }[];
+  proposed?: { url: string; title: string; type: string; reason: string; by?: 'rule' | 'llm' | 'human';
+               screen: SourceQueryScreen }[];
   notes?: string[];
 }
 
@@ -1890,6 +1891,8 @@ export interface SemanticPathSlot extends PathSlot {
   sample: { value: string; tail: string }[];
   hits: Record<string, number>;      // 개념 → 값이 그 개념의 개체 이름과 겹친 수
   suggested: string;
+  /** 확신 정도 — 그 값의 문서 중 분석이 끝난 값(checked) 가운데 그 개념으로 나온 것(matched). */
+  confidence?: { cls: string; checked: number; matched: number; share: number | null };
   name_from: 'value' | 'tail' | 'link';
   /** 같은 식별자 폴더에 이름이 붙어 있는 다른 저장소(credit의 KR######_회사명) — 이름을 거기서 가져올 수 있다. */
   links: { store: string; parent: string; shared: number; values: number; names: number }[];
@@ -1926,6 +1929,8 @@ export interface SemanticGoldItem {
   cls?: string; a?: string; b?: string; decision?: string; source?: string; score?: number; reason?: string;
   a_evidence?: { evidence: string; path: string } | null; b_evidence?: { evidence: string; path: string } | null;
   path?: string; name?: string; src?: string; rel?: string; dst?: string; evidence?: string; origin?: string;
+  /** 묻는 까닭 — 불확실한 것부터(애매한 짝 · 근거 문장에 이름이 없음 · 폴더와 내용이 어긋난 문서 · 한 문서에만 나옴) · 점검(무작위) */
+  why?: string;
 }
 export type SemanticGoldMetrics = Record<SemanticGoldKind, {
   labeled: number; by: Record<string, { n: number; correct: number; accuracy: number }> }>;

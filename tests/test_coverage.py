@@ -87,6 +87,7 @@ def test_discovered_items_are_judged_managed_duplicate_similar_or_new(client, mo
     assert st["https://intra.test/notices"][0] == "similar"          # 「공지 조회」와 이름이 비슷하다
     assert st["https://intra.test/guide"][0] == "new"
     assert "https://intra.test/login" not in st                      # 로그인 화면은 받을 정보가 아니다
+    assert {i["by"] for i in out["items"]} == {"rule"}               # 누가 판정했나 — LLM 없이는 모두 규칙
 
 
 def test_proposal_needs_no_input_and_the_admin_only_confirms(client, monkeypatch):
@@ -113,6 +114,7 @@ def test_proposal_needs_no_input_and_the_admin_only_confirms(client, monkeypatch
     assert set(proposed) == {"https://intra.test/guide", "https://intra.test/notices"}   # 중복·관리 중은 빼고
     assert proposed["https://intra.test/guide"]["screen"]["collect"] == "page"           # 조회 칸이 없는 화면은 본문
     assert proposed["https://intra.test/notices"]["screen"]["skill"]["name"]             # 조회 화면은 스킬 초안까지
+    assert {p["by"] for p in proposed.values()} == {"llm"}      # 비슷함·신규는 규칙이 확신하지 못해 LLM이 다시 봤다
     res = client.post(f"{API}/sources/{a}/coverage/confirm", headers=ADMIN,
                       json={"urls": ["https://intra.test/notices"]})                     # 하나만 확정
     assert res.status_code == 200, res.text
