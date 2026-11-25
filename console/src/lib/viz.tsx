@@ -118,48 +118,6 @@ export function BarList({ rows, max, unit = '건', height = BAR }: {
   );
 }
 
-/**
- * 퍼널 — 단계마다 직전 단계의 부분집합이다. 순서 램프로 칠하고 전 단계 대비 비율을 적는다.
- * 떨어지는 폭이 곧 "어디서 멈췄나"이므로 그 숫자를 가장 크게 둔다.
- */
-export function FunnelBars({ stages }: {
-  stages: { stage: string; count: number; detail?: string }[];
-}) {
-  const top = Math.max(1, ...stages.map((s) => s.count));
-  const labelW = 130;
-  const rowH = 34;
-  const [box, width] = useWidth(620);
-  const plotW = Math.max(60, width - labelW - 150);
-  return (
-    <div ref={box}>
-    <svg width={width} height={stages.length * rowH} role="img">
-      {stages.map((s, i) => {
-        const prev = i === 0 ? s.count : stages[i - 1].count;
-        const drop = prev > 0 ? Math.round((1 - s.count / prev) * 100) : 0;
-        const y = i * rowH + GAP;
-        const w = Math.max(1, Math.round((s.count / top) * plotW));
-        return (
-          <g key={s.stage}>
-            <title>{`${s.stage}: ${fmt(s.count)}건${s.detail ? ` — ${s.detail}` : ''}`}</title>
-            <text x={labelW - 8} y={y + BAR / 2 + 4} textAnchor="end"
-                  fill={VIZ.muted} fontSize="12">{s.stage}</text>
-            <path d={barPath(labelW, y, w, BAR)}
-                  fill={VIZ.ordinal[Math.min(i, VIZ.ordinal.length - 1)]} />
-            <text x={labelW + w + 8} y={y + BAR / 2 + 4} fill={VIZ.ink} fontSize="12"
-                  style={{ fontVariantNumeric: 'tabular-nums' }}>
-              {fmt(s.count)}
-              {i > 0 && drop > 0 && (
-                <tspan fill={VIZ.status.warning}>{`  -${drop}%`}</tspan>
-              )}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
-    </div>
-  );
-}
-
 type StackRow = { label: string; parts: { key: string; value: number; color: string }[] };
 
 /**
