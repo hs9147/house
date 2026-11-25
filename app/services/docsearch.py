@@ -57,7 +57,6 @@ _DEFAULT_BUDGET = 20.0
 # 배치 색인이 쓰기 트랜잭션을 붙잡고 있을 최대 시간. 예산(20초) 내내 붙잡으면 그 사이
 # 업로드가 여는 연결이 쓰기 락에 걸려 `database is locked`로 실패한다. 1초마다 끊으면
 # 5,000건 기준 0.09초가 0.3초쯤 되는데, 추출 비용(건당 수십~수백 ms) 옆에서는 없는 값이다.
-_COMMIT_EVERY = 1.0
 # 업로드가 여는 연결은 오래 기다리지 않는다 — 응답을 5초 붙잡는 것이 색인이 한 주기
 # 늦는 것보다 나쁘다. 못 잡으면 포기하고 주기 색인에 맡긴다.
 _INLINE_TIMEOUT = 1.0
@@ -286,7 +285,6 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
         todo = changed + retry
 
         indexed = failed = 0
-        last_commit = time.monotonic()
         for rel, size, mtime in todo:
             if time.monotonic() - started > budget_seconds:
                 break
@@ -294,11 +292,10 @@ def reindex(store_name: str, root: Path, *, force: bool = False,
                 indexed += 1
             else:
                 failed += 1
-            if time.monotonic() - last_commit >= _COMMIT_EVERY:
-                # 트랜잭션을 예산 내내 붙잡지 않는다 — 그동안 업로드가 여는 연결은
-                # 쓰기 락에 걸려 실패한다. 색인은 파생 데이터라 중간에 끊어도 무방하다.
-                conn.commit()
-                last_commit = time.monotonic()
+            # 파일마다 커밋한다 — 쓰기 잠금을 **다음 파일을 추출하는 동안** 쥐지 않게. 예전에는 1초마다 커밋해, 그
+            # 사이 다음 파일(97-2003·스캔 PDF는 몇 초)을 추출하는 내내 잠금이 남아 다른 쓰기(업로드·내용 분석·묶기)가
+            # 「database is locked」로 실패했다. WAL에서 커밋은 싸다(synchronous=NORMAL).
+            conn.commit()
 
         gone = _vanished(known, candidates, root, unreadable)
         for rel in gone:

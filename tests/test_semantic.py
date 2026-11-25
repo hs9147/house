@@ -1391,3 +1391,30 @@ def test_reading_status_is_not_blocked_while_analysis_writes_and_unchanged_paths
     finally:
         writer.rollback()
         writer.close()
+
+
+def test_semantic_writes_wait_out_another_writer_instead_of_failing(store):
+    """운영: intro 묶기가 2시간 반 돈 끝에, contracts 기준 배우기가 6초 만에 「database is locked」로 통째로 실패했다 — 다른 쓰기와
+    겹치면 5초만 기다렸다. 내용 분석의 쓰기는 다른 쓰기가 끝나기를 기다린다(SEMANTIC_DB_TIMEOUT)."""
+    import sqlite3
+    import threading
+
+    semantic.confirm_schema("docs", GOOD_SCHEMA, "admin")
+    held = threading.Event()
+
+    def hold():
+        w = sqlite3.connect(docsearch.index_path("docs"), timeout=1)
+        w.execute("BEGIN IMMEDIATE")
+        w.execute("INSERT INTO sem_meta (key, value) VALUES ('probe', '1')")
+        held.set()
+        time.sleep(6)                   # 예전 기본(5초)보다 오래 쥔다
+        w.commit()
+        w.close()
+
+    t = threading.Thread(target=hold)
+    t.start()
+    held.wait(5)
+    started = time.time()
+    semantic.resume("docs")             # 분석 상태를 쓴다 — 기다렸다가 성공해야 한다
+    t.join()
+    assert time.time() - started >= 4 and semantic.SEMANTIC_DB_TIMEOUT >= 30

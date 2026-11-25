@@ -460,7 +460,6 @@ def test_batch_reindex_does_not_hold_the_write_lock_for_its_whole_budget(tmp_pat
     for i in range(5):
         (docs / f"규정{i}.md").write_text(f"# 규정 {i}\n\n반출 승인", encoding="utf-8")
 
-    monkeypatch.setattr(docsearch, "_COMMIT_EVERY", 0.0)  # 문서마다 끊는다
     seen: list[int] = []
     real = docsearch._index_file
 
@@ -472,7 +471,8 @@ def test_batch_reindex_does_not_hold_the_write_lock_for_its_whole_budget(tmp_pat
 
     monkeypatch.setattr(docsearch, "_index_file", counting)
     docsearch.reindex("s", docs)
-    assert seen[-1] > 0, "배치 도중 커밋이 한 번도 보이지 않았다"
+    # 파일마다 커밋한다 — 다음 파일을 다루는 동안 앞 파일은 이미 다른 연결에 보인다(쓰기 잠금을 추출 내내 쥐지 않는다)
+    assert seen == [0, 1, 2, 3, 4], seen
 
 
 def test_reindex_retries_failures_when_the_extractors_changed(monkeypatch, tmp_path):

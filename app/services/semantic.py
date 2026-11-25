@@ -134,7 +134,13 @@ _ADDED = (("sem_nodes", "observed_at"), ("sem_edges", "observed_at"), ("sem_edge
           ("sem_edges", "valid_to"))
 
 
-def _conn(store_name: str, timeout: float = 5.0):
+# 내용 분석의 연결은 쓰기를 30초까지 기다린다(색인 DB 기본 5초). 색인 DB는 WAL이라 읽기는 기다리지 않는다 — 기다리는 것은
+# 다른 쓰기(분석·묶기·색인·확정)가 끝나기를이고, 그런 쓰기는 짧다. 5초로는 겹치면 묶기·기준 배우기처럼 오래 도는 작업이
+# 「database is locked」로 통째로 실패했다(운영: intro 묶기 2시간 반 뒤 · contracts 기준 배우기).
+SEMANTIC_DB_TIMEOUT = 30.0
+
+
+def _conn(store_name: str, timeout: float = SEMANTIC_DB_TIMEOUT):
     conn = docsearch._connect(store_name, timeout=timeout)
     conn.executescript(_SCHEMA)
     for table, column in _ADDED:
@@ -918,7 +924,6 @@ def confirm_template(store_name: str, tid: str, rules: dict, actor: str) -> dict
 # 개체를 단다(origin path — LLM 없음). 경로에서 얻은 사실은 **늘 경로에서 다시 만든다**(apply_paths — 분석이 끝날 때마다):
 # 폴더 이름이 바뀌면(차수) 그대로 따라간다. 내용에서 뽑은 것보다 약하다 — 어긋나면 알린다(mismatches).
 PATH_MISMATCH_EXAMPLES = 10
-PATH_WRITE_TIMEOUT = 30.0     # 확정의 쓰기는 다른 쓰기(분석·색인)가 끝나기를 이만큼 기다린다(기본 5초)
 _PATH_ID = re.compile(r"식별자 (\S+)")     # _path_nodes가 근거에 떼어 적은 식별자
 
 
@@ -978,7 +983,7 @@ def confirm_paths(store_name: str, slots: list[dict], actor: str) -> dict:
     """대응을 확정한다 — [{key, cls, name_from}]. 칸은 지금 판정한 후보에서만 고른다(모양·위치는 후보의 것). 빈 목록이면
     대응을 지운다. 확정하면 바로 적용한다(경로에서 만드는 것이라 싸다)."""
     by_key = {c["key"]: c for c in _path_candidates(store_name)}
-    conn = _conn(store_name, timeout=PATH_WRITE_TIMEOUT)
+    conn = _conn(store_name)
     try:
         paths = [r["path"] for r in conn.execute("SELECT path FROM docs")]
         links = _path_links(store_name, list(by_key.values()), paths)
@@ -1845,15 +1850,20 @@ def propose_merges(db: Session, store_name: str, report=_quiet) -> dict:
             mapping = _constrained_groups(names, same_pairs, cannot)
             old = {r["alias"]: r["canonical"] for r in conn.execute(
                 "SELECT alias, canonical FROM sem_aliases WHERE cls = ?", (cls,))}
+            # 별칭마다 근거(가장 믿을 만한 짝의 출처)를 **쓰기 전에** 정한다 — 예전에는 지우기로 쓰기 잠금을 잡은 뒤 별칭마다
+            # 짝 전체를 훑어(별칭 × 짝) 그동안 다른 쓰기가 막혔다
+            source_of: dict[str, str] = {}
+            for a, b, src in same_pairs:
+                source_of.setdefault(a, src)
+                source_of.setdefault(b, src)
+            rows_out = [(cls, alias, canonical, {"id": "같은 식별자", "rule": "이름 기준", "llm": "LLM 판정·검토",
+                                                 "human": "사람이 확인"}.get(source_of.get(alias, "rule"), source_of.get(alias, "rule")))
+                        for alias, canonical in mapping.items()]
             conn.execute("DELETE FROM sem_aliases WHERE cls = ?", (cls,))
-            for alias, canonical in mapping.items():
-                source = next((src for a, b, src in same_pairs if {a, b} & {alias}), "rule")
-                conn.execute("INSERT INTO sem_aliases (cls, alias, canonical, reason) VALUES (?, ?, ?, ?)",
-                             (cls, alias, canonical, {"id": "같은 식별자", "rule": "이름 기준", "llm": "LLM 판정·검토",
-                                                      "human": "사람이 확인"}.get(source, source)))
-                if old.get(alias) != canonical:
-                    applied.append({"cls": cls, "alias": alias, "canonical": canonical, "reason": source})
+            conn.executemany("INSERT INTO sem_aliases (cls, alias, canonical, reason) VALUES (?, ?, ?, ?)", rows_out)
             conn.commit()
+            applied += [{"cls": cls, "alias": alias, "canonical": canonical, "reason": source_of.get(alias, "rule")}
+                        for alias, canonical in mapping.items() if old.get(alias) != canonical]
 
         draft = _propose_merge_rules(db, provider, rules, llm_same) if llm_same else None
         if draft:
