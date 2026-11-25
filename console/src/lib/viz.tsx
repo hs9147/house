@@ -19,6 +19,10 @@ import { useEffect, useRef, useState } from 'react';
  *     그래서 **색만으로 뜻을 나르지 않는다** — 범례에 기호와 이름을 함께 둔다.
  *   - 크기 격자(히트맵) → 같은 blue 램프. 어두운 배경이라 **큰 값이 밝다**(0에 가까울수록
  *     배경에 가깝게 가라앉는다).
+ *   - 부분 → 전체에서 부분마다 다른 **정체**(내용 분석이 처리한 길·개체가 나온 곳) → 범주 팔레트를 정한 순서로
+ *     (돌려 쓰지 않는다): blue·orange·aqua·yellow·magenta(dataviz 기준 팔레트의 dark 단계). 검증 통과:
+ *     `#3987e5,#d95926,#199e70,#c98500,#d55181` (dark, surface #1a1b2a — 밝기대·채도·대비 PASS, 이웃 쌍 CVD
+ *     ΔE 최저 8.4 · 정상 시각 19.3). 남은 몫·건너뜀은 중립 회색, 실패는 상태 색(critical) — 범례에 이름을 함께 둔다.
  */
 export const VIZ = {
   surface: '#1a1b2a',      // --panel
@@ -29,6 +33,8 @@ export const VIZ = {
   series: '#3987e5',       // 단일 시리즈(범주 비교)
   ordinal: ['#cde2fb', '#9ec5f4', '#6da7ec', '#3987e5', '#1c5cab'],
   status: { good: '#0ca30c', warning: '#fab219', critical: '#d03b3b' },
+  categorical: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181'],
+  neutral: '#5b5c70',      // 남은 몫·건너뜀 — 정체가 아닌 나머지
   // 히트맵 램프(0 → 최대). 어두운 표면에서 큰 값이 밝아지도록 램프를 뒤집어 쓴다.
   heat: ['#232438', '#1c5cab', '#2a78d6', '#3987e5', '#6da7ec', '#9ec5f4', '#cde2fb'],
 } as const;

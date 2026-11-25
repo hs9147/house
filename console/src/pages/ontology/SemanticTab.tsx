@@ -4,6 +4,11 @@ import Modal from '../../components/Modal';
 import { api } from '../../lib/api';
 import { useApi, usePolling } from '../../lib/hooks';
 import { readablePattern } from '../../lib/pathshape';
+import { VIZ } from '../../lib/viz';
+import {
+  Advanced, ANALYZED_PARTS, Breakdown, DocRef, LayerBadge, MappingView, ORIGIN_LABEL, PAIR_SOURCE_LABEL, Quote,
+  RulesView, SchemaView,
+} from './semanticViews';
 import { runTask } from '../../lib/tasks';
 import type {
   OntologyOperations, OntologyQuality, SemanticForm, SemanticHit, SemanticMapping, SemanticMergeRules, SemanticNeighbors, SemanticReview, SemanticSchema,
@@ -248,16 +253,19 @@ function SchemaStep({ status, busy, onPropose, onConfirm }: {
     <section style={{ marginTop: 12 }}>
       <h3 style={{ fontSize: 14 }}>① 스키마 — 개념·관계 종류</h3>
       {confirmed && (
-        <p style={{ fontSize: 12 }}>
-          ✅ 확정 판 <span className="mono">{confirmed.version}</span> ({confirmed.confirmed_by}, {confirmed.confirmed_at}) — 개념{' '}
-          {confirmed.classes.map((c) => `${c.name}[${LAYER[c.layer ?? 'entity']}]`).join(' · ')} / 관계{' '}
-          {confirmed.relations.map((r) => `${r.from}→${r.name}→${r.to}${r.temporal ? '⏱' : ''}`).join(', ')}
-        </p>
+        <details open={!draft} style={{ fontSize: 12 }}>
+          <summary style={{ cursor: 'pointer' }}>
+            ✅ 확정한 스키마 — 개념 {confirmed.classes.length} · 관계 {confirmed.relations.length}
+            <span className="mutedtext"> · {confirmed.confirmed_by} · {when(confirmed.confirmed_at)}</span>
+          </summary>
+          <SchemaView schema={confirmed} />
+        </details>
       )}
-      <p className="mutedtext" style={{ fontSize: 11, margin: '2px 0' }}>
-        개념마다 층위(layer)를 정합니다 — <b>reference</b> 기준 지식(규정·용어·절차, 개정으로 바뀜) · <b>entity</b> 대상(협력사·품목,
-        신원) · <b>state</b> 상태(등급·상태, 시점마다 바뀜) · <b>event</b> 사건(계약·견적, 일어난 때). 상태·사건에 닿는 관계는
-        시점에 매이고(⏱ temporal) 문서마다 관측으로 쌓여 최신 값과 이력이 남습니다. 기준 지식의 항목은 표본이 아니어도 검토합니다.
+      <p className="mutedtext" style={{ fontSize: 12, margin: '6px 0' }}>
+        개념마다 층위를 정합니다 — <LayerBadge layer="reference" /> 규정·용어·절차(개정으로 바뀜)
+        {' · '}<LayerBadge layer="entity" /> 협력사·품목(신원) · <LayerBadge layer="state" /> 등급·상태(시점마다 바뀜)
+        {' · '}<LayerBadge layer="event" /> 계약·견적(일어난 때). 상태·사건에 닿는 관계에는 「시점」이 붙어 문서마다 관측으로
+        쌓이고 최신 값과 이력이 남습니다. 기준 지식은 표본이 아니어도 검토합니다.
       </p>
       <button className="secondary" disabled={busy} onClick={onPropose}>
         {draft ? '다시 제안·검토(LLM)' : '스키마 제안·검토(LLM)'}
@@ -265,12 +273,17 @@ function SchemaStep({ status, busy, onPropose, onConfirm }: {
       {draft && (
         <div style={{ marginTop: 8 }}>
           <p className="mutedtext" style={{ fontSize: 12, margin: 0 }}>
-            표본 {draft.samples.length}건으로 제안({draft.provider}, {draft.created_at}) — 원안 개념{' '}
-            {draft.proposal.classes.map((c) => c.name).join('·')}
+            검토를 거친 안 — 표본 문서 {draft.samples.length}건 · {draft.provider} · {when(draft.created_at)}
           </p>
           <Issues review={draft.review} />
           {draft.problems.length > 0 && <p className="error" style={{ fontSize: 12 }}>기계 검사: {draft.problems.join(' / ')}</p>}
-          <JsonEditor value={draft.revised} onConfirm={onConfirm} label={confirmed ? '이 안으로 판 바꾸기(문서를 다시 분석)' : '확정'} />
+          <SchemaView schema={draft.revised} />
+          <button style={{ marginTop: 6 }} onClick={() => onConfirm(draft.revised)}>
+            {confirmed ? '이 안으로 판 바꾸기(문서를 다시 분석)' : '이 안으로 확정'}
+          </button>
+          <Advanced>
+            <JsonEditor value={draft.revised} onConfirm={onConfirm} label="고친 JSON으로 확정" />
+          </Advanced>
         </div>
       )}
     </section>
@@ -296,7 +309,7 @@ function FormsStep({ forms, schemaVersion, busy, onPropose, onConfirm }: {
             const stale = f.confirmed && f.confirmed.schema_version !== schemaVersion;
             return (
               <tr key={f.name}>
-                <td className="mono" style={{ maxWidth: 420 }}>{f.name}</td>
+                <td style={{ maxWidth: 420 }}>{f.columns.join(' · ')}</td>
                 <td>{f.documents.toLocaleString()}건</td>
                 <td>{f.confirmed ? (stale ? '⚠️ 옛 스키마의 대응표' : '✅ 확정') : f.draft ? '검토된 안 있음' : '—'}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>
@@ -309,7 +322,7 @@ function FormsStep({ forms, schemaVersion, busy, onPropose, onConfirm }: {
         </tbody>
       </table>
       {forms.filter((f) => f.name === open && f.draft).map((f) => (
-        <Modal key={f.name} title={`양식 대응표 — ${f.name}`} onClose={() => setOpen('')} wide>
+        <Modal key={f.name} title={`양식 대응표 — ${f.columns.join(' · ')}`} onClose={() => setOpen('')} wide>
           <div className="mutedtext" style={{ fontSize: 12 }}>{f.documents.toLocaleString()}건 · 실제 값 표본</div>
           <table style={{ fontSize: 11 }}>
             <thead><tr>{f.columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
@@ -318,7 +331,11 @@ function FormsStep({ forms, schemaVersion, busy, onPropose, onConfirm }: {
           </table>
           <Issues review={f.draft!.review} />
           {f.draft!.problems.length > 0 && <p className="error" style={{ fontSize: 12 }}>기계 검사: {f.draft!.problems.join(' / ')}</p>}
-          <JsonEditor value={f.draft!.revised} onConfirm={(m) => { onConfirm(f.name, m); setOpen(''); }} label="대응표 확정" />
+          <MappingView mapping={f.draft!.revised} columns={f.columns} />
+          <button style={{ marginTop: 6 }} onClick={() => { onConfirm(f.name, f.draft!.revised); setOpen(''); }}>이 대응표로 확정</button>
+          <Advanced>
+            <JsonEditor value={f.draft!.revised} onConfirm={(m) => { onConfirm(f.name, m); setOpen(''); }} label="고친 JSON으로 확정" />
+          </Advanced>
         </Modal>
       ))}
     </section>
@@ -326,6 +343,7 @@ function FormsStep({ forms, schemaVersion, busy, onPropose, onConfirm }: {
 }
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
+const when = (iso?: string | null) => (iso ? new Date(iso).toLocaleString('ko-KR', { dateStyle: 'medium', timeStyle: 'short' }) : '');
 
 type PathPick = { cls: string; name_from: 'value' | 'tail' | 'link'; link_store?: string };
 
@@ -468,7 +486,7 @@ function EvalView({ title, ev, need }: { title: string; ev: SemanticTemplateEval
       <ul style={{ paddingLeft: 18, margin: '2px 0' }}>
         {ev.docs.map((d) => (
           <li key={d.path}>
-            <span className="mono">{d.path}</span>
+            <DocRef path={d.path} />
             {d.missing_required.length > 0 && <span className="error"> 필수 필드 못 찾음(LLM으로 넘김)</span>}
             {d.extra.length > 0 && <span> · 더 뽑음: {d.extra.join(', ')}</span>}
             {d.missed.length > 0 && <span className="mutedtext"> · 놓침: {d.missed.join(', ')}</span>}
@@ -500,7 +518,7 @@ function TemplatesStep({ templates, schemaVersion, busy, onPropose, onConfirm }:
             return (
               <tr key={t.id}>
                 <td style={{ maxWidth: 420 }} title={t.skeleton.join('\n')}>
-                  {t.label}<div className="mutedtext mono">예: {t.example}</div>
+                  {t.label}<div className="mutedtext">예: <DocRef path={t.example} /></div>
                 </td>
                 <td>{t.documents.toLocaleString()}건</td>
                 <td>{t.confirmed
@@ -521,20 +539,26 @@ function TemplatesStep({ templates, schemaVersion, busy, onPropose, onConfirm }:
         return (
           <Modal key={t.id} title={`템플릿 규칙 — ${t.label}`} onClose={() => setOpen('')} wide>
             <div className="mutedtext" style={{ fontSize: 12 }}>
-              {t.documents.toLocaleString()}건 · 예: <span className="mono">{t.example}</span>
+              {t.documents.toLocaleString()}건 · 예: <DocRef path={t.example} />
             </div>
             <details style={{ fontSize: 12, margin: '4px 0' }}>
               <summary style={{ cursor: 'pointer' }}>뼈대(되풀이되는 줄) {t.skeleton.length}</summary>
               <pre className="mono" style={{ fontSize: 11, whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto' }}>{t.skeleton.join('\n')}</pre>
             </details>
             <div className="mutedtext" style={{ fontSize: 12 }}>
-              규칙을 짠 문서: {d.train.join(', ')} · 검증 문서: {d.check.map((c) => c.path).join(', ')}
+              규칙을 짠 문서 {d.train.map((x, i) => <span key={x}>{i ? ', ' : ' '}<DocRef path={x} /></span>)}
+              {' · '}검증한 문서 {d.check.map((c, i) => <span key={c.path}>{i ? ', ' : ' '}<DocRef path={c.path} /></span>)}
             </div>
             {fixed && d.first && <EvalView title="처음 규칙" ev={d.first} need={d.precision_needed} />}
             {d.evaluation && <EvalView title={fixed ? '검증 결과로 고친 규칙' : '검증'} ev={d.evaluation} need={d.precision_needed} />}
             {d.problems.length > 0 && <p className="error" style={{ fontSize: 12 }}>기계 검사: {d.problems.join(' / ')}</p>}
-            <JsonEditor value={d.revised} onConfirm={(r) => { onConfirm(t.id, r); setOpen(''); }}
-              label="규칙 확정(검증 문서로 다시 잽니다)" />
+            <RulesView rules={d.revised} />
+            <button style={{ marginTop: 6 }} onClick={() => { onConfirm(t.id, d.revised); setOpen(''); }}>
+              이 규칙으로 확정(검증 문서로 다시 잽니다)
+            </button>
+            <Advanced>
+              <JsonEditor value={d.revised} onConfirm={(r) => { onConfirm(t.id, r); setOpen(''); }} label="고친 JSON으로 확정" />
+            </Advanced>
           </Modal>
         );
       })}
@@ -549,17 +573,24 @@ function AnalyzeStep({ status, onAction }: { status: SemanticStatus; onAction: (
   return (
     <section style={{ marginTop: 16 }}>
       <h3 style={{ fontSize: 14 }}>③ 문서 분석</h3>
-      <p style={{ fontSize: 12, margin: '4px 0' }}>
-        {done.toLocaleString()} / {status.documents.toLocaleString()}건 — LLM {status.analyzed.ok ?? 0} · 양식 규칙{' '}
-        {status.analyzed.form ?? 0} · 템플릿 규칙 {status.analyzed.template ?? 0} · 같은 본문 옮김 {status.analyzed.copy ?? 0} · 건너뜀(작업 파일·빈 문서){' '}
-        {status.analyzed.skipped ?? 0} · 실패 {status.analyzed.failed ?? 0}
-        {' · '}표본 검토 {status.review.items}개 중 틀림 {status.review.wrong}
-        {rate !== null && ` (${Math.round(rate * 100)}%, 멈춤 기준 ${Math.round(status.review.stop_rate * 100)}%)`}
-        {status.review.check_items > 0
-          && ` · 이름이 근거에 없는 항목 검토 ${status.review.check_items}개 중 틀림 ${status.review.check_wrong}`}
-        {' · '}개념 {Object.values(status.counts.nodes).reduce((n, v) => n + v, 0).toLocaleString()} · 관계{' '}
-        {Object.values(status.counts.edges).reduce((n, v) => n + v, 0).toLocaleString()}
-      </p>
+      <div style={{ fontSize: 12, margin: '4px 0' }}>
+        <b>{done.toLocaleString()}</b> / {status.documents.toLocaleString()}건 분석 — 처리한 길
+        <Breakdown parts={ANALYZED_PARTS(status.analyzed)} total={status.documents} />
+      </div>
+      <div className="row" style={{ gap: 16, flexWrap: 'wrap', fontSize: 12, margin: '4px 0' }}>
+        <span>뽑은 개념 <b>{Object.values(status.counts.nodes).reduce((n, v) => n + v, 0).toLocaleString()}</b>
+          {' · '}관계 <b>{Object.values(status.counts.edges).reduce((n, v) => n + v, 0).toLocaleString()}</b></span>
+        <span title="문서 10건 중 1건을 골라 LLM이 뽑은 것을 다시 검토한다 — 틀린 비율이 멈춤 기준을 넘으면 분석이 멈춘다">
+          표본 검토 오류율{' '}
+          <b style={{ color: rate !== null && rate > status.review.stop_rate ? VIZ.status.critical : undefined }}>
+            {rate === null ? '—' : `${Math.round(rate * 100)}%`}</b>
+          <span className="mutedtext"> ({status.review.wrong}/{status.review.items}개 · 멈춤 기준 {Math.round(status.review.stop_rate * 100)}%)</span>
+        </span>
+        {status.review.check_items > 0 && (
+          <span>근거에 이름이 없던 항목 <b>{status.review.check_wrong}</b>
+            <span className="mutedtext">/{status.review.check_items}개 틀림</span></span>
+        )}
+      </div>
       {status.paused && <p className="error" style={{ fontSize: 12 }}>⏸ {status.paused}</p>}
       <div className="row" style={{ gap: 6 }}>
         {status.running
@@ -576,7 +607,7 @@ function AnalyzeStep({ status, onAction }: { status: SemanticStatus; onAction: (
             {status.review.notes.slice().reverse().map((n, i) => (
               <li key={i}>
                 <b>{n.item}</b> — {n.problem}
-                <div className="mutedtext">“{n.evidence}” — <span className="mono">{n.path}</span></div>
+                <Quote text={n.evidence} path={n.path} />
               </li>
             ))}
           </ul>
@@ -585,13 +616,16 @@ function AnalyzeStep({ status, onAction }: { status: SemanticStatus; onAction: (
       {status.failed.length > 0 && (
         <details style={{ fontSize: 12, marginTop: 6 }}>
           <summary>실패한 문서 {status.failed.length}건</summary>
-          <ul>{status.failed.map((f) => <li key={f.path}><span className="mono">{f.path}</span>: {f.error}</li>)}</ul>
+          <ul>{status.failed.map((f) => <li key={f.path}><DocRef path={f.path} /> — {f.error}</li>)}</ul>
         </details>
       )}
       {outside.length > 0 && (
-        <p className="mutedtext" style={{ fontSize: 12 }}>
-          스키마 밖 후보(다음 판에 넣을지): {outside.map(([n, c]) => `${n}(${c})`).join(', ')}
-        </p>
+        <div style={{ fontSize: 12, marginTop: 6 }}>
+          <span className="mutedtext">스키마에 없는 개념 후보 — 다음 판에 넣을지: </span>
+          {outside.map(([n, c]) => (
+            <span key={n} className="status dim" style={{ marginRight: 4 }} title={`문서 ${c}건에서 나옴`}>{n} {c}</span>
+          ))}
+        </div>
       )}
     </section>
   );
@@ -627,13 +661,32 @@ function MergeStep({ status, busy, onMerge, onUnmerge, onRules }: {
       </p>
       <button className="secondary" disabled={busy} onClick={onMerge}>묶기(기준 → 애매한 짝만 LLM)</button>
       {last && (
-        <p className="mutedtext" style={{ fontSize: 12 }}>
-          {last.at}: 묶음 {last.applied.length}건 새로 적용
-          {st && ` · 짝 ${st.pairs.toLocaleString()}개 — 식별자 ${st.id} · 기준 ${st.rule} · LLM ${st.llm}(호출 ${st.llm_calls})`
-            + ` · 지난 판정 재사용 ${st.cached} · 사람이 정한 것 ${st.human}`}
-          {last.rejected.length > 0 && ` · LLM이 다르다고 한 짝 ${last.rejected.length}개 (`
-            + `${last.rejected.slice(0, 8).map((r) => `${r.a}≠${r.b}`).join(', ')}${last.rejected.length > 8 ? ' …' : ''})`}
-        </p>
+        <div style={{ fontSize: 12, marginTop: 6 }}>
+          마지막 묶기 {when(last.at)} — 새로 묶인 이름 <b>{last.applied.length}</b>개
+          {st && (
+            <>
+              <div className="mutedtext" style={{ marginTop: 4 }}>
+                살펴본 짝 {st.pairs.toLocaleString()}개를 정한 길 · LLM 호출 {st.llm_calls}회
+              </div>
+              <Breakdown unit="쌍" parts={[
+                { label: '같은 식별자', value: st.id, color: VIZ.categorical[0] },
+                { label: '이름 기준', value: st.rule, color: VIZ.categorical[1] },
+                { label: 'LLM 판정', value: st.llm, color: VIZ.categorical[2] },
+                { label: '지난 판정 그대로', value: st.cached, color: VIZ.categorical[3] },
+                { label: '사람이 정함', value: st.human, color: VIZ.categorical[4] },
+              ]} />
+            </>
+          )}
+          {last.rejected.length > 0 && (
+            <div style={{ marginTop: 4 }}>
+              <span className="mutedtext">LLM이 다른 대상이라고 한 짝 {last.rejected.length}개: </span>
+              {last.rejected.slice(0, 8).map((r) => (
+                <span key={`${r.a}|${r.b}`} className="status dim" style={{ marginRight: 4 }} title={r.reason}>{r.a} ≠ {r.b}</span>
+              ))}
+              {last.rejected.length > 8 && <span className="mutedtext">…</span>}
+            </div>
+          )}
+        </div>
       )}
       {draft && (
         <div style={{ fontSize: 12, padding: 8, marginTop: 8, border: '1px solid var(--border)', borderRadius: 6 }}>
@@ -655,12 +708,24 @@ function MergeStep({ status, busy, onMerge, onUnmerge, onRules }: {
         <button className="small" disabled={busy} onClick={saveText}>기준 확정</button>
       </details>
       {status.aliases.length > 0 && (
-        <table style={{ fontSize: 12 }}>
-          <thead><tr><th>개념</th><th>이름</th><th>대표 이름</th><th>이유</th><th /></tr></thead>
-          <tbody>{status.aliases.map((a) => (
-            <tr key={`${a.cls}:${a.alias}`}>
-              <td>{a.cls}</td><td>{a.alias}</td><td>{a.canonical}</td><td className="mutedtext">{a.reason}</td>
-              <td><button className="small secondary" onClick={() => onUnmerge(a.cls, a.alias)}>풀기</button></td>
+        <table style={{ fontSize: 12, marginTop: 8 }}>
+          <thead><tr><th>개념</th><th>대표 이름</th><th>함께 묶인 이름 — ✕로 풀기</th></tr></thead>
+          <tbody>{Object.values(status.aliases.reduce<Record<string, { cls: string; canonical: string;
+                                                                      names: { alias: string; reason: string }[] }>>((g, a) => {
+            const k = `${a.cls}\t${a.canonical}`;
+            (g[k] ??= { cls: a.cls, canonical: a.canonical, names: [] }).names.push({ alias: a.alias, reason: a.reason });
+            return g;
+          }, {})).map((g) => (
+            <tr key={`${g.cls}:${g.canonical}`}>
+              <td className="mutedtext">{g.cls}</td>
+              <td><b>{g.canonical}</b></td>
+              <td>{g.names.map((n) => (
+                <span key={n.alias} className="status dim" style={{ marginRight: 4 }} title={`근거: ${n.reason}`}>
+                  {n.alias}
+                  <button className="small secondary" style={{ marginLeft: 4, padding: '0 4px' }} aria-label={`${n.alias} 풀기`}
+                          onClick={() => onUnmerge(g.cls, n.alias)}>✕</button>
+                </span>
+              ))}</td>
             </tr>))}
           </tbody>
         </table>
@@ -682,18 +747,20 @@ function GoldItem({ it }: { it: SemanticGoldItem }) {
   if (it.kind === 'pair') {
     return (
       <>
-        {why}<b>{it.cls}: {it.a} ↔ {it.b}</b>
-        <span className="mutedtext"> — 지금 판정 {it.decision === 'same' ? '같다' : '다르다'}({it.source}, 점수 {it.score?.toFixed(2)})</span>
-        {[it.a_evidence, it.b_evidence].map((e, i) => e && (
-          <div key={i} className="mutedtext">“{e.evidence.slice(0, 160)}” — <span className="mono">{e.path}</span></div>))}
+        {why}<b>{it.a}</b> <span className="mutedtext">와</span> <b>{it.b}</b> <span className="mutedtext">({it.cls})</span>
+        <span className="mutedtext"> — 지금은 「{it.decision === 'same' ? '같다' : '다르다'}」
+          · {PAIR_SOURCE_LABEL[it.source ?? ''] ?? it.source}{it.score ? ` · 이름 점수 ${it.score.toFixed(2)}` : ''}</span>
+        {[it.a_evidence, it.b_evidence].map((e, i) => e && <Quote key={i} text={e.evidence.slice(0, 200)} path={e.path} />)}
       </>
     );
   }
   return (
     <>
-      {why}<b>{it.kind === 'node' ? `${it.cls}: ${it.name}` : `${it.src} —${it.rel}→ ${it.dst}`}</b>
-      <span className="mutedtext"> ({it.origin})</span>
-      <div className="mutedtext">“{it.evidence?.slice(0, 200)}” — <span className="mono">{it.path}</span></div>
+      {why}{it.kind === 'node'
+        ? <><b>{it.name}</b> <span className="mutedtext">({it.cls})</span></>
+        : <><b>{it.src}</b> <span className="mutedtext">—</span> {it.rel} <span className="mutedtext">→</span> <b>{it.dst}</b></>}
+      <span className="mutedtext"> · {ORIGIN_LABEL[it.origin ?? ''] ?? it.origin}</span>
+      {it.evidence && it.path && <Quote text={it.evidence.slice(0, 240)} path={it.path} />}
     </>
   );
 }
@@ -817,7 +884,6 @@ function OperationsStep({ store, version }: { store: string; version: string }) 
   );
 }
 
-const LAYER: Record<string, string> = { reference: '기준 지식', entity: '대상', state: '상태', event: '사건' };
 
 /** ⑦ 품질 점검 — 개정 계열(시행일로 지금 판을 가른다)과 지금 판끼리 정의가 갈리는 용어(표준 용어 후보). */
 function QualityStep({ store }: { store: string }) {
@@ -955,29 +1021,28 @@ function Explore({ store, schema }: { store: string; schema: SemanticSchema }) {
           {hits.map((h) => (
             <button key={`${h.cls}:${h.name}`} className="small secondary" onClick={() => void open(h)}
               title={h.aliases.length ? `별칭: ${h.aliases.join(', ')}` : undefined}>
-              {h.cls} · {h.name} ({h.documents})
+              <b>{h.name}</b> <span className="mutedtext">{h.cls} · 문서 {h.documents}</span>
             </button>
           ))}
         </div>
       )}
       {picked && (
         <div style={{ marginTop: 8, fontSize: 12 }}>
-          <b>{picked.cls} · {picked.name}</b>{picked.layer && ` [${LAYER[picked.layer] ?? picked.layer}]`} — 관계{' '}
-          {picked.relations.length}{picked.as_of && ` (${picked.as_of} 기준)`}
+          <b style={{ fontSize: 13 }}>{picked.name}</b> <span className="mutedtext">{picked.cls}</span>{' '}
+          {picked.layer && <LayerBadge layer={picked.layer} />}
+          <span className="mutedtext"> — 관계 {picked.relations.length}{picked.as_of && ` · ${picked.as_of} 기준`}</span>
           <ul style={{ paddingLeft: 18 }}>
             {picked.relations.map((r) => (
               <li key={`${r.rel}:${r.direction}:${r.cls}:${r.name}`} style={{ marginBottom: 4, opacity: r.temporal && !r.current ? 0.6 : 1 }}>
-                {r.direction === 'out' ? `—${r.rel}→ ${r.cls} · ${r.name}` : `← ${r.cls} · ${r.name} —${r.rel}`}
+                {r.direction === 'out'
+                  ? <><span className="mutedtext">{r.rel} →</span> <b>{r.name}</b> <span className="mutedtext">({r.cls})</span></>
+                  : <><b>{r.name}</b> <span className="mutedtext">({r.cls}) — {r.rel} → 이 개체</span></>}
                 {r.temporal && (r.current
                   ? <span className="status ok" style={{ marginLeft: 6 }}>최신{r.latest && ` ${r.latest}`}</span>
                   : <span className="status dim" style={{ marginLeft: 6 }}>이력{r.latest && ` ${r.latest}`}</span>)}
                 {r.evidence.map((e, i) => (
-                  <div key={i} className="mutedtext">
-                    “{e.text}” — <span className="mono">{e.path}</span>{e.origin === 'form' && ' (양식 규칙)'}
-                    {e.origin === 'list' && ' (데이터 수집 목록)'}
-                    {e.observed_at && ` · 관측 ${e.observed_at}`}
-                    {(e.valid_from || e.valid_to) && ` · 효력 ${e.valid_from || '…'}~${e.valid_to || '…'}`}
-                  </div>
+                  <Quote key={i} text={e.text} path={e.path} origin={e.origin} observed={e.observed_at}
+                         from={e.valid_from} to={e.valid_to} />
                 ))}
               </li>
             ))}

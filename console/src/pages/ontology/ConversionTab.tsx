@@ -7,6 +7,7 @@ import { useApi } from '../../lib/hooks';
 import { isAdmin } from '../../lib/auth';
 import type { OntologyOverview, OntologyProgress, OntologyProgressStore, OntologyStore } from '../../lib/types';
 import { BarList, Heatmap, StatTile, VIZ, fmt } from '../../lib/viz';
+import { ANALYZED_PARTS, Breakdown, ORIGIN_PARTS } from './semanticViews';
 
 /**
  * 전환 현황 — 저장소마다 **정보 조회 → 내용 분석 → 워크플로 연결**이 어디까지 왔고 다음에 무엇을 할지
@@ -173,13 +174,6 @@ function StoreRow({ r }: { r: OntologyProgressStore }) {
   );
 }
 
-const ANALYZED_LABEL: Record<string, string> = {
-  ok: 'LLM', form: '양식(②-1)', template: '템플릿(②-2)', copy: '같은 본문', skipped: '건너뜀', failed: '실패',
-};
-const ORIGIN_LABEL: Record<string, string> = {
-  llm: 'LLM', form: '양식', template: '템플릿', list: '수집 목록', path: '경로 틀',
-};
-
 function SemanticDetail({ p }: { p: OntologyProgress }) {
   const rows = p.stores.filter((r) => r.semantic);
   return (
@@ -200,10 +194,8 @@ function SemanticDetail({ p }: { p: OntologyProgress }) {
                 <td className="mono">
                   <Link to={`/ontology/semantic?store=${encodeURIComponent(r.store)}`}>{r.store}</Link>
                 </td>
-                <td>{Object.keys(s.analyzed).length === 0 ? <span className="mutedtext">아직 없음</span>
-                  : Object.entries(s.analyzed).map(([k, v]) => `${ANALYZED_LABEL[k] ?? k} ${fmt(v)}`).join(' · ')}</td>
-                <td>{Object.keys(s.nodes).length === 0 ? <span className="mutedtext">없음</span>
-                  : Object.entries(s.nodes).map(([k, v]) => `${ORIGIN_LABEL[k] ?? k} ${fmt(v)}`).join(' · ')}</td>
+                <td style={{ minWidth: 260 }}><Breakdown parts={ANALYZED_PARTS(s.analyzed)} total={s.documents} /></td>
+                <td style={{ minWidth: 260 }}><Breakdown parts={ORIGIN_PARTS(s.nodes)} unit="개" /></td>
                 <td className="mono">{fmt(s.edges)}</td>
                 <td className="mono">{fmt(s.aliases)}</td>
                 <td style={{ maxWidth: 320 }}>
