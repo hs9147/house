@@ -2,7 +2,10 @@ import os
 import secrets
 from pathlib import Path
 
-from fastapi import FastAPI
+import traceback
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from starlette.staticfiles import StaticFiles
 
 from .api import (
@@ -131,6 +134,15 @@ def create_app() -> FastAPI:
         ),
         version="0.1.0",
     )
+
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception):
+        # 처리하지 못한 예외도 **까닭을 돌려준다** — 본문이 「Internal Server Error」뿐이면 화면에는 「HTTP 500」만 뜨고,
+        # 어느 요청이 왜 실패했는지 서버 로그를 열기 전에는 알 수 없다(내용 분석 ②-3 확정 직후 화면에서 겪었다).
+        # 예외 종류·메시지와 요청 경로만 싣는다(traceback은 서버 로그에).
+        traceback.print_exception(exc)
+        return JSONResponse(status_code=500, content={
+            "detail": f"서버 오류 — {type(exc).__name__}: {str(exc)[:300]} ({request.method} {request.url.path})"})
     # 요청 경로를 관측 컨텍스트에 넣는다 — LLM 호출 기록에 "어디서 왔는지"가 적힌다
     # (services/telemetry.py). 이 플랫폼의 유일한 미들웨어이므로 순수 ASGI로 두고,
     # 요청마다 DB에 쓰지는 않는다 — 쓰기 증폭이 관측보다 먼저 문제가 된다.
