@@ -1357,3 +1357,37 @@ def test_progress_shows_every_stage_per_store_and_the_next_step(store, monkeypat
     assert out["confirmed"]["slots"][0]["cls"] == "계약" and out["candidates"][0]["pattern"] == r"KR\-CT\d{9}"
     r, _ = row()
     assert r["next"] == {"stage": "워크플로 연결", "text": "이 저장소를 쓰는 워크플로를 연결하세요", "tab": "workflows"}
+
+
+def test_reading_status_is_not_blocked_while_analysis_writes_and_unchanged_paths_are_not_rewritten(store):
+    """운영 contracts: 분석(③)이 쓰는 동안 화면의 상태 조회가 「database is locked」로 실패했다. 색인 DB는 WAL이라 쓰기가
+    잡고 있어도 읽기가 된다. 경로 틀 적용은 바뀐 것이 없으면 쓰지 않는다(분석이 예산마다 부른다)."""
+    import sqlite3
+
+    root = Path(get_settings().doc_roots.split("=")[-1] if "=" in get_settings().doc_roots else get_settings().doc_roots)
+    for i in range(5):
+        no = f"KR-CT2404{i:05d}"
+        (root / f"{no}_0").mkdir()
+        (root / f"{no}_0" / f"{no}_품의.md").write_text(f"# 품의 {no}\n", encoding="utf-8")
+    docsearch.reindex("docs", root)
+    semantic.confirm_schema("docs", {**GOOD_SCHEMA, "classes": GOOD_SCHEMA["classes"] + [
+        {"name": "계약", "description": "", "examples": []}]}, "admin")
+    key = semantic.path_slots("docs")["candidates"][0]["key"]
+    first = semantic.confirm_paths("docs", [{"key": key, "cls": "계약"}], "admin")["applied"]
+    assert first["nodes"] == 5 and not first.get("unchanged")
+
+    writer = sqlite3.connect(docsearch.index_path("docs"), timeout=1)
+    try:
+        assert writer.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        writer.execute("BEGIN EXCLUSIVE")         # 분석이 커밋하는 순간처럼 쓰기를 잡고 있다
+        writer.execute("INSERT INTO sem_meta (key, value) VALUES ('probe', '1')")
+        conn = semantic._conn("docs", timeout=1)
+        try:
+            again = semantic.apply_paths(conn)    # 바뀐 것이 없다 — 쓰지 않으므로 잠금과 부딪히지 않는다
+        finally:
+            conn.close()
+        assert again["unchanged"] and again["nodes"] == 5
+        assert semantic.status("docs")["schema"]  # 읽기는 막히지 않는다
+    finally:
+        writer.rollback()
+        writer.close()

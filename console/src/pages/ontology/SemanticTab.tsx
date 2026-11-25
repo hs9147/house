@@ -71,6 +71,21 @@ export default function SemanticTab() {
 
   // 오래 걸리는 일(LLM 여러 번)은 **작업 트레이**에서 진행을 보인다 — 폴더 업로드와 같은 자리. 서버가 뒤에서 돌고
   // 단계·문구를 남기므로(semantic.submit) 브라우저는 그것을 읽어 옮긴다. 다른 메뉴로 가도 트레이에서 계속 보인다.
+  // 진행을 읽다 한 번 실패했다고 일을 「실패」로 끝내지 않는다 — 서버의 일은 그대로 돌고 있다(운영: 분석 중 상태 조회가
+  // 「database is locked」로 한 번 실패해 트레이가 실패로 끝났다). 연달아 MAX_MISSES번 실패할 때만 그 까닭으로 끝낸다.
+  const MAX_MISSES = 5;
+  const readStatus = async (where: string, h: { set: (v: { progress?: string }) => void }, misses: { n: number }) => {
+    try {
+      const s = await api.semanticStatus(where);
+      misses.n = 0;
+      return s;
+    } catch (e) {
+      misses.n += 1;
+      if (misses.n >= MAX_MISSES) throw e;
+      h.set({ progress: `진행을 읽지 못해 다시 봅니다(${misses.n}/${MAX_MISSES}) — ${(e as Error).message}` });
+      return null;
+    }
+  };
   const track = (label: string, start: () => Promise<unknown>) => {
     setError('');
     setNotice('');
@@ -78,9 +93,11 @@ export default function SemanticTab() {
     runTask(`semantic:${where}`, { label: `${label} · ${where}`, to: '/ontology/semantic' }, async (h) => {
       await start();
       if (where === store) await reload();   // 탭도 「진행 중」으로 — 버튼이 잠기고 화면이 따라 갱신된다
+      const misses = { n: 0 };
       for (;;) {
         await new Promise((ok) => setTimeout(ok, 2000));
-        const s = await api.semanticStatus(where);
+        const s = await readStatus(where, h, misses);
+        if (!s) continue;
         const t = s.task;
         h.set({ progress: t.progress || '진행 중…', sent: t.step ?? undefined, total: t.steps ?? undefined });
         if (t.done && !t.running) {
@@ -100,9 +117,11 @@ export default function SemanticTab() {
     runTask(`semantic-analyze:${where}`, { label: `내용 분석 · ${where}`, to: '/ontology/semantic' }, async (h) => {
       await api.semanticAnalyze(where, action);
       if (where === store) await reload();
+      const misses = { n: 0 };
       for (;;) {
         await new Promise((ok) => setTimeout(ok, 3000));
-        const s = await api.semanticStatus(where);
+        const s = await readStatus(where, h, misses);
+        if (!s) continue;
         const done = Object.values(s.analyzed).reduce((n, v) => n + v, 0);
         h.set({ sent: done, total: s.documents,
                 progress: `${done.toLocaleString()} / ${s.documents.toLocaleString()}건 — LLM ${s.analyzed.ok ?? 0} · `

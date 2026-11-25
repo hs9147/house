@@ -113,8 +113,33 @@ def index_path(store_name: str) -> Path:
     return directory / f"{store_name}.db"
 
 
+_WAL: set[str] = set()     # WAL로 바꾼 색인 파일(프로세스마다 한 번만 묻는다 — 바꾼 뒤에는 파일에 남는다)
+
+
+def _use_wal(conn: sqlite3.Connection, path: Path) -> None:
+    """색인 DB를 WAL 저널로 — **읽기와 쓰기가 서로 막지 않는다.**
+
+    rollback 저널에서는 쓰는 쪽이 커밋하는 동안 읽기도 막힌다. 내용 분석(③)이 문서마다 결과를 쓰는 동안 화면이 3초마다
+    상태를 읽다가 5초를 넘겨 「database is locked」가 났다(운영 contracts — 작업 트레이가 「실패」로 끝났다). WAL에서는 읽기가
+    쓰기를 기다리지 않는다. 네트워크 공유 위의 파일에서는 WAL이 안전하지 않아(공유 메모리) 로컬 경로일 때만 바꾼다.
+    색인은 파생 데이터라 synchronous=NORMAL로 둔다(전원이 나가면 마지막 커밋 몇 개를 잃을 수 있다 — 다음 색인이 맞춘다)."""
+    key = str(path)
+    if key.startswith(("\\\\", "//")):
+        return
+    if key not in _WAL:
+        try:
+            if conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
+                return
+            _WAL.add(key)
+        except sqlite3.OperationalError:
+            return   # 다른 연결이 쓰는 중이면 다음에 다시 — 바꾸지 못해도 예전 방식으로 돈다
+    conn.execute("PRAGMA synchronous=NORMAL")    # 연결마다 정하는 값이다(journal_mode와 달리 파일에 남지 않는다)
+
+
 def _connect(store_name: str, timeout: float = 5.0) -> sqlite3.Connection:
-    conn = sqlite3.connect(index_path(store_name), timeout=timeout)
+    path = index_path(store_name)
+    conn = sqlite3.connect(path, timeout=timeout)
+    _use_wal(conn, path)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
     _add_missing_columns(conn)

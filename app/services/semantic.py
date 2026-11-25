@@ -1116,6 +1116,13 @@ def apply_paths(conn) -> dict:
            if usable else {"nodes": 0, "documents": 0, "outside": 0, "stale": bool(confirmed)})
     if conn.in_transaction:      # 호출자가 남긴 쓰기가 있으면 먼저 닫는다(BEGIN이 겹치지 않게)
         conn.commit()
+    # 바뀐 것이 없으면 쓰지 않는다 — 분석은 예산(120초)마다 이것을 부르는데, 매번 7천여 행을 지우고 다시 쓰면 그동안 화면의
+    # 상태 조회가 막혔다(운영 contracts: 「database is locked」). 경로가 바뀐 문서(옮김·이름 바꿈)가 있을 때만 쓴다.
+    have = set(map(tuple, conn.execute(
+        "SELECT path, cls, name, evidence, origin, observed_at FROM sem_nodes WHERE origin = 'path'")))
+    if have == set(rows) and (not usable or (_get(conn, "paths_applied") or {}).get("version") == confirmed["version"]):
+        return {**out, **({"at": (_get(conn, "paths_applied") or {}).get("at", out.get("at"))} if usable else {}),
+                "unchanged": True}
     try:
         conn.execute("BEGIN IMMEDIATE")      # 쓰기 잠금을 여기서 — 계산은 끝났다
         conn.execute("DELETE FROM sem_nodes WHERE origin = 'path'")
