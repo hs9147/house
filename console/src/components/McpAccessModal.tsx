@@ -162,6 +162,7 @@ export default function McpAccessModal({ onClose }: { onClose: () => void }) {
               <ClientGuide target={target} servers={servers} token={token} os={os}
                            gateway={issued?.gateway ?? c.gateway_base_url} />
               <Troubleshoot target={target} />
+              {c.base_url && <AgentHandoff base={c.base_url} token={issued?.token} />}
             </>
           );
         }}
@@ -380,6 +381,61 @@ function ClientGuide({ target, servers, token, os, gateway }: {
       <CodeBlock text={gatewayEnv(gateway, token)} />
       <span className="mutedtext">MCP 토큰과 같은 토큰입니다.</span>
     </Step>
+  );
+}
+
+/**
+ * ③ 에이전트에게 전달 — 링크 하나(로그인 없이 읽히는 연결 안내 md — 비밀이 없다)와 에이전트에게 보낼 한 줄, md 내려받기.
+ * 안내는 토큰을 환경변수(PAAS_MCP_TOKEN)로만 가리킨다. 발급한 토큰을 파일에 넣는 것은 사람이 고를 때만 — 그 파일은
+ * 자격증명이라 저장소·공유 드라이브에 두면 안 된다(맨 위에 그렇게 적는다).
+ */
+function AgentHandoff({ base, token }: { base: string; token?: string }) {
+  const link = `${base}/api/v1/mcp/agent-setup.md`;
+  const [withToken, setWithToken] = useState(false);
+  const [error, setError] = useState('');
+  const message = `다음 안내를 읽고 paas MCP를 연결해 줘: ${link}\n`
+    + `토큰은 환경변수 ${TOKEN_ENV}에 ${token ? '넣어 두었어' : '넣어 둘게'}.`;
+  const download = async () => {
+    setError('');
+    try {
+      const res = await fetch(link);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      let md = await res.text();
+      if (withToken && token) {
+        const [head, ...rest] = md.split('\n');
+        md = [head, '',
+          '> ⚠️ **이 파일에는 토큰이 들어 있습니다** — 저장소·공유 드라이브·메신저에 두지 말고, 설정을 마치면 지우세요.',
+          '', '## 0. 토큰', '',
+          `아래 값을 환경변수 \`${TOKEN_ENV}\`에 넣은 뒤 1부터 진행한다.`, '',
+          '```', `Windows:       setx ${TOKEN_ENV} "${token}"`, `macOS·Linux:   export ${TOKEN_ENV}="${token}"`, '```',
+          ...rest].join('\n');
+      }
+      const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown;charset=utf-8' }));
+      const a = Object.assign(document.createElement('a'), { href: url, download: 'paas-mcp-agent-setup.md' });
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(`내려받지 못했습니다: ${(e as Error).message}`);
+    }
+  };
+  return (
+    <>
+      <h3 style={{ fontSize: 14, margin: '16px 0 6px' }}>③ 에이전트에게 전달</h3>
+      <p className="mutedtext" style={{ fontSize: 12, margin: '0 0 4px' }}>
+        에이전트가 읽고 스스로 연결하는 안내입니다 — 연결 명령(클라이언트별)·도구 목록·쓰는 규칙·안 될 때. <b>토큰은 들어 있지
+        않습니다</b>(환경변수 <span className="mono">{TOKEN_ENV}</span>로만 가리킵니다) — 링크를 그대로 건네도 됩니다.
+      </p>
+      <CodeBlock title="링크(로그인 없이 읽힘)" text={link} />
+      <CodeBlock title="에이전트에게 보낼 말" text={message} />
+      <div className="row" style={{ gap: 12, alignItems: 'center', fontSize: 12 }}>
+        <button className="small secondary" onClick={() => void download()}>md 내려받기</button>
+        <label title={token ? undefined : '①에서 토큰을 발급하면 고를 수 있습니다'} style={{ opacity: token ? 1 : 0.5 }}>
+          <input type="checkbox" disabled={!token} checked={withToken && !!token} onChange={(e) => setWithToken(e.target.checked)} />{' '}
+          발급한 토큰을 파일에 넣기 <span className="mutedtext">(그 파일이 자격증명이 됩니다)</span>
+        </label>
+      </div>
+      {error && <p className="error" style={{ fontSize: 12 }}>{error}</p>}
+    </>
   );
 }
 

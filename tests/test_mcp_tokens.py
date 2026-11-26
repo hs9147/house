@@ -410,3 +410,20 @@ def test_hub_finds_apps_and_opens_modules_through_three_tools(gitea_configured, 
     assert seen == [("http://jira.test/mcp", "search", {"q": "x"})]
     assert "error" in call("modules__call", {"module": "hr", "tool": "search"})   # 남의 조직 모듈
     assert seen == [("http://jira.test/mcp", "search", {"q": "x"})]
+
+
+def test_agent_setup_guide_is_public_has_no_secret_and_lists_the_hub_tools(monkeypatch, fresh_settings):
+    """에이전트에게 건넬 연결 안내 — 로그인 없이 읽히고(비밀이 없다), 통합 서버 주소·클라이언트별 등록·도구 목록·규칙을
+    담는다. 토큰은 환경변수 이름(PAAS_MCP_TOKEN)으로만 가리킨다. 운영 도구는 관리자에게만 붙으므로 목록에 없다."""
+    monkeypatch.setenv("PAAS_MCP_INTERNAL_BASE_URL", "http://gpax.lge.com/paas")
+    get_settings.cache_clear()
+    c = TestClient(create_app())
+    r = c.get(f"{API}/mcp/agent-setup.md")                   # 헤더 없이
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/markdown")
+    md = r.text
+    hub = "http://gpax.lge.com/paas/api/v1/mcp/hub"
+    assert f"claude mcp add --transport http --scope user paas {hub}" in md
+    assert 'bearer_token_env_var = "PAAS_MCP_TOKEN"' in md and "--allow-http" in md
+    assert "| `docs__search_docs` |" in md and "| `graph__find_concepts` |" in md
+    assert "| `ops__" not in md and "관리자 토큰에만" in md
+    assert "test-admin-key" not in md and "Bearer ey" not in md
