@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -99,8 +100,38 @@ def _clear_mcp_tools_cache():
     mcp_client.clear_tools_cache()
 
 
+_SCHEMA_TEMPLATE: Path | None = None
+
+
+def _schema_template() -> Path:
+    """표만 만들어 둔 빈 DB — 세션에 한 번 만든다.
+
+    테스트마다 DB 파일을 지우므로 다음 create_app()이 표를 처음부터 다시 만들었다. 그게 DDL 100여 번이고
+    SQLite는 문장마다 디스크에 확정해 **한 번에 약 1초**였다(create_app 1.17초 중 0.94초 — 실측). 시험이 600개를
+    넘으니 그것만 10분이 넘었다. 이제 이 파일을 복사해 두면 create_all은 있는 표를 확인만 한다.
+    한 트랜잭션으로 만들어 확정도 한 번이다. 데이터는 없다 — 기동 때 넣는 행은 지금처럼 create_app이 넣는다.
+    """
+    global _SCHEMA_TEMPLATE
+    if _SCHEMA_TEMPLATE is None:
+        from sqlalchemy import create_engine
+
+        import app.main  # noqa: F401 — 모든 모델이 Base.metadata에 올라오게
+        from app.db import Base
+
+        path = Path(tempfile.mkdtemp(prefix="paas-test-schema-")) / "schema.db"
+        template_engine = create_engine(f"sqlite:///{path.as_posix()}")
+        with template_engine.begin() as conn:
+            Base.metadata.create_all(conn)
+        template_engine.dispose()
+        _SCHEMA_TEMPLATE = path
+    return _SCHEMA_TEMPLATE
+
+
 @pytest.fixture(autouse=True)
 def _clean_db():
+    db_path = Path("./test-paas.db")
+    if os.environ.get("PAAS_DATABASE_URL") == "sqlite:///./test-paas.db" and not db_path.exists():
+        shutil.copyfile(_schema_template(), db_path)
     yield
     from app.db import engine
 
@@ -108,7 +139,6 @@ def _clean_db():
     # 배포 큐(services/jobs.py)의 백그라운드 스레드가 방금 연 세션을 아직 닫는 중일 수 있다
     # (테스트는 이미 통과했지만 스레드 종료는 비동기). Windows는 열린 파일 삭제를 POSIX보다
     # 엄격히 막아 PermissionError(WinError 32)를 낸다 — 짧게 재시도해 흡수한다.
-    db_path = Path("./test-paas.db")
     for attempt in range(20):
         try:
             db_path.unlink(missing_ok=True)
