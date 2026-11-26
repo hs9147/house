@@ -4,7 +4,7 @@ import secrets
 from datetime import timedelta, timezone
 
 from cryptography.fernet import Fernet, MultiFernet
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -207,6 +207,11 @@ def authenticate_bearer(token: str) -> ApiKey:
     settings = get_settings()
     # 내장 Provider가 켜져 있으면 우리 토큰은 oidc_issuer 설정 없이도 받는다 —
     # 발급·검증 모두 oidc_provider.issuer()라는 한 값으로 닫힌다.
+    from .services import mcp_oauth  # noqa: PLC0415
+
+    if mcp_oauth.is_access_token(token):
+        # MCP 액세스 토큰은 MCP 밖(콘솔·배포 API)에서 받지 않는다 — 개인 MCP 토큰과 같은 울타리.
+        raise HTTPException(status_code=401, detail="MCP 전용 토큰입니다 — MCP 주소에서만 쓸 수 있습니다.")
     key, expected_issuer = _verification_key_and_issuer(token)
     try:
         options = {"verify_aud": bool(settings.oidc_audience)}
@@ -327,6 +332,7 @@ def resolve_mcp_token(db: Session, token: str) -> ApiKey | None:
 
 
 def require_agent_key(
+    request: Request,
     x_api_key: str = Header(default=""),
     authorization: str = Header(default=""),
     db: Session = Depends(get_db),
@@ -345,12 +351,47 @@ def require_agent_key(
     token = x_api_key
     if not token and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
+    try:
+        return _agent_subject(request, token, x_api_key, authorization, db)
+    except HTTPException as e:
+        if e.status_code != 401:
+            raise
+        raise _with_oauth_challenge(e, request.url.path, presented=bool(token)) from None
+
+
+def _agent_subject(request: Request, token: str, x_api_key: str, authorization: str,
+                   db: Session) -> ApiKey:
+    from .services import mcp_oauth  # noqa: PLC0415 — 순환 import 회피
+
+    if token and mcp_oauth.is_access_token(token):
+        # GPAX 로그인으로 받은 MCP 액세스 토큰(services/mcp_oauth.py) — 승인한 MCP 주소에서만.
+        try:
+            email, is_admin = mcp_oauth.verify(db, token, request.url.path)
+        except mcp_oauth.OAuthError as e:
+            raise HTTPException(status_code=401, detail=e.description) from e
+        return ApiKey(name=email, key_hash="", is_admin=is_admin)
     if token and token.count(".") != 2:
         # JWT가 아니면 개인 MCP 토큰일 수 있다 — 아니면 아래 공통 판정으로 떨어진다.
         subject = resolve_mcp_token(db, token)
         if subject is not None:
             return subject
     return require_api_key(x_api_key=x_api_key, authorization=authorization, db=db)
+
+
+def _with_oauth_challenge(e: HTTPException, path: str, presented: bool) -> HTTPException:
+    """MCP 401에 「어디서 로그인하는지」를 싣는다(RFC 9728 §5.1) — MCP 클라이언트는 이 헤더를
+    보고 GPAX 로그인 창을 연다. 없으면 사람이 토큰을 찾아 붙여 넣는 길밖에 없다."""
+    from .services import mcp_oauth  # noqa: PLC0415
+
+    if not mcp_oauth.enabled():
+        return e
+    challenge = (f'Bearer resource_metadata="{mcp_oauth.resource_metadata_url(path)}", '
+                 f'scope="{mcp_oauth.SCOPE}"')
+    if presented:
+        challenge += ', error="invalid_token"'
+    headers = dict(e.headers or {})
+    headers["WWW-Authenticate"] = challenge
+    return HTTPException(status_code=401, detail=e.detail, headers=headers)
 
 
 def require_project_mcp_access(db: Session, key: ApiKey, project: Project) -> None:

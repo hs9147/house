@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     # 쓴다 — 이 둘이 달라도 되는 건 OIDC 규약이 보장한다.
     # 비우면(기본) 백채널도 브라우저와 같은 주소를 쓴다.
     oidc_provider_backchannel_url: str = ""
+    # MCP 클라이언트가 GPAX 로그인 창으로 연결하는 길(OAuth 2.1 + PKCE, services/mcp_oauth.py).
+    # oidc_provider_enabled와 platform_public_url이 함께 있어야 열린다 — 같은 로그인·서명 키를 쓴다.
+    # 개인 MCP 토큰은 이것과 상관없이 계속 받는다.
+    mcp_oauth_enabled: bool = True
 
     # --- 배포 작업 큐 ---
     deploy_workers: int = 2

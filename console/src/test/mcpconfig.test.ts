@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  codeCommand, codeProjectConfig, codexConfig, desktopConfig, gatewayEnv, geminiConfig, stdioBridge,
+  codeCommand, codeLoginCommand, codeProjectConfig, codexConfig, desktopConfig, gatewayEnv, geminiConfig, stdioBridge,
   tokenEnvCommand, vscodeConfig,
 } from '../lib/mcpconfig';
 
@@ -42,6 +42,12 @@ describe('토큰을 저장소에 남기지 않는 설정', () => {
     expect(cmd).toHaveLength(2);
     expect(cmd[0]).toBe('claude mcp add --transport http --scope user paas-docs '
       + 'http://gpax.lge.com/paas/api/v1/mcp/docs --header "Authorization: Bearer tok"');
+  });
+
+  it('GPAX 로그인으로 연결할 때는 헤더 없이 주소만', () => {
+    const cmd = codeLoginCommand(servers.slice(0, 1));
+    expect(cmd).toBe('claude mcp add --transport http --scope user paas-docs http://gpax.lge.com/paas/api/v1/mcp/docs');
+    expect(cmd).not.toContain('Authorization');
   });
 
   it('프로젝트 .mcp.json에는 환경변수 이름만', () => {

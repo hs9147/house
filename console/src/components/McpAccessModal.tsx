@@ -1,9 +1,9 @@
 import { useState, type ReactNode } from 'react';
-import { api } from '../lib/api';
+import { api, type McpGrant } from '../lib/api';
 import { copyText } from '../lib/clipboard';
 import { useApi } from '../lib/hooks';
 import {
-  codeCommand, codeProjectConfig, codexConfig, desktopConfig, type DesktopOs, gatewayEnv, geminiConfig, type McpServerRef,
+  codeCommand, codeLoginCommand, codeProjectConfig, codexConfig, desktopConfig, type DesktopOs, gatewayEnv, geminiConfig, type McpServerRef,
   stdioBridge, TOKEN_ENV, TOKEN_PLACEHOLDER, tokenEnvCommand, vscodeConfig,
 } from '../lib/mcpconfig';
 import Async from './Async';
@@ -39,6 +39,7 @@ type Catalog = { servers: { name: string; url: string; description: string }[]; 
 export default function McpAccessModal({ onClose }: { onClose: () => void }) {
   const tokens = useApi(() => api.listMcpTokens());
   const catalog = useApi(() => api.myMcpServers());
+  const grants = useApi(() => api.listMcpGrants());
   const [label, setLabel] = useState('Claude Code — 내 PC');
   const [bundle, setBundle] = useState(true);
   const [skip, setSkip] = useState<Set<string>>(new Set());          // 뺄 공용 서버
@@ -81,6 +82,16 @@ export default function McpAccessModal({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const dropGrant = async (g: McpGrant) => {
+    if (!window.confirm(`「${g.client_name}」 연결을 끊을까요? 그 도구는 다시 로그인해야 붙습니다.`)) return;
+    try {
+      await api.revokeMcpGrant(g.id);
+      grants.reload();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const toggle = (set: Set<string>, value: string, update: (s: Set<string>) => void) => {
     const next = new Set(set);
     if (next.has(value)) next.delete(value); else next.add(value);
@@ -98,8 +109,10 @@ export default function McpAccessModal({ onClose }: { onClose: () => void }) {
         {(c: Catalog) => {
           const servers = issued?.servers ?? pick(c);
           const token = issued?.token ?? TOKEN_PLACEHOLDER;
+          const hub = c.servers.filter((s) => s.name === HUB);
           return (
             <>
+              {grants.data?.enabled && hub.length > 0 && <LoginConnect hub={hub} />}
               <h3 style={{ fontSize: 14, margin: '12px 0 6px' }}>① 연결할 서버와 토큰</h3>
               {issued ? (
                 <p style={{ fontSize: 12, margin: '4px 0' }}>
@@ -189,11 +202,56 @@ export default function McpAccessModal({ onClose }: { onClose: () => void }) {
           </table>
         )}
       </Async>
+      {(grants.data?.grants.length ?? 0) > 0 && (
+        <>
+          <h3 style={{ fontSize: 14, marginTop: 18 }}>승인된 앱 <span className="mutedtext" style={{ fontWeight: 400, fontSize: 12 }}>— GPAX 로그인으로 연결한 도구</span></h3>
+          <table style={{ fontSize: 12 }}>
+            <thead><tr><th>앱</th><th>연결한 곳</th><th>승인</th><th>만료</th><th>마지막 사용</th><th /></tr></thead>
+            <tbody>
+              {grants.data!.grants.map((g) => (
+                <tr key={g.id}>
+                  <td>{g.client_name}</td>
+                  <td className="mono">{new URL(g.resource).pathname}</td>
+                  <td>{new Date(g.created_at).toLocaleDateString()}</td>
+                  <td className={g.is_expired ? 'error' : ''}>
+                    {g.is_expired ? '만료됨' : new Date(g.expires_at).toLocaleDateString()}
+                  </td>
+                  <td>{g.last_used_at ? new Date(g.last_used_at).toLocaleString() : '-'}</td>
+                  <td><button className="small secondary" onClick={() => void dropGrant(g)}>끊기</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
       {error && <p className="error">{error}</p>}
       <div className="row" style={{ marginTop: 10 }}>
         <button className="secondary" onClick={onClose}>닫기</button>
       </div>
     </Modal>
+  );
+}
+
+/**
+ * 토큰 없이 GPAX 로그인으로 — MCP 권한 규약(OAuth)을 따르는 클라이언트는 주소만 등록하면 첫 호출의 401을 보고
+ * 브라우저에 로그인·승인 화면을 연다. Gitea SSO와 같은 콘솔 로그인을 쓴다.
+ */
+function LoginConnect({ hub }: { hub: McpServerRef[] }) {
+  return (
+    <div style={{ border: '1px solid var(--border, #2c2e44)', borderRadius: 8, padding: '10px 12px', margin: '8px 0 4px' }}>
+      <h3 style={{ fontSize: 14, margin: '0 0 4px' }}>
+        토큰 없이 GPAX 로그인으로 연결 <span className="status">베타</span>
+      </h3>
+      <p style={{ fontSize: 12, margin: '0 0 6px' }}>
+        주소만 등록하면, 처음 붙을 때 브라우저에 <b>GPAX 로그인 → 승인</b> 화면이 열립니다. 토큰을 복사해 붙여 넣지 않고,
+        90일 동안 저절로 갱신되며, 아래 「승인된 앱」에서 언제든 끊을 수 있습니다.
+      </p>
+      <CodeBlock title="Claude Code — 등록한 뒤 /mcp → paas → Authenticate" text={codeLoginCommand(hub)} />
+      <p className="mutedtext" style={{ fontSize: 12, margin: '6px 0 0' }}>
+        VS Code·Cursor는 <span className="mono">headers</span> 없이 주소(<span className="mono">{hub[0].url}</span>)만 넣으면 같은 창을
+        엽니다. 로그인 창이 열리지 않으면 아래 ①~②의 토큰 방식을 쓰세요.
+      </p>
+    </div>
   );
 }
 

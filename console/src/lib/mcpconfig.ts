@@ -47,6 +47,11 @@ export function desktopConfig(servers: McpServerRef[], token: string, os: Deskto
  * Claude Code — 사용자 범위(--scope user)로 등록하는 명령. 토큰은 내 사용자 설정(~/.claude.json)에만 남고 저장소에는
  * 들어가지 않으며, 어느 프로젝트에서 열어도 보인다. 서버마다 한 줄.
  */
+/** Claude Code — 토큰 없이 등록한다. 첫 호출의 401을 보고 Claude Code가 GPAX 로그인 창을 연다(`/mcp` → 인증). */
+export function codeLoginCommand(servers: McpServerRef[]): string {
+  return servers.map((s) => `claude mcp add --transport http --scope user ${s.name} ${s.url}`).join('\n');
+}
+
 export function codeCommand(servers: McpServerRef[], token: string): string {
   return servers.map((s) =>
     `claude mcp add --transport http --scope user ${s.name} ${s.url} --header "Authorization: Bearer ${token}"`).join('\n');

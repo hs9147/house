@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from starlette.staticfiles import StaticFiles
 
 from .api import (
-    a2a_gateway, llm, mcp_servers,
+    a2a_gateway, llm, mcp_oauth, mcp_servers,
     mcp_tokens, modules, oidc_provider, orgs, planning, previews, projects,
     ontology, proxy_gateway, server, shared_db, smartwork, sources, storage, system,
     telemetry, webhooks, workflows,
@@ -181,6 +181,11 @@ def create_app() -> FastAPI:
     app.include_router(mcp_servers.router, prefix=API_PREFIX)
     # 개인 MCP 토큰 발급·폐기 — MCP 서버 자체와 달리 콘솔(로그인 세션)이 쓰는 경로다.
     app.include_router(mcp_tokens.router, prefix=API_PREFIX)
+    # GPAX 계정 로그인으로 MCP 연결(OAuth 2.1 + PKCE) — 개인 토큰 대신. 꺼져 있으면 각 경로가
+    # 404를 준다(services/mcp_oauth.enabled). 뿌리 경로는 IIS가 넘겨 줄 때만 닿는다.
+    app.include_router(mcp_oauth.router, prefix=PAAS_PREFIX)
+    app.include_router(mcp_oauth.root_router)
+    app.include_router(mcp_oauth.grants_router, prefix=API_PREFIX)
     if settings.oidc_provider_enabled:  # /paas/.well-known/openid-configuration, /paas/oauth2/*
         app.include_router(oidc_provider.router, prefix=PAAS_PREFIX)
         # 발급자 주소는 클라이언트(Gitea 등)가 조회한 URL과 정확히 같아야 하고, 그

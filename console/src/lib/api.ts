@@ -979,6 +979,10 @@ export const api = {
       last_used_at: string | null; is_expired: boolean;
     }[]>('GET', '/mcp/tokens'),
   revokeMcpToken: (id: number) => request<void>('DELETE', `/mcp/tokens/${id}`),
+  // GPAX 로그인으로 승인한 MCP 연결(OAuth) — enabled가 false면 이 서버는 그 길이 꺼져 있다.
+  listMcpGrants: () =>
+    request<{ enabled: boolean; grants: McpGrant[] }>('GET', '/mcp/oauth/grants'),
+  revokeMcpGrant: (id: number) => request<void>('DELETE', `/mcp/oauth/grants/${id}`),
   // 내 토큰으로 붙을 수 있는 MCP 서버 — 공용 서버와, 기획 MCP를 붙일 수 있는 내 과제.
   myMcpServers: () =>
     request<{
@@ -1188,4 +1192,9 @@ export const api = {
       status: string; message: string; error: string | null;
       port: number | null; services: string[];
     }>('POST', '/system/restart'),
+};
+
+export type McpGrant = {
+  id: number; client_name: string; resource: string; created_at: string; expires_at: string;
+  last_used_at: string | null; is_expired: boolean;
 };

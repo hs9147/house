@@ -310,6 +310,61 @@ class OidcAuthCode(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class McpOAuthClient(Base):
+    """MCP 클라이언트(Claude Code·VS Code·Cursor…)가 **스스로 등록한** OAuth 클라이언트
+    (RFC 7591, services/mcp_oauth.py).
+
+    Gitea처럼 설정 파일에 미리 적어 두는 기밀 클라이언트가 아니다 — 에이전트는 사람마다·
+    기계마다 따로 붙고 비밀을 지킬 곳이 없다(공개 클라이언트). 그래서 비밀 대신 PKCE로
+    code를 묶고, 돌아갈 주소(redirect_uris)는 등록 때 적은 것만 받는다."""
+
+    __tablename__ = "mcp_oauth_clients"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    client_name: Mapped[str] = mapped_column(String(128), default="")
+    redirect_uris: Mapped[str] = mapped_column(Text, default="[]")  # JSON 목록
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class McpOAuthCode(Base):
+    """MCP OAuth의 1회용 code — OidcAuthCode와 같은 규칙(해시만·60초)에 PKCE와 대상
+    자원(resource, RFC 8707)을 얹었다. Gitea 쪽 표를 넓히지 않고 따로 둔다 — 한쪽 흐름을
+    고치다 다른 쪽이 깨지지 않게."""
+
+    __tablename__ = "mcp_oauth_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    client_id: Mapped[str] = mapped_column(String(64))
+    email: Mapped[str] = mapped_column(String(255))
+    redirect_uri: Mapped[str] = mapped_column(String(512))
+    code_challenge: Mapped[str] = mapped_column(String(128))
+    resource: Mapped[str] = mapped_column(String(512), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class McpOAuthGrant(Base):
+    """사람이 승인한 MCP 연결 하나 — 「승인된 앱」 목록의 한 줄이다.
+
+    액세스 토큰(JWT, 1시간)은 저장하지 않지만 이 행의 id(gid)를 싣고 다닌다. 그래서 행을
+    지우면(연결 끊기) 남은 액세스 토큰도 다음 요청부터 막힌다. 갱신 토큰은 쓸 때마다 바뀌고
+    (해시만 저장), 승인 자체는 개인 MCP 토큰과 같은 90일을 넘기지 않는다."""
+
+    __tablename__ = "mcp_oauth_grants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(64), index=True)
+    client_name: Mapped[str] = mapped_column(String(128), default="")
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    resource: Mapped[str] = mapped_column(String(512), default="")
+    refresh_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class LlmProviderKind(str, enum.Enum):
     openai = "openai"        # OpenAI Official API (GPT-4o, o1 등)
     anthropic = "anthropic"  # Anthropic Official API (Claude 3.5 Sonnet 등)
