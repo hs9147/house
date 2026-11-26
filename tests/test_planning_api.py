@@ -1297,7 +1297,7 @@ def test_push_records_compliance_warning_without_blocking(monkeypatch, fresh_set
     # 배포는 이 테스트의 관심사가 아니다(원격이 없으므로 실행만 막는다)
     from app.api import webhooks
 
-    monkeypatch.setattr(webhooks, "_deploy_task", lambda project_id: None)
+    monkeypatch.setattr(webhooks, "_deploy_task", lambda project_id, profile=None: None)
     body = json.dumps({
         "ref": "refs/heads/main",
         "repository": {"clone_url": "https://git.example.com/o/plan-app"},
@@ -1373,7 +1373,7 @@ def test_builder_branch_push_opens_a_pull_request(monkeypatch, fresh_settings, t
 
     # 기본 브랜치 push는 배포 신호일 뿐 — 자기 자신에게 PR을 만들지 않는다
     posts.clear()
-    monkeypatch.setattr("app.api.webhooks._deploy_task", lambda project_id: None)
+    monkeypatch.setattr("app.api.webhooks._deploy_task", lambda project_id, profile=None: None)
     r = _push_webhook(c, {
         "ref": "refs/heads/main",
         "repository": {"clone_url": "https://git.example.com/o/plan-app"},

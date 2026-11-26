@@ -34,8 +34,9 @@ def test_storage_and_code_servers_come_from_what_exists(monkeypatch, tmp_path, f
     마찬가지로 항상 나온다."""
     c = _client(monkeypatch, tmp_path)
     # 플랫폼 저장소(internal)는 사람이 가져다 등록할 대상이 아니라 목록에 없다
+    # 맨 앞은 통합 서버(paas) — 연결설정의 기본이 이것 하나다
     assert [i["id"] for i in c.get(f"{API}/mcp/search", headers=ADMIN).json()] == [
-        "paas-ops", "paas-docs", "paas-code", "paas-graph", "paas-apis"]
+        "paas", "paas-ops", "paas-docs", "paas-code", "paas-graph", "paas-ml", "paas-apis"]
 
     from app.db import SessionLocal
     from app.models import DocumentStore
@@ -71,9 +72,9 @@ def test_db_server_is_listed_only_when_allowlisted(monkeypatch, tmp_path, fresh_
 
 def test_keyword_search_narrows(monkeypatch, tmp_path, fresh_settings):
     c = _client(monkeypatch, tmp_path, doc_roots=f"company-docs={tmp_path / 'docs'}")
-    # "저장소"는 문서 검색 서버 설명에도 들어 있어 둘 다 걸린다
+    # "저장소"는 통합 서버·문서 검색 서버 설명에도 들어 있어 셋 다 걸린다
     hits = c.get(f"{API}/mcp/search", params={"q": "저장소"}, headers=ADMIN).json()
-    assert [i["id"] for i in hits] == ["paas-docs", "paas-storage-company-docs"]
+    assert [i["id"] for i in hits] == ["paas", "paas-docs", "paas-storage-company-docs"]
     # 카테고리로 좁히면 저장소 서버만 남는다
     assert [i["id"] for i in c.get(f"{API}/mcp/search", params={"q": "storage"},
                                    headers=ADMIN).json()] == ["paas-storage-company-docs"]
@@ -88,7 +89,7 @@ def test_without_any_base_entries_carry_no_address(monkeypatch, tmp_path, fresh_
     monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "")
     monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "")
     c = _client(monkeypatch, tmp_path, base="")
-    ops = c.get(f"{API}/mcp/search", headers=ADMIN).json()[0]
+    ops = next(i for i in c.get(f"{API}/mcp/search", headers=ADMIN).json() if i["id"] == "paas-ops")
     assert ops["url"] == ""
     assert ops["path"] == "/paas/api/v1/mcp/ops"
 
@@ -99,7 +100,7 @@ def test_backchannel_url_is_the_last_resort(monkeypatch, tmp_path, fresh_setting
     monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "http://10.0.0.5:7000/paas")
     monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "")
     c = _client(monkeypatch, tmp_path, base="")
-    ops = c.get(f"{API}/mcp/search", headers=ADMIN).json()[0]
+    ops = next(i for i in c.get(f"{API}/mcp/search", headers=ADMIN).json() if i["id"] == "paas-ops")
     assert ops["url"] == "http://10.0.0.5:7000/paas/api/v1/mcp/ops"
 
 
@@ -187,7 +188,8 @@ def test_a_keyless_module_says_why_it_is_401(monkeypatch, tmp_path, fresh_settin
 def test_refresh_reports_the_current_count(monkeypatch, tmp_path, fresh_settings):
     c = _client(monkeypatch, tmp_path)
     body = c.post(f"{API}/modules/search/refresh-mcp", headers=ADMIN).json()
-    assert body["total_mcp_servers"] == 5  # ops + docs + code + graph + apis (문서 폴더 없음)
+    # 통합(paas) + ops + docs + code + graph + ml + apis (문서 폴더 없음)
+    assert body["total_mcp_servers"] == 7
     assert body["base_url"] == "http://localhost:7000/paas"
 
 

@@ -286,7 +286,7 @@ def test_module_calls_and_edits_are_limited_to_who_the_module_belongs_to(monkeyp
     고치는 것은 관리자·그 조직 사람만. 전역 모듈은 지금처럼 누구나 부른다."""
     from app.api import proxy_gateway
     from app.db import SessionLocal
-    from app.models import Project
+    from app.models import Organization, Project
 
     class _FakeResponse:
         content, status_code, headers = b"{}", 200, {"content-type": "application/json"}
@@ -303,7 +303,15 @@ def test_module_calls_and_edits_are_limited_to_who_the_module_belongs_to(monkeyp
 
     monkeypatch.setattr(proxy_gateway.httpx, "AsyncClient", lambda **kw: _FakeClient())
     c = TestClient(create_app())
-    org = c.post(f"{API}/orgs", json={"name": "gp-sil"}, headers=ADMIN).json()["id"]
+    # 조직은 DB에 바로 만든다 — POST /orgs는 Gitea 조직까지 만들어 PAAS_GITEA_URL을 요구한다(이 시험의 관심이 아니다).
+    db = SessionLocal()
+    try:
+        row = Organization(name="gp-sil")
+        db.add(row)
+        db.commit()
+        org = row.id
+    finally:
+        db.close()
     news = c.post(f"{API}/modules", json={"name": "kotra-news", "type": "external_api", "organization_id": org,
                                           "config": {"url": "https://apis.data.go.kr/x", "api_key": "k"}},
                   headers=ADMIN).json()

@@ -263,7 +263,10 @@ def test_quoted_windows_paths_are_accepted(monkeypatch, fresh_settings):
         get_settings.cache_clear()
         found = storage._legacy_stores()
         assert [s.name for s in found] == ["contract"], raw
-        assert str(found[0].root).endswith("D:\\1.계약품의"), raw
+        # 드라이브 표기로 비교하지 않는다 — D:가 네트워크 드라이브인 PC에서는 정규화하면 UNC 경로가 된다.
+        root = found[0].root
+        assert root.name == "1.계약품의", raw
+        assert not any(q in str(root) for q in "\"'“”"), raw
 
 
 def test_spaces_inside_a_path_survive(monkeypatch, tmp_path, fresh_settings):

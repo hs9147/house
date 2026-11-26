@@ -220,9 +220,12 @@ def test_code_server_lists_only_reachable_projects(gitea_configured):
     assert "code-no" not in text
 
 
-def test_issue_lists_and_revokes_own_tokens_only(gitea_configured):
+def test_issue_lists_and_revokes_own_tokens_only(gitea_configured, monkeypatch):
     """남의 토큰은 없는 것으로 답한다 — 존재 여부조차 알려 주지 않는다."""
     c = gitea_configured
+    # 응답의 MCP 주소는 공개 주소로 만든다 — 정하지 않으면 개발 PC의 .env에 기대게 된다(없으면 빈 주소).
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "https://paas.example.com")
+    get_settings.cache_clear()
     db = SessionLocal()
     try:
         org = Organization(name="tok-team")
