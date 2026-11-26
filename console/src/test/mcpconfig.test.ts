@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { codeConfig, desktopConfig, gatewayEnv } from '../lib/mcpconfig';
+import {
+  codeCommand, codeProjectConfig, codexConfig, desktopConfig, gatewayEnv, geminiConfig, stdioBridge,
+  tokenEnvCommand, vscodeConfig,
+} from '../lib/mcpconfig';
 
 const servers = [
   { name: 'paas-docs', url: 'http://gpax.lge.com/paas/api/v1/mcp/docs' },
@@ -27,12 +30,42 @@ describe('desktopConfig', () => {
   });
 });
 
-describe('codeConfig / gatewayEnv', () => {
-  it('passes remote servers straight to Claude Code', () => {
-    const cfg = JSON.parse(codeConfig(servers, 'tok')).mcpServers;
-    expect(cfg['paas-docs']).toEqual({
-      type: 'http', url: 'http://gpax.lge.com/paas/api/v1/mcp/docs', headers: { Authorization: 'Bearer tok' },
-    });
+describe('gatewayEnv', () => {
+  it('게이트웨이 스크립트의 환경변수', () => {
     expect(gatewayEnv('http://x/paas/api/v1', 'tok')).toBe('PAAS_GATEWAY_BASE_URL=http://x/paas/api/v1\nPAAS_API_KEY=tok');
+  });
+});
+
+describe('토큰을 저장소에 남기지 않는 설정', () => {
+  it('Claude Code는 사용자 범위 명령으로 — 서버마다 한 줄', () => {
+    const cmd = codeCommand(servers, 'tok').split('\n');
+    expect(cmd).toHaveLength(2);
+    expect(cmd[0]).toBe('claude mcp add --transport http --scope user paas-docs '
+      + 'http://gpax.lge.com/paas/api/v1/mcp/docs --header "Authorization: Bearer tok"');
+  });
+
+  it('프로젝트 .mcp.json에는 환경변수 이름만', () => {
+    const cfg = JSON.parse(codeProjectConfig(servers)).mcpServers;
+    expect(cfg['paas-docs'].headers).toEqual({ Authorization: 'Bearer ${PAAS_MCP_TOKEN}' });
+    expect(codeProjectConfig(servers)).not.toContain('tok');
+  });
+
+  it('Codex는 기본이 환경변수, 원하면 헤더에 직접', () => {
+    expect(codexConfig(servers.slice(0, 1), 'tok')).toBe(
+      '[mcp_servers.paas-docs]\nurl = "http://gpax.lge.com/paas/api/v1/mcp/docs"\nbearer_token_env_var = "PAAS_MCP_TOKEN"');
+    expect(codexConfig(servers.slice(0, 1), 'tok', true)).toContain('http_headers = { Authorization = "Bearer tok" }');
+  });
+
+  it('VS Code는 처음 연결할 때 묻는 입력으로 받는다', () => {
+    const cfg = JSON.parse(vscodeConfig(servers));
+    expect(cfg.inputs[0]).toMatchObject({ id: 'paas-mcp-token', password: true });
+    expect(cfg.servers['paas-docs'].headers.Authorization).toBe('Bearer ${input:paas-mcp-token}');
+  });
+
+  it('Gemini·stdio 브리지·환경변수 명령', () => {
+    expect(JSON.parse(geminiConfig(servers, 'tok')).mcpServers['paas-docs'].httpUrl).toBe(servers[0].url);
+    expect(stdioBridge(servers.slice(0, 1), 'tok')).toBe(
+      'npx -y mcp-remote http://gpax.lge.com/paas/api/v1/mcp/docs --allow-http --header "Authorization: Bearer tok"');
+    expect(tokenEnvCommand('tok', 'windows')).toBe('setx PAAS_MCP_TOKEN "tok"');
   });
 });

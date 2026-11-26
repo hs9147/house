@@ -84,9 +84,9 @@ export default function Layout() {
           <span className="mutedtext" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={email || (admin ? 'admin' : 'member')}>
             {email || (admin ? 'admin' : 'member')}
           </span>
-          <button className="secondary small" title="Claude Desktop·Claude Code에 플랫폼 MCP를 등록합니다"
+          <button className="secondary small" title="AI 도구(Claude Code·Desktop, Codex, VS Code…)에 플랫폼 MCP를 등록합니다"
             onClick={() => setMcpOpen(true)}>
-            MCP 접속
+            MCP 연결설정
           </button>
           <button
             className="secondary small"
