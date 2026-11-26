@@ -179,12 +179,12 @@ function SemanticDetail({ p }: { p: OntologyProgress }) {
   return (
     <>
       <p className="mutedtext" style={{ fontSize: 12 }}>
-        위 표의 진행률 뒤에 있는 것 — 분석한 문서가 어떤 길로 처리됐는지(규칙이 많을수록 LLM을 덜 씁니다), 개체가 어디서
+        위 표의 진행률 뒤에 있는 것 — 분석한 문서를 어떤 방법으로 처리했는지(규칙이 많을수록 LLM을 덜 씁니다), 개체가 어디서
         나왔는지, 관계·묶은 별칭 수, 멈춘 까닭입니다. 고치는 일은 <Link to="/ontology/semantic">내용 분석</Link> 탭에서 합니다.
       </p>
       <table style={{ fontSize: 12 }}>
         <thead>
-          <tr><th>저장소</th><th>분석한 문서 — 처리한 길</th><th>개체 — 나온 곳</th><th>관계</th><th>별칭</th><th>멈춘 까닭</th></tr>
+          <tr><th>저장소</th><th>분석한 문서 — 처리한 방법</th><th>개체 — 나온 곳</th><th>관계</th><th>별칭</th><th>멈춘 까닭</th></tr>
         </thead>
         <tbody>
           {rows.map((r) => {

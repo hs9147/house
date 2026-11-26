@@ -574,7 +574,7 @@ function AnalyzeStep({ status, onAction }: { status: SemanticStatus; onAction: (
     <section style={{ marginTop: 16 }}>
       <h3 style={{ fontSize: 14 }}>③ 문서 분석</h3>
       <div style={{ fontSize: 12, margin: '4px 0' }}>
-        <b>{done.toLocaleString()}</b> / {status.documents.toLocaleString()}건 분석 — 처리한 길
+        <b>{done.toLocaleString()}</b> / {status.documents.toLocaleString()}건 분석 — 처리한 방법
         <Breakdown parts={ANALYZED_PARTS(status.analyzed)} total={status.documents} />
       </div>
       <div className="row" style={{ gap: 16, flexWrap: 'wrap', fontSize: 12, margin: '4px 0' }}>
@@ -666,7 +666,7 @@ function MergeStep({ status, busy, onMerge, onUnmerge, onRules }: {
           {st && (
             <>
               <div className="mutedtext" style={{ marginTop: 4 }}>
-                살펴본 짝 {st.pairs.toLocaleString()}개를 정한 길 · LLM 호출 {st.llm_calls}회
+                살펴본 짝 {st.pairs.toLocaleString()}개를 정한 방법 · LLM 호출 {st.llm_calls}회
               </div>
               <Breakdown unit="쌍" parts={[
                 { label: '같은 식별자', value: st.id, color: VIZ.categorical[0] },

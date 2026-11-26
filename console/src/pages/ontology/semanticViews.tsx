@@ -190,7 +190,7 @@ export function RulesView({ rules }: { rules: SemanticTemplateRules }) {
   );
 }
 
-/** 분석한 문서가 처리된 길 — 색은 상태 팔레트(규칙은 초록, LLM은 기본, 실패는 빨강). */
+/** 분석한 문서를 처리한 방법 — 정체는 범주 팔레트 순서(VIZ.categorical), 건너뜀은 중립, 실패는 상태 색. */
 // 정체는 범주 팔레트를 정한 순서로(VIZ.categorical — 검증 결과는 lib/viz 주석), 나머지는 중립, 실패는 상태 색
 export const ANALYZED_PARTS = (a: Record<string, number>) => [
   { label: 'LLM', value: a.ok ?? 0, color: VIZ.categorical[0] },
