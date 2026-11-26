@@ -240,19 +240,27 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
   );
 }
 
-/** 붙여 넣을 것 — 제목·내용·복사(평문 http에서도 되는 길로 복사하고 결과를 그 자리에 알린다). */
+/** 붙여 넣을 것 — 제목(있으면 위에)·내용·복사(덩어리 오른쪽 위 모서리). 평문 http에서도 되는 길로 복사하고 결과를
+ *  버튼 글자로 잠깐 알린다 — 버튼이 덩어리 위에 혼자 한 줄을 차지하지 않게. */
 function CodeBlock({ title, text }: { title?: string; text: string }) {
-  const [done, setDone] = useState('');
-  const copy = async () => setDone((await copyText(text)) ? '복사했습니다' : '복사하지 못했습니다 — 직접 선택해 복사하세요');
+  const [done, setDone] = useState<'' | 'ok' | 'fail'>('');
+  const copy = async () => {
+    setDone((await copyText(text)) ? 'ok' : 'fail');
+    window.setTimeout(() => setDone(''), 2000);
+  };
   return (
     <div style={{ margin: '4px 0 8px' }}>
-      <div className="row" style={{ gap: 8, alignItems: 'center', fontSize: 11 }}>
-        {title && <span className="mono mutedtext">{title}</span>}
-        <button className="small secondary" onClick={() => void copy()}>복사</button>
-        {done && <span className="mutedtext">{done}</span>}
+      {title && <div className="mono mutedtext" style={{ fontSize: 11, marginBottom: 2 }}>{title}</div>}
+      <div style={{ position: 'relative' }}>
+        <pre className="mono" style={{ background: '#090d16', padding: '10px 64px 10px 10px', borderRadius: 8, fontSize: 12,
+                                       margin: 0, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap',
+                                       wordBreak: 'break-all' }}>{text}</pre>
+        <button className="small secondary" onClick={() => void copy()}
+                title={done === 'fail' ? '복사하지 못했습니다 — 직접 선택해 복사하세요' : undefined}
+                style={{ position: 'absolute', top: 6, right: 6 }}>
+          {done === 'ok' ? '복사됨' : done === 'fail' ? '직접 복사' : '복사'}
+        </button>
       </div>
-      <pre className="mono" style={{ background: '#090d16', padding: 10, borderRadius: 8, fontSize: 12, margin: '4px 0 0',
-                                     maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{text}</pre>
     </div>
   );
 }
