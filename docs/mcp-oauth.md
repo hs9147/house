@@ -18,7 +18,39 @@
 액세스 토큰은 **MCP 전용**이다. 발급자(`…/paas/oauth`)가 달라 콘솔·배포 API(`require_api_key`)는 받지 않고, 승인한
 MCP 주소(aud) 아래에서만 통한다. 「MCP 연결설정 → 승인된 앱」에서 끊으면 남은 액세스 토큰도 다음 요청부터 막힌다.
 
+## 지금 쓰는 길 — 로그인 도우미 (HTTPS 없이)
+
+Claude Code가 스스로 OAuth를 하면 토큰 주소가 https여야 한다. 운영(gpax.lge.com)은 http뿐이라 실측에서 이렇게 멈췄다:
+`Refusing to send credentials to non-https token endpoint … OAuth token requests MUST use TLS`.
+
+그래서 로그인·갱신은 **도우미**(`/paas/api/v1/mcp/paas-mcp.mjs`, Node 18+, `app/services/mcp_login_helper.mjs`)가 하고,
+Claude Code에는 `headersHelper`로 헤더만 건넨다(Claude Code는 연결할 때마다, 401·403이면 다시 이 명령을 부른다 — 10초 제한).
+
+```powershell
+mkdir -Force $HOME/.paas-mcp | Out-Null
+curl.exe -s -o $HOME/.paas-mcp/paas-mcp.mjs http://gpax.lge.com/paas/api/v1/mcp/paas-mcp.mjs
+node $HOME/.paas-mcp/paas-mcp.mjs login     # 브라우저에 GPAX 로그인 → 승인 (resource = /paas/api/v1 전체)
+node $HOME/.paas-mcp/paas-mcp.mjs install   # claude mcp add-json --scope user paas {url, headersHelper}
+```
+
+- 저장: `~/.paas-mcp/<호스트>.json` — 갱신 토큰(쓸 때마다 바뀜)과 1시간짜리 액세스 토큰. 만료 5분 전까지는 같은 액세스
+  토큰을 다시 쓰고, 여러 창이 동시에 갱신하면 잠금으로 한 번만 갱신한다.
+- 끊기: 콘솔 「승인된 앱」 또는 `node paas-mcp.mjs logout`(서버에서도 폐기).
+- Claude Code 전용이다(headersHelper). VS Code·Cursor·Codex는 개인 토큰을 쓴다.
+- 요청은 여전히 http 평문이다 — 개인 토큰과 같다. 실리는 값이 1시간짜리라는 점만 낫다.
+- 검증(로컬 임시 앱): 로그인·승인·헤더·허브 200·게이트웨이 200·콘솔 API 401·만료 시 갱신·동시 갱신 4개·승인된 앱 1줄·
+  로그아웃 후 401, 그리고 `claude mcp get`이 headersHelper로 `✔ Connected`.
+
+## 클라이언트가 스스로 로그인하려면 (HTTPS — 미해결)
+
+실측(2026-11-27): 443은 Tableau Server(Apache, 0.0.0.0:443, 인증서 SAN `gp-gcp-dx.lge.com`)가 쓰고 있어 IIS가 SNI로
+함께 쓸 수 없다. 이 서버는 사내망에서 80·443만 열려 있어 다른 포트도 없다. `gpax.lge.com` 인증서도 아직 없다.
+남은 방법은 IIS가 443을 받고 Tableau를 그 뒤(내부 포트)로 옮기는 것 — Tableau 관리자와 정비 시간이 필요하다.
+그때 `PAAS_PLATFORM_PUBLIC_URL=https://gpax.lge.com`으로 바꾸면 Claude Code·VS Code가 401의 안내를 보고 스스로 로그인한다.
+
 ## 운영에서 열리려면 (인프라 — 앱 밖)
+
+> 1(뿌리 `/.well-known` 넘기기)·2(`/paas` Windows 인증 끄기)는 2026-11-26 반영·확인했다. 3(HTTPS)이 위 「미해결」이다.
 
 실측(2026-11-26, gpax.lge.com):
 

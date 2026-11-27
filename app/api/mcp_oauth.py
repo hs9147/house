@@ -8,10 +8,11 @@
   - grants_router(/paas/api/v1 아래): 「승인된 앱」 목록·끊기 — 콘솔이 부른다.
 """
 import html
+from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 
 from .. import audit
@@ -264,6 +265,23 @@ async def revoke(request: Request, db: Session = Depends(get_db)):
     form = await request.form()
     mcp_oauth.revoke(db, str(form.get("token", "")))
     return JSONResponse({}, headers=_NO_STORE)
+
+
+# --- 로그인 도우미 -----------------------------------------------------------------
+
+_HELPER = Path(__file__).resolve().parent.parent / "services" / "mcp_login_helper.mjs"
+
+
+@grants_router.get("/mcp/paas-mcp.mjs")
+def login_helper():
+    """GPAX MCP 로그인 도우미(Node) — 로그인 없이 받는다(비밀이 없다). 서버 주소만 채워 내려 준다.
+
+    MCP 클라이언트가 스스로 OAuth를 하려면 토큰 주소가 https여야 한다(Claude Code는 http면 거부한다). 이 플랫폼이
+    아직 http라, 로그인·갱신은 이 도우미가 하고 Claude Code에는 headersHelper로 헤더만 건넨다."""
+    _require_enabled()
+    script = _HELPER.read_text(encoding="utf-8").replace("__PAAS_BASE__", mcp_oauth.public_base())
+    return Response(script, media_type="text/javascript; charset=utf-8", headers={
+        "Content-Disposition": 'attachment; filename="paas-mcp.mjs"', "Cache-Control": "no-cache"})
 
 
 # --- 승인된 앱 (콘솔) ---------------------------------------------------------------

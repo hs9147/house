@@ -286,3 +286,21 @@ def test_disabled_without_public_url(monkeypatch, fresh_settings, tmp_path):
     assert r.status_code == 401
     assert "bearer" not in r.headers.get("www-authenticate", "").lower()
     assert json.loads(r.text)["detail"]
+
+
+def test_login_helper_download_has_this_server_address(client):
+    """도우미는 로그인 없이 받는다(비밀이 없다) — 서버 주소를 채워 내려 준다."""
+    r = client.get("/paas/api/v1/mcp/paas-mcp.mjs")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/javascript")
+    assert f"'{BASE}'" in r.text and "__PAAS_BASE__" not in r.text
+    assert "headersHelper" in r.text  # Claude Code에 헤더만 건네는 방식
+
+
+def test_login_helper_is_unavailable_when_oauth_is_off(monkeypatch, fresh_settings, tmp_path):
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", BASE)
+    monkeypatch.setenv("PAAS_MCP_OAUTH_ENABLED", "false")
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH", str(tmp_path / "key.pem"))
+    get_settings.cache_clear()
+    assert TestClient(create_app()).get("/paas/api/v1/mcp/paas-mcp.mjs").status_code == 404

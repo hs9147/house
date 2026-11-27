@@ -3,7 +3,7 @@ import { api, type McpGrant } from '../lib/api';
 import { copyText } from '../lib/clipboard';
 import { useApi } from '../lib/hooks';
 import {
-  codeCommand, codeLoginCommand, codeProjectConfig, codexConfig, desktopConfig, type DesktopOs, gatewayEnv, geminiConfig, type McpServerRef,
+  codeCommand, codeProjectConfig, codexConfig, desktopConfig, type DesktopOs, gatewayEnv, geminiConfig, loginHelperCommands, type McpServerRef,
   stdioBridge, TOKEN_ENV, TOKEN_PLACEHOLDER, tokenEnvCommand, vscodeConfig,
 } from '../lib/mcpconfig';
 import Async from './Async';
@@ -112,7 +112,7 @@ export default function McpAccessModal({ onClose }: { onClose: () => void }) {
           const hub = c.servers.filter((s) => s.name === HUB);
           return (
             <>
-              {grants.data?.enabled && hub.length > 0 && <LoginConnect hub={hub} />}
+              {grants.data?.enabled && hub.length > 0 && c.base_url && <LoginConnect base={c.base_url} os={os} onOs={setOs} />}
               <h3 style={{ fontSize: 14, margin: '12px 0 6px' }}>① 연결할 서버와 토큰</h3>
               {issued ? (
                 <p style={{ fontSize: 12, margin: '4px 0' }}>
@@ -233,23 +233,32 @@ export default function McpAccessModal({ onClose }: { onClose: () => void }) {
 }
 
 /**
- * 토큰 없이 GPAX 로그인으로 — MCP 권한 규약(OAuth)을 따르는 클라이언트는 주소만 등록하면 첫 호출의 401을 보고
- * 브라우저에 로그인·승인 화면을 연다. Gitea SSO와 같은 콘솔 로그인을 쓴다.
+ * 토큰 없이 GPAX 로그인으로 — 로그인 도우미(paas-mcp.mjs)가 브라우저 로그인·승인과 갱신을 맡고, Claude Code에는
+ * headersHelper로 헤더만 건넨다. Claude Code가 스스로 OAuth를 하려면 토큰 주소가 https여야 해서(http면 거부) 이렇게 간다.
  */
-function LoginConnect({ hub }: { hub: McpServerRef[] }) {
+function LoginConnect({ base, os, onOs }: { base: string; os: DesktopOs; onOs: (os: DesktopOs) => void }) {
   return (
     <div style={{ border: '1px solid var(--border, #2c2e44)', borderRadius: 8, padding: '10px 12px', margin: '8px 0 4px' }}>
       <h3 style={{ fontSize: 14, margin: '0 0 4px' }}>
-        토큰 없이 GPAX 로그인으로 연결 <span className="status">베타</span>
+        토큰 없이 GPAX 로그인으로 연결 <span className="status">Claude Code</span>
       </h3>
       <p style={{ fontSize: 12, margin: '0 0 6px' }}>
-        주소만 등록하면, 처음 붙을 때 브라우저에 <b>GPAX 로그인 → 승인</b> 화면이 열립니다. 토큰을 복사해 붙여 넣지 않고,
-        90일 동안 저절로 갱신되며, 아래 「승인된 앱」에서 언제든 끊을 수 있습니다.
+        로그인 도우미를 받아 한 번 로그인하면, 브라우저에 <b>GPAX 로그인 → 승인</b> 화면이 열리고 Claude Code에 <span className="mono">paas</span>
+        서버가 등록됩니다. 토큰을 복사해 붙여 넣지 않고, 연결할 때마다 1시간짜리 토큰을 도우미가 만들어 건넵니다(90일 동안 저절로 갱신).
+        아래 「승인된 앱」에서 언제든 끊을 수 있습니다.
       </p>
-      <CodeBlock title="Claude Code — 등록한 뒤 /mcp → paas → Authenticate" text={codeLoginCommand(hub)} />
+      <div className="row" style={{ gap: 6, marginBottom: 6 }}>
+        <select value={os} onChange={(e) => onOs(e.target.value as DesktopOs)}>
+          <option value="windows">Windows (PowerShell)</option>
+          <option value="mac">macOS · Linux</option>
+        </select>
+      </div>
+      <CodeBlock title="받기 → 로그인 → Claude Code에 등록" text={loginHelperCommands(base, os)} />
       <p className="mutedtext" style={{ fontSize: 12, margin: '6px 0 0' }}>
-        VS Code·Cursor는 <span className="mono">headers</span> 없이 주소(<span className="mono">{hub[0].url}</span>)만 넣으면 같은 창을
-        엽니다. 로그인 창이 열리지 않으면 아래 ①~②의 토큰 방식을 쓰세요.
+        Node 18 이상이 필요합니다. 등록한 뒤 Claude Code를 새로 열면 붙습니다(<span className="mono">/mcp</span>에서 확인).
+        같은 이름(<span className="mono">paas</span>)으로 사용자 범위에 등록된 것이 있으면 바꿉니다.
+        상태 보기 <span className="mono">… status</span>, 끊기 <span className="mono">… logout</span>.
+        VS Code·Cursor·Codex는 아래 ①~②의 토큰 방식을 쓰세요.
       </p>
     </div>
   );

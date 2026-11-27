@@ -47,11 +47,6 @@ export function desktopConfig(servers: McpServerRef[], token: string, os: Deskto
  * Claude Code — 사용자 범위(--scope user)로 등록하는 명령. 토큰은 내 사용자 설정(~/.claude.json)에만 남고 저장소에는
  * 들어가지 않으며, 어느 프로젝트에서 열어도 보인다. 서버마다 한 줄.
  */
-/** Claude Code — 토큰 없이 등록한다. 첫 호출의 401을 보고 Claude Code가 GPAX 로그인 창을 연다(`/mcp` → 인증). */
-export function codeLoginCommand(servers: McpServerRef[]): string {
-  return servers.map((s) => `claude mcp add --transport http --scope user ${s.name} ${s.url}`).join('\n');
-}
-
 export function codeCommand(servers: McpServerRef[], token: string): string {
   return servers.map((s) =>
     `claude mcp add --transport http --scope user ${s.name} ${s.url} --header "Authorization: Bearer ${token}"`).join('\n');
@@ -117,4 +112,28 @@ export function tokenEnvCommand(token: string, os: DesktopOs): string {
 /** 게이트웨이(/proxy·/a2a)를 부르는 스크립트·빌더용 — 같은 토큰을 쓴다. */
 export function gatewayEnv(gatewayBaseUrl: string, token: string): string {
   return `PAAS_GATEWAY_BASE_URL=${gatewayBaseUrl}\nPAAS_API_KEY=${token}`;
+}
+
+/**
+ * GPAX MCP 로그인 도우미 — 받기·로그인·Claude Code 등록 세 줄. `base`는 `http://gpax.lge.com/paas`.
+ *
+ * Claude Code가 스스로 OAuth를 하려면 토큰 주소가 https여야 해서(http면 거부한다), 로그인·갱신은 도우미가 하고
+ * Claude Code에는 headersHelper로 헤더만 건넨다. 도우미는 Node 18+로 돈다(Claude Code를 쓰면 대개 이미 있다).
+ */
+export function loginHelperCommands(base: string, os: DesktopOs): string {
+  const url = `${base}/api/v1/mcp/paas-mcp.mjs`;
+  if (os === 'windows') {
+    return [
+      // PowerShell — 경로는 슬래시로(PowerShell·curl.exe·node 모두 읽는다, 역슬래시 이스케이프가 필요 없다)
+      'mkdir -Force $HOME/.paas-mcp | Out-Null',
+      `curl.exe -s -o $HOME/.paas-mcp/paas-mcp.mjs ${url}`,
+      'node $HOME/.paas-mcp/paas-mcp.mjs login',
+      'node $HOME/.paas-mcp/paas-mcp.mjs install',
+    ].join('\n');
+  }
+  return [
+    `mkdir -p ~/.paas-mcp && curl -s -o ~/.paas-mcp/paas-mcp.mjs ${url}`,
+    'node ~/.paas-mcp/paas-mcp.mjs login',
+    'node ~/.paas-mcp/paas-mcp.mjs install',
+  ].join('\n');
 }
