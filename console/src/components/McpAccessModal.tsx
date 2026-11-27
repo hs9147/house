@@ -200,7 +200,7 @@ export default function McpAccessModal({ onClose }: { onClose: () => void }) {
           </table>
         )}
       </Async>
-      {(grants.data?.grants.length ?? 0) > 0 && (
+      {grants.data?.enabled && grants.data.grants.length > 0 && (
         <>
           <h3 style={{ fontSize: 14, marginTop: 18 }}>승인된 앱 <span className="mutedtext" style={{ fontWeight: 400, fontSize: 12 }}>— GPAX 로그인으로 연결한 도구</span></h3>
           <table style={{ fontSize: 12 }}>
