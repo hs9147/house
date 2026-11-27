@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   codeCommand, codeProjectConfig, codexConfig, desktopConfig, gatewayEnv, geminiConfig, stdioBridge,
-  loginHelperCommands, tokenEnvCommand, vscodeConfig,
+  tokenEnvCommand, vscodeConfig,
 } from '../lib/mcpconfig';
 
 const servers = [
@@ -42,13 +42,6 @@ describe('토큰을 저장소에 남기지 않는 설정', () => {
     expect(cmd).toHaveLength(2);
     expect(cmd[0]).toBe('claude mcp add --transport http --scope user paas-docs '
       + 'http://gpax.lge.com/paas/api/v1/mcp/docs --header "Authorization: Bearer tok"');
-  });
-
-  it('로그인 도우미 — 받기·로그인·등록, 토큰은 없다', () => {
-    const win = loginHelperCommands('http://gpax.lge.com/paas', 'windows').split('\n');
-    expect(win[1]).toBe('curl.exe -s -o $HOME/.paas-mcp/paas-mcp.mjs http://gpax.lge.com/paas/api/v1/mcp/paas-mcp.mjs');
-    expect(win.slice(2)).toEqual(['node $HOME/.paas-mcp/paas-mcp.mjs login', 'node $HOME/.paas-mcp/paas-mcp.mjs install']);
-    expect(loginHelperCommands('http://gpax.lge.com/paas', 'mac')).not.toContain('Bearer');
   });
 
   it('프로젝트 .mcp.json에는 환경변수 이름만', () => {

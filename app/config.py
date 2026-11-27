@@ -74,7 +74,10 @@ class Settings(BaseSettings):
     # MCP 클라이언트가 GPAX 로그인 창으로 연결하는 길(OAuth 2.1 + PKCE, services/mcp_oauth.py).
     # oidc_provider_enabled와 platform_public_url이 함께 있어야 열린다 — 같은 로그인·서명 키를 쓴다.
     # 개인 MCP 토큰은 이것과 상관없이 계속 받는다.
-    mcp_oauth_enabled: bool = True
+    # **기본은 꺼짐.** 클라이언트는 토큰 주소가 https여야 OAuth를 끝낸다(Claude Code는 http면 거부 — 운영 실측). 켜 두면
+    # MCP 401이 로그인 안내(Bearer resource_metadata)를 싣고, 토큰이 만료된 클라이언트가 OAuth를 시도하다 TLS 오류만 낸다.
+    # HTTPS가 생기면 켠다(docs/mcp-oauth.md).
+    mcp_oauth_enabled: bool = False
 
     # --- 배포 작업 큐 ---
     deploy_workers: int = 2

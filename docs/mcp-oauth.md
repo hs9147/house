@@ -18,7 +18,12 @@
 액세스 토큰은 **MCP 전용**이다. 발급자(`…/paas/oauth`)가 달라 콘솔·배포 API(`require_api_key`)는 받지 않고, 승인한
 MCP 주소(aud) 아래에서만 통한다. 「MCP 연결설정 → 승인된 앱」에서 끊으면 남은 액세스 토큰도 다음 요청부터 막힌다.
 
-## 지금 쓰는 길 — 로그인 도우미 (HTTPS 없이)
+> **현재 상태(2026-11-27): 꺼 둠** — `PAAS_MCP_OAUTH_ENABLED` 기본값 `false`. 콘솔 안내(「토큰 없이 GPAX 로그인으로 연결」)와
+> agent-setup.md의 도우미 안내는 뺐다. 운영 시험에서 승인 화면까지 닿지 않았고, HTTPS 없이는 클라이언트 스스로의 로그인도
+> 끝나지 않는다. 연결은 개인 토큰으로 한다. 코드(아래)는 남겨 두었다 — HTTPS가 생기면 `PAAS_MCP_OAUTH_ENABLED=true`와
+> `PAAS_PLATFORM_PUBLIC_URL=https://…`로 다시 켜고, 콘솔 안내를 되살린다(git: 8f65985).
+
+## 로그인 도우미 (HTTPS 없이 — 꺼 둠)
 
 Claude Code가 스스로 OAuth를 하면 토큰 주소가 https여야 한다. 운영(gpax.lge.com)은 http뿐이라 실측에서 이렇게 멈췄다:
 `Refusing to send credentials to non-https token endpoint … OAuth token requests MUST use TLS`.

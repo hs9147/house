@@ -36,6 +36,7 @@ def _reset_provider_singletons():
 @pytest.fixture
 def client(monkeypatch, fresh_settings, tmp_path):
     monkeypatch.setenv("PAAS_OIDC_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("PAAS_MCP_OAUTH_ENABLED", "true")  # 기본은 꺼짐(HTTPS가 생길 때까지)
     monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", BASE)
     # 운영과 같은 모양 — Gitea 백채널은 localhost. MCP 쪽은 이것과 상관없이 공개 주소여야 한다.
     monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "http://localhost:7000/paas")
@@ -275,6 +276,7 @@ def test_personal_token_still_works(client):
 
 def test_disabled_without_public_url(monkeypatch, fresh_settings, tmp_path):
     monkeypatch.setenv("PAAS_OIDC_PROVIDER_ENABLED", "true")
+    monkeypatch.setenv("PAAS_MCP_OAUTH_ENABLED", "true")
     monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", "")
     monkeypatch.setenv("PAAS_OIDC_ISSUER", "http://paas.test/paas")
     monkeypatch.setenv("PAAS_OIDC_PROVIDER_BACKCHANNEL_URL", "")
@@ -304,3 +306,19 @@ def test_login_helper_is_unavailable_when_oauth_is_off(monkeypatch, fresh_settin
     monkeypatch.setenv("PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH", str(tmp_path / "key.pem"))
     get_settings.cache_clear()
     assert TestClient(create_app()).get("/paas/api/v1/mcp/paas-mcp.mjs").status_code == 404
+
+
+def test_off_by_default_so_401_carries_no_login_hint(monkeypatch, fresh_settings, tmp_path):
+    """HTTPS가 생기기 전에는 꺼 둔다 — 켜 두면 토큰이 만료된 클라이언트가 OAuth를 시도하다 TLS 오류만 낸다."""
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_ENABLED", "true")
+    monkeypatch.delenv("PAAS_MCP_OAUTH_ENABLED", raising=False)
+    monkeypatch.setenv("PAAS_PLATFORM_PUBLIC_URL", BASE)
+    monkeypatch.setenv("PAAS_OIDC_PROVIDER_SIGNING_KEY_PATH", str(tmp_path / "key.pem"))
+    get_settings.cache_clear()
+    assert get_settings().mcp_oauth_enabled is False
+    c = TestClient(create_app())
+    r = c.post("/paas/api/v1/mcp/hub", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert r.status_code == 401
+    assert "bearer" not in r.headers.get("www-authenticate", "").lower()
+    assert c.get("/paas/api/v1/mcp/paas-mcp.mjs").status_code == 404
+    assert c.get("/paas/oauth/.well-known/oauth-authorization-server").status_code == 404
